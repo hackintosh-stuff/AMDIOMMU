@@ -31,8 +31,33 @@ bytes; pool2 sizes are Snapshot 114808 and Request 114856 bytes. Large kernel
 control/evidence objects stay in heap or persistent storage. The normal analyzer
 fixture covers 1024 associations, first four cycles per association and all five
 L1 tables. Defaults are `runs/r30` and `org.example.round30load`; compatibility
-entry points and evidence filenames under `tools/r27` remain in use. Mac builds
-and hardware acceptance of this candidate are pending.
+entry points and evidence filenames under `tools/r27` remain in use.
+
+**Round30 hardware acceptance PASSED.** The tested implementation was committed
+before deployment as `874ea550e06bdf733398053dcd4e5165ada106d8` (tree
+`09e425939dad870c6b930ded58cccfd2eba96c7a`), then built and deployed as Lucy
+1.1.215 / Probe 0.39.0. One planned boot and one valid finite measurement used
+token `0x30c0de30`.
+
+- Application: 8192/8192 valid replies, bad 0, 512×16, no retransmission; R28T
+  tails 1024/1024 and one R29D echo (seq 1024) before TX close.
+- RX: 1024/1024 standard maps and confirmed unmaps over five L1 tables,
+  1024 retained spares, 9307 posted/completed, 4096 retained first-four-cycle
+  samples, restored 1024, pending 0, live owners 0.
+- TX: driver/backend mapped and retired 10291/10291, held/live 0; owners,
+  pending, pinned and ring 0; commands 22633 submitted and completed, 88 wraps;
+  device page faults 0.
+- After exit, three ordinary network probes succeeded; strict analyzer `ok=true`,
+  13/13 checks; capture complete with no errors.
+
+This documentation update is not a newly deployed or hardware-tested revision;
+the deployed source commit remains `874ea55`. Next work is outside this round:
+sleep/wake, multi-device or a general system mapper are not part of RX1024.
+
+Round30 result and archive are outside this source repository:
+[Round30 result](<../../docs/m2-3k-round30-result.md>) and
+[evidence archive](<../../docs/evidence/r30-final-20261103.tgz>)
+(SHA256 `f73fba0aeb668228fbe64bcea181eee6b4ed2b3b0bb48b4a2f486d00f62db857`).
 
 ## Historical Round29 / normal TX retirement and tail completion
 
