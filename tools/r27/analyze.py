@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round30: extend cyclic standard RX mapping to the complete 1024-slot ring.
+"""Round31: prove an explicit-stop RX1024 session across a 125-second idle.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,7 +29,7 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round30-8192-ordinary-application; RX1024-cyclic-standard-map; acknowledged-tail-and-TX-retirement'
+SCOPE = 'round31-explicit-stop-session; 4096+4096-after-125s-idle; RX1024-cyclic-standard-map; acknowledged-tail-and-TX-retirement'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
@@ -266,6 +266,51 @@ def check(cap):
         return {'requests': REQUEST_COUNT, 'groups': len(bursts()), 'groupSize': BURST, 'duplicates': 0,
                 'receiveOrder': 'permutation within each group only'}
     run('full8192-bytes-no-retry-no-duplicate-credit', logs)
+
+    def session_lifecycle():
+        A.need(P.get('m2-3l-session-mode') == 'explicit-stop' and
+               P.get('m2-3l-session-state') == 'stopped',
+               'explicit-stop session did not finish stopped')
+        A.need(P.get('m2-3l-tx-deadline') == 0 and
+               P.get('m2-b2-r15-authorize-deadline') == 0,
+               'TX/RX authorization still has a timed deadline')
+        start = P['m2-3l-session-start']
+        stopped = P['m2-3l-stop-request-time']
+        end = P['m2-3l-session-end']
+
+        def one(pattern, name):
+            values = re.findall('^' + pattern + '$', client, re.M)
+            A.need(len(values) == 1, 'missing/repeated session ' + name)
+            return int(values[0])
+
+        phase1 = one(r'client_session_phase phase=1 first=1 last=4096 t_ns=(\d+)', 'phase1')
+        phase2 = one(r'client_session_phase phase=2 first=4097 last=8192 t_ns=(\d+)', 'phase2')
+        idle_begin = one(r'client_session_idle_begin seconds=125 state=active t_ns=(\d+)', 'idle begin')
+        idle_end = one(r'client_session_idle_end state=active t_ns=(\d+)', 'idle end')
+        request = one(r'client_session_stop_request t_ns=(\d+)', 'stop request')
+        ack = one(r'client_session_stop_ack t_ns=(\d+)', 'stop acknowledgement')
+        observed_end = one(r'client_session_stopped t_ns=(\d+)', 'stopped observation')
+        halves = ([], [])
+        for req, stamp in re.findall(r'^client_(?:sent|recv) .* req=(\d+) .* t_ns=(\d+)$', client, re.M):
+            halves[int(req) > 4096].append(int(stamp))
+        A.need(len(halves[0]) == len(halves[1]) == 8192,
+               'session phases do not each contain 4096 requests and replies')
+        A.need(0 < rb['tReady'] <= start <= phase1 <= min(halves[0]) <= max(halves[0]) <= idle_begin and
+               idle_end <= phase2 <= min(halves[1]) <= max(halves[1]) <= request,
+               'session request phases overlap idle or stop')
+        A.need(idle_end - idle_begin >= 125_000_000_000 and
+               min(halves[1]) - start > 120_000_000_000,
+               'second 4096 requests did not survive the old 60/120-second limits')
+        A.need(request <= stopped <= ack and stopped <= rh['tDisarmed'] and
+               rh['tDisarmed'] < P['m2-3i-tail-confirmed-time'] <=
+               P['m2-3e-t-resume'] <= end <= observed_end,
+               'explicit stop/drain/tail/restore/session-end order differs')
+        return {'mode': 'explicit-stop', 'state': 'stopped', 'requestsPerPhase': 4096,
+                'idleSeconds': (idle_end - idle_begin) / 1e9,
+                'secondPhaseAfterSeconds': (min(halves[1]) - start) / 1e9,
+                'stopRequests': 1, 'txDeadline': 0, 'rxDeadline': 0,
+                'durationSeconds': (end - start) / 1e9}
+    run('persistent-session-125s-idle-second4096-explicit-stop-and-restore', session_lifecycle)
 
     def drain_tail():
         observed = re.findall(r'^client_drain_observed t_ns=(\d+)$', client, re.M)

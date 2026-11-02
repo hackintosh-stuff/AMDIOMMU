@@ -3,6 +3,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IODMACommand.h>
+#include <kern/thread.h>
 
 // 设备 DMA 观察用的纯逻辑核心（区间集合、fault 分类、描述符解码）。
 // 与 host 回归测试包含同一个文件，见 tests/dma-observe-test.cpp。
@@ -49,6 +50,7 @@ protected:
 public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
+    IOReturn setProperties(OSObject *properties) override;
 
     uint64_t getPageSize() const override;
 
@@ -405,6 +407,17 @@ private:
 
     // 定时器回调（静态，符合 IOTimerEventSource::Action 签名）
     static void m22b2TimerFired(OSObject *owner, IOTimerEventSource *sender);
+
+    // Round31: the timer only launches this retained, dedicated worker. The
+    // probe's local tables/command context live until explicit stop + restore.
+    bool r31SessionRequested() const;
+    static void r31SessionWorker(void *parameter, wait_result_t result);
+    void r31RequestStop();
+    bool fR31Session = false;
+    volatile UInt32 fR31StopRequested = 0;
+    volatile UInt32 fR31WorkerActive = 0;
+    volatile UInt64 fR31StopRequestTime = 0;
+    bool fR31SessionCompleted = false; // written/read by the worker only
 
     R27ProbeTimer *fM22b2Timer;   // 一次性定时器（stop() 里释放）
     uint32_t            fM22b2DelayMS; // 延迟毫秒数（可被 boot-arg 覆盖）

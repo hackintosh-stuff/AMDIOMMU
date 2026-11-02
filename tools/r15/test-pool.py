@@ -5,7 +5,7 @@ No hardware, remote access, full gate suite, or substitute state-machine model.
 Only mbuf/clock/IOKit allocation plumbing is stubbed. Default runs a local C++
 compiler; --emit PATH writes the standalone generated test for another compiler.
 --check-extraction validates source-hook wiring without requiring a compiler.
---mainline checks only normal full-pool Prepare and release for Round30.
+--mainline checks normal full-pool Prepare, open-ended authorization, and Disarm.
 """
 import argparse
 import os
@@ -40,6 +40,7 @@ PREFIX = r'''
 #include <cstdint>
 #include <vector>
 #include "RTL812xRxPool.hpp"
+#include "RTL812xRxMap.hpp"
 using UInt8 = unsigned char;
 using UInt32 = unsigned int;
 using UInt64 = unsigned long long;
@@ -211,6 +212,10 @@ public:
     void r15PoolPosted(UInt32,UInt64);
     void r15PoolInvalidate();
     void r15PoolFree();
+    // Cyclic RX methods are covered by their own real-method harness. This
+    // allocator/authorization case does not install any DMA bindings.
+    void r27RxRearm(UInt32,UInt64,UInt32,UInt32,UInt32,UInt32,UInt64*) { assert(false); }
+    void r27RxPosted(UInt32,UInt64) { assert(false); }
 };
 '''
 
@@ -412,6 +417,18 @@ int main() {
     }
     std::vector<mbuf_t> owned(d.r15Pool->mbufs,d.r15Pool->mbufs+r15pool::kMaxEntries);
     for (mbuf_t m:owned) assert(m->freed==0);
+    r->poolId=r->out.poolId; r->expectedGeneration=r->out.generation;
+    nowTicks=2000;
+    r->op=r15pool::kAuthorize; r->mapCompletedAt=1500;
+    r->deadline=0; r->replaceLimit=r15pool::kSpareCount;
+    assert(act(d,r)==kIOReturnSuccess);
+    assert(r->out.state==r15pool::kAuthorized && !r->out.deadline);
+    nowTicks+=125000000000ULL;
+    r->op=r15pool::kSnapshot;
+    assert(act(d,r)==kIOReturnSuccess);
+    assert(r->out.state==r15pool::kAuthorized && !r->out.deadline);
+    r->op=r15pool::kDisarm;
+    assert(act(d,r)==kIOReturnSuccess && r->out.state==r15pool::kDisarmed);
     d.r15PoolFree(); assert(!d.r15Pool);
     for (mbuf_t m:owned) assert(m->freed==1);
     for (unsigned i=0;i<r15pool::kRingCount;++i) assert(!d.rxBufArray[i].mbuf);
@@ -422,13 +439,16 @@ int main() {
     delete[] d.rxBufArray; delete[] d.rxDescArray; delete r;
     for (mbuf_t m:allMbufs) delete m;
     for (auto *region:allRegions) delete region;
-    std::puts("R30 actual pool Prepare/release: 1024 borrowed ring + 1024 retained spares; pool2 ABI PASS");
+    std::puts("R31 actual pool Prepare/Authorize(deadline=0)/Disarm/release: 1024 ring + 1024 spares; pool2 ABI PASS");
 }
 '''
 
 
 def generate(mainline=False):
     n = runpy.run_path(str(ROOT / 'tools/apply-lucy-obs2.py'))
+    if mainline:
+        n['select_rx']('31')
+        n = n['select_rx'].__globals__
     text = n['POOL_METHODS']
     state = extract(text, 'struct RTL8125::R15PoolState') + ';'
     functions = [extract(text, 'static bool r15PhysicalSpan'),

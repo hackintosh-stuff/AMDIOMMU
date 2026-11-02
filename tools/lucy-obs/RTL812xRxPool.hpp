@@ -54,7 +54,7 @@ struct Snapshot {
     u64 tPrepared;
     u64 tAuthorized;
     u64 mapCompletedAt;
-    u64 deadline;
+    u64 deadline; // mach ticks; current cyclic RX uses 0 until explicit Disarm
     u32 epoch;
     u32 vtdPath;
     u32 mtu;
@@ -80,7 +80,7 @@ struct Request {
     u32 expectedGeneration;
     u64 poolId;
     u64 mapCompletedAt;
-    u64 deadline;
+    u64 deadline; // mach ticks; 0 = current cyclic session, finite for RX15
     u32 replaceLimit;
     u32 reserved;               // Prepare: opt-in declared businessToken, 0=all obs
     Snapshot out;

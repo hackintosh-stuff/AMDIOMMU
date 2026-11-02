@@ -31,6 +31,8 @@
 #include <mach/mach_time.h>
 #include <kern/clock.h>
 #include <libkern/OSByteOrder.h>
+#include <libkern/c++/OSBoolean.h>
+#include <libkern/c++/OSDictionary.h>
 
 // 页表编码/解码的唯一实现。生产代码与 host 回归测试**包含同一个文件**，
 // 测试跑的就是这里的分支，不是另写一份 Python 复述。
@@ -80,6 +82,11 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
     // ---- M2-2b-2 延迟定时器 ----
     fM22b2Timer = nullptr;
     fM22b2DelayMS = 0;
+    fR31Session = false;
+    fR31StopRequested = 0;
+    fR31WorkerActive = 0;
+    fR31StopRequestTime = 0;
+    fR31SessionCompleted = false;
     for (int i = 0; i < kMaxActiveMaps; i++) {
         fMaps[i].pa = 0;
         fMaps[i].len = 0;
@@ -264,19 +271,54 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
 }
 
 // ===== AMDMapperProbe.cpp (original lines 7715..7747) =====
-void org_example_AMDMapperProbe::stop(IOService *provider) {
-    fMapWindowOpen = false;
-    fArmed = false;         // 立刻停止放行真实设备
+void org_example_AMDMapperProbe::r31RequestStop() {
+    // RPC/service-stop callers only register a request. The worker owns every
+    // state publication, RX/TX drain and hardware restoration operation.
+    UInt64 expected = 0;
+    const UInt64 now = mach_absolute_time();
+    (void)__atomic_compare_exchange_n(&fR31StopRequestTime, &expected, now,
+                                     false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&fR31StopRequested, 1u, __ATOMIC_RELEASE);
+}
 
-    // 摘掉 M2-2b-2 的延迟定时器，避免 stop 之后回调仍被投递
-    // （那时对象正在拆除，runM22b2PageTableProbe 会访问已释放的成员）。
+IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
+    OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    OSObject *request = dict ? dict->getObject("R31Stop") : nullptr;
+    if (!request) return super::setProperties(properties);
+    if (request != kOSBooleanTrue) return kIOReturnBadArgument;
+    if (!fR31Session) return kIOReturnNotReady;
+    r31RequestStop();
+    return kIOReturnSuccess;
+}
+
+void org_example_AMDMapperProbe::stop(IOService *provider) {
+    // Cancel under the timer's gate so the once-only launch has either
+    // completed or been cancelled. Keep the source installed until after the
+    // join: openClientGate/closeClientGate need its workloop association.
+    IOWorkLoop *wl = fM22b2Timer ? fM22b2Timer->getWorkLoop() : nullptr;
+    const bool callerInGate = wl && wl->inGate();
     if (fM22b2Timer) {
+        if (wl && !callerInGate) fM22b2Timer->closeClientGate();
         fM22b2Timer->cancelTimeout();
-        IOWorkLoop *wl = getWorkLoop();
+        if (wl) fM22b2Timer->openClientGate();
+    }
+
+    // Round31's worker must finish RX drain / R29D / TX retire / restore while
+    // its mapper and provider dependencies still exist. Never hold the probe
+    // workloop gate across the join, even if stop's caller originally held it.
+    if (fR31Session) {
+        r31RequestStop();
+        while (__atomic_load_n(&fR31WorkerActive, __ATOMIC_ACQUIRE))
+            IOSleep(10);
+    }
+    if (wl && callerInGate) fM22b2Timer->closeClientGate();
+    if (fM22b2Timer) {
         if (wl) wl->removeEventSource(fM22b2Timer);
         fM22b2Timer->release();
         fM22b2Timer = nullptr;
     }
+    fMapWindowOpen = false;
+    fArmed = false;
 
     // 先摘通知，避免 stop 之后回调仍被投递（那时对象正在拆除）
     if (fPublishNotifier) {
@@ -626,7 +668,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.39.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.40.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

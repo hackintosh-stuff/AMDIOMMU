@@ -21,6 +21,7 @@ spec.loader.exec_module(base)
 
 DECLARATIONS = r'''
     bool fM22b2Use3L=false;
+    bool fR31Session=false;
     bool r17Prepare(volatile UInt64 *,UInt64,UInt32);
     struct R27RxDomain;
     R27RxDomain *fR27Rx=nullptr;

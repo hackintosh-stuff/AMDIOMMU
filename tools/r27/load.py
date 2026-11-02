@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Round30 ordinary UDP load: 8192 requests in 512 send-all-16/receive groups.
+"""Round31 UDP session: 4096 requests, 125 s idle, another 4096, explicit stop.
 Wait for 1024 persistent RX mappings, then drive cyclic DMA and bounded drain.
-Only a fresh all-standard window permits the batch; never retransmit requests.
+Only an active all-standard session permits the batch; never retransmit requests.
 """
 import argparse
+import importlib.util
 from pathlib import Path
 import re
 import socket
@@ -14,6 +15,10 @@ from protocol import (REQUESTS, SEED, bursts, evidence, identify,
                       tail_done, tail_done_identify, TAIL_MAX)
 
 ROOT = Path(__file__).resolve().parents[2]
+_session_spec = importlib.util.spec_from_file_location('round31_session',
+                                                      ROOT / 'tools/r31/session.py')
+session = importlib.util.module_from_spec(_session_spec)
+_session_spec.loader.exec_module(session)
 
 
 def now():
@@ -23,10 +28,36 @@ def now():
     return time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)
 
 
-# Bound the load to the 60 s main window, even if the backend deadline is longer.
-# The r15 invalidation timestamp is at/before the main sample begins, so this is
-# a conservative end bound using the existing authorization time base.
-PROBE_DEADLINE_NS = 60_000_000_000
+# A finite client budget includes the deliberate idle interval. The kernel
+# session itself has no timer: R31Stop is what begins the normal drain.
+CLIENT_BUDGET_NS = 300_000_000_000
+SESSION_IDLE_SECONDS = 125
+SESSION_SPLIT = 4096
+
+
+def session_idle(emit, client_deadline_ns):
+    if session.status().get('session-state') != 'active':
+        raise RuntimeError('session is not active before idle')
+    begin = now()
+    emit('client_session_idle_begin seconds=%d state=active t_ns=%d' %
+         (SESSION_IDLE_SECONDS, begin))
+    end = begin + SESSION_IDLE_SECONDS * 1_000_000_000
+    while True:
+        current = now()
+        if client_deadline_ns is not None and current >= client_deadline_ns:
+            raise RuntimeError('client budget exhausted during session idle')
+        if current >= end:
+            break
+        time.sleep(min(5, (end - current) / 1e9))
+    if session.status().get('session-state') != 'active':
+        raise RuntimeError('session did not remain active through idle')
+    emit('client_session_idle_end state=active t_ns=%d' % now())
+
+
+def request_session_stop(emit):
+    emit('client_session_stop_request t_ns=%d' % now())
+    session.stop()
+    emit('client_session_stop_ack t_ns=%d' % now())
 
 
 def drain_tail(s, peer, token, emit):
@@ -158,23 +189,29 @@ def bind_local(s, local, emit, tries=60, delay=.5):
             time.sleep(delay)
 
 
-def exchange(s, local, peer, token, emit, ord_state, window_deadline_ns=None):
+def exchange(s, local, peer, token, emit, ord_state, client_deadline_ns=None,
+             persistent_session=False):
     bind_local(s, local, emit)
     s.settimeout(.5)
     emit('client_bound %s:%d' % s.getsockname())
     sent = acked = bad = 0
+    if persistent_session:
+        emit('client_session_phase phase=1 first=1 last=4096 t_ns=%d' % now())
     # Each of the 512 groups sends all 16 before recv; no retransmission.
     for group in bursts():
-        if window_deadline_ns is not None and now() >= window_deadline_ns:
-            emit('client_window_expired sent=%d acked=%d' % (sent, acked))
+        if persistent_session and group[0] == SESSION_SPLIT + 1:
+            session_idle(emit, client_deadline_ns)
+            emit('client_session_phase phase=2 first=4097 last=8192 t_ns=%d' % now())
+        if client_deadline_ns is not None and now() >= client_deadline_ns:
+            emit('client_budget_expired sent=%d acked=%d' % (sent, acked))
             break
         emit('client_burst reqs=%s' % ','.join(str(r) for r in group))
         pending = {}
         for req in group:
             data = payload(token, req)
             before = now()
-            if window_deadline_ns is not None and before >= window_deadline_ns:
-                emit('client_window_expired sent=%d acked=%d' % (sent, acked))
+            if client_deadline_ns is not None and before >= client_deadline_ns:
+                emit('client_budget_expired sent=%d acked=%d' % (sent, acked))
                 break
             if s.sendto(data, peer) != len(data):
                 raise RuntimeError('short UDP send')
@@ -185,8 +222,8 @@ def exchange(s, local, peer, token, emit, ord_state, window_deadline_ns=None):
         # Collect this burst's echoes. A miss is counted, never retried: a
         # dropped frame is a result, not something to paper over.
         for req in tuple(pending):
-            if window_deadline_ns is not None:
-                remaining = (window_deadline_ns - now()) / 1e9
+            if client_deadline_ns is not None:
+                remaining = (client_deadline_ns - now()) / 1e9
                 if remaining <= 0:
                     break
                 s.settimeout(min(.5, remaining))
@@ -212,10 +249,10 @@ def exchange(s, local, peer, token, emit, ord_state, window_deadline_ns=None):
             emit('client_recv token=0x%08x req=%d %s payload_ok=%d from=%s:%d t_ns=%d' %
                  (token, req, evidence(echoed), int(valid), *source, now()))
         # Two ordinary probes after collecting the finite application burst,
-        # still inside the translation window. No pause between request groups.
+        # still inside the active translation session.
         for _ in range(2):
-            if window_deadline_ns is not None:
-                remaining = (window_deadline_ns - now()) / 1e9
+            if client_deadline_ns is not None:
+                remaining = (client_deadline_ns - now()) / 1e9
                 if remaining <= 0:
                     break
                 s.settimeout(min(.5, remaining))
@@ -263,7 +300,7 @@ def ord_probe(s, peer, seq, emit, tag):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('out', nargs='?', default='runs/r30')
+    ap.add_argument('out', nargs='?', default='runs/r31')
     ap.add_argument('--iface', default='en2')
     ap.add_argument('--peer', default='192.168.50.122')
     ap.add_argument('--port', type=int, default=9110)
@@ -278,7 +315,7 @@ def main():
     if int((out / 'batch.txt').read_text().strip()) != 512:
         raise ValueError('round27 keeps the kernel declaration batch512')
     if int((out / 'requests.txt').read_text().strip()) != len(REQUESTS):
-        raise ValueError('round30 requires 8192 application requests')
+        raise ValueError('round31 requires 8192 application requests')
     payload(token, 1)
     with (out / 'load.txt').open('w') as f:
         def log(line):
@@ -350,6 +387,13 @@ def main():
                     if '"m2-3h-rx-ready" = "yes"' not in props:
                         time.sleep(.02)
                         continue
+                    state = session.parse_status(props)
+                    if state.get('session-mode') != 'explicit-stop':
+                        log('load_result FAIL-not-explicit-stop-session')
+                        return 2
+                    if state.get('session-state') != 'active':
+                        time.sleep(.02)
+                        continue
                     if '"m2-3g-mode" = "all-standard"' not in props:
                         log('load_result FAIL-not-all-standard')
                         return 2
@@ -357,8 +401,8 @@ def main():
                         log('load_result FAIL-window-already-exited')
                         return 2
                     stamp = re.search(r'"m2-b2-r15-inv-time" = "(0x[0-9a-fA-F]+)"', props)
-                    # Preserve the same-boot freshness proof, now bounded by
-                    # this round's 60 s main window. Never authorize by token.
+                    # Preserve same-boot freshness. An active persistent
+                    # session has no authorization-age expiry.
                     if not stamp:
                         log('load_result FAIL-authorization-not-stamped')
                         return 2
@@ -370,17 +414,13 @@ def main():
                             'inv=%d boot=%d now=%d' % (inv, boot, current))
                         return 2
                     age = current - inv
-                    if age >= PROBE_DEADLINE_NS:
-                        log('load_result FAIL-authorization-expired age_s=%.3f '
-                            'deadline_s=%.1f' % (age / 1e9, PROBE_DEADLINE_NS / 1e9))
-                        return 2
                     if pre_sent < PRE_PROBES:
                         continue
                     log('load_m2_3g_mode : all-standard')
                     log('load_m2_3h_rx : standard-nonidentity-cyclic1024')
-                    log('load_authorization_age_ns : %d (%.3f s, deadline %.0f s)'
-                        % (age, age / 1e9, PROBE_DEADLINE_NS / 1e9))
-                    window_deadline_ns = inv + PROBE_DEADLINE_NS
+                    log('load_authorization_age_ns : %d (%.3f s, explicit-stop)'
+                        % (age, age / 1e9))
+                    log('load_session : 4096+4096 idle=125s explicit-stop=1')
                     break
             time.sleep(.05)
         else:
@@ -405,6 +445,7 @@ def main():
             emit('client_token_scope userspace-only')
             emit('client_payload_magic R27P nonbusiness=1')
             emit('client_m2_3g_mode all-standard')
+            emit('client_session_mode explicit-stop')
             emit('client_requests %d' % len(REQUESTS))
             emit('client_route_interface %s' % a.iface)
             # The pre-window probes were collected before this file existed;
@@ -413,8 +454,22 @@ def main():
                 emit(line)
             emit('client_ord_pre sent=%d' % pre_sent)
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                rc = exchange(s, local, (a.peer, a.port), token, emit, ord,
-                              window_deadline_ns=window_deadline_ns)
+                rc = 1
+                try:
+                    rc = exchange(s, local, (a.peer, a.port), token, emit, ord,
+                                  client_deadline_ns=now() + CLIENT_BUDGET_NS,
+                                  persistent_session=True)
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    emit('client_session_error %s' % exc)
+                # One stop request per load, including an incomplete batch.
+                # No client retry can disguise which action triggered drain.
+                stop_ok = False
+                try:
+                    request_session_stop(emit)
+                    stop_ok = True
+                except (OSError, RuntimeError) as exc:
+                    emit('client_session_stop_error %s' % exc)
+                    rc = 1
                 # AFTER the exit. The probe publishes this property only
                 # after the device table was restored, read back, the backend
                 # detached and ordinary admission reopened. Waiting for the
@@ -430,8 +485,10 @@ def main():
                         tail_done = True
                         if not drain_tail(s, (a.peer, a.port), token, emit):
                             rc = 1
-                    if '"m2-3e-after-exit" = "ordinary-output-resumed"' in props:
+                    if ('"m2-3e-after-exit" = "ordinary-output-resumed"' in props and
+                            session.parse_status(props).get('session-state') == 'stopped'):
                         resumed = True
+                        emit('client_session_stopped t_ns=%d' % now())
                         break
                     time.sleep(.3)
                 emit('client_after_exit resumed=%d t_ns=%d' % (int(resumed), now()))
@@ -444,7 +501,7 @@ def main():
                             ok_after += 1
                         time.sleep(.1)
                 emit('client_ord_after_exit ok=%d of=3' % ok_after)
-                if not resumed or ok_after != 3 or not tail_done:
+                if not resumed or ok_after != 3 or not tail_done or not stop_ok:
                     rc = 1
             emit('client_result %s' %
                  ('OK' if rc == 0 and ok_after == 3 else 'PROBLEM'))

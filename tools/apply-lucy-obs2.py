@@ -64,14 +64,14 @@ Detach. Evidence records and the command budget stay finite; the DMA owner does
 not. See tools/r17/driver-template.py and RTL812xTxMapNative.hpp. The default
 remains 16 so the archived round-16 build stays reproducible.
 
-Round 30 binds 1024 owned RX spares to standard mapper IOVAs
+Round 31 keeps 1024 owned RX spares to standard mapper IOVAs
 and reuses them cyclically until hold/disarm and drain restore the physical
-ring buffers before standard unmap. Select --tx 21 --rx 30 (--rx30 also
+ring buffers before standard unmap. Select --tx 21 --rx 31 (--rx31 also
 works); --rx 27 aliases the same canonical cyclic template. The original
 physical RX15 path remains the default.
 
 Usage:
-    py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30]
+    py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31]
 Exit 0 = applied (or already applied). Non-zero = refused, with the reason.
 """
 import os
@@ -2138,19 +2138,25 @@ def select_tx(round_no):
 
 
 def select_rx(round_no):
-    """Opt in to finite standard-mapped RX without rewriting historical TX."""
+    """Opt in to standard-mapped RX without rewriting historical TX."""
     global RX_SELECT, RX, RXMAP_NAMES, POOL_METHODS, RX_BIZ_NEW
     global RX_NEW, RX_DECL_NEW, RX_CAPTURE_NEW
-    if round_no not in ('15', '27', '28', '29', '30'):
+    if round_no not in ('15', '27', '28', '29', '30', '31'):
         raise SystemExit('unsupported RX module round: %r' % (round_no,))
     RX_SELECT = round_no
-    RX = runpy.run_path(os.path.join(HERE, 'r27', 'driver-template.py')) if round_no in ('27', '28', '29', '30') else None
+    RX = runpy.run_path(os.path.join(HERE, 'r27', 'driver-template.py')) if round_no in ('27', '28', '29', '30', '31') else None
     RXMAP_NAMES = RX['HEADERS'] if RX else []
     POOL_METHODS = RX['pool_methods'](_POOL_METHODS_BASE) if RX else _POOL_METHODS_BASE
     if RX:
-        # Cyclic RX authorization is finite but must cover the 8192-request load.
+        # Current cyclic RX accepts deadline=0 until explicit Disarm; a finite
+        # request still has the 120-second bound. Historical RX15 stays finite.
         POOL_METHODS = POOL_METHODS.replace('10000000000ULL, &maxWindow',
                                             '120000000000ULL, &maxWindow')
+        POOL_METHODS = POOL_METHODS.replace(
+            'request->deadline <= now ||\n'
+            '            request->deadline - now > maxWindow ||',
+            '(request->deadline && (request->deadline <= now ||\n'
+            '             request->deadline - now > maxWindow)) ||')
     RX_BIZ_NEW = RX['rx_business'](_RX_BIZ_BASE) if RX else _RX_BIZ_BASE
     RX_NEW = RX['rx_rearm'](_RX_REARM_BASE) if RX else _RX_REARM_BASE
     RX_DECL_NEW = RX['rx_decl'](_RX_DECL_BASE) if RX else _RX_DECL_BASE
@@ -2326,14 +2332,14 @@ def main():
         if a.startswith('--rx'):
             rx = a[4:]; i += 1; continue
         positional.append(a); i += 1
-    if len(positional) != 1 or (tx is not None and tx not in TXR) or (rx is not None and rx not in ('15', '27', '28', '29', '30')):
-        print("usage: apply-lucy-obs2.py <RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30]")
+    if len(positional) != 1 or (tx is not None and tx not in TXR) or (rx is not None and rx not in ('15', '27', '28', '29', '30', '31')):
+        print("usage: apply-lucy-obs2.py <RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31]")
         return 2
     if tx is not None:
         select_tx(tx)
     if rx is not None:
         select_rx(rx)
-    if RX_SELECT in ('27', '28', '29', '30') and TX_SELECT != '21':
+    if RX_SELECT in ('27', '28', '29', '30', '31') and TX_SELECT != '21':
         print("refused: cyclic RX requires the current --tx 21 module")
         return 2
     root = positional[0]

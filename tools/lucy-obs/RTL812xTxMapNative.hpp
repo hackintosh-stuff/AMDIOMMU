@@ -214,7 +214,9 @@ struct Request {
 typedef IOReturn (*Callback)(void *context, uint32_t op, Request *request);
 struct Configure {
     uint32_t version, bytes, op, bdf, token, state;
-    uint64_t deadline; // mach absolute ticks, finite > now; no new Map after it
+    // Mach ticks: nonzero > now prevents new Map at expiry;
+    // 0 keeps an all-standard session active until explicit Disarm.
+    uint64_t deadline;
     Callback callback;
     void *context;
     IOService *owner; // retained by the driver until successful Detach

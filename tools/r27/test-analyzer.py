@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused Round30 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round31 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain3 and both new RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
@@ -43,6 +43,13 @@ HISTORY_CHECK = 'retained32-standard-handles-PTE-and-retirement-lifecycles'
 EXIT_CHECK = 'zero-pending-owners-pins-ring-and-no-device-page-fault'
 RX_MAP_CHECK = 'rx1024-standard-mapping-PTE-and-confirmed-unmap'
 RX_DONE_CHECK = 'rx1024-real-DMA-restoration-and-application-correlation'
+SESSION_CHECK = 'persistent-session-125s-idle-second4096-explicit-stop-and-restore'
+IDLE_NS = 125_000_000_000
+
+
+def session_time(value):
+    # Insert the same 125 s idle into the existing ordered synthetic timeline.
+    return value + IDLE_NS if value >= 2152 else value
 
 CPP = r'''
 #include <cstdint>
@@ -72,6 +79,9 @@ static_assert(offsetof(r27rx::MapRecord, entryId) == 88, "RX scalar offset");
 static_assert(offsetof(r27rx::MapRecord, mapCommand) == 120, "RX map command offset");
 static_assert(offsetof(r27rx::MapRecord, unmapCommand) == 160, "RX unmap command offset");
 
+static uint64_t sessionTime(uint64_t value) {
+    return value >= 2152 ? value + 125000000000ULL : value;
+}
 static void save(const std::string &dir, const char *name, const void *p, size_t n) {
     FILE *f = std::fopen((dir + "/" + name).c_str(), "wb");
     if (!f || std::fwrite(p, 1, n, f) != n || std::fclose(f)) std::abort();
@@ -223,6 +233,38 @@ int main(int argc, char **argv) {
             c.doneStatus = c.doneLength;
         }
     }
+    // Shift timestamp fields only; ABI, addresses, counters and protocol stay
+    // identical. Both snapshots and real client logs include the idle gap.
+#define SESSION_TIME(field) field = sessionTime(field)
+    SESSION_TIME(g.tPublished); SESSION_TIME(s.tPublished); SESSION_TIME(b.tSample);
+    for (auto &r : d.records) {
+        SESSION_TIME(r.tMapPublish); SESSION_TIME(r.tMapInv);
+        SESSION_TIME(r.tClearPublish); SESSION_TIME(r.tRetireInv);
+        SESSION_TIME(r.mapCommand.tComplete); SESSION_TIME(r.retireCommand.tComplete);
+    }
+    for (auto &w : g.witnesses) {
+        SESSION_TIME(w.request.tMap); SESSION_TIME(w.request.tDone);
+        SESSION_TIME(w.tOwn); SESSION_TIME(w.tFree);
+    }
+    for (auto &w : s.witnesses) {
+        SESSION_TIME(w.tBegin); SESSION_TIME(w.tPrepared); SESSION_TIME(w.tSegmented);
+        SESSION_TIME(w.tCommit); SESSION_TIME(w.tDone); SESSION_TIME(w.tCompleteBegin);
+        SESSION_TIME(w.tCompleteEnd); SESSION_TIME(w.tFree);
+    }
+    SESSION_TIME(rx.tInstalled); SESSION_TIME(rx.tDisarmed); SESSION_TIME(rx.tLastRestore);
+    SESSION_TIME(rb.tReady); SESSION_TIME(rb.tDrained);
+    for (uint32_t i = 0; i < r27rx::kCount; ++i) {
+        SESSION_TIME(rx.maps[i].tMapInv);
+        auto &w = rx.witnesses[i];
+        SESSION_TIME(w.tPost); SESSION_TIME(w.tDone); SESSION_TIME(w.tRestoreOwn);
+        SESSION_TIME(w.tLastPost); SESSION_TIME(w.tLastDone);
+        for (auto &c : w.samples) { SESSION_TIME(c.tPost); SESSION_TIME(c.tDone); }
+        auto &r = rb.records[i];
+        SESSION_TIME(r.tMapPublish); SESSION_TIME(r.tMapInv);
+        SESSION_TIME(r.tUnmapPublish); SESSION_TIME(r.tUnmapInv);
+        SESSION_TIME(r.mapCommand.tComplete); SESSION_TIME(r.unmapCommand.tComplete);
+    }
+#undef SESSION_TIME
     if (damage == "unrestored") rx.witnesses[r27rx::kCount - 1].flags &= ~r27rx::kWitnessRestored;
     save(dir, "r27-rx-raw.bin", &rx, sizeof(rx));
     save(dir, "r27-rx-map-raw.bin", &rb, sizeof(rb));
@@ -237,6 +279,10 @@ int main(int argc, char **argv) {
 
 def properties():
     p = {'m2-3c-mode': 'standard-iomapper', 'm2-3g-mode': 'all-standard',
+         'm2-3l-session-mode': 'explicit-stop', 'm2-3l-session-state': 'stopped',
+         'm2-3l-session-start': 420, 'm2-3l-stop-request-time': session_time(8751),
+         'm2-3l-session-end': session_time(9060),
+         'm2-3l-tx-deadline': 0, 'm2-b2-r15-authorize-deadline': 0,
          'm2-3h-rx-mode': 'standard-nonidentity-cyclic1024',
          'm2-3h-rx-state': 'drained-and-unmapped', 'm2-3h-rx-ready': 'no',
          'm2-b2-t-recovery-start': 9023, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0,
@@ -277,6 +323,9 @@ def properties():
              'm2-3e-t-detach', 'm2-3e-t-resume')
     p.update(zip(enter, range(100, 160, 10)))
     p.update(zip(leave, range(9000, 9060, 10)))
+    for key in enter + leave + ('m2-b2-t-recovery-start', 'm2-3i-tail-confirmed-time',
+                                'm2-3i-exit-retire-confirmed-time'):
+        p[key] = session_time(p[key])
     return ''.join('"%s" = "%s"\n' % (key, hex(value) if isinstance(value, int) else value)
                    for key, value in p.items())
 
@@ -316,9 +365,25 @@ def real_logs(client_reorder=True, peer_reorder=True):
     with patch.object(load, 'now', return_value=50):
         for _ in range(20):
             assert load.ord_probe(s, PEER, seq.next(), client_lines.append, 'pre')
-    with patch.object(load, 'now', side_effect=(1000 + i // 8 for i in itertools.count())):
-        assert load.exchange(s, '127.0.0.1', PEER, TOKEN, client_lines.append, seq) == 0
-    with patch.object(load, 'now', side_effect=itertools.count(9100)):
+    steps, offset = itertools.count(), [0]
+
+    def clock():
+        return 1000 + next(steps) // 8 + offset[0]
+
+    def sleep(seconds):
+        offset[0] += round(seconds * 1e9)
+
+    with patch.object(load, 'now', side_effect=clock), \
+         patch.object(load.time, 'sleep', side_effect=sleep), \
+         patch.object(load.session, 'status', return_value={'session-state': 'active'}):
+        assert load.exchange(s, '127.0.0.1', PEER, TOKEN, client_lines.append, seq,
+                             persistent_session=True) == 0
+    with patch.object(load, 'now', side_effect=[session_time(8750), session_time(8752)]), \
+         patch.object(load.session, 'stop') as stop:
+        load.request_session_stop(client_lines.append)
+        stop.assert_called_once_with()
+    client_lines.append('client_session_stopped t_ns=%d' % session_time(9090))
+    with patch.object(load, 'now', side_effect=itertools.count(session_time(9100))):
         for _ in range(3):
             assert load.ord_probe(s, PEER, seq.next(), client_lines.append, 'after-exit')
     client_lines.append('client_result OK')
@@ -349,12 +414,12 @@ def real_logs(client_reorder=True, peer_reorder=True):
          patch.object(peer.time, 'monotonic_ns', side_effect=itertools.count(1)):
         assert peer.serve(ps, TOKEN, 1, peer_lines.append) == 0
     import hashlib
-    client_lines.append('client_drain_observed t_ns=8801')
+    client_lines.append('client_drain_observed t_ns=%d' % session_time(8801))
     for seq in range(1, analyzer.RX_COUNT + 1):
         data = protocol.tail(TOKEN, seq)
         evidence = 'token=0x%08x seq=%d len=%d sha256=%s payload=%s' % (
             TOKEN, seq, len(data), hashlib.sha256(data).hexdigest(), data.hex())
-        stamp = 8802 + (seq - 1) // 16
+        stamp = session_time(8802 + (seq - 1) // 16)
         client_lines.extend(['client_tail_send ' + evidence + ' t_ns=%d' % stamp,
                              'client_tail_recv ' + evidence + ' payload_ok=1 t_ns=%d' % stamp])
         peer_lines.extend(['peer_tail_recv ' + evidence + ' payload_ok=1 from=127.0.0.1:10000 t=%d' % seq,
@@ -366,11 +431,11 @@ def real_logs(client_reorder=True, peer_reorder=True):
     data = protocol.tail_done(TOKEN, analyzer.RX_COUNT)
     evidence = 'token=0x%08x seq=%d len=%d sha256=%s payload=%s' % (
         TOKEN, analyzer.RX_COUNT, len(data), hashlib.sha256(data).hexdigest(), data.hex())
-    client_lines.extend(['client_tail_done_send ' + evidence + ' t_ns=8970',
-                         'client_tail_done_recv ' + evidence + ' payload_ok=1 t_ns=9010'])
+    client_lines.extend(['client_tail_done_send ' + evidence + ' t_ns=%d' % session_time(8970),
+                         'client_tail_done_recv ' + evidence + ' payload_ok=1 t_ns=%d' % session_time(9010)])
     peer_lines.extend(['peer_tail_done_recv ' + evidence + ' payload_ok=1 from=127.0.0.1:10000 t=40',
                        'peer_tail_done_sent ' + evidence + ' to=127.0.0.1:10000 t=41'])
-    client_lines.append('client_after_exit resumed=1 t_ns=9100')
+    client_lines.append('client_after_exit resumed=1 t_ns=%d' % session_time(9100))
     return '\n'.join(client_lines) + '\n', '\n'.join(peer_lines) + '\n'
 
 
@@ -430,7 +495,7 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(protocol.MAGIC, b'R27P')
         self.assertNotIn(protocol.payload(TOKEN, 1)[:4], (b'IOB1', b'1BOI'))
         report = self.expect(True)
-        self.assertEqual(len(report['checks']), 13)
+        self.assertEqual(len(report['checks']), 14)
         by_id = {c['id']: c.get('detail') for c in report['checks']}
         self.assertEqual(by_id[COUNTER_CHECK]['mode'], 2)
         self.assertEqual((by_id[COUNTER_CHECK]['Mapped'], by_id[COUNTER_CHECK]['Unmarked']), (10240, 10240))
@@ -451,6 +516,10 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(by_id[RX_DONE_CHECK]['sampledCompletions'], 4096)
         self.assertEqual(by_id[RX_DONE_CHECK]['restored'], 1024)
         self.assertEqual(by_id[RX_DONE_CHECK]['applicationRequests'], [1025])
+        self.assertEqual(by_id[SESSION_CHECK]['stopRequests'], 1)
+        self.assertEqual(by_id[SESSION_CHECK]['requestsPerPhase'], 4096)
+        self.assertGreaterEqual(by_id[SESSION_CHECK]['idleSeconds'], 125)
+        self.assertGreater(by_id[SESSION_CHECK]['secondPhaseAfterSeconds'], 120)
         # Scoped decoding must leave the historical module's ABI unchanged.
         self.assertEqual((legacy.STD_VERSION, legacy.DRIVER_VERSION), (3, 4))
 
@@ -484,8 +553,9 @@ class AnalyzerTests(unittest.TestCase):
         path = self.capture / 'r27-rx-raw.bin'
         blob = bytearray(path.read_bytes())
         for offset, fmt, value in ((24, 'I', 4097), (28, 'I', 4097),
-                                   (32848 + 32, 'Q', 5200),
-                                   (32848 + 80, 'Q', 5000), (32848 + 88, 'Q', 5200),
+                                   (32848 + 32, 'Q', session_time(5200)),
+                                   (32848 + 80, 'Q', session_time(5000)),
+                                   (32848 + 88, 'Q', session_time(5200)),
                                    (32848 + 96, 'I', 5), (32848 + 100, 'I', 5),
                                    (32848 + 104, 'I', 4)):
             analyzer.struct.pack_into('<' + fmt, blob, offset, value)
@@ -527,7 +597,7 @@ class AnalyzerTests(unittest.TestCase):
                          ('client_drain_observed ', 'missing_drain_observed '),
                          ('sent=1024 received=1024 max=4096', 'sent=1025 received=1024 max=4096'),
                          ('seq=1 len=200', 'seq=4097 len=200'),
-                         ('t_ns=8802', 't_ns=8799')):
+                         ('t_ns=%d' % session_time(8802), 't_ns=%d' % session_time(8799))):
             with self.subTest(old=old):
                 path.write_text(baseline.replace(old, new))
                 self.expect(False, 'published-drain-R28T-tail-integrity')

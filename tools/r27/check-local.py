@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused Round30 software checks; no device, install or reboot actions.
+"""Focused Round31 software checks; no device, install or reboot actions.
 
 The C++ harnesses compile real driver/backend bodies with host plumbing.
 They do not replace a macOS kext build or the one required hardware run.
@@ -40,7 +40,8 @@ def main():
         raise SystemExit('C++17 compiler required; set CXX')
     env = dict(os.environ, CXX=' '.join(shlex.quote(x) for x in cxx),
                PYTHONDONTWRITEBYTECODE='1', ASAN_OPTIONS='detect_leaks=0')
-    for path in sorted((ROOT / 'tools/r27').glob('*.py')):
+    for path in sorted(list((ROOT / 'tools/r27').glob('*.py')) +
+                       list((ROOT / 'tools/r31').glob('*.py'))):
         data = path.read_bytes()
         if b'\r' in data:
             raise ValueError('Mac source must use LF: ' + path.name)
@@ -48,9 +49,11 @@ def main():
     py = [sys.executable, '-B']
     run(py + ['tools/r21/abi.py', '--check-r30'], env)
     run(py + ['tools/r15/test-pool.py', '--mainline'], env)
-    # Normal main traffic plus the single final-batch/done handshake regression.
+    run(py + ['tools/r31/test-session.py'], env)
+    # Main traffic, persistent idle/stop, and the final-batch/done handshake.
     run(py + ['tools/r27/test-protocol.py',
               'ProtocolTests.test_all_8192_send_all_then_receive',
+              'ProtocolTests.test_persistent_session_idle_then_single_stop',
               'ProtocolTests.test_last_tail_batch_finishes_before_done'], env)
     rx = py + ['tools/r27/test-driver.py']
     if args.source:
@@ -72,7 +75,7 @@ def main():
         run([exe], env)
     run(py + ['tools/r27/test-analyzer.py',
               'AnalyzerTests.test_rx1024_full_lifecycle_with_actual_headers_and_real_logs'], env)
-    print('Round30 focused software checks passed; macOS build and hardware acceptance remain separate.')
+    print('Round31 focused software checks passed; macOS build and hardware acceptance remain separate.')
 
 
 if __name__ == '__main__':

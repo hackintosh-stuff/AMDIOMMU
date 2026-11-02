@@ -410,6 +410,10 @@ static bool r17ModeRequested(const char *mode, size_t length) {
     return false;
 }
 
+bool org_example_AMDMapperProbe::r31SessionRequested() const {
+    return r17ModeRequested("session", 7);
+}
+
 bool org_example_AMDMapperProbe::r17Activate(volatile UInt8 *base, void *command) {
     if (!fR17 || !fR15Service) return false;
     auto *d=fR17;
@@ -419,6 +423,11 @@ bool org_example_AMDMapperProbe::r17Activate(volatile UInt8 *base, void *command
     const bool stdMode=r17ModeRequested("std", 3);
     const bool allTx=r17ModeRequested("alltx", 5);
     const bool rxStd=r17ModeRequested("rxstd", 5);
+    if (fR31Session && (!stdMode || !allTx || !rxStd)) {
+        setProperty("m2-3l-session-state", "failed");
+        setProperty("m2-3l-session-error", "session-requires-std-alltx-rxstd");
+        return false;
+    }
     if (rxStd && (!stdMode || !allTx)) {
         setProperty("m2-3h-rx-state", "invalid-rxstd-requires-std-alltx");
         return false;
@@ -431,9 +440,10 @@ bool org_example_AMDMapperProbe::r17Activate(volatile UInt8 *base, void *command
     r17tx::Configure c={};
     c.version=r17tx::kVersion; c.bytes=sizeof(c); c.op=r17tx::kInstall;
     c.bdf=d->command.devid; c.token=fR15Request.reserved;
-    // Covers the finite 60-second window and its drain. In all-TX mode the
-    // token identifies this run; packet admission does not inspect that token.
-    c.deadline=mach_absolute_time()+120000000000ULL;
+    // Session admission lasts until explicit Disarm. The finite path keeps
+    // its 120-second authorization covering the window and drain.
+    c.deadline=fR31Session?0:mach_absolute_time()+120000000000ULL;
+    setHexProperty(this,"m2-3l-tx-deadline",c.deadline);
     c.callback=&org_example_AMDMapperProbe::r17Callback; c.context=this; c.owner=this;
     c.mode=allTx?(UInt32)r17tx::kModeAllStandard:
         (stdMode?(UInt32)r17tx::kModeStandard:(UInt32)r17tx::kModeDirect);
@@ -1343,7 +1353,7 @@ bool org_example_AMDMapperProbe::r27RxBegin() {
     if (__atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE) ||
         !r18StdReady() || !fR17->commandOwned || !fR15Service)
         return false;
-    R27ClientContext client(this, fM22b2Timer);
+    R27ClientContext client(this, fR31Session ? nullptr : fM22b2Timer);
     setProperty("m2-3h-rx-mode", "standard-nonidentity-cyclic1024");
     setProperty("m2-3h-rx-ready", "no");
     setProperty("m2-3h-rx-state", "preparing");
@@ -1426,7 +1436,7 @@ void org_example_AMDMapperProbe::r27RxReady() {
 bool org_example_AMDMapperProbe::r27RxFinish(UInt32 budgetMs) {
     R27RxDomain *r = __atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE);
     if (!r || r->released) return true;
-    R27ClientContext client(this, fM22b2Timer);
+    R27ClientContext client(this, fR31Session ? nullptr : fM22b2Timer);
     setProperty("m2-3h-rx-ready", "no");
     if (r->held) {
         if (r27RxControl(r27rx::kDisarm) != kIOReturnSuccess) goto drainFailed;
@@ -1531,7 +1541,7 @@ unmapFailed:
 bool org_example_AMDMapperProbe::r29WaitTailDone(UInt32 budgetMs) {
     R27RxDomain *r = __atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE);
     if (!r || !r->snapshot.ready) return true;
-    R27ClientContext client(this, fM22b2Timer);
+    R27ClientContext client(this, fR31Session ? nullptr : fM22b2Timer);
     setProperty("m2-3i-tail-state", "waiting");
     const UInt64 start = m2b2NowNS();
     do {

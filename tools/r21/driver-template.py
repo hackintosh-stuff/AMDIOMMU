@@ -223,7 +223,8 @@ IOReturn RTL8125::r17TxConfigure(r17tx::Configure *c)
          * costs a reboot to repeat. */
         if (useAppleVTD || !workLoop || !pciDevice || !c->callback ||
             !c->context || !c->owner || !c->token ||
-            c->deadline <= mach_absolute_time()) {
+            (c->deadline ? c->deadline <= mach_absolute_time()
+                         : c->mode != r17tx::kModeAllStandard)) {
             IOLog("r17 install rejected: vtd=%d wl=%d pci=%d cb=%d ctx=%d "
                   "own=%d tok=%u dl=%llu now=%llu\n", (int)useAppleVTD,
                   workLoop != 0, pciDevice != 0, c->callback != 0,
@@ -663,7 +664,7 @@ bool RTL8125::r17TxMapAdmitted(mbuf_t m, IOPhysicalSegment *segments,
      * always admitted after translation is confirmed; a close that happens
      * after admission is exactly what the reference protects. */
     const bool base = !useAppleVTD && __atomic_load_n(&p->enabled, __ATOMIC_ACQUIRE)
-        && p->callback && mach_absolute_time() < p->deadline;
+        && p->callback && (!p->deadline || mach_absolute_time() < p->deadline);
     /* Round25: historical evidence capacity never gates live mapping owners. */
     if (!base) {
         __atomic_fetch_add(&p->rejected, 1u, __ATOMIC_RELAXED);

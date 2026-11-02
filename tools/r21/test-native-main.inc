@@ -117,7 +117,8 @@ static IOReturn detachCfg(RTL8125 &d)
     c.bdf = 0x2500; c.token = 7;
     return d.r17TxConfigure(&c);
 }
-static void installMode(RTL8125 &d, IOService &o, UInt32 mode, IOMapper *mapper)
+static void installMode(RTL8125 &d, IOService &o, UInt32 mode, IOMapper *mapper,
+                        UInt64 deadline = 100000000)
 {
     /* Round23: every case installs a FRESH backend, whose slot mask starts empty
      * exactly like the real probe's. Without this reset a stripe still held by a
@@ -126,7 +127,7 @@ static void installMode(RTL8125 &d, IOService &o, UInt32 mode, IOMapper *mapper)
     d.r17Tx = nullptr;
     r17tx::Configure c{};
     c.version = r17tx::kVersion; c.bytes = sizeof(c); c.op = r17tx::kInstall;
-    c.bdf = 0x2500; c.token = 7; c.deadline = 100000000;
+    c.bdf = 0x2500; c.token = 7; c.deadline = deadline;
     c.callback = backend; c.context = &o; c.owner = &o;
     c.mode = mode; c.mapper = mapper;
     assert(!d.r17TxConfigure(&c));
@@ -1396,6 +1397,39 @@ int main(void)
     }
 
     printf("round29: ring drained before acknowledged timer retirement passed\n");
+
+    /* Round31: zero deadline keeps real all-standard mapping active across
+     * the old 120-second limit. Explicit stop still retires before Disarm. */
+    {
+        IOService owner; RTL8125 d; IOTimerEventSource timer; IOMapper mapper;
+        installMode(d, owner, r17tx::kModeAllStandard, &mapper, 0);
+        auto *p = d.r17Tx;
+        const UInt64 started = mach_absolute_time();
+        for (unsigned phase = 0; phase < 2; phase++) {
+            if (phase) ticks += 125000000000ULL;
+            Mbuf m; m.parsed = false;
+            IOPhysicalSegment seg[1] = {{m.pa, m.len}};
+            assert(mapCall(d, &m, seg, 1));
+            const UInt32 k = genOfPacket(d, &m);
+            assert(k < r17tx::kSlots && seg[0].location != m.pa);
+            submit(d, &m, seg, 1);
+            d.r17TxComplete(p->gens[k].lastSlot);
+            retireTick(d, &timer);
+            assert(m.frees == 1 && !p->held);
+        }
+        assert(mach_absolute_time() - started > 120000000000ULL);
+        assert(!p->deadline && p->mapped == 2 && p->completed == 2);
+        assert(p->retired == 2 && p->stdUnmaps == 2 && !p->rejected);
+        assert(!d.r17TxLiveGens());
+        d.txDirtyDescIndex = d.txNextDescIndex;
+        assert(!gateCfg(d, true));
+        auto stop = control(r17tx::kDisarm);
+        assert(!d.r17TxConfigure(&stop) && !p->enabled);
+        assert(!detachCfg(d) && owner.refs == 1 && !p->callback);
+        assert(!gateCfg(d, false));
+        d.r17TxStop();
+    }
+    printf("round31: active all-standard session beyond 120s, retire/Disarm/Detach passed\n");
 
     printf("round21 window-edge tests: gate calls=%u fails=%u samples=%u\n",
            harnessGateCalls, harnessGateFails, lastSampleSeq);

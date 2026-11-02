@@ -85,6 +85,11 @@ bool org_example_AMDMapperProbe::scheduleM22b2() {
     fM22b2Hold  = parsePgtHoldBootArg();
     fM22b2SleepOnly = parsePgtSleepBootArg();
     fM22b2Use3L = parsePgt3lBootArg();
+    fR31Session = r31SessionRequested();
+    if (fR31Session) {
+        setProperty("m2-3l-session-mode", "explicit-stop");
+        setProperty("m2-3l-session-state", "preparing");
+    }
     setProperty("m2-b2-leaf-mode-src",
         fM22b2Use4K ? "amdiommu=pgt4k" : "amdiommu=pgt");
     setProperty("m2-b2-hold-mode",
@@ -151,9 +156,48 @@ void org_example_AMDMapperProbe::m22b2TimerFired(
     // 定时器是一次性的：触发后不再重排。
     self->setProperty("m2-b2-schedule", "fired");
 
-    // 在 workloop 上下文里跑。这里可以 IOSleep（会短暂阻塞 workloop），
-    // 但整个探测本来就有 2 秒观察窗口，且只跑一次，代价可接受。
+    if (self->fR31Session) {
+        UInt32 inactive = 0;
+        if (!__atomic_compare_exchange_n(&self->fR31WorkerActive, &inactive,
+                1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+        self->retain();
+        thread_t worker = THREAD_NULL;
+        const kern_return_t kr = kernel_thread_start(
+            &org_example_AMDMapperProbe::r31SessionWorker, self, &worker);
+        if (kr != KERN_SUCCESS) {
+            self->setProperty("m2-3l-session-state", "failed");
+            setHexProperty(self, "m2-3l-worker-error", (UInt64)kr);
+            __atomic_store_n(&self->fR31WorkerActive, 0u, __ATOMIC_RELEASE);
+            self->release();
+            return;
+        }
+        // kernel_thread_start returns a caller-owned reference. The worker
+        // holds the probe separately and terminates itself after cleanup.
+        thread_deallocate(worker);
+        return;
+    }
+
+    // Legacy finite experiments keep their existing workloop scheduling.
     self->runM22b2PageTableProbe();
+}
+
+void org_example_AMDMapperProbe::r31SessionWorker(
+    void *parameter, wait_result_t result) {
+    (void)result;
+    org_example_AMDMapperProbe *self =
+        static_cast<org_example_AMDMapperProbe *>(parameter);
+    self->runM22b2PageTableProbe();
+    if (self->fR31SessionCompleted) {
+        setHexProperty(self, "m2-3l-session-end", mach_absolute_time());
+        self->setProperty("m2-3l-session-state", "stopped");
+    } else {
+        self->setProperty("m2-3l-session-state", "failed");
+    }
+    // No probe/provider access after this release-store except our retained
+    // object's final release; stop() may now dismantle its dependencies.
+    __atomic_store_n(&self->fR31WorkerActive, 0u, __ATOMIC_RELEASE);
+    self->release();
+    thread_terminate(current_thread());
 }
 
 // ===== AMDMapperProbePgt.cpp (original lines 5310..7405) =====
@@ -1234,9 +1278,20 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         }
     }
 
+    if (fR31Session) {
+        setHexProperty(this, "m2-3l-session-start", mach_absolute_time());
+        setProperty("m2-3l-session-state", "active");
+    }
     m2b2SampleEvents(base, evtBuf, M2B2_MAIN_MEAS_SECS, tgt, &winMain,
                      postSampleDone ? m2b2DoPostSample : nullptr,
-                     postSampleDone ? &postSample : nullptr);
+                     postSampleDone ? &postSample : nullptr,
+                     fR31Session ? &fR31StopRequested : nullptr);
+    if (fR31Session &&
+        __atomic_load_n(&fR31StopRequested, __ATOMIC_ACQUIRE)) {
+        setHexProperty(this, "m2-3l-stop-request-time",
+            __atomic_load_n(&fR31StopRequestTime, __ATOMIC_ACQUIRE));
+        setProperty("m2-3l-session-state", "stop-requested");
+    }
     mainWindowRan = true;
     setProperty("m2-b2-main-window-ran", "yes");
 
@@ -2044,6 +2099,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     m2b2PublishRxSet();
 
 recover:
+    if (fR31Session) setProperty("m2-3l-session-state", "draining");
     // Disarm cyclic repost, then keep TX OPEN for the bounded userspace echo
     // tail that returns every pending RX IOVA to its physical ring buffer.
     // Standard RX unmaps still run under translation and the shared command
@@ -2596,6 +2652,11 @@ recover:
         semMd->release();
         evtMd->release();
         setProperty("m2-b2-cleanup", "done");
+        if (fR31Session) {
+            fR31SessionCompleted = mainWindowRan && winMain.valid &&
+                !firstFailStage && !ctx.failed &&
+                __atomic_load_n(&fR31StopRequested, __ATOMIC_ACQUIRE);
+        }
     } else {
         // 不释放：硬件可能仍引用这些地址。宁可泄漏，也不要让 IOMMU
         // 继续按已被回收的内存翻译全系统 DMA（2026-10-30 就是这样

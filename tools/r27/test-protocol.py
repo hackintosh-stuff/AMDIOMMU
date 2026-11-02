@@ -95,6 +95,43 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn('client_summary sent=8192 acked=8192 bad=0', logs)
         self.assertIn('client_recv_order req=1 answered=16', logs)
 
+    def test_persistent_session_idle_then_single_stop(self):
+        s, logs = Socket(reorder=True), []
+        ticks = [1_000_000_000]
+
+        def clock():
+            ticks[0] += 1000
+            return ticks[0]
+
+        def sleep(seconds):
+            self.assertEqual(s.sent, list(range(1, 4097)))
+            self.assertEqual(s.queue, [])
+            ticks[0] += round(seconds * 1e9)
+
+        def stop():
+            self.assertEqual(s.sent, list(protocol.REQUESTS))
+            self.assertGreaterEqual(ticks[0], 126_000_000_000)
+            self.assertEqual(s.queue, [])
+
+        with patch.object(load, 'now', side_effect=clock), \
+             patch.object(load.time, 'sleep', side_effect=sleep), \
+             patch.object(load.session, 'status', return_value={'session-state': 'active'}) as status, \
+             patch.object(load.session, 'stop', side_effect=stop) as request:
+            rc = load.exchange(s, '127.0.0.1', ('127.0.0.2', 9110), 7,
+                               logs.append, load.OrdSeq(),
+                               client_deadline_ns=ticks[0] + load.CLIENT_BUDGET_NS,
+                               persistent_session=True)
+            self.assertEqual(rc, 0)
+            load.request_session_stop(logs.append)
+        self.assertEqual(status.call_count, 2)
+        request.assert_called_once_with()
+        self.assertEqual(s.sent, list(protocol.REQUESTS))
+        self.assertIn('client_summary sent=8192 acked=8192 bad=0', logs)
+        for name in ('idle_begin', 'idle_end', 'stop_request', 'stop_ack'):
+            self.assertEqual(sum(line.startswith('client_session_' + name + ' ')
+                                 for line in logs), 1)
+        self.assertEqual(sum(line.startswith('client_ord_recv ') for line in logs), 1024)
+
     def test_peer_full_8192_and_reject_duplicate(self):
         class PeerSocket:
             def __init__(self, duplicate):

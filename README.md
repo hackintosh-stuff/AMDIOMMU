@@ -1,6 +1,40 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round30 / full-ring cyclic RX1024
+## Current Round31 / explicit-stop mapping session
+
+Base: `d826cd3093d18625097f03b6a988a98637d622b1`.
+Candidate: Lucy **1.1.216** / Probe **0.40.0**. The wire layouts stay
+domain3/native7/std5, RX4 and pool2.
+
+Round30 passed one planned boot and one valid measurement: all 1024 RX slots
+mapped and restored, 9307 RX completions, 8192/8192 application replies and
+10291/10291 confirmed TX retirements. Round31 gives the active mapping session
+an explicit lifetime:
+
+- Add `.session` to `.std.alltx.rxstd` to run on a dedicated kernel worker.
+- Keep RX1024 and ordinary standard TX active until an explicit stop request;
+  the session has no automatic 60-second window or 120-second TX/RX lease.
+- Submit `R31Stop=true` through the service property interface. The request
+  thread only records the stop; the worker performs the existing RX drain,
+  R29D exchange, TX retirement and DTE/command-engine restoration.
+- Keep the existing 8192 requests, split 4096 + 4096 around one 125-second
+  idle period, then request stop and verify the same complete exit.
+
+From this repository, use a fresh upstream tree at
+`639144d1f284a9fee222a518691b01494f5e265d` with the existing MacKernelSDK:
+
+```sh
+sh tools/r27/build.sh _scratch/r31-upstream
+```
+
+Generation selects `--tx 21 --rx 31`. Run defaults are `runs/r31` and
+`org.example.round31load`; compatibility entry points remain under `tools/r27`.
+`python3 -B tools/r31/session.py status` reads the live state;
+`sudo python3 -B tools/r31/session.py stop` requests the normal asynchronous exit.
+The finite load requests this stop itself after its second half.
+Mac builds and hardware acceptance of this candidate are pending.
+
+## Historical Round30 / full-ring cyclic RX1024
 
 Base: `27664efbafdbea9e3f13141aff5c49d01c42a8b8`.
 Candidate: Lucy **1.1.215** / Probe **0.39.0**; domain3/native7/std5, RX4, pool2.

@@ -1121,13 +1121,20 @@ static inline void m2b2DoPostSample(void *ctx) {
 }
 
 // ---- m2b2SampleEvents (original lines 2753..2916) ----
+static inline void r31WaitForSessionStop(const volatile UInt32 *stopRequested) {
+    // The dedicated worker keeps all local probe resources alive while normal
+    // driver work continues. No elapsed-time deadline ends a Round31 session.
+    while (!__atomic_load_n(stopRequested, __ATOMIC_ACQUIRE)) IOSleep(100);
+}
+
 static inline void m2b2SampleEvents(volatile UInt8 *base,
                              volatile UInt32 *evtBuf,
                              UInt32 measureSecs,
                              UInt32 tgtDevid,
                              org_example_AMDMapperProbe::M22b2EventWindow *w,
                              void (*postSample)(void *) = nullptr,
-                             void *postCtx = nullptr) {
+                             void *postCtx = nullptr,
+                             const volatile UInt32 *stopRequested = nullptr) {
     w->valid = false;
     w->invalidReason = "not-run";
     w->tStart = 0; w->tEnd = 0; w->durMS = 0;
@@ -1176,7 +1183,8 @@ static inline void m2b2SampleEvents(volatile UInt8 *base,
     w->wallStart = m2b2WallSecs();
 
     // ---- 观察窗口 ----
-    IOSleep(measureSecs * 1000);
+    if (stopRequested) r31WaitForSessionStop(stopRequested);
+    else IOSleep(measureSecs * 1000);
 
     // 【第九轮】窗口内后置采样：在 tEnd 之前、睡眠刚结束的这一刻。
     //
