@@ -52,8 +52,8 @@ class Socket:
 
 class ProtocolTests(unittest.TestCase):
     def test_scope_and_pattern(self):
-        self.assertEqual(protocol.REQUESTS, tuple(range(1, 2049)))
-        self.assertEqual(len(protocol.bursts()), 128)
+        self.assertEqual(protocol.REQUESTS, tuple(range(1, 8193)))
+        self.assertEqual(len(protocol.bursts()), 512)
         original = [32, 1472, 120, 1472, 32, 1472, 120, 1472,
                     32, 120, 1472, 32, 120, 32, 120, 32]
         for group in protocol.bursts():
@@ -73,7 +73,7 @@ class ProtocolTests(unittest.TestCase):
             self.assertNotIn(b'IOB1', data)
             self.assertNotIn(bytes.fromhex('31424f49'), data)
             self.assertIsNone(protocol.identify(data))
-        for req in (0, 2049):
+        for req in (0, 8193):
             with self.assertRaises(ValueError):
                 protocol.payload(7, req)
 
@@ -84,18 +84,18 @@ class ProtocolTests(unittest.TestCase):
             rc = load.exchange(s, '127.0.0.1', ('127.0.0.2', 9110),
                                7, logs.append, load.OrdSeq())
         self.assertEqual(s.sent, list(protocol.REQUESTS))  # no retries
-        for i in range(128):
+        for i in range(512):
             events = s.events[i * 32:(i + 1) * 32]
             self.assertEqual([e[0] for e in events], ['send'] * 16 + ['recv'] * 16)
         return rc, logs
 
-    def test_all_2048_send_all_then_receive(self):
+    def test_all_8192_send_all_then_receive(self):
         rc, logs = self.exchange(reorder=True)
         self.assertEqual(rc, 0)
-        self.assertIn('client_summary sent=2048 acked=2048 bad=0', logs)
+        self.assertIn('client_summary sent=8192 acked=8192 bad=0', logs)
         self.assertIn('client_recv_order req=1 answered=16', logs)
 
-    def test_peer_full_2048_and_reject_duplicate(self):
+    def test_peer_full_8192_and_reject_duplicate(self):
         class PeerSocket:
             def __init__(self, duplicate):
                 self.incoming = [protocol.SEED]
@@ -128,12 +128,46 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(s.echoes, [protocol.SEED] +
                              [protocol.payload(7, req) for group in protocol.bursts()
                               for req in reversed(group)])
-            self.assertIn('peer_stop received=2048 bad=%d seed=1' % int(duplicate), logs)
+            self.assertIn('peer_stop received=8192 bad=%d seed=1' % int(duplicate), logs)
+
+    def test_tail_separate_bounded_and_byte_exact(self):
+        for seq in (1, protocol.TAIL_MAX):
+            data = protocol.tail(7, seq)
+            self.assertEqual(len(data), 200)
+            self.assertEqual(protocol.tail_identify(data), (7, seq))
+            self.assertIsNone(protocol.identify(data))
+            self.assertIsNone(protocol.ordinary_seq(data))
+        for seq in (0, protocol.TAIL_MAX + 1):
+            with self.assertRaises(ValueError):
+                protocol.tail(7, seq)
+        for props, expected in [('"m2-3e-after-exit" = "ordinary-output-resumed"', 16),
+                                ('"m2-3h-rx-state" = "draining"', protocol.TAIL_MAX)]:
+            s = Socket()
+            logs = []
+            with patch.object(load, 'now', return_value=100), \
+                 patch.object(load.time, 'monotonic', return_value=0), \
+                 patch.object(load, 'command', return_value=props):
+                self.assertTrue(load.drain_tail(s, ('127.0.0.2', 9110), 7, logs.append))
+            self.assertEqual(s.sent, [])  # no main workload ID or retry credit
+            self.assertIn('client_tail_summary sent=%d received=%d max=4096' %
+                          (expected, expected), logs)
+
+    def test_tail_duplicate_fails_without_retransmission(self):
+        class DuplicateTail(Socket):
+            def recvfrom(self, size):
+                data, addr = super().recvfrom(size)
+                return protocol.tail(7, 1), addr
+        s = DuplicateTail()
+        logs = []
+        with patch.object(load, 'now', return_value=100), \
+             patch.object(load.time, 'monotonic', return_value=0):
+            self.assertFalse(load.drain_tail(s, ('127.0.0.2', 9110), 7, logs.append))
+        self.assertEqual(len(s.queue), 14)
 
     def test_duplicates_never_count_as_success(self):
         rc, logs = self.exchange(duplicate=True)
         self.assertEqual(rc, 1)
-        self.assertIn('client_summary sent=2048 acked=1920 bad=128', logs)
+        self.assertIn('client_summary sent=8192 acked=7680 bad=512', logs)
 
 
 if __name__ == '__main__':

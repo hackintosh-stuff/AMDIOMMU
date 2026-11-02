@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Round27 ordinary UDP load: 2048 requests in 128 send-all-16/receive groups.
-Wait for all 64 RX mappings to be installed, then turn the RX ring twice.
+"""Round28 ordinary UDP load: 8192 requests in 512 send-all-16/receive groups.
+Wait for 64 persistent RX mappings, then drive cyclic DMA and bounded drain.
 Only a fresh all-standard window permits the batch; never retransmit requests.
 """
 import argparse
@@ -10,7 +10,7 @@ import socket
 import subprocess
 import time
 from protocol import (REQUESTS, SEED, bursts, evidence, identify,
-                      length_of, ordinary, payload)
+                      length_of, ordinary, payload, tail, tail_identify, TAIL_MAX)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -26,6 +26,51 @@ def now():
 # The r15 invalidation timestamp is at/before the main sample begins, so this is
 # a conservative end bound using the existing authorization time base.
 PROBE_DEADLINE_NS = 60_000_000_000
+
+
+def drain_tail(s, peer, token, emit):
+    """Bounded, separate nonbusiness tail; no retransmission or main-ID credit."""
+    emit('client_drain_observed t_ns=%d' % now())
+    sent = received = 0
+    deadline = time.monotonic() + 12
+    s.settimeout(.25)
+    while sent < TAIL_MAX and time.monotonic() < deadline:
+        pending = set()
+        for seq in range(sent + 1, min(sent + 17, TAIL_MAX + 1)):
+            data = tail(token, seq)
+            if s.sendto(data, peer) != len(data):
+                raise RuntimeError('short tail send')
+            emit('client_tail_send token=0x%08x seq=%d %s t_ns=%d' %
+                 (token, seq, evidence(data), now()))
+            pending.add(seq)
+        sent += len(pending)
+        group_end = min(deadline, time.monotonic() + 1)
+        while pending and time.monotonic() < group_end:
+            try:
+                data, source = s.recvfrom(8192)
+            except socket.timeout:
+                continue
+            ident = tail_identify(data)
+            seq = ident[1] if ident else 0
+            ok = (source == peer and ident == (token, seq) and seq in pending
+                  and data == tail(token, seq))
+            emit('client_tail_recv token=0x%08x seq=%d %s payload_ok=%d t_ns=%d' %
+                 (token, seq, evidence(data), int(ok), now()))
+            if not ok:
+                return False
+            pending.remove(seq)
+            received += 1
+        if pending:
+            emit('client_tail_timeout pending=%s' % ','.join(map(str, sorted(pending))))
+            break
+        props = command('ioreg', '-l', '-w0', '-r', '-c',
+                        'org_example_AMDMapperProbe', required=False)
+        if '"m2-3h-rx-state" = "draining"' not in props:
+            emit('client_tail_drain_ended t_ns=%d' % now())
+            break
+        emit('client_tail_drain_still_active t_ns=%d' % now())
+    emit('client_tail_summary sent=%d received=%d max=%d' % (sent, received, TAIL_MAX))
+    return sent > 0 and sent == received
 
 
 def boot_ticks():
@@ -180,7 +225,7 @@ def ord_probe(s, peer, seq, emit, tag):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('out', nargs='?', default='runs/r27')
+    ap.add_argument('out', nargs='?', default='runs/r28')
     ap.add_argument('--iface', default='en2')
     ap.add_argument('--peer', default='192.168.50.122')
     ap.add_argument('--port', type=int, default=9110)
@@ -195,7 +240,7 @@ def main():
     if int((out / 'batch.txt').read_text().strip()) != 512:
         raise ValueError('round27 keeps the kernel declaration batch512')
     if int((out / 'requests.txt').read_text().strip()) != len(REQUESTS):
-        raise ValueError('round27 requires 2048 application requests')
+        raise ValueError('round28 requires 8192 application requests')
     payload(token, 1)
     with (out / 'load.txt').open('w') as f:
         def log(line):
@@ -294,7 +339,7 @@ def main():
                     if pre_sent < PRE_PROBES:
                         continue
                     log('load_m2_3g_mode : all-standard')
-                    log('load_m2_3h_rx : standard-nonidentity-one-shot')
+                    log('load_m2_3h_rx : standard-nonidentity-cyclic64')
                     log('load_authorization_age_ns : %d (%.3f s, deadline %.0f s)'
                         % (age, age / 1e9, PROBE_DEADLINE_NS / 1e9))
                     window_deadline_ns = inv + PROBE_DEADLINE_NS
@@ -338,10 +383,15 @@ def main():
                 # property is what makes "communication resumed" a fact about the
                 # order of events rather than a hope about timing.
                 resumed = False
-                deadline2 = time.monotonic() + 75
+                deadline2 = time.monotonic() + 90
+                tail_done = False
                 while time.monotonic() < deadline2:
                     props = command('ioreg', '-l', '-w0', '-r', '-c',
                                     'org_example_AMDMapperProbe', required=False)
+                    if not tail_done and '"m2-3h-rx-state" = "draining"' in props:
+                        tail_done = True
+                        if not drain_tail(s, (a.peer, a.port), token, emit):
+                            rc = 1
                     if '"m2-3e-after-exit" = "ordinary-output-resumed"' in props:
                         resumed = True
                         break
@@ -356,7 +406,7 @@ def main():
                             ok_after += 1
                         time.sleep(.1)
                 emit('client_ord_after_exit ok=%d of=3' % ok_after)
-                if not resumed or ok_after != 3:
+                if not resumed or ok_after != 3 or not tail_done:
                     rc = 1
             emit('client_result %s' %
                  ('OK' if rc == 0 and ok_after == 3 else 'PROBLEM'))

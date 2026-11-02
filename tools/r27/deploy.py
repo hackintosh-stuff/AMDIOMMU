@@ -17,10 +17,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 BATCH = 512
-BASE_COMMIT = 'ddf188b7381aac84461ed2dbeb962a8592f2be87'
+BASE_COMMIT = 'ae92d3869a828b82e76eeb24c59ecd91a7cbe09a'
 UPSTREAM_COMMIT = '639144d1f284a9fee222a518691b01494f5e265d'
-DRIVER_VERSION = '1.1.212'
-PROBE_VERSION = '0.36.0'
+DRIVER_VERSION = '1.1.213'
+PROBE_VERSION = '0.37.0'
 EFI_UUID = '7A8D47A3-44C8-47E7-B488-A4C24DB5AC82'
 EFI_VOLUME_UUID = '7029D646-AA46-3D16-950E-6C6AF4AB44B3'
 EFI_SIZE = 272629760
@@ -121,7 +121,7 @@ def source_identity():
     """Deploy a committed successor of the accepted source, as requested."""
     commit = output('git', 'rev-parse', 'HEAD').strip()
     if not re.fullmatch(r'[0-9a-f]{40}', commit) or commit == BASE_COMMIT:
-        raise ValueError('commit the applied and software-tested Round27 source before deployment')
+        raise ValueError('commit the applied and software-tested Round28 source before deployment')
     subprocess.run(['git', 'merge-base', '--is-ancestor', BASE_COMMIT, commit],
                    cwd=str(ROOT), check=True)
     dirty = output('git', 'status', '--porcelain=v1', '--untracked-files=normal',
@@ -135,7 +135,7 @@ def source_identity():
 
 def daemon_plist(out, peer, port):
     return {
-        'Label': 'org.example.round27load',
+        'Label': 'org.example.round28load',
         'ProgramArguments': ['/bin/sh', str(HERE / 'boot-load.sh'),
                              out.relative_to(ROOT).as_posix()],
         'WorkingDirectory': str(ROOT),
@@ -152,7 +152,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--efi', required=True, help='already mounted exact target EFI')
     parser.add_argument('--token', required=True, type=lambda value: int(value, 0))
-    parser.add_argument('--out', default='runs/r27')
+    parser.add_argument('--out', default='runs/r28')
     parser.add_argument('--backup', help='project-relative recovery directory')
     parser.add_argument('--peer', default='192.168.50.122')
     parser.add_argument('--port', type=int, default=9110)
@@ -163,7 +163,7 @@ def main():
     source_ref = source_identity()
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     out = project_path(args.out)
-    backup = project_path(args.backup or ('runs/recovery-r27-' + stamp))
+    backup = project_path(args.backup or ('runs/recovery-r28-' + stamp))
     if backup.exists() or backup == out:
         raise ValueError('recovery directory must be new and separate from load output')
     if any((out / name).exists() for name in ('load.txt', 'client.log')):
@@ -207,8 +207,8 @@ def main():
     tokenarg = 'amdiommu=pgt.batch%d.t0x%08x.std.alltx.rxstd' % (BATCH, args.token)
     bootargs = ' '.join([arg for arg in current_args.split()
                          if not arg.startswith('amdiommu=')] + [tokenarg])
-    plan = {'round': 27, 'driver_mode': 2, 'scope': 'all-TX-and-finite64-RX-standard',
-            'kernel_batch': BATCH, 'application_requests': 2048, 'rx_maps': 64,
+    plan = {'round': 28, 'driver_mode': 2, 'scope': 'all-TX-and-cyclic64-RX-standard',
+            'kernel_batch': BATCH, 'application_requests': 8192, 'rx_maps': 64,
             'source_commit': source_ref['commit'], 'base_commit': BASE_COMMIT,
             'bootarg': tokenarg, 'mtu': 1500, 'tso4': False, 'tso6': False,
             'out': out.relative_to(ROOT).as_posix(),
@@ -248,18 +248,18 @@ def main():
         raise ValueError('EFI/NVRAM read-back differs from the r27 declaration')
     (out / 'token.txt').write_text('0x%08x\n' % args.token, encoding='utf-8')
     (out / 'batch.txt').write_text('%d\n' % BATCH, encoding='utf-8')
-    (out / 'requests.txt').write_text('2048\n', encoding='utf-8')
+    (out / 'requests.txt').write_text('8192\n', encoding='utf-8')
     (out / 'expected-version.json').write_text(json.dumps(expected, indent=2) + '\n', encoding='utf-8')
     (out / 'deployment.json').write_text(json.dumps(plan, indent=2) + '\n', encoding='utf-8')
     (out / 'source-ref.json').write_text(json.dumps(source_ref, indent=2) + '\n', encoding='utf-8')
     daemon = daemon_plist(out, args.peer, args.port)
-    generated = out / 'org.example.round27load.plist'
+    generated = out / 'org.example.round28load.plist'
     generated.write_bytes(plistlib.dumps(daemon, sort_keys=False))
     run(['plutil', '-lint', generated])
     for job in jobs:
         subprocess.run(['sudo', 'launchctl', 'bootout', 'system', str(job)], check=False)
         run(['sudo', 'rm', '-f', job])
-    target = Path('/Library/LaunchDaemons/org.example.round27load.plist')
+    target = Path('/Library/LaunchDaemons/org.example.round28load.plist')
     run(['sudo', 'cp', generated, target])
     run(['sudo', 'chown', 'root:wheel', target])
     run(['sudo', 'chmod', '644', target])

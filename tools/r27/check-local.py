@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused Round27 software checks; no device, install or reboot actions.
+"""Focused Round28 software checks; no device, install or reboot actions.
 
 The C++ harnesses compile real driver/backend bodies with host plumbing.
 They do not replace a macOS kext build or the one required hardware run.
@@ -47,6 +47,7 @@ def main():
         ast.parse(data.decode('utf-8'), filename=path.name, feature_version=(3, 9))
     py = [sys.executable, '-B']
     run(py + ['tools/r21/abi.py', '--check-r26'], env)
+    # Includes the separate R28T drain-tail bounds and main R27P isolation tests.
     run(py + ['tools/r27/test-protocol.py'], env)
     rx = py + ['tools/r27/test-driver.py']
     if args.source:
@@ -67,7 +68,7 @@ def main():
                    '-I', 'tools/lucy-obs', '-I', 'kext', cpp, '-o', exe], env)
         run([exe], env)
     run(py + ['tools/r27/test-analyzer.py'], env)
-    print('Round27 focused software checks passed; macOS build and hardware acceptance remain separate.')
+    print('Round28 focused software checks passed; macOS build and hardware acceptance remain separate.')
 
 
 if __name__ == '__main__':

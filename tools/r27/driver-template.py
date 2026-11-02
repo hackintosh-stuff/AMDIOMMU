@@ -1,9 +1,9 @@
-"""Round27 finite RX mapping hooks layered on the round15 owned pool.
+"""Round28 cyclic RX hooks retaining the round27 integration interfaces.
 
-The probe prepares the standard commands outside Lucy's command gate.  Lucy
-only installs already-invalidated IOVAs, posts each spare once, then restores
-the original physical buffer at that descriptor's next hand-back.  No mapper
-operation, allocation, or waiting is added to the receive interrupt.
+The probe prepares mappings outside Lucy's command gate. Lucy binds each of
+64 fixed spares once and reposts that same IOVA after copy and completion while
+authorized. Drain restores originals before physical OWN publication detaches
+each association. No mapping, allocation, or waiting occurs in the interrupt.
 """
 
 HEADERS = ['RTL812xRxMap.hpp', 'AMDAliveTxDomainNative.hpp']
@@ -19,7 +19,7 @@ MEMBERS = r'''
 '''
 
 METHODS = r'''
-#pragma mark --- round 27 one-shot standard-mapped receive spares ---
+#pragma mark --- round 28 cyclic standard-mapped receive spares ---
 
 IOReturn RTL8125::r27RxAction(OSObject *owner, void *arg0,
                             void *, void *, void *)
@@ -102,7 +102,8 @@ IOReturn RTL8125::r27RxControl(r27rx::Request *request)
              * A clear pending count alone is insufficient: every live ring
              * association must again be its retained original physical object. */
             if (s.state != r27rx::kDrained || s.pendingPosted ||
-                s.posted != s.restored) return kIOReturnBusy;
+                s.posted != s.completed ||
+                s.restored != p->snap.replacements) return kIOReturnBusy;
             for (UInt32 slot = 0; slot < r15pool::kRingCount; ++slot) {
                 if (p->slotId[slot] != slot ||
                     rxBufArray[slot].mbuf != p->mbufs[slot] ||
@@ -153,18 +154,34 @@ void RTL8125::r27RxRearm(UInt32 slot, UInt64 oldAddr, UInt32 status,
                          __ATOMIC_RELEASE);
     }
     if (copyFailed) s.flags |= r27rx::kFlagCopyFailed;
+    if (copyFailed || (status & RxRES) || s.flags || p->snap.flags) {
+        s.state = r27rx::kDisarmed;
+        __atomic_store_n(&p->snap.state, (UInt32)r15pool::kDisarmed,
+                         __ATOMIC_RELEASE);
+    }
+    if (s.state == r27rx::kDisarmed && !s.tDisarmed) s.tDisarmed = now;
 
     if (spare && ix < s.mapCount) {
         r27rx::Witness &w = s.witnesses[ix];
-        /* The hardware has handed THIS descriptor back.  Restoration precedes
-         * every authorization/deadline check, even for an error or failed copy.
-         * No caller may leave an IOVA posted when translation is restored. */
-        if (!w.tDone && w.tPost && w.slot == slot && w.entryId == id) {
-            w.tDone = now; w.token = token; w.reqId = reqId;
+        /* One outstanding DMA per bound object. Copy has finished before this
+         * hook; the same immutable IOVA may now be reposted, without mapping. */
+        if (w.postCount == w.doneCount + 1 && w.slot == slot && w.entryId == id) {
+            w.tDone = now;
+            w.tLastDone = now;
+            w.doneCount++;
+            w.token = token; w.reqId = reqId;
             w.doneLength = length; w.doneStatus = status;
             w.flags |= r27rx::kWitnessDone;
             if (!matches || copyFailed || (status & RxRES))
                 w.flags |= r27rx::kWitnessError;
+            if (w.doneCount <= 4) {
+                r27rx::Cycle &c = w.samples[w.doneCount - 1];
+                c.tDone = now; c.token = token; c.reqId = reqId;
+                c.doneLength = length; c.doneStatus = status;
+                c.flags |= r27rx::kWitnessDone;
+                if (!matches || copyFailed || (status & RxRES))
+                    c.flags |= r27rx::kWitnessError;
+            }
             s.completed++;
             r15pool::Witness &old = p->snap.witnesses[ix];
             old.tDone = now; old.token = token; old.reqId = reqId;
@@ -179,6 +196,14 @@ void RTL8125::r27RxRearm(UInt32 slot, UInt64 oldAddr, UInt32 status,
             __atomic_store_n(&p->snap.state, (UInt32)r15pool::kDisarmed,
                              __ATOMIC_RELEASE);
         }
+        if (matches && !copyFailed && !(status & RxRES) && !s.flags &&
+            !p->snap.flags && w.postCount == w.doneCount &&
+            s.state == r27rx::kInstalled &&
+            __atomic_load_n(&p->snap.state, __ATOMIC_ACQUIRE) == r15pool::kAuthorized) {
+            *addr = w.iova;
+            return;
+        }
+        if (!s.tDisarmed) s.tDisarmed = now;
         p->slotId[slot] = slot;
         rxBufArray[slot].mbuf = p->mbufs[slot];
         rxBufArray[slot].phyAddr = p->snap.entries[slot].addr;
@@ -196,13 +221,8 @@ void RTL8125::r27RxRearm(UInt32 slot, UInt64 oldAddr, UInt32 status,
     if (s.state != r27rx::kInstalled ||
         __atomic_load_n(&p->snap.state, __ATOMIC_ACQUIRE) != r15pool::kAuthorized)
         return;
-    if (now > p->snap.deadline) {
-        p->snap.flags |= r15pool::kFlagExpired;
-        s.state = r27rx::kDisarmed;
-        __atomic_store_n(&p->snap.state, (UInt32)r15pool::kDisarmed,
-                         __ATOMIC_RELEASE);
-        return;
-    }
+    /* R28 authorization covers the parent-controlled window. Do not apply
+     * the legacy five-second replacement deadline to cyclic RX. */
     if (copyFailed || (status & RxRES) ||
         p->snap.replacements >= p->snap.replaceLimit ||
         p->snap.replacements >= s.mapCount) return;
@@ -235,12 +255,25 @@ void RTL8125::r27RxPosted(UInt32 slot, UInt64 addr)
     /* The caller is after address -> barrier -> OWN.  Hardware may already
      * have cleared OWN by now, so re-reading OWN would lose a fast completion;
      * the ordered store site itself is the publication evidence. */
-    if (!w.tPost && w.iova == addr && p->slotId[slot] == w.entryId) {
-        w.tPost = mach_absolute_time();
+    if (w.iova == addr && p->slotId[slot] == w.entryId &&
+        w.postCount == w.doneCount && !w.tRestoreOwn) {
+        const UInt64 now = mach_absolute_time();
+        if (!w.postCount) { w.tPost = now; s.pendingPosted++; }
+        else w.reuseCount++;
+        w.tLastPost = now;
+        w.postCount++;
+        if (w.postCount <= 4) {
+            r27rx::Cycle &c = w.samples[w.postCount - 1];
+            c.tPost = now; c.cycle = w.postCount;
+            c.flags = r27rx::kWitnessPosted;
+            w.sampleCount = w.postCount;
+        }
         w.flags |= r27rx::kWitnessPosted;
-        p->snap.witnesses[wi - 1].tPost = w.tPost;
-        s.posted++; s.pendingPosted++;
-    } else if (w.tDone && !w.tRestoreOwn && addr == w.originalPA &&
+        r15pool::Witness &old = p->snap.witnesses[wi - 1];
+        old.tPost = now;
+        s.posted++;
+    } else if (w.tDone && w.postCount == w.doneCount &&
+               !w.tRestoreOwn && addr == w.originalPA &&
                p->slotId[slot] == slot) {
         w.tRestoreOwn = mach_absolute_time();
         w.flags |= r27rx::kWitnessRestored;

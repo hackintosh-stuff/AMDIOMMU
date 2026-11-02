@@ -786,10 +786,16 @@ bool org_example_AMDMapperProbe::m2b2R15PrepareMap(
 
 bool org_example_AMDMapperProbe::m2b2R15Authorize() {
     if (!fR15Service || !fR15MapTicks || !fR15InvTicks) return false;
+    // ABI deadline is mach_absolute_time ticks, not nanoseconds. Allow the
+    // actual 60-second translation run plus the 15-second RX drain and setup
+    // margin, while retaining a finite authorization bound.
+    const UInt64 windowNS = 120000000000ULL;
     UInt64 windowTicks = 0;
-    nanoseconds_to_absolutetime(5000000000ULL, &windowTicks);
+    nanoseconds_to_absolutetime(windowNS, &windowTicks);
     fR15Request.mapCompletedAt = fR15InvTicks;
     fR15Request.deadline = mach_absolute_time() + windowTicks;
+    setHexProperty(this, "m2-b2-r15-authorize-window-ns", windowNS);
+    setHexProperty(this, "m2-b2-r15-authorize-deadline", fR15Request.deadline);
     fR15Request.replaceLimit = r15pool::kSpareCount;
     setHexProperty(this, "m2-b2-r15-inv-time", fR15InvTicks);
     const bool ok = m2b2R15Call(r15pool::kAuthorize);

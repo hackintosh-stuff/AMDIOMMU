@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round27 ordinary UDP application payloads; no kernel business selection.
+"""Round28 ordinary UDP application payloads; no kernel business selection.
 
 The token and request id belong only to the client/peer integrity check.  The
 driver's obsParseBiz reads a different four-byte magic at the UDP payload start,
@@ -9,20 +9,37 @@ import hashlib
 import struct
 
 MAGIC = b'R27P'
-REQUESTS = tuple(range(1, 2049))
+REQUESTS = tuple(range(1, 8193))
+TAIL_MAGIC = b'R28T'
+TAIL_MAX = 4096
+
+
+def tail(token, seq):
+    if not 0 < token < 0x80000000 or not 1 <= seq <= TAIL_MAX:
+        raise ValueError('invalid bounded Round28 tail')
+    head = struct.pack('>4sII', TAIL_MAGIC, token, seq)
+    return head + _stream(b'round28-drain-v1\x00' + head, 188)
+
+
+def tail_identify(data):
+    if len(data) < 12:
+        return None
+    magic, token, seq = struct.unpack_from('>4sII', data)
+    return (token, seq) if magic == TAIL_MAGIC else None
+
 SEED = bytes(1024)
 LARGE = (2, 4, 6, 8, 11)
 BURST = 16
 
 
 def bursts():
-    """128 consecutive groups; send every member before receiving any echo."""
+    """512 consecutive groups; send every member before receiving any echo."""
     return [REQUESTS[i:i + BURST] for i in range(0, len(REQUESTS), BURST)]
 
 
 def length_of(req):
     if req not in REQUESTS:
-        raise ValueError('round27 requires req 1..2048')
+        raise ValueError('round27 requires req 1..8192')
     pattern_req = (req - 1) % BURST + 1
     if pattern_req in LARGE:
         return 1472

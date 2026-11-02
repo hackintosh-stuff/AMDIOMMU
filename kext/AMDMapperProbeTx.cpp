@@ -1088,7 +1088,7 @@ out:
     return result;
 }
 
-// ================= Round27: standard one-shot RX mappings =================
+// ================= Round28: map-once standard cyclic RX mappings =================
 // These callbacks run with the same R17 lock and command cursor as ordinary
 // TX. No second command-ring cursor or shared TX slot is introduced.
 bool org_example_AMDMapperProbe::r27RxRequested() const {
@@ -1292,7 +1292,7 @@ bool org_example_AMDMapperProbe::r27RxBegin() {
         !r18StdReady() || !fR17->commandOwned || !fR15Service)
         return false;
     R27ClientContext client(this, fM22b2Timer);
-    setProperty("m2-3h-rx-mode", "standard-nonidentity-one-shot");
+    setProperty("m2-3h-rx-mode", "standard-nonidentity-cyclic-map-once");
     setProperty("m2-3h-rx-ready", "no");
     setProperty("m2-3h-rx-state", "preparing");
     R27RxDomain *r = (R27RxDomain *)IOMalloc(sizeof(R27RxDomain));
@@ -1347,7 +1347,7 @@ bool org_example_AMDMapperProbe::r27RxBegin() {
     if (r27RxControl(r27rx::kInstall) != kIOReturnSuccess) goto failed;
     r->installed = true;
     // R15 Authorize must follow the LAST RX map invalidation, not just the
-    // earlier DTE invalidation. Its five-second bound still gates new swaps.
+    // earlier DTE invalidation. Its finite translation-window bound gates swaps.
     fR15InvTicks = r->snapshot.records[r27rx::kCount - 1].tMapInv;
     r27RxExport();
     setProperty("m2-3h-rx-state", "installed-awaiting-authorize");
@@ -1378,6 +1378,10 @@ bool org_example_AMDMapperProbe::r27RxFinish(UInt32 budgetMs) {
     setProperty("m2-3h-rx-ready", "no");
     if (r->held) {
         if (r27RxControl(r27rx::kDisarm) != kIOReturnSuccess) goto drainFailed;
+        // This is the userspace tail barrier: successful Disarm guarantees no
+        // cyclic repost. TX admission remains open until Finish succeeds.
+        setProperty("m2-3h-rx-state", "draining");
+        setHexProperty(this, "m2-3h-rx-drain-budget-ms", budgetMs);
         UInt64 budgetTicks = 0;
         nanoseconds_to_absolutetime((UInt64)budgetMs * 1000000ULL, &budgetTicks);
         const UInt64 deadline = mach_absolute_time() + budgetTicks;
@@ -1386,7 +1390,22 @@ bool org_example_AMDMapperProbe::r27RxFinish(UInt32 budgetMs) {
             const auto &s = r->control.out;
             if (kr == kIOReturnSuccess && s.version == r27rx::kVersion &&
                 s.bytes == sizeof(s) && s.poolId == r->control.poolId &&
-                s.state == r27rx::kDrained && !s.pendingPosted && s.posted == s.restored) {
+                s.state == r27rx::kDrained && !s.pendingPosted && s.posted == s.completed) {
+                // posted/completed count cycles; restored counts distinct
+                // objects. Every object's last cycle must be complete and its
+                // original ring buffer restored before any standard unmap.
+                UInt32 distinct = 0;
+                UInt64 posts = 0, completions = 0;
+                for (UInt32 i = 0; i < r27rx::kCount; ++i) {
+                    const auto &w = s.witnesses[i];
+                    if (w.postCount != w.doneCount) goto drainFailed;
+                    posts += w.postCount; completions += w.doneCount;
+                    if (!w.postCount) continue;
+                    ++distinct;
+                    if (!(w.flags & r27rx::kWitnessRestored)) goto drainFailed;
+                }
+                if (s.restored != distinct || posts != s.posted ||
+                    completions != s.completed) goto drainFailed;
                 // A reset/address mismatch means the ring association proof
                 // was lost. A payload-copy error does not prevent safe unmap.
                 if (s.flags & (r27rx::kFlagAddressMismatch | r27rx::kFlagRingReset |
@@ -1471,6 +1490,18 @@ void org_example_AMDMapperProbe::r27RxExport() {
     setHexProperty(this, "m2-3h-rx-completed", r->control.out.completed);
     setHexProperty(this, "m2-3h-rx-restored", r->control.out.restored);
     setHexProperty(this, "m2-3h-rx-pending", r->control.out.pendingPosted);
+    UInt64 distinct = 0, reused = 0, reuseCycles = 0, samples = 0;
+    for (UInt32 i = 0; i < r27rx::kCount; ++i) {
+        const auto &w = r->control.out.witnesses[i];
+        if (w.postCount) ++distinct;
+        if (w.reuseCount) ++reused;
+        reuseCycles += w.reuseCount;
+        samples += w.sampleCount;
+    }
+    setHexProperty(this, "m2-3h-rx-distinct-posted", distinct);
+    setHexProperty(this, "m2-3h-rx-reused-objects", reused);
+    setHexProperty(this, "m2-3h-rx-reuse-cycles", reuseCycles);
+    setHexProperty(this, "m2-3h-rx-cycle-samples", samples);
     setHexProperty(this, "m2-3h-rx-flags", r->control.out.flags);
 }
 

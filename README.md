@@ -1,45 +1,37 @@
 # AMDIOMMU — authoritative source repository
 
-## Round27 / M2-3h
+## Round28 / cyclic64 RX implementation
 
-Round27 adds a finite one-shot lifecycle for 64 standard-mapped RX spares alongside the established four-slot ordinary TX path. Expected versions: Lucy 1.1.212 / Probe 0.36.0; TX domain3/native6/std5, RX v1. This source change does not itself assert hardware acceptance. Results and the exact deployed commit are recorded in the parent project's Round27 report.
+Round28 evolves the existing Round27 entry points in place: 64 standard-mapped RX spares are reposted cyclically, then held/disarmed, drained, restored and unmapped alongside the established four-slot ordinary all-standard TX path. Expected versions: Lucy **1.1.213** / Probe **0.37.0**. Base commit: `ae92d3869a828b82e76eeb24c59ecd91a7cbe09a`.
 
-Base commit: `ddf188b7381aac84461ed2dbeb962a8592f2be87`.
+This is software implementation and host-test scope, **not hardware acceptance**. macOS kext build, deployment and hardware validation remain separate; no successful Round28 hardware run is asserted here.
 
-On macOS with Python 3.9+ and C++17, obtain a fresh upstream tree at `639144d1f284a9fee222a518691b01494f5e265d` in a repository-relative directory, supplying the existing MacKernelSDK dependency:
+- Main traffic: 8192 requests in 512 batches of 16; `R27P` application protocol retained.
+- Drain traffic: separate `R28T` 200-byte tails, bounded to 4096; tails are not main requests or positive business witnesses.
+- RX ABI2: Snapshot 19536 bytes, Request 21632 bytes, Witness 272 bytes, Cycle 40 bytes; first four cycle samples retained per spare. Backend snapshot remains 12864 bytes. TX domain3/native6/std5 and compatibility function/property names remain unchanged.
+- Defaults use `runs/r28`; the finite launchd job is `org.example.round28load`. Capture retains compatibility filenames including `R27-EXPORTS.json`, with Round28 scope and expected versions. Evidence records Git source identity, not full-source snapshots.
+
+On macOS with Python 3.9+ and C++17, obtain a fresh upstream tree at `639144d1f284a9fee222a518691b01494f5e265d`, supplying the existing MacKernelSDK dependency:
 
 ```sh
 python3 -B tools/r27/check-local.py
-sh tools/r27/build.sh _scratch/r27-upstream
+sh tools/r27/build.sh _scratch/r28-upstream
 ```
 
-The build generates `--tx 21 --rx 27`; do not edit `generated/round26`. Commit tested canonical source before deployment; the Mac checkout must match that commit and remain source-clean. Runtime evidence, runs, SDKs and upstream source copies are not committed.
+The generator selection is **`--tx 21 --rx 28`** (`--rx28` and `--rx=28` also work). Compatibility selection `--rx 27` aliases the same current cyclic canonical template at `tools/r27/driver-template.py`; it does not regenerate the historical one-shot implementation. RX15 remains historical. Generate Round28 into its own isolated tree, never overwrite or derive it from `generated/round26`. Commit tested canonical source before any later authorized deployment; deployed checkout must match that commit and remain source-clean.
+
+## Historical Round27
+
+Round27 introduced the finite one-shot lifecycle for 64 standard-mapped RX spares with Lucy 1.1.212 / Probe 0.36.0 and RX ABI1, based on `ddf188b7381aac84461ed2dbeb962a8592f2be87`. Its results and exact deployed commit belong to the parent project's historical report. They are not a Round28 pass, nor does this README assert that historical hardware acceptance succeeded.
 
 ## Historical Round26 baseline
 
-This repository is the authoritative source baseline starting at M2-3g / Round26 (2026-11-02). Commit source changes here; do not maintain a new independently edited source baseline in evidence archives or the parent working directory.
+This repository became the authoritative source baseline at M2-3g / Round26. Round26 used Lucy 1.1.211 / Probe 0.35.0; domain3/native6/std5, mode2 ordinary all-standard TX. Single device, fixed four slots, finite translation window; not a general production IOMapper.
 
-## Scope
+## Source and evidence policy
 
-- `kext/`, `tools/`: exact LF source inputs uploaded for the validated Round26 build (367 files), plus non-cache tool support files.
-- `include/`, `src/`, `tests/`, `fixtures/`, `reference/`: existing project modules, tests and reference inputs.
-- `generated/round26/`: exact generated Lucy C++/header used by the validated build, for source inspection and reproducibility comparison. The generator and templates remain canonical; do not edit the generated copy by hand.
-- No runtime evidence, kext binaries, SDKs, upstream tarballs or full patch-package before/after snapshots are committed.
+- `kext/`, `tools/` are canonical implementation and generator inputs. `include/`, `src/`, `tests/`, `fixtures/`, `reference/` contain existing modules, tests and reference inputs.
+- `generated/round26/` is the historical generated Lucy inspection/reproducibility copy; do not edit it by hand.
+- Runtime evidence, kext binaries, SDKs, upstream tarballs and full patch-package before/after snapshots are not committed.
 
-Round26: Lucy 1.1.211 / Probe 0.35.0; domain3/native6/std5, mode2 ordinary all-standard TX. Single device, fixed four slots, finite translation window; not a general production IOMapper.
-
-## Reproduce
-
-Use macOS, Python 3.9-compatible Python3 and the existing kernel SDK/toolchain. Obtain a **fresh** RTL812xLucy tree at upstream commit `639144d1f284a9fee222a518691b01494f5e265d` (https://github.com/Mieze/RTL812xLucy), supply its MacKernelSDK dependency, then run from this repository:
-
-```sh
-sh tools/r26/build.sh path/to/clean/RTL812xLucy
-```
-
-The path is relative to this repository. The build entry generates source, runs its focused ABI/protocol/ASan+UBSan/analyzer checks, and builds both kexts. Do not rerun injection on an already generated tree. Historical tool filenames do not imply that old hardware experiments should be rerun.
-
-## Baseline policy
-
-Every future patch must name the full **base commit** and target this repository. Verify the clean/expected working tree and run `git apply --check` before applying. Never silently overwrite local changes or edit the patch baseline to force acceptance. Commit the resulting source before deployment and record that commit in evidence metadata.
-
-Evidence remains outside this repository. Source identity in evidence is a Git commit hash, not a source snapshot. Logs, raw exports, binary identities and experiment results remain separate from source provenance. Round26 original evidence/report live in the parent project's documentation tree. Repository commits do not themselves constitute hardware validation.
+Every future patch must name the full base commit and target this repository. Verify the expected working tree and use `git apply --check` before applying a patch. Never overwrite local changes or edit the baseline to force acceptance. Source identity in evidence is a Git commit hash, not a source snapshot. Logs, raw exports, binary identities and experiment results remain separate from provenance; repository commits do not constitute hardware validation.

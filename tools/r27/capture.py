@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture r27 evidence after the finite load; no live peer or old ABI verifier.
+"""Capture Round28 evidence after the finite load; no live peer or old ABI verifier.
 
 All workspace paths are relative to the project. Missing evidence is recorded
 in the manifest and returns 1 after saving the available failure diagnostics.
@@ -17,9 +17,9 @@ import struct
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSIONS = {'RTL812xLucy': '1.1.212', 'AMDMapperProbe': '0.36.0'}
+VERSIONS = {'RTL812xLucy': '1.1.213', 'AMDMapperProbe': '0.37.0'}
 ABI = {'native': 6, 'standard': 5, 'domain': 3, 'driver_mode': 2,
-       'rx_driver': 1, 'rx_backend': 1}
+       'rx_driver': 2, 'rx_backend': 2}
 EXPORTS = (
     ('probe', 'm2-3b-domain-raw', 'r21-domain-raw.bin'),
     ('probe', 'm2-3b-pt-raw', 'r21-pt-raw.bin'),
@@ -93,7 +93,7 @@ def collect_system(out, stamp):
         rc, text = command(args)
         lines.append('%s : %s' % (label, text.strip() if rc == 0 else '(unavailable)'))
     loaded_rc, loaded = command(['kmutil', 'showloaded', '--list-only'])
-    identity = ['scope : r27', 'expected_abi : native6/std5/domain3 mode2',
+    identity = ['scope : r28', 'expected_abi : native6/std5/domain3 mode2',
                 'captured_utc : ' + stamp, 'kmutil_returncode : %d' % loaded_rc,
                 '# loaded kext identity (read-only)', loaded]
     installed = {}
@@ -132,8 +132,8 @@ def collect_system(out, stamp):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('out', help='new or empty project-relative capture directory')
-    parser.add_argument('--load', default='runs/r27')
-    parser.add_argument('--peer-log', default='runs/r27/peer.log')
+    parser.add_argument('--load', default='runs/r28')
+    parser.add_argument('--peer-log', default='runs/r28/peer.log')
     parser.add_argument('--iface', default='en2')
     args = parser.parse_args()
     out, load, peer_log = (project_path(value) for value in (args.out, args.load, args.peer_log))
@@ -154,10 +154,15 @@ def main():
             errors.append('ioreg capture failed: ' + name)
     copied = out / 'r27-load'
     copied.mkdir()
+    # Fixed evidence allowlist: never archive arbitrary source snapshots from load.
+    allowed_load = ('token.txt', 'batch.txt', 'requests.txt', 'load.txt', 'client.log',
+                    'netstat-before.txt', 'netstat-after.txt', 'expected-version.json',
+                    'source-ref.json', 'launchd.out', 'launchd.err', 'deployment.json')
     if load.is_dir():
-        for path in sorted(load.iterdir()):
+        for name in allowed_load:
+            path = load / name
             if path.is_file():
-                shutil.copy2(path, copied / path.name)
+                shutil.copy2(path, copied / name)
     else:
         errors.append('load directory missing: ' + args.load)
     required = ('token.txt', 'batch.txt', 'requests.txt', 'load.txt', 'client.log',
@@ -179,8 +184,8 @@ def main():
         token = int((out / 'token.txt').read_text().strip(), 0)
         batch = int((out / 'batch.txt').read_text().strip())
         requests = int((out / 'requests.txt').read_text().strip())
-        if not 0 < token < 0x80000000 or batch != 512 or requests != 2048:
-            errors.append('r27 requires a nonzero low-half token, kernel batch512 and 2048 application requests')
+        if not 0 < token < 0x80000000 or batch != 512 or requests != 8192:
+            errors.append('r27 requires a nonzero low-half token, kernel batch512 and 8192 application requests')
     except (OSError, ValueError) as exc:
         errors.append('cannot read token/batch: ' + str(exc))
     all_specs = [entry + (None, True) for entry in EXPORTS] + [
@@ -192,6 +197,10 @@ def main():
                 if required_blob:
                     errors.append('missing required raw export: ' + key)
                 continue
+            expected_bytes = {'r27-rx-raw.bin': 19536, 'r27-rx-map-raw.bin': 12864}.get(name)
+            if expected_bytes is not None and len(data) != expected_bytes:
+                errors.append('Round28 export size mismatch: %s: %d != %d' %
+                              (name, len(data), expected_bytes))
             (out / name).write_bytes(data)
             digest = sha(data)
             published = property_text(texts[source], digest_key) if digest_key else None
@@ -231,7 +240,7 @@ def main():
             data = path.read_bytes()
             observed[label] = struct.unpack_from('<I', data, offset)[0] if len(data) >= offset + 4 else None
     report = {
-        'scope': 'r27', 'captured_utc': stamp, 'interface': args.iface,
+        'scope': 'r28', 'captured_utc': stamp, 'interface': args.iface,
         'load_source': args.load, 'peer_source': args.peer_log,
         'declared_token': token, 'token_scope': 'userspace-integrity-and-rx-observation-only',
         'batch': batch, 'application_requests': requests,
@@ -242,11 +251,11 @@ def main():
         'cleanup': property_text(texts['probe'], 'm2-3b-cleanup'),
         'exports': exports, 'errors': errors, 'warnings': warnings,
         'capture_status': 'incomplete' if errors else 'complete',
-        'note': 'archive only; native6/std5/domain3/rx1; internal TX map sequence is not '
+        'note': 'archive only; native6/std5/domain3/rx2; internal TX map sequence is not '
                 'the client request id; no old ABI verifier or OBS-ring-completeness '
                 'requirement; later driver publications are cross-checks only'}
     write_text(out / 'R27-EXPORTS.json', json.dumps(report, indent=2) + '\n')
-    lines = ['scope : r27', 'captured_utc : ' + stamp,
+    lines = ['scope : r28', 'captured_utc : ' + stamp,
              'interface : ' + args.iface, 'expected_abi : native6/std5/domain3 mode2',
              'capture_status : ' + report['capture_status'],
              'No correctness verdict; hashes are computed from archived bytes.',
@@ -256,7 +265,7 @@ def main():
             data = path.read_bytes()
             lines.append('  %s  %10d  %s' % (sha(data), len(data), path.relative_to(out).as_posix()))
     write_text(out / 'MANIFEST.txt', '\n'.join(lines) + '\n')
-    print('Round27 capture %s: %s' % (report['capture_status'], args.out))
+    print('Round28 capture %s: %s' % (report['capture_status'], args.out))
     for error in errors:
         print('  INCOMPLETE: ' + error)
     return int(bool(errors))

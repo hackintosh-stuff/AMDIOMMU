@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile and exercise the actual generated round27 finite RX methods.
+"""Compile and exercise the actual generated round28 cyclic RX methods.
 
 This is one RX ownership/lifecycle check, not a replay of previous rounds.
 --source additionally checks the newly generated Lucy call sites, and uses its
@@ -33,6 +33,7 @@ def method(text, name):
 
 PREFIX = r'''
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -149,6 +150,11 @@ struct Fixture {
 };
 
 int main() {
+    static_assert(r27rx::kVersion==2 && sizeof(r27rx::Cycle)==40);
+    static_assert(sizeof(r27rx::Witness)==272 && offsetof(r27rx::Witness,tLastPost)==80);
+    static_assert(offsetof(r27rx::Witness,samples)==112);
+    static_assert(sizeof(r27rx::Snapshot)==19536 && sizeof(r27rx::Request)==21632);
+    static_assert(sizeof(r27rx::BackendSnapshot)==12864);
     {
         Fixture f; f.install();
         auto &p=*f.d.r15Pool;
@@ -159,25 +165,45 @@ int main() {
             f.post(i,addr);
         }
         assert(p.rx27.posted==64 && p.rx27.pendingPosted==64);
-        // An expired replacement window must not block an existing IOVA's return.
+        // Legacy deadline is not a cyclic selector. Tokens do not select either.
         p.snap.deadline=1;
-        UInt64 addr=f.receive(0,0x27abcd,1025);
-        assert(addr==p.snap.entries[0].addr && p.rx27.pendingPosted==64);
-        assert(!p.rx27.witnesses[0].tRestoreOwn);
-        f.post(0,addr);
-        assert(p.rx27.pendingPosted==63);
-        // Disarm likewise stops only new substitutions, never restoration.
+        for (UInt32 cycle=1; cycle<=4; ++cycle) {
+            for (UInt32 i=0; i<64; ++i) {
+                auto addr=f.receive(i,cycle%2 ? 0 : 0x27abcd,cycle*100+i);
+                assert(addr==f.q.maps[i].iova && p.rx27.pendingPosted==64);
+                f.post(i,addr);
+                auto &w=p.rx27.witnesses[i];
+                assert(w.postCount==cycle+1 && w.doneCount==cycle);
+                assert(w.reuseCount==cycle && w.sampleCount<=4);
+            }
+        }
+        assert(p.rx27.posted==320 && p.rx27.completed==256);
+        auto untouched=f.receive(70); f.post(70,untouched);
+        assert(untouched==p.snap.entries[70].addr && p.rx27.posted==320);
+        assert(p.snap.replacements==64 && p.snap.completions==256);
+        f.q.op=r27rx::kRelease;
+        assert(f.d.r27RxControl(&f.q)==kIOReturnBusy);
         f.op(r27rx::kDisarm);
-        for (UInt32 i=1; i<64; ++i) {
+        const auto disarmed=p.rx27.tDisarmed;
+        UInt64 addr=0;
+        for (UInt32 i=0; i<64; ++i) {
             addr=f.receive(i);
             assert(addr==p.snap.entries[i].addr);
             f.post(i,addr);
         }
-        assert(p.rx27.completed==64 && p.rx27.restored==64 && !p.rx27.pendingPosted);
+        assert(p.rx27.posted==320 && p.rx27.completed==320 && p.rx27.restored==64 && !p.rx27.pendingPosted);
         assert(!p.rx27.flags);
         for (UInt32 i=0; i<64; ++i) {
             auto &w=p.rx27.witnesses[i];
             assert(w.flags==7 && w.tPost<w.tDone && w.tDone<w.tRestoreOwn);
+            assert(w.postCount==5 && w.doneCount==5 && w.reuseCount==4 && w.sampleCount==4);
+            assert(w.tDone==w.tLastDone && w.samples[0].tDone<w.tDone);
+            assert(w.tLastPost<=disarmed && w.tLastDone>w.tLastPost && w.tLastDone<w.tRestoreOwn);
+            for (UInt32 c=0;c<4;++c) {
+                assert(w.samples[c].cycle==c+1 && w.samples[c].flags==3);
+                assert(w.samples[c].tPost<w.samples[c].tDone);
+                if (c) assert(w.samples[c-1].tDone<w.samples[c].tPost);
+            }
             assert(p.slotId[i]==i && !p.slotWitness[i]);
             assert(f.ring[i].mbuf==p.mbufs[i] && f.desc[i].buf.addr==w.originalPA);
         }
@@ -198,7 +224,35 @@ int main() {
         assert((w.flags&r27rx::kWitnessError) && w.tRestoreOwn);
         assert((p.rx27.flags&r27rx::kFlagCopyFailed) && !p.rx27.pendingPosted);
         assert(addr==p.snap.entries[4].addr && !p.rx27CopyFailed && releases==0);
+        assert(p.snap.state==r15pool::kDisarmed && p.rx27.tDisarmed);
+        addr=f.receive(5); f.post(5,addr);
+        assert(addr==p.snap.entries[5].addr && p.snap.replacements==1);
         f.op(r27rx::kDisarm); f.op(r27rx::kDrain); f.op(r27rx::kRelease);
+    }
+    {
+        Fixture f; f.install(); auto &p=*f.d.r15Pool;
+        auto addr=f.receive(2); f.post(2,addr);
+        f.desc[2].buf.addr ^= 4096;
+        addr=f.receive(2);
+        assert(addr==p.snap.entries[2].addr && p.rx27.pendingPosted==1);
+        assert(p.rx27.flags&r27rx::kFlagAddressMismatch);
+        assert(p.snap.state==r15pool::kDisarmed && p.rx27.tDisarmed);
+        f.post(2,addr);
+        assert(p.rx27.posted==1 && p.rx27.completed==1 && p.rx27.restored==1);
+        auto physical=f.receive(3); f.post(3,physical);
+        assert(physical==p.snap.entries[3].addr && p.snap.replacements==1);
+        f.op(r27rx::kDrain); f.op(r27rx::kRelease);
+    }
+    {
+        Fixture f; f.install(); auto &p=*f.d.r15Pool;
+        auto addr=f.receive(0); f.post(0,addr);
+        f.op(r27rx::kDrain); assert(p.rx27.state==r27rx::kDisarmed);
+        addr=f.receive(0);
+        assert(addr==p.snap.entries[0].addr && p.rx27.pendingPosted==1);
+        f.post(0,addr);
+        f.op(r27rx::kDrain);
+        assert(p.rx27.posted==1 && p.rx27.completed==1 && p.rx27.restored==1);
+        f.op(r27rx::kRelease);
     }
     {
         Fixture f;
@@ -220,7 +274,7 @@ int main() {
         m.bytes[45]='X'; token=req=0;
         assert(!f.d.r27RxParse(&m,&token,&req) && !token && !req);
     }
-    std::puts("R27 RX: 64 post/done/original-PA restore; expired/disarmed drain; copy-error restore; pre-map owner hold; R27P observation PASS");
+    std::puts("R28 RX: same 64 objects, 5 cumulative DMA cycles, first4 samples; disarm/drain physical-OWN detach; wrong-address/copy-error stop; owner hold; R27P observation; v2 ABI PASS");
 }
 '''
 

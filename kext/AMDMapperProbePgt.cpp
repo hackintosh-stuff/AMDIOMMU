@@ -2050,11 +2050,19 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     m2b2PublishRxSet();
 
 recover:
-    // One-shot RX spares return to their original physical ring buffers on
-    // completion. Keep TX open while waiting so remaining echo traffic can
-    // finish that ring traversal. All standard RX unmaps happen here, while
-    // translation and the shared command buffer are still active.
-    const bool rxDrained = r27RxFinish(2000);
+    // Disarm cyclic repost, then keep TX OPEN for the bounded userspace echo
+    // tail that returns every pending RX IOVA to its physical ring buffer.
+    // Standard RX unmaps still run under translation and the shared command
+    // buffer. On failure pin BEFORE closing TX so diagnostics/tail can continue.
+    const bool rxDrained = r27RxFinish(15000);
+    if (!rxDrained) {
+        // No TX close, DTE restoration, command stop, detach or table free.
+        setProperty("m2-3b-cleanup", "PINNED-RX-no-DTE-restore");
+        setProperty("m2-b2-verdict", "INVALID-RX-outstanding-or-unmap-pinned");
+        setProperty("m2-b2-stage", "17e-pinned-RX");
+        r17Export(&ctx);
+        return;
+    }
     // ---- 第 17e 步：退出窗口的前半段（round22）----
     //
     // 【顺序】停止接纳 → 等已获准的提交写完 OWN → 排空硬件持有的 TX →
@@ -2084,15 +2092,6 @@ recover:
             // 继续走第 18 步；只是把"没排空"这件事记下来。
             setProperty("m2-3e-exit-drain", "TIMEOUT-before-dte-flip");
         }
-    }
-    if (!rxDrained) {
-        // No DTE restoration, command-buffer stop, detach or page-table free
-        // while the NIC might still own an RX IOVA (or its unmap is unconfirmed).
-        setProperty("m2-3b-cleanup", "PINNED-RX-no-DTE-restore");
-        setProperty("m2-b2-verdict", "INVALID-RX-outstanding-or-unmap-pinned");
-        setProperty("m2-b2-stage", "17e-pinned-RX");
-        r17Export(&ctx);
-        return;
     }
     // ---- 第 18 步：恢复（状态机，任何一步失败都阻止释放）----
     //

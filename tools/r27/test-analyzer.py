@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Focused Round27 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round28 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native6/std5/domain3 and both new RX snapshots.
-Real Round27 client/peer code generates the 2048 ordinary application logs.
+Real Round28 client/peer code generates the 8192 ordinary application logs.
 The positive fixture covers all 64 RX map/post/done/restore/unmap lifecycles,
 including one matched business receive, and both aligned/unaligned RX pages.
 Rejection cases cover missing restoration and corrupted RX command evidence.
@@ -35,9 +35,9 @@ legacy = analyzer.A
 
 TOKEN = 7
 PEER = ('127.0.0.2', 9110)
-ABI_CHECK = 'capture-ABI-domain3-native6-std5-rx1'
+ABI_CHECK = 'capture-ABI-domain3-native6-std5-rx2'
 COUNTER_CHECK = 'all-TX-standard-mode2-cumulative-and-unmarked-no-cover'
-LOG_CHECK = 'full2048-bytes-no-retry-no-duplicate-credit'
+LOG_CHECK = 'full8192-bytes-no-retry-no-duplicate-credit'
 CMD_CHECK = 'original8192-command-ring-wraps-and-postwrap-completion'
 HISTORY_CHECK = 'retained32-standard-handles-PTE-and-retirement-lifecycles'
 EXIT_CHECK = 'zero-pending-owners-pins-ring-and-no-device-page-fault'
@@ -57,6 +57,12 @@ struct IOService;
 #include "AMDAliveTxDomainNative.hpp"
 #include "RTL812xRxMap.hpp"
 #include <cstddef>
+static_assert(sizeof(r27rx::Cycle) == 40, "Cycle ABI2 size");
+static_assert(sizeof(r27rx::Witness) == 272, "Witness ABI2 size");
+static_assert(sizeof(r27rx::Snapshot) == 19536, "Snapshot ABI2 size");
+static_assert(sizeof(r27rx::Request) == 21632, "Request ABI2 size");
+static_assert(offsetof(r27rx::Witness, tLastPost) == 80, "final timestamps offset");
+static_assert(offsetof(r27rx::Witness, samples) == 112, "cycle samples offset");
 static_assert(offsetof(r27rx::Snapshot, maps) == 80, "RX maps offset");
 static_assert(offsetof(r27rx::Snapshot, witnesses) == 2128, "RX witnesses offset");
 static_assert(offsetof(r27rx::BackendSnapshot, records) == 64, "RX backend records offset");
@@ -86,20 +92,20 @@ int main(int argc, char **argv) {
     d.iovaBase = base; d.iovaBytes = 16 * 4096;
     d.rootPA = d.ptBase = ptBase; d.leafPA = ptBase + 8192;
     d.ptBytes = sizeof(pt); d.rootLevel = 3; d.devid = 0x0200; d.domid = 7;
-    d.historyTotal = d.mapsTotal = d.retiresTotal = 2304; d.historyStart = 2272;
+    d.historyTotal = d.mapsTotal = d.retiresTotal = 10240; d.historyStart = 10208;
     d.commandCapacity = _COMMAND_RING_BYTES_ / 16;
-    d.commandSubmits = d.commandCompleted = d.completionSequence = 4739;
-    d.commandWraps = 18; d.commandPostWrapCompleted = 4484;
+    d.commandSubmits = d.commandCompleted = d.completionSequence = 20611;
+    d.commandWraps = 80; d.commandPostWrapCompleted = 20356;
     d.slotsUsed = 15; d.maxLiveOwners = 4;
-    for (auto &uses : d.slotUses) uses = 576;
+    for (auto &uses : d.slotUses) uses = 2560;
     g.magic = 0x37315854; g.version = r17tx::kVersion; g.bytes = sizeof(g);
     g.count = 32; g.bdf = d.devid; g.token = 7;
-    g.retired = 2304; g.maxHeld = 4; g.historyStart = 2272; g.tPublished = 9025;
+    g.retired = 10240; g.maxHeld = 4; g.historyStart = 10208; g.tPublished = 9025;
     s.magic = r18std::kMagic; s.version = r18std::kVersion; s.bytes = sizeof(s);
     s.count = 32; s.bdf = d.devid; s.token = 7;
-    s.accepts = s.unmaps = s.historyTotal = 2304;
+    s.accepts = s.unmaps = s.historyTotal = 10240;
     s.maxHeld = 4; s.mode = r17tx::kModeAllStandard;
-    s.historyStart = 2272; s.highReqAccepts = 2272; s.tPublished = 9025;
+    s.historyStart = 10208; s.highReqAccepts = 10208; s.tPublished = 9025;
     b.magic = r20tx::kMagic; b.version = r20tx::kVersion; b.bytes = sizeof(b);
     b.bdf = d.devid; b.token = 7; b.nslot = 16;
     b.txNext = b.txDirty = b.txClose = b.txTail = 64;
@@ -108,16 +114,16 @@ int main(int argc, char **argv) {
     b.sampleStage = r20tx::kStageExit; b.sampleSeq = 8; b.quiesced = 1;
     for (uint32_t i = 0; i < 32; ++i) {
         // These are retirement records, not necessarily the last 32 request
-        // IDs. All retained internal IDs exceed the userspace range 1..2048.
-        // Keep internal 2272 instead of 2273 to distinguish retirement order.
-        const uint32_t req = i == 0 ? 2272 : 2273 + i, pattern = (req - 1) % 16 + 1;
+        // IDs. All retained internal IDs exceed the userspace range 1..8192.
+        // Keep internal 10208 instead of 10209 to distinguish retirement order.
+        const uint32_t req = i == 0 ? 10208 : 10209 + i, pattern = (req - 1) % 16 + 1;
         const bool large = pattern == 2 || pattern == 4 || pattern == 6 || pattern == 8 || pattern == 11;
         const bool medium = pattern == 3 || pattern == 7 || pattern == 10 || pattern == 13 || pattern == 15;
         const uint32_t frame = large ? 1514 : medium ? 162 : 96;
         const uint32_t n = large ? 2 : 1, page = (i % 4) * 4;
         // Four distinct stripes overlap; each group retires before reuse.
         const uint64_t t = 3000 + (i / 4) * 100 + (i % 4) * 3;
-        const uint64_t commandBase = 4611 + (i / 4) * 8;
+        const uint64_t commandBase = 20483 + (i / 4) * 8;
         auto &w = d.records[i];
         // Each history may have its own physical ring permutation. Handles
         // must perform the join; equal array indices must not be assumed.
@@ -171,12 +177,13 @@ int main(int argc, char **argv) {
     r27rx::BackendSnapshot rb{};
     rx.version = r27rx::kVersion; rx.bytes = sizeof(rx);
     rx.state = r27rx::kReleased; rx.generation = 1; rx.poolId = 0x275200;
-    rx.mapCount = rx.posted = rx.completed = rx.restored = r27rx::kCount;
+    rx.mapCount = rx.restored = r27rx::kCount;
+    rx.posted = rx.completed = 4 * r27rx::kCount;
     rx.businessToken = 7; rx.tInstalled = 400; rx.tDisarmed = 8800;
-    rx.tLastRestore = 3483;
+    rx.tLastRestore = 8864;
     rb.version = r27rx::kVersion; rb.bytes = sizeof(rb);
     rb.count = rb.mapCalls = rb.mapOk = rb.unmapCalls = rb.unmapOk = r27rx::kCount;
-    rb.ready = 1; rb.tReady = 410; rb.tDrained = 8810;
+    rb.ready = 1; rb.tReady = 410; rb.tDrained = 8870;
     for (uint32_t i = 0; i < r27rx::kCount; ++i) {
         auto &r = rb.records[i];
         r.pa = 0x90000000ULL + i * 0x3000 + (i % 2 ? 128 : 0);
@@ -185,11 +192,11 @@ int main(int argc, char **argv) {
         r.mapOptions = 0x2; // reference/IOMemoryDescriptor.sdk.h: kIODMAMapWriteAccess
         r.pages = (r.pa & 4095) ? 2 : 1;
         r.tMapPublish = 200 + i * 2; r.tMapInv = 201 + i * 2;
-        r.tUnmapPublish = 8820 + i; r.tUnmapInv = 8900 + i;
+        r.tUnmapPublish = 8880 + i; r.tUnmapInv = 8900 + i;
         r.mapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
                         1 + i, 1 + i, r.tMapInv};
         r.unmapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
-                          4676 + i, 4676 + i, r.tUnmapInv};
+                          20548 + i, 20548 + i, r.tUnmapInv};
         r.flags = r27rx::kMapRegistered | r27rx::kMapPublished |
                   r27rx::kMapInvalidated | r27rx::kMapUnmapped | r27rx::kMapReleased;
         for (uint32_t j = 0; j < r.pages; ++j)
@@ -199,12 +206,20 @@ int main(int argc, char **argv) {
         w.originalPA = 0xa0000000ULL + i * 8192;
         w.sparePA = r.pa; w.iova = r.iova; w.slot = i; w.entryId = r.entryId;
         w.flags = r27rx::kWitnessPosted | r27rx::kWitnessDone | r27rx::kWitnessRestored;
-        w.tPost = 3000 + i; w.tDone = 3320 + i; w.tRestoreOwn = 3420 + i;
-        // One actual business completion suffices. Other slots may receive
-        // ordinary/background packets; no business selector controls mapping.
-        w.token = i == 0 ? 7 : 0; w.reqId = i == 0 ? 1025 : 0;
-        w.doneLength = i == 0 ? 78 : 246; // UDP bytes + Ethernet/IPv4/UDP/FCS
-        w.doneStatus = w.doneLength; // hardware DescOwn is already clear
+        w.tPost = 1200 + i; w.tDone = w.tLastDone = 4500 + i;
+        w.tLastPost = 4200 + i; w.tRestoreOwn = 8801 + i;
+        w.postCount = w.doneCount = w.sampleCount = 4; w.reuseCount = 3;
+        w.doneLength = 246; w.doneStatus = w.doneLength;
+        for (uint32_t j = 0; j < 4; ++j) {
+            auto &c = w.samples[j];
+            c.tPost = 1200 + j * 1000 + i;
+            c.tDone = j == 0 ? 1290 + i : 1500 + j * 1000 + i;
+            c.cycle = j + 1; c.flags = 3;
+            c.token = i == 0 && j == 0 ? 7 : 0;
+            c.reqId = i == 0 && j == 0 ? 1025 : 0;
+            c.doneLength = i == 0 && j == 0 ? 78 : 246;
+            c.doneStatus = c.doneLength;
+        }
     }
     if (damage == "unrestored") rx.witnesses[63].flags &= ~r27rx::kWitnessRestored;
     save(dir, "r27-rx-raw.bin", &rx, sizeof(rx));
@@ -220,12 +235,12 @@ int main(int argc, char **argv) {
 
 def properties():
     p = {'m2-3c-mode': 'standard-iomapper', 'm2-3g-mode': 'all-standard',
-         'm2-3h-rx-mode': 'standard-nonidentity-one-shot',
+         'm2-3h-rx-mode': 'standard-nonidentity-cyclic64',
          'm2-3h-rx-state': 'drained-and-unmapped', 'm2-3h-rx-ready': 'no',
-         'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0}
+         'm2-b2-t-recovery-start': 9000, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0}
     for key in ('m2-3c-map-calls', 'm2-3c-map-ok', 'm2-3c-unmap-ok',
                 'm2-3b-map-accepted', 'm2-3b-retires'):
-        p[key] = 2304
+        p[key] = 10240
     for key in ('m2-3c-insert-calls', 'm2-3c-map-rejects', 'm2-3b-map-rejected',
                 'm2-3c-cover-calls', 'm2-3b-owners-held', 'm2-b2-win-entries', 'm2-b2-win-new-entries',
                 'm2-b2-win-raw-count', 'm2-b2-win-pre-backlog',
@@ -235,10 +250,10 @@ def properties():
                 'm2-3e-enter-last-inflight', 'm2-3e-enter-last-ring',
                 'm2-3e-exit-last-inflight', 'm2-3e-exit-last-ring'):
         p[key] = 0
-    p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': 4739,
-              'm2-3b-command-completed': 4739, 'm2-3b-command-wraps': 18,
-              'm2-3b-command-post-wrap-completed': 4484,
-              'm2-3b-completion-sequence': 4739,
+    p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': 20611,
+              'm2-3b-command-completed': 20611, 'm2-3b-command-wraps': 80,
+              'm2-3b-command-post-wrap-completed': 20356,
+              'm2-3b-completion-sequence': 20611,
               'm2-b2-window-valid': 'yes', 'm2-b2-win-raw-truncated': 'no',
               'm2-b2-win-status-start': 8, 'm2-b2-win-status-end': 8,
               'm2-3e-enter': 'gate-open-after-dte-and-invalidations',
@@ -294,7 +309,7 @@ def real_logs(client_reorder=True, peer_reorder=True):
     with patch.object(load, 'now', return_value=50):
         for _ in range(20):
             assert load.ord_probe(s, PEER, seq.next(), client_lines.append, 'pre')
-    with patch.object(load, 'now', side_effect=itertools.count(1000)):
+    with patch.object(load, 'now', side_effect=(1000 + i // 8 for i in itertools.count())):
         assert load.exchange(s, '127.0.0.1', PEER, TOKEN, client_lines.append, seq) == 0
     with patch.object(load, 'now', side_effect=itertools.count(9100)):
         for _ in range(3):
@@ -326,6 +341,19 @@ def real_logs(client_reorder=True, peer_reorder=True):
          patch.object(peer.time, 'monotonic', side_effect=lambda: 0 if incoming else 2), \
          patch.object(peer.time, 'monotonic_ns', side_effect=itertools.count(1)):
         assert peer.serve(ps, TOKEN, 1, peer_lines.append) == 0
+    import hashlib
+    client_lines.append('client_drain_observed t_ns=8801')
+    for seq in range(1, 5):
+        data = protocol.tail(TOKEN, seq)
+        evidence = 'token=0x%08x seq=%d len=%d sha256=%s payload=%s' % (
+            TOKEN, seq, len(data), hashlib.sha256(data).hexdigest(), data.hex())
+        client_lines.extend(['client_tail_send ' + evidence + ' t_ns=%d' % (8801 + seq),
+                             'client_tail_recv ' + evidence + ' payload_ok=1 t_ns=%d' % (8810 + seq)])
+        peer_lines.extend(['peer_tail_recv ' + evidence + ' payload_ok=1 from=127.0.0.1:10000 t=%d' % seq,
+                           'peer_tail_sent ' + evidence + ' to=127.0.0.1:10000 t=%d' % (seq + 1)])
+    client_lines.append('client_tail_drain_ended t_ns=8815')
+    client_lines.append('client_tail_summary sent=4 received=4 max=4096')
+    client_lines.append('client_after_exit resumed=1 t_ns=9100')
     return '\n'.join(client_lines) + '\n', '\n'.join(peer_lines) + '\n'
 
 
@@ -360,8 +388,8 @@ class AnalyzerTests(unittest.TestCase):
             '"R24TxWaits" = 96\n"R24TxResumes" = 96\n'
             '"R24TxWakes" = 96\n"R24TxPending" = 0\n'
             '"R26TxMode" = "all-standard"\n'
-            '"R26TxMapped" = 2304\n"R26TxUnmarked" = 2304\n'
-            '"R26TxLegacySelected" = 0\n"R26TxAttempts" = 2308\n'
+            '"R26TxMapped" = 10240\n"R26TxUnmarked" = 10240\n'
+            '"R26TxLegacySelected" = 0\n"R26TxAttempts" = 10244\n'
             '"rtl812x-txmap-cover-calls" = 0\n')
 
     def setUp(self):
@@ -385,19 +413,19 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(protocol.MAGIC, b'R27P')
         self.assertNotIn(protocol.payload(TOKEN, 1)[:4], (b'IOB1', b'1BOI'))
         report = self.expect(True)
-        self.assertEqual(len(report['checks']), 11)
+        self.assertEqual(len(report['checks']), 12)
         by_id = {c['id']: c.get('detail') for c in report['checks']}
         self.assertEqual(by_id[COUNTER_CHECK]['mode'], 2)
-        self.assertEqual((by_id[COUNTER_CHECK]['Mapped'], by_id[COUNTER_CHECK]['Unmarked']), (2304, 2304))
+        self.assertEqual((by_id[COUNTER_CHECK]['Mapped'], by_id[COUNTER_CHECK]['Unmarked']), (10240, 10240))
         self.assertEqual((by_id[CMD_CHECK]['commandCapacity'], by_id[CMD_CHECK]['commandRingBytes']), (512, 8192))
         history = by_id[HISTORY_CHECK]
-        self.assertEqual((history['historyTotal'], history['historyStart'], history['retained']), (2304, 2272, 32))
-        self.assertTrue(all(req > 2048 for req in history['internalRequests']))
+        self.assertEqual((history['historyTotal'], history['historyStart'], history['retained']), (10240, 10208, 32))
+        self.assertTrue(all(req > 8192 for req in history['internalRequests']))
         self.assertEqual(history['nativeHandles'], [0])
         self.assertEqual(history['peakRetainedLive'], 4)
         self.assertEqual(by_id['ordinary-traffic-before-during-and-three-after'],
-                         {'before': 20, 'during': 256, 'after': 3})
-        self.assertEqual((self.capture / 'r27-rx-raw.bin').stat().st_size, 7248)
+                         {'before': 20, 'during': 1024, 'after': 3})
+        self.assertEqual((self.capture / 'r27-rx-raw.bin').stat().st_size, 19536)
         self.assertEqual((self.capture / 'r27-rx-map-raw.bin').stat().st_size, 12864)
         self.assertEqual(by_id[RX_MAP_CHECK]['mapped'], 64)
         self.assertEqual(by_id[RX_MAP_CHECK]['unmapped'], 64)
@@ -426,12 +454,64 @@ class AnalyzerTests(unittest.TestCase):
                     analyzer.struct.pack_into('<' + fmt, blob, 64 + command + offset, value)
                     path.write_bytes(blob)
                     self.expect(False, RX_MAP_CHECK)
-        for command, sequence in ((120, 4676), (160, 4740), (120, 4611), (160, 4677)):
+        for command, sequence in ((120, 20548), (160, 20612), (120, 20483), (160, 20549)):
             with self.subTest(command=command, sequence=sequence):
                 blob = bytearray(baseline)
                 analyzer.struct.pack_into('<2Q', blob, 64 + command + 16, sequence, sequence)
                 path.write_bytes(blob)
                 self.expect(False, RX_MAP_CHECK)
+
+    def test_more_than_four_cycles_retains_first_four(self):
+        path = self.capture / 'r27-rx-raw.bin'
+        blob = bytearray(path.read_bytes())
+        for offset, fmt, value in ((24, 'I', 257), (28, 'I', 257),
+                                   (2128 + 32, 'Q', 5200),
+                                   (2128 + 80, 'Q', 5000), (2128 + 88, 'Q', 5200),
+                                   (2128 + 96, 'I', 5), (2128 + 100, 'I', 5),
+                                   (2128 + 104, 'I', 4)):
+            analyzer.struct.pack_into('<' + fmt, blob, offset, value)
+        path.write_bytes(blob)
+        self.expect(True)
+
+    def test_unmaps_must_complete_before_recovery(self):
+        path = self.capture / 'props.txt'
+        path.write_text(path.read_text().replace('0x2328', '0x22c4'))
+        self.expect(False, RX_MAP_CHECK)
+
+    def test_cyclic_identity_counts_flags_and_order_corruption(self):
+        path = self.capture / 'r27-rx-raw.bin'
+        baseline = path.read_bytes()
+        # Witness original80 + final times/counts32 + four Cycle40 records.
+        for offset, fmt, value in ((80, 'Q', 8801), (88, 'Q', 1),
+                                   (96, 'I', 5), (100, 'I', 3), (104, 'I', 4),
+                                   (108, 'I', 3), (112, 'Q', 201),
+                                   (120, 'Q', 1200), (128, 'I', 2),
+                                   (132, 'I', 8), (136, 'I', 8193),
+                                   (148, 'I', 1), (152, 'Q', 1289),
+                                   (48, 'I', 1), (52, 'I', 1025)):
+            with self.subTest(offset=offset):
+                blob = bytearray(baseline)
+                analyzer.struct.pack_into('<' + fmt, blob, 2128 + offset, value)
+                path.write_bytes(blob)
+                self.expect(False, RX_DONE_CHECK)
+        for offset, value in ((20, 256), (24, 64), (28, 64), (32, 63)):
+            with self.subTest(header=offset):
+                blob = bytearray(baseline)
+                analyzer.struct.pack_into('<I', blob, offset, value)
+                path.write_bytes(blob)
+                self.expect(False, RX_DONE_CHECK)
+
+    def test_missing_or_corrupt_drain_tail(self):
+        path = self.capture / 'client.log'
+        baseline = path.read_text()
+        for old, new in (('client_tail_recv ', 'missing_tail_recv '),
+                         ('client_drain_observed ', 'missing_drain_observed '),
+                         ('sent=4 received=4 max=4096', 'sent=5 received=4 max=4096'),
+                         ('seq=1 len=200', 'seq=4097 len=200'),
+                         ('t_ns=8802', 't_ns=8799')):
+            with self.subTest(old=old):
+                path.write_text(baseline.replace(old, new))
+                self.expect(False, 'published-drain-R28T-tail-integrity')
 
     def test_missing_rx_restoration_witness_is_rejected(self):
         subprocess.run([str(self.exe), str(self.capture), 'unrestored'], check=True)

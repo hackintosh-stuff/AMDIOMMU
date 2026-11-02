@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Round27: 64 one-shot standard RX maps plus ordinary TX mode 2.
+"""Round28: 64 cyclic standard RX maps plus ordinary TX mode 2.
 
-The 2048 userspace request IDs are unrelated to the internal mapping-attempt
+The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
 records carry individual PTE/lifecycle evidence. Legacy decoders are loaded
 under a distinct module name and their full-history assertions are unchanged.
@@ -29,12 +29,12 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round27-2048-ordinary-application; RX64-one-shot-standard-map; TX-retained32-PTE'
+SCOPE = 'round28-8192-ordinary-application; RX64-cyclic-standard-map; TX-retained32-PTE'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
-RX_VERSION, RX_COUNT = 1, 64
-RX_DRIVER_BYTES, RX_BACKEND_BYTES = 7248, 12864
+RX_VERSION, RX_COUNT = 2, 64
+RX_DRIVER_BYTES, RX_BACKEND_BYTES = 19536, 12864
 RX_BASE, RX_STRIDE, RX_CAPACITY = 0x1000010000, 8192, 4096
 ALL_STANDARD_MODE = 2
 DOMAIN_VERSION, DOMAIN_HEADER, DOMAIN_RECORD_BYTES = 3, 80, 720
@@ -91,17 +91,24 @@ def retained(h, rows, total_key, expected_total):
 
 
 def decode_rx(blob):
-    A.need(len(blob) == RX_DRIVER_BYTES, 'RX driver snapshot must be 7248 bytes')
+    A.need(len(blob) == RX_DRIVER_BYTES, 'RX driver snapshot must be 19536 bytes')
     h = A.unpack('version bytes state flags generation mapCount posted completed '
                  'restored pendingPosted businessToken reserved poolId tInstalled '
                  'tDisarmed tLastRestore', '12I4Q', blob)
     A.need(h['version'] == RX_VERSION and h['bytes'] == len(blob), 'RX driver ABI differs')
     maps = [A.unpack('pa iova tMapInv entryId capacity', '3Q2I', blob, 80 + i * 32)
             for i in range(RX_COUNT)]
-    rows = [A.unpack('originalPA sparePA iova tPost tDone tRestoreOwn '
-                    'slot entryId flags token reqId doneLength doneStatus reserved',
-                    '6Q8I', blob, 80 + RX_COUNT * 32 + i * 80)
-            for i in range(RX_COUNT)]
+    rows = []
+    for i in range(RX_COUNT):
+        at = 80 + RX_COUNT * 32 + i * 272
+        w = A.unpack('originalPA sparePA iova tPost tDone tRestoreOwn '
+                     'slot entryId flags token reqId doneLength doneStatus reserved',
+                     '6Q8I', blob, at)
+        w.update(A.unpack('tLastPost tLastDone postCount doneCount reuseCount sampleCount',
+                          '2Q4I', blob, at + 80))
+        w['samples'] = [A.unpack('tPost tDone cycle token reqId doneLength doneStatus flags',
+                                 '2Q6I', blob, at + 112 + j * 40) for j in range(4)]
+        rows.append(w)
     return h, maps, rows
 
 
@@ -142,7 +149,7 @@ def check(cap):
                 '%s overwritten records are not individually proved.' %
                 (mapped_total - HISTORY_CAPACITY if mapped_total is not None and
                  mapped_total >= HISTORY_CAPACITY else 'earlier'),
-                'Application IDs 1..2048 are userspace integrity IDs, not TX mapping-attempt IDs; RX business correlation uses observed R27P headers.',
+                'Application IDs 1..8192 are userspace integrity IDs, not TX mapping-attempt IDs; RX business correlation uses observed R27P headers.',
                 'Application logs prove bytes; cumulative counters prove all-TX standard-path totals; '
                 'retained 32 prove PTE/lifecycle relations.']}
     try:
@@ -165,9 +172,9 @@ def check(cap):
         A.need(0 < token < 0x80000000 and sh['token'] == bh['token'] == token,
                'inconsistent/non-low-half token')
         A.need(dh['devid'] == gh['bdf'] == sh['bdf'] == bh['bdf'], 'capture device association differs')
-        checks.append({'id': 'capture-ABI-domain3-native6-std5-rx1', 'state': 'ok'})
+        checks.append({'id': 'capture-ABI-domain3-native6-std5-rx2', 'state': 'ok'})
     except (A.Refused, OSError, ValueError, KeyError, IndexError, struct.error) as exc:
-        checks.append({'id': 'capture-ABI-domain3-native6-std5-rx1', 'state': 'FAIL', 'detail': str(exc)})
+        checks.append({'id': 'capture-ABI-domain3-native6-std5-rx2', 'state': 'FAIL', 'detail': str(exc)})
         return result()
 
     def driver_property(key, numeric=False):
@@ -238,7 +245,66 @@ def check(cap):
                    'peer echo was not paired with its validated receive')
         return {'requests': REQUEST_COUNT, 'groups': len(bursts()), 'groupSize': BURST, 'duplicates': 0,
                 'receiveOrder': 'permutation within each group only'}
-    run('full2048-bytes-no-retry-no-duplicate-credit', logs)
+    run('full8192-bytes-no-retry-no-duplicate-credit', logs)
+
+    def drain_tail():
+        observed = re.findall(r'^client_drain_observed t_ns=(\d+)$', client, re.M)
+        A.need(len(observed) == 1 and rh['tDisarmed'] <= int(observed[0]) <= rh['tLastRestore'],
+               'published drain observation missing/outside physical restore interval')
+        groups = {}
+        for text, names in ((client, ('client_tail_send', 'client_tail_recv')),
+                            (peer, ('peer_tail_recv', 'peer_tail_sent'))):
+            for name in names:
+                rows = {}
+                for line in text.splitlines():
+                    if not line.startswith(name + ' '):
+                        continue
+                    m = re.fullmatch(name + r' token=(0x[0-9a-fA-F]+) seq=(\d+) len=(\d+) '
+                                     r'sha256=([0-9a-f]{64}) payload=([0-9a-f]+)'
+                                     r'(?: payload_ok=(1))?(?: (?:from|to)=[^ ]+)? t(?:_ns)?=(\d+)', line)
+                    A.need(m is not None, 'malformed drain tail: ' + name)
+                    tok, seq, size = int(m[1], 16), int(m[2]), int(m[3])
+                    data, stamp = bytes.fromhex(m[5]), int(m[7])
+                    A.need(tok == token and 1 <= seq <= 4096 and seq not in rows and
+                           data == PROTOCOL.tail(token, seq) and len(data) == size and
+                           hashlib.sha256(data).hexdigest() == m[4], 'tail identity/bytes/hash differs')
+                    if name.endswith('recv'):
+                        A.need(m[6] == '1', 'tail receive not validated')
+                    if name.startswith('client_'):
+                        A.need(int(observed[0]) <= stamp and rh['tDisarmed'] <= stamp,
+                               'tail precedes published drain')
+                    rows[seq] = stamp
+                groups[name] = rows
+        sent, received = groups['client_tail_send'], groups['client_tail_recv']
+        A.need(sent and set(sent) == set(received) == set(groups['peer_tail_recv']) ==
+               set(groups['peer_tail_sent']) and set(sent) == set(range(1, len(sent) + 1)),
+               'missing/duplicate drain-tail exchange')
+        after_exit = re.findall(r'^client_after_exit resumed=1 t_ns=(\d+)$', client, re.M)
+        drain_checks = re.findall(r'^client_tail_drain_(ended|still_active) t_ns=(\d+)$', client, re.M)
+        A.need(len(after_exit) == 1 and min(sent.values()) <= rh['tLastRestore'] and
+               max(list(sent.values()) + list(received.values())) < int(after_exit[0]) and
+               sum(t > rb['tDrained'] for t in sent.values()) <= 16,
+               'tail did not begin during physical drain or extended beyond final burst/after-exit')
+        A.need(len(drain_checks) == (len(sent) + 15) // 16 and
+               all(kind == 'still_active' for kind, _ in drain_checks[:-1]),
+               'missing/repeated/intermediate drain-end observation')
+        for group, (_, stamp) in enumerate(drain_checks):
+            ids = range(group * 16 + 1, min((group + 1) * 16, len(sent)) + 1)
+            A.need(max(received[seq] for seq in ids) <= int(stamp) < int(after_exit[0]),
+                   'drain-state check precedes its completed burst')
+            if (group + 1) * 16 < len(sent):
+                A.need(int(stamp) <= sent[(group + 1) * 16 + 1], 'tail started next burst before drain-state check')
+        for seq in sent:
+            A.need(sent[seq] <= received[seq] and
+                   groups['peer_tail_recv'][seq] <= groups['peer_tail_sent'][seq], 'tail event order differs')
+        A.need(re.findall(r'^client_tail_summary .*$', client, re.M) ==
+               ['client_tail_summary sent=%d received=%d max=4096' % (len(sent), len(received))],
+               'drain-tail summary missing/inconsistent')
+        main_times = [int(t) for t in re.findall(r'^client_(?:sent|recv) .* t_ns=(\d+)$', client, re.M)]
+        A.need(len(main_times) == 2 * REQUEST_COUNT and main_times == sorted(main_times) and
+               max(main_times) <= int(observed[0]), 'main traffic timing overlaps drain tail')
+        return {'sent': len(sent), 'received': len(received), 'max': 4096}
+    run('published-drain-R28T-tail-integrity', drain_tail)
 
     def counters():
         A.need(mapped_total >= MIN_MAPPINGS, 'fewer than %d mapped ordinary TX frames' % MIN_MAPPINGS)
@@ -474,7 +540,7 @@ def check(cap):
         return {'before': len(before), 'during': len(during), 'after': len(after)}
     run('ordinary-traffic-before-during-and-three-after', ordinary)
     def rx_mappings():
-        A.need(P['m2-3h-rx-mode'] == 'standard-nonidentity-one-shot' and
+        A.need(P['m2-3h-rx-mode'] == 'standard-nonidentity-cyclic64' and
                P['m2-3h-rx-state'] == 'drained-and-unmapped' and
                P['m2-3h-rx-ready'] == 'no', 'RX run did not reach its released final state')
         A.need(rb['count'] == rb['mapCalls'] == rb['mapOk'] == rb['unmapCalls'] ==
@@ -509,7 +575,8 @@ def check(cap):
             A.need(r['flags'] == 31 and r['mapResult'] == r['unmapResult'] == 0 and
                    0 < P['m2-3e-t-translate-on'] <= r['tMapPublish'] <= r['tMapInv'] <= rb['tReady'] and
                    rb['tDrained'] <= r['tUnmapPublish'] <= r['tUnmapInv'] <=
-                   P['m2-3e-t-translate-off'], label + 'map/unmap confirmation or order differs')
+                   P['m2-3e-t-translate-off'] and r['tUnmapInv'] < P['m2-b2-t-recovery-start'],
+                    label + 'map/unmap confirmation or order differs')
             for key in ('mapCommand', 'unmapCommand'):
                 c = r[key]
                 A.need(c['expected'] > 0 and c['expected'] == c['observed'] and
@@ -545,8 +612,11 @@ def check(cap):
 
     def rx_completions():
         A.need(rh['state'] == 4 and rh['flags'] == 0 and rh['generation'] > 0 and rh['poolId'] > 0 and
-               rh['mapCount'] == rh['posted'] == rh['completed'] == rh['restored'] == RX_COUNT and
-               rh['pendingPosted'] == 0, 'RX64 driver did not post, complete, restore and release every spare')
+               rh['mapCount'] == rh['restored'] == RX_COUNT and
+               rh['posted'] == rh['completed'] >= 4 * RX_COUNT and
+               rh['posted'] == sum(w['postCount'] for w in rxwitnesses) and
+               rh['completed'] == sum(w['doneCount'] for w in rxwitnesses) and
+               rh['pendingPosted'] == 0, 'RX64 cumulative DMA counts or association restoration differs')
         A.need(0 < rh['tInstalled'] <= rb['tReady'] <= rh['tDisarmed'] <= rb['tDrained'] and
                rh['tLastRestore'] == max(w['tRestoreOwn'] for w in rxwitnesses) <= rb['tDrained'],
                'RX driver installation/drain/last-restore timestamps differ')
@@ -575,7 +645,7 @@ def check(cap):
                 A.need(tok == token and data == payload(token, req) and len(data) == int(match[3]) and
                        hashlib.sha256(data).hexdigest() == match[4], 'RX-correlated peer reply bytes differ')
                 peer_ids.add(req)
-        business = []
+        business, final_business = [], []
         for w in rxwitnesses:
             r = records[w['entryId']]
             label = 'RX completion entry %d: ' % w['entryId']
@@ -587,25 +657,53 @@ def check(cap):
                    w['tRestoreOwn'] <= rb['tDrained'] <= r['tUnmapPublish'] <= r['tUnmapInv'] and
                    P['m2-3e-t-gate-open'] <= w['tPost'],
                    label + 'map/post/DMA/restore/drain/unmap order differs')
-            A.need(not w['doneStatus'] & 0x80000000 and
-                   (w['doneStatus'] & 0x1fff) == w['doneLength'] and
-                   0 < w['doneLength'] <= RX_CAPACITY, label + 'hardware completion status/length differs')
-            if w['token'] or w['reqId']:
-                req = w['reqId']
-                A.need(w['token'] == token and req in REQUESTS and req in sends and req in replies and req in peer_ids,
-                       label + 'observed R27P reply is absent from application logs')
-                # Observer accepts Ethernet/IPv4 IHL5/UDP only. The descriptor
-                # length includes Ethernet + IPv4 + UDP + four FCS bytes.
-                A.need(w['doneLength'] == len(payload(token, req)) + 46 and
-                       sends[req] <= w['tDone'] <= replies[req],
-                       label + 'R27P payload/frame/FCS length or delivery order differs')
-                business.append(req)
-        A.need(business and len(set(business)) == len(business),
-               'no unique observed R27P completion is correlated to the userspace byte logs')
-        return {'posted': RX_COUNT, 'completed': RX_COUNT, 'restored': RX_COUNT, 'pending': 0,
-                'businessCompletions': len(business), 'applicationRequests': sorted(business),
-                'correlation': 'observed IPv4/UDP R27P run-token+req, descriptor length incl FCS, client+peer bytes',
-                'scope': '64 one-shot spare buffers; not general RX allocation/recycling'}
+            A.need(w['postCount'] == w['doneCount'] >= 4 and
+                   w['reuseCount'] == w['postCount'] - 1 and w['sampleCount'] == 4,
+                   label + 'cyclic counts differ')
+            A.need(w['tPost'] == w['samples'][0]['tPost'] and
+                   w['samples'][-1]['tDone'] <= w['tLastDone'] == w['tDone'] and
+                   w['tLastPost'] <= rh['tDisarmed'] < w['tRestoreOwn'] and
+                   w['tLastPost'] < w['tLastDone'] < w['tRestoreOwn'],
+                   label + 'first/final cycle or disarm/restore order differs')
+            previous = r['tMapInv']
+            for cycle, sample in enumerate(w['samples'], 1):
+                A.need(sample['cycle'] == cycle and sample['flags'] == 3 and
+                       previous < sample['tPost'] < sample['tDone'],
+                       label + 'sample identity/flags/time order differs')
+                previous = sample['tDone']
+            if w['postCount'] == 4:
+                last = w['samples'][-1]
+                A.need(w['tLastPost'] == last['tPost'] and all(w[k] == last[k] for k in
+                       ('tDone', 'token', 'reqId', 'doneLength', 'doneStatus')),
+                       label + 'final witness is inconsistent with fourth sample')
+            else:
+                A.need(previous < w['tLastPost'], label + 'final reuse precedes retained cycles')
+            for sample in w['samples'] + [w]:
+                A.need(not sample['doneStatus'] & 0x80000000 and
+                       (sample['doneStatus'] & 0x1fff) == sample['doneLength'] and
+                       0 < sample['doneLength'] <= RX_CAPACITY,
+                       label + 'hardware completion status/length differs')
+                if sample['token'] or sample['reqId']:
+                    req = sample['reqId']
+                    A.need(sample['token'] == token and req in REQUESTS and req in sends and
+                           req in replies and req in peer_ids,
+                           label + 'observed R27P reply is absent from application logs')
+                    A.need(sample['doneLength'] == len(payload(token, req)) + 46 and
+                           sends[req] <= sample['tDone'] <= replies[req],
+                           label + 'R27P frame/FCS length or delivery order differs')
+                    if sample is not w:
+                        business.append(req)
+                    elif w['postCount'] > 4:
+                        final_business.append(req)
+        A.need(business and len(set(business + final_business)) == len(business + final_business),
+               'no unique sampled R27P completions correlate to userspace logs')
+        return {'posted': rh['posted'], 'completed': rh['completed'], 'restored': RX_COUNT, 'pending': 0,
+                'sampledCompletions': RX_COUNT * 4,
+                'businessCompletions': len(business), 'nonBusinessSamples': RX_COUNT * 4 - len(business),
+                'additionalFinalBusinessCompletions': len(final_business),
+                'applicationRequests': sorted(business),
+                'correlation': 'first four cycles per association and final completion; R27P token+ID and FCS length',
+                'scope': '64 cyclic spare associations; first four cycles retained, cumulative DMA totals'}
     run('rx64-real-DMA-restoration-and-application-correlation', rx_completions)
     return result()
 

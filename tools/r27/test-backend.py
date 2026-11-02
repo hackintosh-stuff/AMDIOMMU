@@ -151,6 +151,12 @@ struct Fixture {
 };
 
 static void normalBatch() {
+    static_assert(r27rx::kVersion == 2, "Round28 RX ABI2");
+    static_assert(sizeof(r27rx::Cycle) == 40, "first four cycle samples");
+    static_assert(sizeof(r27rx::Witness) == 272, "cyclic witness");
+    static_assert(sizeof(r27rx::Snapshot) == 19536, "driver snapshot");
+    static_assert(sizeof(r27rx::Request) == 21632, "control request");
+    static_assert(sizeof(r27rx::BackendSnapshot) == 12864, "backend unchanged");
     Fixture f;
     for(unsigned i=0;i<r27rx::kCount;++i) {
         assert(f.self.r27RxCandidate(&f.memory[i],&f.command[i]));
