@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.example.round11load</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>/Users/ling/r11work/tools/round11-load.sh</string>
+		<string>/Users/ling/r11load</string>
+		<!-- the TARGET device: RTL8127, MAC 1c:86:0b:3b:0b:bd.
+		     Round 9 used en0 here, which is a DIFFERENT NIC, and the
+		     report still called the result "the controlled chain". -->
+		<string>en2</string>
+		<!-- the peer is the Windows machine, reached over the SAME link
+		     that carries en2. Verified end to end before this run: a
+		     datagram from 192.168.50.216 (en2) to 192.168.50.122 was
+		     echoed and logged by the peer. -->
+		<string>192.168.50.122</string>
+		<string>9110</string>
+		<!-- start 38 s after boot, in MACH seconds.
+		     Round 10 measured the window as [37.84, 40.84] s mach time
+		     and the client spreads 4 requests over ~0.9 s, so 38 puts
+		     all of them inside with ~2 s of margin at the end. This
+		     number is NOT wall-clock seconds: round 10's first attempts
+		     used wall seconds and landed 6 s after the window closed. -->
+		<string>38</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/ling/r11load/launchd.out</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/ling/r11load/launchd.err</string>
+</dict>
+</plist>

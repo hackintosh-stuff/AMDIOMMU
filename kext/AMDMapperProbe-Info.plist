@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>English</string>
+    <key>CFBundleExecutable</key><string>AMDMapperProbe</string>
+    <key>CFBundleIdentifier</key><string>org.example.AMDMapperProbe</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>AMDMapperProbe</string>
+    <key>CFBundlePackageType</key><string>KEXT</string>
+    <key>CFBundleShortVersionString</key><string>0.35.0</string>
+    <key>CFBundleVersion</key><string>0.35.0</string>
+    <!--
+      版本历史：
+        0.35.0 M2-3g 第26轮：.std.alltx 窗口内全部 TX 使用标准映射；
+               token 只标识运行，req 为内部映射序号。保留四槽与32条历史。
+        0.1.0  M1-A：只验证 copyMapperForDevice(自己) 能否返回本 mapper。
+        0.2.0  M1-B/B1：给真实设备 IOMA（pci1022,1481）设 iommu-parent 并验证。
+        0.3.0  B1 修正：fromPath + 严格 IOName 校验。
+        0.4.0  B2-0：自有 buffer 观察 iovmMapMemory 调用契约。
+        0.5.0  B2-a：实现物理连续单段的恒等映射，并验证碎片被拒。
+        0.6.0  B2-b：支持真实网卡（RTL8127），映射表 + amdiommu=arm 闸门。
+        0.7.0  B2-b 修正：用 gIOFirstPublishNotification 消除注入竞态。
+        0.8.0  M2-0b：只读 PCI 配置空间，取 IOMMU capability 里的 BAR，
+               与 IVRS base / DSDT _CRS 交叉验证。全部只读，不碰 MMIO。
+        0.9.0  M2-1：只读 MMIO 探测。boot-arg amdiommu=mmio 门控，
+               默认完全不执行；开启后只读 EFR 与已知值比对，
+               不匹配立即停止，不写任何寄存器。
+        0.10.0 M2-2a-1：最小 MMIO 写测试。boot-arg amdiommu=write 门控。
+               只写 DEV_TABLE 寄存器一次标记值、读回、立即恢复原值，
+               并确认 CONTROL 未被改变。不使能 IOMMU、不发命令。
+        0.11.0 M2-2a-2：建设备表（不使能）。boot-arg amdiommu=table 门控。
+               分配物理连续内存、全填直通 DTE、写 DEV_TABLE 基址寄存器、
+               确认 CONTROL 未变、恢复原值。IOMMU 始终关闭。
+        0.12.0 M2-2a-3：短窗口使能测试。boot-arg amdiommu=enable 门控。
+               完整走 Linux early_enable_iommu() 序列：设备表 + 命令缓冲 +
+               CMDBUF_EN + IOMMU_EN，读 STATUS 后**立即禁用**，
+               再恢复全部寄存器。窗口极短，用于验证使能动作本身是否安全。
+        0.13.0 M2-2b-1：命令通道验证。boot-arg amdiommu=cmd 门控。
+               三块内存（设备表 / 命令缓冲 / 完成信号 cmd_sem），
+               发一条 CMD_COMPL_WAIT 并轮询 cmd_sem 确认硬件真的执行了。
+               仍是短窗口：使能 → 发命令 → 轮询 → 立即禁用。
+        0.24.0 M2-2b-2 第九轮：驱动侧记录取代读环作为主证据。
+                第八轮的读环方案有三个它自己承认不了的限制：读到的字节
+                无法证明属于同一代次（只有冻结的 tailAfter，槽位在边界
+                采样后被复用看不出来）；寄存器写着某个地址不证明那块
+                内存对象还活着；TSO 段的真实长度在描述符里根本不存在。
+                现在驱动在自己的提交点/完成点记录元数据，并把一段后缀
+                复制进 IORegistry 属性——探针读到的是驱动**仍然持有的
+                对象**的副本，不解引用任何物理地址，配对按驱动自己算的
+                累计索引（与硬件关闭指针同源）进行。
+                同时修正扫描与记账：窗口扫描有明确上限并记录停止原因
+                （异常大的差值不再变成 2^31 次内核循环）；窗口记录使用
+                独立容量，不再与几千条历史快照争用；扫描质量（提前停止、
+                记录丢失、长度不可解码、槽位覆盖）会撤回覆盖资格，而不
+                只是显示在旁边；"完成数 > 提交数"在窗口开始时有在途项
+                的情况下是合法的，不再被判为错误。
+                时间边界：后置关闭指针采样移进窗口**内部**（第八轮是包
+                住窗口，跨度 3.00785 秒对窗口 3.00018 秒）；翻译生效起点
+                改为两条失效命令都收到完成之后。
+        0.23.0 M2-2b-2 第八轮：把生产观测流程真正接通。
+               第七轮的 txSlotLifecycle() 存在、也有回归，但**生产从未
+               调用它**：m2b2CollectTxSegments() 收下 tailCum/cloCum 后
+               直接 (void) 掉，只要能读到关闭指针就把所有非零 TX 地址标
+               成 in-flight。第七轮采集里 tail = clo = 0x6a（队列已排空），
+               却仍把每条历史地址报成 in-flight。
+               现在由 scanTxWindow() 按 [tailBefore, tailAfter) 逐个累计
+               索引走表，每条描述符带自己的槽位、代次、地址、长度与完成
+               状态；正的关闭指针增量可以落到具体槽位/代次/地址/长度。
+               同时修正：快照命中不再被报成"已完成区间"；快照里的间隙
+               不再被当成窗口里的间隙；覆盖改为逐路径记录（TX 整窗覆盖
+               不等于 RX 整窗覆盖）；读环内存新增内容指纹（RX 最后一槽
+               的 RingEnd、TX 地址/长度自洽），寄存器自报不再是唯一依据；
+               边界采样与环扫描分离，扫描不再夹在两次关闭指针采样之间。
+        0.22.1 M2-2b-2 第七轮修正 2：readVerdict 不能用于设备自报地址。
+               0.22.0 把 layoutKnown=false 的严格判据套到环基址上，于是
+               环一个字节都读不到：tx-slots=0、raw-offered=0、
+               unscanned=0x800——记录是对的，但观测完全无用。设备自报
+               地址（驱动写进去、硬件正在用）与描述符里的任意值安全性质
+               不同，前者只需检查映射上限与 MMIO 空洞。
+        0.22.0 M2-2b-2 第七轮修正：地址记录不再受恒等映射上限过滤
+               （记录与解引用彻底分开）；insertCoalesced 插满后仍继续
+               更新包络（第六轮提前 break，导致 txdesc4/5 落在自己声明的
+               envelope-hi 之外）；五类计数分开不再重复计数；描述符按
+               实际格式记录地址+长度；生命周期由驱动的累计提交/关闭指针
+               推导，不再一律标 live；关闭指针寄存器由 TxConfig 推导而非
+               候选选举，差值按 MaxTxDescPtrMask=0x7FFFFFFF 计算而非
+               1024 取模（1000->2024 应为 1024 而非 0）；控制分支必须有
+               实际完成状态；页表路径逐级真读并导出表物理地址/表级/索引。
+        0.21.7 M2-2b-2 第六轮修正：设备 DMA 观察改为按 BAR 寄存器取内存
+               （getDeviceMemoryWithRegister），而不是按数组索引——后者
+               会读到错误的 MMIO 区域。新增寄存器可信性判定。
+        0.21.0 M2-2b-2 第六轮：设备 DMA 观察（只读读 TX/RX 环与描述符）、
+               fault 归属分类、pgtsleep 判定优先级修正、窗口结构移出栈。
+        0.20.0 M2-2b-2：4 级恒等页表 + 单设备 DTE 切换。boot-arg amdiommu=pgt 门控。
+               建 4 级页表（2 MiB 大页恒等映射全部 16 GiB RAM）、开事件日志、
+               使能、CMD_INV_ALL、把 RTL8127 的 DTE 从直通改成翻译、
+               INV_DEV_ENTRY + INV_IOMMU_PAGES、观察 2 秒事件日志、
+               再把 DTE 改回直通并恢复全部寄存器。
+
+        0.27.0 M2-3b 第十七轮：原生 mbuf 的非恒等 TX 映射与逐包回收。
+                不再使用 staging 拷贝：直接把报文自己的 physical segments
+                交给映射后端，保持每段长度、顺序与页内偏移，描述符使用
+                返回的非恒等 IOVA。每个请求在硬件完成与撤图失效之后立即
+                释放自己的 mbuf 并允许复用 IOVA/页槽，不再累积到 Detach。
+                有限的是证据数组（32 代）与命令预算（160 次提交），
+                不是 DMA 持有者；预算不足时明确拒绝且不留下映射。
+                新增提交/完成交接状态（kPosting/kSubmitted/kPending），
+                使极快 completion 不能跨代读写同一份 witness。
+
+        0.28.0 M2-3c 第十八轮：标准 IOMapper / IODMACommand 接入真实 TX。
+                驱动为每个报文建立 IOMemoryDescriptor，并用探针自身的
+                IOMapper（非 system mapper）构造 IODMACommand；由 IOKit 在
+                prepare() 内实际调用 iovmMapMemory() 生成非恒等 IOVA，
+                描述符使用该 IOVA；complete() 由框架实际调用
+                iovmUnmapMemory() 完成撤图与失效，之后才释放 descriptor、
+                command 与 mbuf。只支持单段物理连续的报文布局，其余在
+                prepare() 之前明确拒绝。同时修正退休定时器的主动收割：
+                先非阻塞取得 __POLLING，占用时跳过，释放后再做 retire 与
+                IOMMU 失效等待。
+
+      匹配 IOResources 而非任何 PCI 设备。IOResources 是全局资源节点、不持有 DMA，
+      因此即使本 mapper 的 iovm* 全部返回失败，也没有设备会因此受损。
+    -->
+    <key>IOKitPersonalities</key>
+    <dict>
+        <key>AMDMapperProbe</key>
+        <dict>
+            <key>CFBundleIdentifier</key><string>org.example.AMDMapperProbe</string>
+            <key>IOClass</key><string>org_example_AMDMapperProbe</string>
+            <key>IOMatchCategory</key><string>AMDMapperProbe</string>
+            <key>IOProviderClass</key><string>IOResources</string>
+            <key>IOResourceMatch</key><string>IOKit</string>
+        </dict>
+    </dict>
+    <key>OSBundleLibraries</key>
+    <dict>
+        <key>com.apple.kpi.iokit</key><string>25.0.0</string>
+        <key>com.apple.kpi.libkern</key><string>25.0.0</string>
+        <key>com.apple.kpi.mach</key><string>25.0.0</string>
+        <key>com.apple.kpi.bsd</key><string>25.0.0</string>
+        <!--
+          0.8.0 新增：直接依赖 IOPCIFamily。
+
+          为什么必须显式声明（这是 0.8.0 部署时踩到的真实问题）：
+            M2-0b 用 OSDynamicCast(IOPCIDevice, fTarget)，而 OSDynamicCast
+            展开成 OSMetaClassBase::safeMetaCast(inst, OSTypeID(IOPCIDevice))，
+            其中 OSTypeID(T) = T::metaClass —— 这会**引用**
+            IOPCIDevice::metaClass 这个符号。
+
+            kmutil 报：
+              Failed to bind '__ZN11IOPCIDevice9metaClassE' ... as could not
+              find a kext which exports this symbol
+
+            但该符号其实存在于 IOPCIFamily 的导出表里（已核实）。原因是
+            探针的 OSBundleLibraries 只列了 kpi.* 系列，没有声明对
+            IOPCIFamily 的依赖，于是 AuxKC 链接时不知道去哪儿找它。
+
+          版本号 2.9 与实测的运行版本一致（kmutil showloaded 显示
+          com.apple.iokit.IOPCIFamily (2.9)）。
+        -->
+        <key>com.apple.iokit.IOPCIFamily</key><string>2.9</string>
+    </dict>
+</dict>
+</plist>

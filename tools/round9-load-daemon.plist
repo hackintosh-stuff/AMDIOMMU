@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.example.round9load</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>/Users/ling/r9work/tools/round9-load.sh</string>
+		<string>/Users/ling/r9load</string>
+		<string>en0</string>
+		<string>192.168.50.122</string>
+		<string>9109</string>
+		<!-- start 30 s after boot: the probe's window opens at ~37 s -->
+		<string>30</string>
+		<!-- keep sending for 20 s: covers the whole 3 s window -->
+		<string>20</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/ling/r9load/launchd.out</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/ling/r9load/launchd.err</string>
+</dict>
+</plist>
