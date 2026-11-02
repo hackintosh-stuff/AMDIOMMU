@@ -292,8 +292,9 @@ bool RTL8125::r27RxActive()
 
 bool RTL8125::r27RxParse(mbuf_t packet, UInt32 *token, UInt32 *reqId)
 {
-    /* Observe ordinary R27P UDP replies only.  These bytes never select a DMA
-     * mapping: replacement and restoration cover non-business RX as well. */
+    /* Observe ordinary R27P replies and the finite R29D tail-finished echo.
+     * Neither header selects a DMA mapping. R29D is accepted only after all
+     * spare bindings have been released back to the ordinary RX ring. */
     if (!r15Pool || !r15Pool->rx27.version || !packet || !token || !reqId)
         return false;
     UInt8 h[54]; UInt32 have = 0;
@@ -308,13 +309,23 @@ bool RTL8125::r27RxParse(mbuf_t packet, UInt32 *token, UInt32 *reqId)
     const UInt32 ipLength = ((UInt32)h[16] << 8) | h[17];
     const UInt32 udpLength = ((UInt32)h[38] << 8) | h[39];
     if (ipLength < 40 || udpLength < 20 || udpLength != ipLength - 20 ||
-        ipLength + 14 > (UInt32)mbuf_pkthdr_len(packet) ||
-        h[42] != 'R' || h[43] != '2' || h[44] != '7' || h[45] != 'P') return false;
+        ipLength + 14 > (UInt32)mbuf_pkthdr_len(packet)) return false;
     const UInt32 t = ((UInt32)h[46] << 24) | ((UInt32)h[47] << 16) |
                      ((UInt32)h[48] << 8) | h[49];
     const UInt32 r = ((UInt32)h[50] << 24) | ((UInt32)h[51] << 16) |
                      ((UInt32)h[52] << 8) | h[53];
     if (!t || !r) return false;
+    if (h[42] == 'R' && h[43] == '2' && h[44] == '9' && h[45] == 'D') {
+        r27rx::Snapshot &s = r15Pool->rx27;
+        if (ipLength == 40 && udpLength == 20 &&
+            s.state == r27rx::kReleased && !s.flags && !s.pendingPosted &&
+            !r15Pool->rx27BindingsHeld && t == s.businessToken &&
+            r <= r27rx::kTailMax && !s.tailSeq)
+            s.tailSeq = r;
+        return false;
+    }
+    if (h[42] != 'R' || h[43] != '2' || h[44] != '7' || h[45] != 'P')
+        return false;
     *token = t; *reqId = r;
     return true;
 }

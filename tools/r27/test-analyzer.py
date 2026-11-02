@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Focused Round28 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round29 analyzer fixture; synthetic evidence is not hardware evidence.
 
-Actual C++ headers generate native6/std5/domain3 and both new RX snapshots.
+Actual C++ headers generate native7/std5/domain3 and both new RX snapshots.
 Real Round28 client/peer code generates the 8192 ordinary application logs.
 The positive fixture covers all 64 RX map/post/done/restore/unmap lifecycles,
 including one matched business receive, and both aligned/unaligned RX pages.
@@ -35,7 +35,7 @@ legacy = analyzer.A
 
 TOKEN = 7
 PEER = ('127.0.0.2', 9110)
-ABI_CHECK = 'capture-ABI-domain3-native6-std5-rx2'
+ABI_CHECK = 'capture-ABI-domain3-native7-std5-rx3'
 COUNTER_CHECK = 'all-TX-standard-mode2-cumulative-and-unmarked-no-cover'
 LOG_CHECK = 'full8192-bytes-no-retry-no-duplicate-credit'
 CMD_CHECK = 'original8192-command-ring-wraps-and-postwrap-completion'
@@ -179,7 +179,7 @@ int main(int argc, char **argv) {
     rx.state = r27rx::kReleased; rx.generation = 1; rx.poolId = 0x275200;
     rx.mapCount = rx.restored = r27rx::kCount;
     rx.posted = rx.completed = 4 * r27rx::kCount;
-    rx.businessToken = 7; rx.tInstalled = 400; rx.tDisarmed = 8800;
+    rx.businessToken = 7; rx.tailSeq = 4; rx.tInstalled = 400; rx.tDisarmed = 8800;
     rx.tLastRestore = 8864;
     rb.version = r27rx::kVersion; rb.bytes = sizeof(rb);
     rb.count = rb.mapCalls = rb.mapOk = rb.unmapCalls = rb.unmapOk = r27rx::kCount;
@@ -237,7 +237,12 @@ def properties():
     p = {'m2-3c-mode': 'standard-iomapper', 'm2-3g-mode': 'all-standard',
          'm2-3h-rx-mode': 'standard-nonidentity-cyclic64',
          'm2-3h-rx-state': 'drained-and-unmapped', 'm2-3h-rx-ready': 'no',
-         'm2-b2-t-recovery-start': 9000, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0}
+         'm2-b2-t-recovery-start': 9023, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0,
+         'm2-3i-tail-state': 'confirmed', 'm2-3i-tail-seq': 4,
+         'm2-3i-tail-confirmed-time': 8980, 'm2-3i-exit-retire-confirmed-time': 9022,
+         'm2-3i-exit-driver-live': 0, 'm2-3i-exit-driver-held': 0,
+         'm2-3i-exit-driver-mapped': 10240, 'm2-3i-exit-driver-retired': 10240,
+         'm2-3b-slots-live': 0}
     for key in ('m2-3c-map-calls', 'm2-3c-map-ok', 'm2-3c-unmap-ok',
                 'm2-3b-map-accepted', 'm2-3b-retires'):
         p[key] = 10240
@@ -353,6 +358,13 @@ def real_logs(client_reorder=True, peer_reorder=True):
                            'peer_tail_sent ' + evidence + ' to=127.0.0.1:10000 t=%d' % (seq + 1)])
     client_lines.append('client_tail_drain_ended t_ns=8815')
     client_lines.append('client_tail_summary sent=4 received=4 max=4096')
+    data = protocol.tail_done(TOKEN, 4)
+    evidence = 'token=0x%08x seq=4 len=%d sha256=%s payload=%s' % (
+        TOKEN, len(data), hashlib.sha256(data).hexdigest(), data.hex())
+    client_lines.extend(['client_tail_done_send ' + evidence + ' t_ns=8970',
+                         'client_tail_done_recv ' + evidence + ' payload_ok=1 t_ns=9010'])
+    peer_lines.extend(['peer_tail_done_recv ' + evidence + ' payload_ok=1 from=127.0.0.1:10000 t=40',
+                       'peer_tail_done_sent ' + evidence + ' to=127.0.0.1:10000 t=41'])
     client_lines.append('client_after_exit resumed=1 t_ns=9100')
     return '\n'.join(client_lines) + '\n', '\n'.join(peer_lines) + '\n'
 
@@ -413,7 +425,7 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(protocol.MAGIC, b'R27P')
         self.assertNotIn(protocol.payload(TOKEN, 1)[:4], (b'IOB1', b'1BOI'))
         report = self.expect(True)
-        self.assertEqual(len(report['checks']), 12)
+        self.assertEqual(len(report['checks']), 13)
         by_id = {c['id']: c.get('detail') for c in report['checks']}
         self.assertEqual(by_id[COUNTER_CHECK]['mode'], 2)
         self.assertEqual((by_id[COUNTER_CHECK]['Mapped'], by_id[COUNTER_CHECK]['Unmarked']), (10240, 10240))
@@ -475,7 +487,7 @@ class AnalyzerTests(unittest.TestCase):
 
     def test_unmaps_must_complete_before_recovery(self):
         path = self.capture / 'props.txt'
-        path.write_text(path.read_text().replace('0x2328', '0x22c4'))
+        path.write_text(re.sub(r'("m2-b2-t-recovery-start" = )"[^"]+"', r'\1"0x22c4"', path.read_text()))
         self.expect(False, RX_MAP_CHECK)
 
     def test_cyclic_identity_counts_flags_and_order_corruption(self):

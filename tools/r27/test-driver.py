@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile and exercise the actual generated round28 cyclic RX methods.
+"""Compile and exercise the actual generated round29 cyclic RX methods.
 
 This is one RX ownership/lifecycle check, not a replay of previous rounds.
 --source additionally checks the newly generated Lucy call sites, and uses its
@@ -150,7 +150,7 @@ struct Fixture {
 };
 
 int main() {
-    static_assert(r27rx::kVersion==2 && sizeof(r27rx::Cycle)==40);
+    static_assert(r27rx::kVersion==3 && sizeof(r27rx::Cycle)==40);
     static_assert(sizeof(r27rx::Witness)==272 && offsetof(r27rx::Witness,tLastPost)==80);
     static_assert(offsetof(r27rx::Witness,samples)==112);
     static_assert(sizeof(r27rx::Snapshot)==19536 && sizeof(r27rx::Request)==21632);
@@ -273,8 +273,15 @@ int main() {
         assert(f.d.r27RxParse(&m,&token,&req) && token==0x27abcd && req==1025);
         m.bytes[45]='X'; token=req=0;
         assert(!f.d.r27RxParse(&m,&token,&req) && !token && !req);
+        // The actual normal receive parser sees the done echo after kRelease.
+        m.len=m.pktlen=54; m.bytes[17]=40; m.bytes[39]=20;
+        std::memcpy(m.bytes+42,"R29D",4); m.bytes[52]=0; m.bytes[53]=16;
+        f.op(r27rx::kDrain); f.op(r27rx::kRelease);
+        assert(f.d.r15Pool->rx27.state==r27rx::kReleased);
+        assert(!f.d.r27RxParse(&m,&token,&req) && !token && !req);
+        assert(f.d.r15Pool->rx27.tailSeq==16);
     }
-    std::puts("R28 RX: same 64 objects, 5 cumulative DMA cycles, first4 samples; disarm/drain physical-OWN detach; wrong-address/copy-error stop; owner hold; R27P observation; v2 ABI PASS");
+    std::puts("R29 RX: same 64 objects, 5 cumulative DMA cycles, first4 samples; physical-OWN restore; R27P observation; R29D only after release; v3 ABI PASS");
 }
 '''
 

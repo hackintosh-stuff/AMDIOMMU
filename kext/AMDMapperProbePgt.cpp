@@ -208,13 +208,6 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     const char *firstFailStage = nullptr;
     const char *firstFailReason = nullptr;
 
-    // Round22: did the device table entry actually get switched to our page
-    // table? This decides what the failure path is allowed to do. If it did,
-    // the table is live and may only be freed after the DTE is restored and
-    // read back; if it did not, there is nothing to protect and the IOMMU
-    // programming must still be restored.
-    bool dteFlipped = false;
-
     setProperty("m2-b2-pre-window-ran", "no");
     setProperty("m2-b2-main-window-ran", "no");
 
@@ -1018,7 +1011,6 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         setHexProperty(this, "m2-b2-dte-domid", dte[tgt * 4 + 1]);
         setProperty("m2-b2-dte", "switched-to-translation");
         OSSynchronizeIO();
-        dteFlipped = true;
         // 【第九轮】DTE 写入完成的时刻。这只是"写下去了"，不等于翻译已生效：
         // 失效命令还没提交，TLB 里可能仍是旧表项。真正的生效起点在
         // 第 15 步两条失效命令都收到完成之后记为 tInvComplete。
@@ -2063,6 +2055,13 @@ recover:
         r17Export(&ctx);
         return;
     }
+    if (!r29WaitTailDone(5000)) {
+        setProperty("m2-3b-cleanup", "PINNED-tail-no-DTE-restore");
+        setProperty("m2-b2-verdict", "INVALID-tail-not-confirmed");
+        setProperty("m2-b2-stage", "17e-pinned-tail");
+        r17Export(&ctx);
+        return;
+    }
     // ---- 第 17e 步：退出窗口的前半段（round22）----
     //
     // 【顺序】停止接纳 → 等已获准的提交写完 OWN → 排空硬件持有的 TX →
@@ -2079,18 +2078,12 @@ recover:
         // 退出记录就在这一步取：排空成功与否都要取，失败时记录里的占用
         // 正是"为什么被钉住"的证据。
         r17SampleExit(r20tx::kStageExit);
-        if (!stopped && dteFlipped) {
+        if (!stopped) {
             setProperty("m2-3b-cleanup", "PINNED-outstanding-no-DTE-restore");
             setProperty("m2-b2-verdict", "INVALID-TX-outstanding-pinned");
             setProperty("m2-b2-stage", "17e-pinned-outstanding");
             r17Export(&ctx);
             return;
-        }
-        if (!stopped) {
-            // DTE 从未切换：翻译不是本次实验装的，没有需要保护的表。仍然
-            // 必须把 IOMMU 编程还原（它指向我们的命令缓冲/设备表），所以
-            // 继续走第 18 步；只是把"没排空"这件事记下来。
-            setProperty("m2-3e-exit-drain", "TIMEOUT-before-dte-flip");
         }
     }
     // ---- 第 18 步：恢复（状态机，任何一步失败都阻止释放）----

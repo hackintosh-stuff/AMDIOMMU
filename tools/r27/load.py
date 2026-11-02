@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round28 ordinary UDP load: 8192 requests in 512 send-all-16/receive groups.
+"""Round29 ordinary UDP load: 8192 requests in 512 send-all-16/receive groups.
 Wait for 64 persistent RX mappings, then drive cyclic DMA and bounded drain.
 Only a fresh all-standard window permits the batch; never retransmit requests.
 """
@@ -10,7 +10,8 @@ import socket
 import subprocess
 import time
 from protocol import (REQUESTS, SEED, bursts, evidence, identify,
-                      length_of, ordinary, payload, tail, tail_identify, TAIL_MAX)
+                      length_of, ordinary, payload, tail, tail_identify,
+                      tail_done, tail_done_identify, TAIL_MAX)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,6 +33,7 @@ def drain_tail(s, peer, token, emit):
     """Bounded, separate nonbusiness tail; no retransmission or main-ID credit."""
     emit('client_drain_observed t_ns=%d' % now())
     sent = received = 0
+    released = False
     deadline = time.monotonic() + 12
     s.settimeout(.25)
     while sent < TAIL_MAX and time.monotonic() < deadline:
@@ -66,11 +68,47 @@ def drain_tail(s, peer, token, emit):
         props = command('ioreg', '-l', '-w0', '-r', '-c',
                         'org_example_AMDMapperProbe', required=False)
         if '"m2-3h-rx-state" = "draining"' not in props:
-            emit('client_tail_drain_ended t_ns=%d' % now())
+            released = '"m2-3h-rx-state" = "drained-and-unmapped"' in props
+            if released:
+                emit('client_tail_drain_ended t_ns=%d' % now())
             break
         emit('client_tail_drain_still_active t_ns=%d' % now())
     emit('client_tail_summary sent=%d received=%d max=%d' % (sent, received, TAIL_MAX))
-    return sent > 0 and sent == received
+    if not released or sent == 0 or sent != received:
+        return False
+
+    # The RX release and tail-wait properties are published separately. All
+    # issued tail echoes are already received; send no more tail batches.
+    wait_end = min(deadline, time.monotonic() + 1)
+    while '"m2-3i-tail-state" = "waiting"' not in props and time.monotonic() < wait_end:
+        time.sleep(.02)
+        props = command('ioreg', '-l', '-w0', '-r', '-c',
+                        'org_example_AMDMapperProbe', required=False)
+    remaining = deadline - time.monotonic()
+    if ('"m2-3h-rx-state" = "drained-and-unmapped"' not in props or
+            '"m2-3i-tail-state" = "waiting"' not in props or remaining <= 0):
+        return False
+
+    # One terminal echo closes the real tail before the probe closes TX.
+    data = tail_done(token, sent)
+    s.settimeout(min(1, remaining))
+    before = now()
+    if s.sendto(data, peer) != len(data):
+        raise RuntimeError('short tail termination send')
+    emit('client_tail_done_send token=0x%08x seq=%d %s t_ns=%d' %
+         (token, sent, evidence(data), before))
+    try:
+        echoed, source = s.recvfrom(8192)
+    except socket.timeout:
+        emit('client_tail_done_timeout token=0x%08x seq=%d t_ns=%d' %
+             (token, sent, now()))
+        return False
+    ident = tail_done_identify(echoed)
+    seq = ident[1] if ident else 0
+    ok = source == peer and ident == (token, sent) and echoed == data
+    emit('client_tail_done_recv token=0x%08x seq=%d %s payload_ok=%d t_ns=%d' %
+         (token, seq, evidence(echoed), int(ok), now()))
+    return ok
 
 
 def boot_ticks():
@@ -225,7 +263,7 @@ def ord_probe(s, peer, seq, emit, tag):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('out', nargs='?', default='runs/r28')
+    ap.add_argument('out', nargs='?', default='runs/r29')
     ap.add_argument('--iface', default='en2')
     ap.add_argument('--peer', default='192.168.50.122')
     ap.add_argument('--port', type=int, default=9110)
@@ -240,7 +278,7 @@ def main():
     if int((out / 'batch.txt').read_text().strip()) != 512:
         raise ValueError('round27 keeps the kernel declaration batch512')
     if int((out / 'requests.txt').read_text().strip()) != len(REQUESTS):
-        raise ValueError('round28 requires 8192 application requests')
+        raise ValueError('round29 requires 8192 application requests')
     payload(token, 1)
     with (out / 'load.txt').open('w') as f:
         def log(line):

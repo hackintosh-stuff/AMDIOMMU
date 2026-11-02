@@ -45,6 +45,14 @@ static IOReturn backend(void *, uint32_t op, r17tx::Request *r)
         r->tRetire = mach_absolute_time();
         return 0;
     }
+    if (op == r17tx::kRetireAck) {
+        stdAckCalls++;
+        auto record = stdConfirmedRetires.find(r->handle);
+        if (!r->handle || r->bdf != 0x2500 || r->token != 7 ||
+            record == stdConfirmedRetires.end()) return kIOReturnNotReady;
+        r->tRetire = record->second;
+        return kIOReturnSuccess;
+    }
     maps++;
     if (mapMode == 1) return 99;
     UInt64 at = 0;
@@ -1351,6 +1359,43 @@ int main(void)
         d.r17TxStop();
         printf("round26: ordinary all-standard TX, four-slot resume, detach output passed\n");
     }
+
+    /* Round29: an empty hardware ring is not an empty driver. The real
+     * completion path still owns one generation until the timer completes the
+     * standard command AND reads its backend-confirmed retirement record. */
+    {
+        IOService owner; RTL8125 d; IOTimerEventSource timer; IOMapper mapper;
+        installMode(d, owner, r17tx::kModeAllStandard, &mapper);
+        auto *p = d.r17Tx;
+        Mbuf m; m.parsed = false;
+        IOPhysicalSegment seg[1] = {{m.pa, m.len}};
+        const int complete0 = stdCompleteCalls, ack0 = stdAckCalls;
+        assert(mapCall(d, &m, seg, 1));
+        auto *g = &p->gens[genOfPacket(d, &m)];
+        const UInt64 handle = g->stdHandle;
+        assert(handle && !g->request.handle); // ack must use the mapper stamp
+        submit(d, &m, seg, 1);
+        d.r17TxComplete(g->lastSlot);
+        d.txDirtyDescIndex = d.txNextDescIndex;
+        auto close = control(r17tx::kQuiesce);
+        assert(!d.r17TxConfigure(&close));
+        assert(!close.inFlight && !close.ringOwn && !close.activeCover);
+        assert(close.held == 1 && close.modeReserved == 1);
+        assert(close.mapped == 1 && close.completed == 1 && !close.retired);
+        assert(g->state == r17tx::kPending && !g->stdCompleteAttempted);
+        assert(!m.frees && stdCompleteCalls == complete0 && stdAckCalls == ack0);
+        retireTick(d, &timer);
+        assert(stdCompleteCalls == complete0 + 1 && stdAckCalls == ack0 + 1);
+        assert(m.frees == 1 && p->retired == 1 && p->stdUnmaps == 1);
+        assert(g->request.tRetire == stdConfirmedRetires.at(handle));
+        assert(g->request.tRetire < m.freedAt && !g->stdMD && !g->stdCmd);
+        assert(!d.r17TxConfigure(&close));
+        assert(!close.held && !close.modeReserved && close.mapped == close.retired);
+        assert(!detachCfg(d));
+        d.r17TxStop();
+    }
+
+    printf("round29: ring drained before acknowledged timer retirement passed\n");
 
     printf("round21 window-edge tests: gate calls=%u fails=%u samples=%u\n",
            harnessGateCalls, harnessGateFails, lastSampleSeq);

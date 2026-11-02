@@ -41,6 +41,7 @@ struct IOService;
 #include "RTL812xTxMapNative.hpp"
 #include "RTL812xTxMapStd.hpp"
 #include "AMDAliveTxDomainNative.hpp"
+#include "RTL812xRxMap.hpp"
 int main() {
     std::printf("{\n");
     std::printf("  \"domain_version\": %u,\n", r17domain::kVersion);
@@ -55,6 +56,10 @@ int main() {
     std::printf("  \"configure_bytes\": %zu,\n", sizeof(r17tx::Configure));
     std::printf("  \"request_bytes\": %zu,\n", sizeof(r17tx::Request));
     std::printf("  \"native_version\": %u,\n", (unsigned)r17tx::kVersion);
+    std::printf("  \"retire_ack_op\": %u,\n", (unsigned)r17tx::kRetireAck);
+    std::printf("  \"rx_version\": %u, \"rx_snapshot_bytes\": %zu, \"rx_request_bytes\": %zu,\n",
+                r27rx::kVersion, sizeof(r27rx::Snapshot), sizeof(r27rx::Request));
+    std::printf("  \"rx_tail_seq_offset\": %zu,\n", offsetof(r27rx::Snapshot, tailSeq));
     std::printf("  \"kInstall\": %d, \"kDisarm\": %d, \"kQuery\": %d,\n",
                 (int)r17tx::kInstall, (int)r17tx::kDisarm, (int)r17tx::kQuery);
     std::printf("  \"kDetach\": %d, \"kQuiesce\": %d, \"kResume\": %d,\n",
@@ -134,12 +139,14 @@ def abi():
 
 
 def check():
-    """Check current round25/26 decoders; leave archived full-history versions alone."""
+    """Check the current decoder; leave archived full-history versions alone."""
     sys.path.insert(0, str(HERE))
     import analyze as A
     want = abi()
     round26 = want['native_version'] == 6
-    decoder = HERE.parent / 'r26/analyze.py' if round26 else HERE / 'check-r25.py'
+    round29 = want['native_version'] == 7
+    decoder = (HERE.parent / 'r27/analyze.py' if round29 else
+               HERE.parent / 'r26/analyze.py' if round26 else HERE / 'check-r25.py')
     current = runpy.run_path(str(decoder))
     bad = []
     pairs = [
@@ -178,7 +185,7 @@ def check():
     # static_asserts. The header assert catches a layout change at compile time;
     # this list catches the other direction -- a deliberate ABI bump that left
     # the tooling behind. Changing either means updating both on purpose.
-    pin = [('configure_bytes', 176), ('native_version', 6 if round26 else 5),
+    pin = [('configure_bytes', 176), ('native_version', 7 if round29 else 6 if round26 else 5),
            ('request_limit', 512), ('mapping_slots', 4),
            ('configure_off_deadline', 24), ('configure_off_callback', 32),
            ('configure_off_mapper', 96), ('configure_off_quiesced', 112),
@@ -193,7 +200,7 @@ def check():
     if bad:
         print('ABI MISMATCH:\n  ' + '\n  '.join(bad))
         return 1
-    print('abi: current round25/26 and shared record decoders match headers '
+    print('abi: current and shared record decoders match headers '
           '(%d fields); Configure/run dimensions match (%d)' %
           (len(pairs) + len(current_pairs), len(pin)))
     return 0
@@ -233,6 +240,19 @@ def check_r26():
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == '--check-r29':
+        want = abi()
+        pins = {'domain_version': 3, 'native_version': 7, 'std_version': 5,
+                'configure_bytes': 176, 'retire_ack_op': 4,
+                'history_capacity': 32, 'mapping_slots': 4,
+                'rx_version': 3, 'rx_snapshot_bytes': 19536,
+                'rx_request_bytes': 21632, 'rx_tail_seq_offset': 44}
+        bad = {k: (want.get(k), v) for k, v in pins.items() if want.get(k) != v}
+        if bad:
+            print('round29 ABI MISMATCH: ' + repr(bad))
+            return 1
+        print('round29 ABI: %d header-derived pins passed' % len(pins))
+        return check()
     if len(sys.argv) > 1 and sys.argv[1] == '--check-r26':
         return check_r26()
     if len(sys.argv) > 1 and sys.argv[1] == '--check-r25':

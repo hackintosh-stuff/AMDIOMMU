@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused Round28 software checks; no device, install or reboot actions.
+"""Focused Round29 software checks; no device, install or reboot actions.
 
 The C++ harnesses compile real driver/backend bodies with host plumbing.
 They do not replace a macOS kext build or the one required hardware run.
@@ -46,9 +46,11 @@ def main():
             raise ValueError('Mac source must use LF: ' + path.name)
         ast.parse(data.decode('utf-8'), filename=path.name, feature_version=(3, 9))
     py = [sys.executable, '-B']
-    run(py + ['tools/r21/abi.py', '--check-r26'], env)
-    # Includes the separate R28T drain-tail bounds and main R27P isolation tests.
-    run(py + ['tools/r27/test-protocol.py'], env)
+    run(py + ['tools/r21/abi.py', '--check-r29'], env)
+    # Normal main traffic plus the single final-batch/done handshake regression.
+    run(py + ['tools/r27/test-protocol.py',
+              'ProtocolTests.test_all_8192_send_all_then_receive',
+              'ProtocolTests.test_last_tail_batch_finishes_before_done'], env)
     rx = py + ['tools/r27/test-driver.py']
     if args.source:
         rx += ['--source', args.source]
@@ -67,8 +69,9 @@ def main():
         run(cxx + ['-std=c++17', '-w', '-fsanitize=address,undefined',
                    '-I', 'tools/lucy-obs', '-I', 'kext', cpp, '-o', exe], env)
         run([exe], env)
-    run(py + ['tools/r27/test-analyzer.py'], env)
-    print('Round28 focused software checks passed; macOS build and hardware acceptance remain separate.')
+    run(py + ['tools/r27/test-analyzer.py',
+              'AnalyzerTests.test_rx64_full_lifecycle_with_actual_headers_and_real_logs'], env)
+    print('Round29 focused software checks passed; macOS build and hardware acceptance remain separate.')
 
 
 if __name__ == '__main__':

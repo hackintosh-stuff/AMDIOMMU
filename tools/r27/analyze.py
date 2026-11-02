@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round28: 64 cyclic standard RX maps plus ordinary TX mode 2.
+"""Round29: close tail traffic and confirmed TX retirement with cyclic RX64.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,11 +29,11 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round28-8192-ordinary-application; RX64-cyclic-standard-map; TX-retained32-PTE'
+SCOPE = 'round29-8192-ordinary-application; RX64-cyclic-standard-map; acknowledged-tail-and-TX-retirement'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
-RX_VERSION, RX_COUNT = 2, 64
+RX_VERSION, RX_COUNT = 3, 64
 RX_DRIVER_BYTES, RX_BACKEND_BYTES = 19536, 12864
 RX_BASE, RX_STRIDE, RX_CAPACITY = 0x1000010000, 8192, 4096
 ALL_STANDARD_MODE = 2
@@ -41,7 +41,7 @@ DOMAIN_VERSION, DOMAIN_HEADER, DOMAIN_RECORD_BYTES = 3, 80, 720
 HISTORY_CAPACITY = 32
 TAIL = DOMAIN_HEADER + HISTORY_CAPACITY * DOMAIN_RECORD_BYTES
 DOMAIN_BYTES = TAIL + 72
-DRIVER_VERSION, DRIVER_BYTES = 6, A.DRIVER_HEADER + HISTORY_CAPACITY * A.DRIVER_RECORD_BYTES
+DRIVER_VERSION, DRIVER_BYTES = 7, A.DRIVER_HEADER + HISTORY_CAPACITY * A.DRIVER_RECORD_BYTES
 STD_VERSION, STD_BYTES = 5, A.STD_HEADER + HISTORY_CAPACITY * A.STD_RECORD_BYTES
 # Snapshot.commandCapacity and m2-3b-command-capacity count 16-byte entries;
 # M23_CMD_BUF_SIZE in the producer counts bytes. Do not compare unlike units.
@@ -93,7 +93,7 @@ def retained(h, rows, total_key, expected_total):
 def decode_rx(blob):
     A.need(len(blob) == RX_DRIVER_BYTES, 'RX driver snapshot must be 19536 bytes')
     h = A.unpack('version bytes state flags generation mapCount posted completed '
-                 'restored pendingPosted businessToken reserved poolId tInstalled '
+                 'restored pendingPosted businessToken tailSeq poolId tInstalled '
                  'tDisarmed tLastRestore', '12I4Q', blob)
     A.need(h['version'] == RX_VERSION and h['bytes'] == len(blob), 'RX driver ABI differs')
     maps = [A.unpack('pa iova tMapInv entryId capacity', '3Q2I', blob, 80 + i * 32)
@@ -159,7 +159,7 @@ def check(cap):
         gh, drv = A.decode_driver(blob('rtl812x-txmap-raw', 'r21-driver-raw.bin'))
         gh['historyStart'] = gh.pop('reserved')
         A.need(gh['version'] == DRIVER_VERSION and len(drv) == HISTORY_CAPACITY and gh['bytes'] == DRIVER_BYTES,
-               'native v6 ABI missing')
+               'native v7 ABI missing')
         sh, std = decode_std(blob('rtl812x-txmap-std-raw', 'r21-std-raw.bin'))
         bh = A.decode_block(blob('rtl812x-txmap-block-raw', 'r21-block-raw.bin'))
         pt = blob('m2-3b-pt-raw', 'r21-pt-raw.bin')
@@ -172,9 +172,9 @@ def check(cap):
         A.need(0 < token < 0x80000000 and sh['token'] == bh['token'] == token,
                'inconsistent/non-low-half token')
         A.need(dh['devid'] == gh['bdf'] == sh['bdf'] == bh['bdf'], 'capture device association differs')
-        checks.append({'id': 'capture-ABI-domain3-native6-std5-rx2', 'state': 'ok'})
+        checks.append({'id': 'capture-ABI-domain3-native7-std5-rx3', 'state': 'ok'})
     except (A.Refused, OSError, ValueError, KeyError, IndexError, struct.error) as exc:
-        checks.append({'id': 'capture-ABI-domain3-native6-std5-rx2', 'state': 'FAIL', 'detail': str(exc)})
+        checks.append({'id': 'capture-ABI-domain3-native7-std5-rx3', 'state': 'FAIL', 'detail': str(exc)})
         return result()
 
     def driver_property(key, numeric=False):
@@ -249,8 +249,8 @@ def check(cap):
 
     def drain_tail():
         observed = re.findall(r'^client_drain_observed t_ns=(\d+)$', client, re.M)
-        A.need(len(observed) == 1 and rh['tDisarmed'] <= int(observed[0]) <= rh['tLastRestore'],
-               'published drain observation missing/outside physical restore interval')
+        A.need(len(observed) == 1 and rh['tDisarmed'] <= int(observed[0]) < P['m2-3i-tail-confirmed-time'],
+               'published drain observation missing/outside tail phase')
         groups = {}
         for text, names in ((client, ('client_tail_send', 'client_tail_recv')),
                             (peer, ('peer_tail_recv', 'peer_tail_sent'))):
@@ -281,12 +281,12 @@ def check(cap):
                'missing/duplicate drain-tail exchange')
         after_exit = re.findall(r'^client_after_exit resumed=1 t_ns=(\d+)$', client, re.M)
         drain_checks = re.findall(r'^client_tail_drain_(ended|still_active) t_ns=(\d+)$', client, re.M)
-        A.need(len(after_exit) == 1 and min(sent.values()) <= rh['tLastRestore'] and
-               max(list(sent.values()) + list(received.values())) < int(after_exit[0]) and
-               sum(t > rb['tDrained'] for t in sent.values()) <= 16,
-               'tail did not begin during physical drain or extended beyond final burst/after-exit')
+        A.need(len(after_exit) == 1 and
+               max(list(sent.values()) + list(received.values())) < int(after_exit[0]),
+               'tail extended beyond its final burst/after-exit')
         A.need(len(drain_checks) == (len(sent) + 15) // 16 and
-               all(kind == 'still_active' for kind, _ in drain_checks[:-1]),
+               all(kind == 'still_active' for kind, _ in drain_checks[:-1]) and
+               drain_checks[-1][0] == 'ended',
                'missing/repeated/intermediate drain-end observation')
         for group, (_, stamp) in enumerate(drain_checks):
             ids = range(group * 16 + 1, min((group + 1) * 16, len(sent)) + 1)
@@ -303,8 +303,50 @@ def check(cap):
         main_times = [int(t) for t in re.findall(r'^client_(?:sent|recv) .* t_ns=(\d+)$', client, re.M)]
         A.need(len(main_times) == 2 * REQUEST_COUNT and main_times == sorted(main_times) and
                max(main_times) <= int(observed[0]), 'main traffic timing overlaps drain tail')
-        return {'sent': len(sent), 'received': len(received), 'max': 4096}
+        return {'sent': len(sent), 'received': len(received), 'max': 4096,
+                'beganDuringPhysicalDrain': min(sent.values()) <= rh['tLastRestore']}
     run('published-drain-R28T-tail-integrity', drain_tail)
+
+    def tail_done():
+        last = re.findall(r'^client_tail_summary sent=(\d+) received=(\d+) max=4096$', client, re.M)
+        A.need(len(last) == 1 and last[0][0] == last[0][1], 'tail count before done is not closed')
+        seq = int(last[0][0])
+        A.need(1 <= seq <= PROTOCOL.TAIL_MAX and seq == rh['tailSeq'] == P['m2-3i-tail-seq'],
+               'tail-done sequence differs from client/driver/probe')
+        stamps = {}
+        for text, names in ((client, ('client_tail_done_send', 'client_tail_done_recv')),
+                            (peer, ('peer_tail_done_recv', 'peer_tail_done_sent'))):
+            for name in names:
+                lines = [line for line in text.splitlines() if line.startswith(name + ' ')]
+                A.need(len(lines) == 1, 'tail-done must occur exactly once: ' + name)
+                m = re.fullmatch(name + r' token=(0x[0-9a-fA-F]+) seq=(\d+) len=(\d+) '
+                                 r'sha256=([0-9a-f]{64}) payload=([0-9a-f]+)'
+                                 r'(?: payload_ok=(1))?(?: (?:from|to)=[^ ]+)? t(?:_ns)?=(\d+)', lines[0])
+                A.need(m is not None, 'malformed tail-done: ' + name)
+                data = bytes.fromhex(m[5])
+                A.need(int(m[1], 16) == token and int(m[2]) == seq and
+                       data == PROTOCOL.tail_done(token, seq) and int(m[3]) == len(data) == 12 and
+                       m[4] == hashlib.sha256(data).hexdigest(), 'tail-done bytes/token/hash mismatch')
+                if name.endswith('recv'):
+                    A.need(m[6] == '1', 'tail-done receive was rejected')
+                stamps[name] = int(m[7])
+        tail_receives = [int(t) for t in re.findall(r'^client_tail_recv .* t_ns=(\d+)$', client, re.M)]
+        A.need(len(tail_receives) == seq and max(tail_receives) <= stamps['client_tail_done_send'] <=
+               stamps['client_tail_done_recv'], 'tail-done preceded the last completed tail batch')
+        A.need(stamps['peer_tail_done_recv'] <= stamps['peer_tail_done_sent'], 'peer done echo order differs')
+        # The parser observes the echo before enqueueInputPacket. Userland may
+        # receive that already-enqueued echo after the probe closes the TX gate.
+        confirmed = P['m2-3i-tail-confirmed-time']
+        A.need(P['m2-3i-tail-state'] == 'confirmed' and rh['state'] == 4 and not rh['pendingPosted'] and
+               max(r['tUnmapInv'] for r in rxrecords) <= confirmed and
+               stamps['client_tail_done_send'] <= confirmed <= P['m2-3e-exit-gate-close'],
+               'TX closed before the restored RX ring observed the tail-done echo')
+        after = re.findall(r'^client_after_exit resumed=1 t_ns=(\d+)$', client, re.M)
+        A.need(len(after) == 1 and stamps['client_tail_done_recv'] < int(after[0]),
+               'exit declared before client validated the done echo')
+        return {'sequence': seq, 'bytes': 12, 'confirmationObserved': confirmed,
+                'clientEchoReceived': stamps['client_tail_done_recv'], 'retries': 0}
+    run('R29D-tail-finished-before-TX-close', tail_done)
 
     def counters():
         A.need(mapped_total >= MIN_MAPPINGS, 'fewer than %d mapped ordinary TX frames' % MIN_MAPPINGS)
@@ -479,6 +521,9 @@ def check(cap):
     def exit_state():
         A.need(dh['liveOwners'] == dh['active'] == dh['flags'] == sh['pinned'] == 0 and P['m2-3b-owners-held'] == 0,
                'live backend owner remains')
+        A.need(P['m2-3b-slots-live'] == P['m2-3i-exit-driver-live'] == P['m2-3i-exit-driver-held'] == 0 and
+               P['m2-3i-exit-driver-mapped'] == P['m2-3i-exit-driver-retired'] == mapped_total,
+               'software retirement barrier was not closed')
         A.need(bh['outstanding'] == bh['liveCount'] == bh['liveHandle'] == bh['state'] == 0 and
                not bh['liveFlags'] & 4 and bh['txDirty'] == bh['txNext'] and bh['txClose'] == bh['txTail'],
                'ring/driver not quiescent')
@@ -517,12 +562,13 @@ def check(cap):
         enter = [P[k] for k in ('m2-3e-enter-gate-close', 'm2-3e-enter-submit-done', 'm2-3e-enter-drain-done',
                                 'm2-b2-dma-t-dte-written', 'm2-3e-t-translate-on', 'm2-3e-t-gate-open')]
         leave = [P[k] for k in ('m2-3e-exit-gate-close', 'm2-3e-exit-submit-done', 'm2-3e-exit-drain-done',
+                                'm2-3i-exit-retire-confirmed-time', 'm2-b2-t-recovery-start',
                                 'm2-3e-t-translate-off', 'm2-3e-t-detach', 'm2-3e-t-resume')]
         A.need(all(t > 0 for t in enter + leave) and enter == sorted(enter) and leave == sorted(leave) and enter[-1] < leave[0],
                'window entry/exit timestamps out of order')
         for rows in (drv, std):
             for r in rows:
-                A.need(enter[-1] <= r.get('tOwn', r.get('tBegin', 0)) <= r['tFree'] <= leave[2],
+                A.need(enter[-1] <= r.get('tOwn', r.get('tBegin', 0)) <= r['tFree'] <= leave[3],
                        'retained generation outside same window')
         return {'entry': enter, 'exit': leave, 'domain': dh['domid'], 'device': dh['devid']}
     run('same-domain-window-enter-and-exit-order', window)

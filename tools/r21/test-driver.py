@@ -28,6 +28,7 @@ PREFIX = r'''
 #include <cassert>
 #include <cstdio>
 #include <functional>
+#include <map>
 struct TestNetif {
     unsigned signals = 0;
     std::function<void()> output;
@@ -118,6 +119,8 @@ enum {kStdOk=0, kStdRefuseNoHandle=1, kStdRefuseWithHandle=2,
 static int stdMode = kStdOk;          /* what the stub command does */
 static int stdUnmapCount = 0;
 static int stdUnmapFails = 0;
+static int stdCompleteCalls = 0, stdAckCalls = 0;
+static std::map<UInt64, UInt64> stdConfirmedRetires;
 static int stdPrepareCalls = 0;
 static int stdMdCreated = 0, stdMdReleased = 0;
 static int stdMdPrepared = 0, stdMdCompleted = 0;
@@ -160,7 +163,7 @@ struct IOMemoryDescriptor {
 struct IODMACommand {
     struct Segment64 {UInt64 fIOVMAddr, fLength;};
     enum { kMapped = 0 };
-    IOMemoryDescriptor *md=nullptr; bool active=false; UInt64 iova=0, len=0;
+    IOMemoryDescriptor *md=nullptr; bool active=false; UInt64 iova=0, len=0, handle=0;
     /* Round23: the stub backend hands out one FIXED STRIPE per live mapping,
      * exactly like the real one (amdtx::plan uses `slot`). Round 22 gave every
      * mapping the same window base, which is indistinguishable from an overlap
@@ -181,6 +184,7 @@ struct IODMACommand {
         for (UInt32 k = 0; k < amdtx::kSlots; k++)
             if (!(stubLive & (1u << k))) { slot = k; break; }
         stdLastHandle = ++stdHandleSeq;      /* mapper published a mapping */
+        handle = stdLastHandle;
         stdRecordSeq++;
         /* A REFUSED prepare never becomes a live mapping, so it must not claim
          * a stripe. The published-handle refusal is the pinned case: the driver
@@ -219,10 +223,16 @@ struct IODMACommand {
     }
     /* IODMACommand::complete() is the ONLY unmap entry point in standard mode. */
     IOReturn complete(bool, bool)
-    { if (!active) return kIOReturnNotReady; active=false; stdUnmapCount++;
-      if (!stdUnmapFails) stubLive &= ~(1u << slot);
+    { stdCompleteCalls++;
+      if (!active) return kIOReturnNotReady; active=false; stdUnmapCount++;
+      if (!stdUnmapFails) {
+          stubLive &= ~(1u << slot);
+          stdConfirmedRetires[handle] = mach_absolute_time();
+      }
       return stdUnmapFails ? kIOReturnIOError : kIOReturnSuccess; }
-    void clearMemoryDescriptor(){ md=nullptr; }
+    IOReturn clearMemoryDescriptor(bool autoComplete=true)
+    { if (autoComplete && active) complete(true, false);
+      md=nullptr; return kIOReturnSuccess; }
     void release(){ stdCmdReleased++; delete this; }
 };
 

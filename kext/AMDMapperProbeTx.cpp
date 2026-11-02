@@ -73,6 +73,7 @@ struct org_example_AMDMapperProbe::R17Domain {
     UInt64 tEdge, tSubmitDone, tDrainDone, tResume;
     bool stopOk, detachOk, resumed;
     UInt32 stopMs, stopLastRing, stopLastFlight;
+    UInt32 driverHeld, driverLive, driverMapped, driverRetired;
     const char *stopEdge, *stopFailReason;
     UInt64 tDetach;
     // Explicit "unconfirmed mapping modification" state. After invalidate() fails,
@@ -187,11 +188,33 @@ IOReturn org_example_AMDMapperProbe::r17Callback(void *context, UInt32 op,
     R17Domain *d=self?self->fR17:nullptr;
     if (!d || !r || r->version!=r17tx::kVersion || r->bytes!=sizeof(*r))
         return kIOReturnBadArgument;
+    if (op==r17tx::kRetireAck) r->tRetire=0;
     IOLockLock(d->lock);
     auto &s=d->snapshot;
     IOReturn result=kIOReturnNotReady;
     if (r->bdf!=s.devid || !d->installed) goto out;
-    if (op==r17tx::kMap) {
+    if (op==r17tx::kRetireAck) {
+        // complete() can hide an IOMapper unmap failure. Confirm this handle's
+        // retirement from the backend's completed record before driver release.
+        if (r->token!=self->fR15Request.reserved || !r->handle ||
+            r->handle>d->handleCounter) {
+            result=kIOReturnBadArgument; goto out;
+        }
+        for (UInt32 k=0;k<amdtx::kSlots;++k)
+            if (d->slotHandle[k]==r->handle) goto out;
+        for (UInt32 k=0;k<s.count && k<r17domain::kMaxRecords;++k) {
+            const auto &w=s.records[(s.historyStart+k)%r17domain::kMaxRecords];
+            if (w.handle!=r->handle) continue;
+            if (w.status!=3 || !w.tClearPublish || w.tRetireInv<=w.tClearPublish ||
+                w.tRetireInv!=w.retireCommand.tComplete ||
+                !w.retireCommand.expected ||
+                w.retireCommand.expected!=w.retireCommand.observed) {
+                result=kIOReturnIOError; goto out;
+            }
+            r->tRetire=w.tRetireInv;
+            result=kIOReturnSuccess; break;
+        }
+    } else if (op==r17tx::kMap) {
         // Round23: `d->handle` is no longer a single "the one live generation"
         // marker -- it records the most recently issued handle for Query, and
         // whether a slot is free is decided by the slot mask below.
@@ -433,27 +456,29 @@ bool org_example_AMDMapperProbe::r17Activate(volatile UInt8 *base, void *command
     return true;
 }
 
-// Round 22: stop admitting submissions and wait until both of these hold:
-//
-//   (a) no admitted submission is between the gate and its OWN bit, and
-//   (b) the ring holds no descriptor the device still owns.
-//
-// (a) BEFORE (b) is the whole point. Round 21 closed a flag and read the ring,
-// so a thread that had passed the flag but not yet written OWN was invisible:
-// the drain could report "empty" and the DTE flip raced that thread. The
-// barrier's reference count makes (a) a counted fact, and the ring only shrinks
-// after a completion, so once both hold nothing can appear behind us.
-//
-// The wait happens HERE, on the probe's thread. kQuiesce itself never sleeps:
-// the caller's other thread is the driver workloop, which is the context that
-// reaps completed descriptors, so waiting there would wait for itself.
+// The driver timer retires mappings after the NIC ring is empty. Keep the DTE
+// and command engine active until those owners and commands have completed.
+bool org_example_AMDMapperProbe::r17BackendDrained() {
+    R17Domain *d=fR17;
+    if (!d) return true;
+    IOLockLock(d->lock);
+    const bool clean=!d->liveOwner && !d->slotLive && d->mapsOk==d->retires &&
+        !d->command.failed && d->command.submits==d->command.completed &&
+        !d->coverUnconfirmedMap && !d->snapshot.flags;
+    IOLockUnlock(d->lock);
+    return clean;
+}
+
+// Poll on the probe thread without holding Lucy's gate or the backend lock,
+// allowing the driver timer to finish pending unmaps.
 bool org_example_AMDMapperProbe::r17StopSubmit(UInt32 budgetMs, const char *edge) {
     R17Domain *d=fR17;
     if (!d || !d->installed) return true;
     UInt32 lastRing=0, lastFlight=0;
     bool done=false;
-    UInt64 t0=mach_absolute_time();
-    for (UInt32 i=0;i<budgetMs;i++) {
+    d->stopOk=false; d->stopFailReason=nullptr;
+    const UInt64 t0=mach_absolute_time();
+    do {
         UInt32 occ=0, cover=0, flight=0, ring=0;
         if (!r17Gate(true,&occ,&cover,&flight,&ring)) {
             // The backend is unreachable (not "still busy"). That is a real
@@ -462,21 +487,13 @@ bool org_example_AMDMapperProbe::r17StopSubmit(UInt32 budgetMs, const char *edge
             break;
         }
         lastRing=ring; lastFlight=flight;
-        if (flight==0 && ring==0) {
-            // Confirm with a second read. The word is closed and the reference
-            // count is zero, so no submission can appear between the two reads;
-            // this only guards against a completion that was mid-walk.
-            IOSleep(2);
-            UInt32 occ2=0, cover2=0, flight2=0, ring2=0;
-            if (!r17Gate(true,&occ2,&cover2,&flight2,&ring2)) {
-                d->stopFailReason="backend-unreachable";
-                break;
-            }
-            if (flight2==0 && ring2==0) { done=true; lastRing=0; lastFlight=0; break; }
-            lastRing=ring2; lastFlight=flight2;
+        if (!flight && !ring && !occ && !cover && !d->driverHeld &&
+            !d->driverLive && d->driverMapped==d->driverRetired &&
+            r17BackendDrained()) {
+            done=true; break;
         }
         IOSleep(1);
-    }
+    } while (m2b2ToMS(mach_absolute_time()-t0)<budgetMs);
     d->stopOk=done;
     d->stopMs=(UInt32)m2b2ToMS(mach_absolute_time()-t0);
     d->stopLastRing=lastRing;
@@ -501,6 +518,18 @@ bool org_example_AMDMapperProbe::r17StopSubmit(UInt32 budgetMs, const char *edge
     setHexProperty(this,k,(UInt64)lastRing);
     snprintf(k,sizeof(k),"m2-3e-%s-last-inflight",edge);
     setHexProperty(this,k,(UInt64)lastFlight);
+    // tDrainDone above remains the driver's descriptor-drain latch. This is
+    // the separate probe observation that software and backend owners are gone.
+    snprintf(k,sizeof(k),"m2-3i-%s-retire-confirmed-time",edge);
+    setHexProperty(this,k,done?m2b2NowNS():0);
+    snprintf(k,sizeof(k),"m2-3i-%s-driver-live",edge);
+    setHexProperty(this,k,d->driverLive);
+    snprintf(k,sizeof(k),"m2-3i-%s-driver-held",edge);
+    setHexProperty(this,k,d->driverHeld);
+    snprintf(k,sizeof(k),"m2-3i-%s-driver-mapped",edge);
+    setHexProperty(this,k,d->driverMapped);
+    snprintf(k,sizeof(k),"m2-3i-%s-driver-retired",edge);
+    setHexProperty(this,k,d->driverRetired);
     if (!done) {
         snprintf(k,sizeof(k),"m2-3e-%s-drain-why",edge);
         setProperty(k,d->stopFailReason?d->stopFailReason:"unknown");
@@ -569,6 +598,10 @@ bool org_example_AMDMapperProbe::r17Gate(bool quiesce, UInt32 *outstanding,
     // The driver's latches, not a probe-side clock: these name when the event
     // happened. A failed call must not overwrite them with stale values.
     if (kr == kIOReturnSuccess) {
+        d->driverHeld = c.held;
+        d->driverLive = c.modeReserved;
+        d->driverMapped = c.mapped;
+        d->driverRetired = c.retired;
         d->edgeSeq = c.edgeSeq;
         d->tEdge = c.tEdge;
         d->tSubmitDone = c.tSubmitDone;
@@ -1292,7 +1325,7 @@ bool org_example_AMDMapperProbe::r27RxBegin() {
         !r18StdReady() || !fR17->commandOwned || !fR15Service)
         return false;
     R27ClientContext client(this, fM22b2Timer);
-    setProperty("m2-3h-rx-mode", "standard-nonidentity-cyclic-map-once");
+    setProperty("m2-3h-rx-mode", "standard-nonidentity-cyclic64");
     setProperty("m2-3h-rx-ready", "no");
     setProperty("m2-3h-rx-state", "preparing");
     R27RxDomain *r = (R27RxDomain *)IOMalloc(sizeof(R27RxDomain));
@@ -1471,6 +1504,38 @@ drainFailed:
 unmapFailed:
     r->snapshot.flags |= r27rx::kBackendUnmapFailed;
     setProperty("m2-3h-rx-state", "PINNED-RX-unmap-failed");
+    r27RxExport(); return false;
+}
+
+// After RX retirement, keep TX open until the peer echoes the R29D marker
+// that userspace sends after receiving every tail reply.
+bool org_example_AMDMapperProbe::r29WaitTailDone(UInt32 budgetMs) {
+    R27RxDomain *r = __atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE);
+    if (!r || !r->snapshot.ready) return true;
+    R27ClientContext client(this, fM22b2Timer);
+    setProperty("m2-3i-tail-state", "waiting");
+    const UInt64 start = m2b2NowNS();
+    do {
+        const IOReturn kr = r27RxControl(r27rx::kSnapshot);
+        const auto &s = r->control.out;
+        if (kr != kIOReturnSuccess || s.version != r27rx::kVersion ||
+            s.bytes != sizeof(s) || s.poolId != r->control.poolId ||
+            s.businessToken != fR15Request.reserved ||
+            s.state != r27rx::kReleased || s.flags || s.pendingPosted) {
+            setProperty("m2-3i-tail-state", "PINNED-tail-snapshot");
+            r27RxExport(); return false;
+        }
+        if (s.tailSeq && s.tailSeq <= r27rx::kTailMax) {
+            setHexProperty(this, "m2-3i-tail-seq", s.tailSeq);
+            // This is the probe's confirmation observation, in mach ticks
+            // (m2b2NowNS has the same clock as the existing recovery stamps).
+            setHexProperty(this, "m2-3i-tail-confirmed-time", m2b2NowNS());
+            setProperty("m2-3i-tail-state", "confirmed");
+            r27RxExport(); return true;
+        }
+        IOSleep(10);
+    } while (m2b2ToMS(m2b2NowNS()-start) < budgetMs);
+    setProperty("m2-3i-tail-state", "PINNED-tail-timeout");
     r27RxExport(); return false;
 }
 

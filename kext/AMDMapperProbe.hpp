@@ -106,11 +106,11 @@ private:
     // driver's gate or workloop.
     bool r17Gate(bool quiesce, UInt32 *outstanding, UInt32 *activeCover,
                  UInt32 *inFlight = nullptr, UInt32 *ringOwn = nullptr);
-    // The one wait: closes admission (kQuiesce is idempotent) and returns true
-    // only when BOTH the admitted-submission count and the total ring occupancy
-    // are zero, confirmed by a second read. `edge` names the boundary in the
-    // published records ("enter" / "exit").
+    // Closes admission, then waits for submitters, descriptors, driver held/live
+    // generations and backend owners to drain, with every retirement and command
+    // completion confirmed. Polling does not hold the driver's gate or d->lock.
     bool r17StopSubmit(UInt32 budgetMs, const char *edge);
+    bool r17BackendDrained();
     // Second half of the enter edge: only after the DTE flip and both domain
     // invalidations completed. `tInvComplete` is that completion time, which is
     // what "translation is in effect from here" means.
@@ -171,6 +171,7 @@ private:
     bool r27RxBegin();
     void r27RxReady();
     bool r27RxFinish(UInt32 budgetMs);
+    bool r29WaitTailDone(UInt32 budgetMs);
     void r27RxExport();
     void r27RxRelease();
     IOReturn r27RxControl(UInt32 op);

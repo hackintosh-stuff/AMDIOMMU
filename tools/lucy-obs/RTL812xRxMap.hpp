@@ -1,4 +1,4 @@
-/* Round28: cyclic RX DMA through standard IOMapper callbacks.
+/* Round29: cyclic RX DMA with a tail-finished observation after RX release.
  * Separate ABI: RTL812xRxPool.hpp remains byte-for-byte compatible.
  * Probe owns the 64 physical MD/DMACommand objects; Lucy retains the actual
  * mbufs until kRelease acknowledges every standard unmap. No kernel pointer
@@ -13,7 +13,8 @@ typedef unsigned long long u64;
 static const char kFunctionName[] = "rtl812x-r27-rxmap";
 static const u64 kIovaBase = 0x1000010000ULL;
 enum {
-    kVersion = 2, kCount = 64, kPagesPerSlot = 2, kCapacity = 4096,
+    kVersion = 3, kCount = 64, kPagesPerSlot = 2, kCapacity = 4096,
+    kTailMax = 4096,
     kInstall = 1, kSnapshot = 2, kDisarm = 3, kDrain = 4, kRelease = 5,
     kHold = 6,
     kAbsent = 0, kInstalled = 1, kDisarmed = 2, kDrained = 3, kReleased = 4,
@@ -48,7 +49,8 @@ struct Witness {
 struct Snapshot {
     u32 version, bytes, state, flags;
     u32 generation, mapCount, posted, completed;
-    u32 restored, pendingPosted, businessToken, reserved;
+    // R29D echoed on the restored ordinary RX ring; never a DMA selector.
+    u32 restored, pendingPosted, businessToken, tailSeq;
     u64 poolId, tInstalled, tDisarmed, tLastRestore;
     Mapping maps[kCount];
     Witness witnesses[kCount];

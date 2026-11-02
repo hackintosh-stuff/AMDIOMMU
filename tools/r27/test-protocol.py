@@ -140,17 +140,34 @@ class ProtocolTests(unittest.TestCase):
         for seq in (0, protocol.TAIL_MAX + 1):
             with self.assertRaises(ValueError):
                 protocol.tail(7, seq)
-        for props, expected in [('"m2-3e-after-exit" = "ordinary-output-resumed"', 16),
-                                ('"m2-3h-rx-state" = "draining"', protocol.TAIL_MAX)]:
-            s = Socket()
-            logs = []
-            with patch.object(load, 'now', return_value=100), \
-                 patch.object(load.time, 'monotonic', return_value=0), \
-                 patch.object(load, 'command', return_value=props):
-                self.assertTrue(load.drain_tail(s, ('127.0.0.2', 9110), 7, logs.append))
-            self.assertEqual(s.sent, [])  # no main workload ID or retry credit
-            self.assertIn('client_tail_summary sent=%d received=%d max=4096' %
-                          (expected, expected), logs)
+
+    def test_last_tail_batch_finishes_before_done(self):
+        s = Socket()
+        logs, done = [], []
+        send = s.sendto
+
+        def record_send(data, addr):
+            if protocol.tail_done_identify(data):
+                self.assertEqual(s.queue, [])
+                self.assertEqual(sum(line.startswith('client_tail_recv ') and
+                                     'payload_ok=1' in line for line in logs), 16)
+                done.append(data)
+            return send(data, addr)
+
+        released = '"m2-3h-rx-state" = "drained-and-unmapped"'
+        with patch.object(load, 'now', return_value=100), \
+             patch.object(load.time, 'monotonic', return_value=0), \
+             patch.object(load.time, 'sleep'), \
+             patch.object(load, 'command', side_effect=[released,
+                          released + '\n"m2-3i-tail-state" = "waiting"']), \
+             patch.object(s, 'sendto', side_effect=record_send):
+            self.assertTrue(load.drain_tail(s, ('127.0.0.2', 9110), 7, logs.append))
+        self.assertEqual(done, [protocol.tail_done(7, 16)])
+        self.assertEqual(s.sent, [])  # no main workload ID or retry credit
+        self.assertEqual(s.queue, [])
+        self.assertIn('client_tail_summary sent=16 received=16 max=4096', logs)
+        self.assertEqual(sum(line.startswith('client_tail_done_recv ') and
+                             'payload_ok=1' in line for line in logs), 1)
 
     def test_tail_duplicate_fails_without_retransmission(self):
         class DuplicateTail(Socket):

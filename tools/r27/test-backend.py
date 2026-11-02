@@ -33,6 +33,7 @@ DECLARATIONS = r'''
     bool r27RxBegin();
     void r27RxReady();
     bool r27RxFinish(UInt32);
+    bool r29WaitTailDone(UInt32);
     void r27RxExport();
     void r27RxRelease();
     IOReturn r27RxControl(UInt32);
@@ -102,6 +103,7 @@ public:
 static void *IOMalloc(size_t bytes) { return std::malloc(bytes); }
 static void IOFree(void *p,size_t) { std::free(p); }
 static void nanoseconds_to_absolutetime(UInt64 n,UInt64 *ticks) { *ticks=n; }
+static void absolutetime_to_nanoseconds(UInt64 t,UInt64 *ns) { *ns=t; }
 static void IOSleep(unsigned ms) { clockTick+=ms*1000000ULL; }
 static bool r17ModeRequested(const char *,size_t) { return true; }
 '''
@@ -151,7 +153,7 @@ struct Fixture {
 };
 
 static void normalBatch() {
-    static_assert(r27rx::kVersion == 2, "Round28 RX ABI2");
+    static_assert(r27rx::kVersion == 3, "Round29 RX ABI3");
     static_assert(sizeof(r27rx::Cycle) == 40, "first four cycle samples");
     static_assert(sizeof(r27rx::Witness) == 272, "cyclic witness");
     static_assert(sizeof(r27rx::Snapshot) == 19536, "driver snapshot");
@@ -279,6 +281,7 @@ public:
     void release() { delete this; }
 ''')
     prefix += 'using IOPhysicalAddress=UInt64;\n'
+    prefix += base.section(header, 'static inline UInt64 m2b2NowNS()', '// ---- m2b2WallSecs')
     text = prefix + '#include "tools/lucy-obs/RTL812xRxMap.hpp"\n'
     text += '#include "tools/lucy-obs/RTL812xRxPool.hpp"\n' + constants
     text += '\n#define M2B1_LOOP_TIMEOUT 32\n'

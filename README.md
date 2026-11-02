@@ -1,6 +1,31 @@
 # AMDIOMMU — authoritative source repository
 
-## Round28 / cyclic64 RX implementation
+## Current Round29 / normal TX retirement and tail completion
+
+Base: `feb014bd0172cbc0e897dab8332d7a2e1fcae948`.
+Candidate: Lucy **1.1.214** / Probe **0.38.0**; domain3/native7/std5, RX3.
+
+This round fixes the two observed Round28 exit failures while keeping RX64,
+four TX slots and the existing 8192-request workload:
+
+- Wait for the driver timer and backend retirement before restoring DTE/commands.
+- Confirm each standard handle after complete(), before releasing its buffer.
+- Finish the current tail batch and exchange one R29D echo before closing TX.
+
+Use a fresh upstream tree at `639144d1f284a9fee222a518691b01494f5e265d`
+with the existing MacKernelSDK, then run from this repository:
+
+```sh
+sh tools/r27/build.sh _scratch/r29-upstream
+```
+
+The build runs the current main-path checks against generated `--tx 21 --rx 29`
+source. The normal analyzer fixture is selected; historical corruption matrices
+remain available separately. Defaults are `runs/r29` and `org.example.round29load`.
+After one successful RX64 hardware run, proceed to RX1024. Hardware acceptance
+of this candidate is pending.
+
+## Historical Round28 / cyclic64 RX implementation
 
 Round28 evolves the existing Round27 entry points in place: 64 standard-mapped RX spares are reposted cyclically, then held/disarmed, drained, restored and unmapped alongside the established four-slot ordinary all-standard TX path. Expected versions: Lucy **1.1.213** / Probe **0.37.0**. Base commit: `ae92d3869a828b82e76eeb24c59ecd91a7cbe09a`.
 

@@ -8,10 +8,12 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.37.0</string>
-    <key>CFBundleVersion</key><string>0.37.0</string>
+    <key>CFBundleShortVersionString</key><string>0.38.0</string>
+    <key>CFBundleVersion</key><string>0.38.0</string>
     <!--
       版本历史：
+        0.38.0 M2-3i 第29轮：RX释放后R29D确认尾流结束；标准TX按句柄确认退休，
+               软件generation与后端owner/slot/CW闭合后才恢复DTE及命令引擎。
         0.37.0 M2-3h 第28轮：64个RX对象各映射一次并循环使用；Disarm后发布draining，
                保持TX开放等待最多15秒RX排空，120秒有限授权覆盖60秒翻译窗口。
         0.36.0 M2-3h 第27轮：.std.alltx.rxstd 增加64个RX spare的一次标准映射闭环；

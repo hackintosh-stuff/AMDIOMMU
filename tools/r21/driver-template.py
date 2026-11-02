@@ -80,7 +80,8 @@ MEMBERS = r'''
                         IOPhysicalSegment *segments, UInt32 &count);
     bool r17TxMapStd(R17TxState *p, R17Gen *g, mbuf_t m,
                      IOPhysicalSegment *segments, UInt32 &count);
-    bool r17TxStdRollback(R17TxState *p, R17Gen *g, mbuf_t m, IOReturn unmap);
+    IOReturn r17TxStdComplete(R17TxState *p, R17Gen *g);
+    bool r17TxStdRollback(R17TxState *p, R17Gen *g, mbuf_t m);
     bool r17TxCover(R17TxState *p, IOPhysicalSegment *segments, UInt32 count);
     void r17TxRetire(R17TxState *p, R17Gen *g, UInt64 handle);
     UInt64 r17TxStdMark();
@@ -129,6 +130,8 @@ struct RTL8125::R17Gen {
     IOMemoryDescriptor *stdMD;
     IODMACommand *stdCmd;
     bool stdWired;
+    bool stdCompleteAttempted; /* complete() may discard failed unmap bookkeeping */
+    IOReturn stdRetireResult;  /* API result plus per-handle backend confirmation */
     UInt64 stdHandle;           /* probe handle, 0 until one is published */
     r17tx::Request request;
     r17tx::Witness current;
@@ -333,7 +336,6 @@ IOReturn RTL8125::r17TxConfigure(r17tx::Configure *c)
          * mappings exist. */
         c->state = __atomic_load_n(&p->ctrl, __ATOMIC_ACQUIRE);
         r17TxReport(c);
-        c->held = r17TxLiveGens();
         c->mapped = __atomic_load_n(&p->mapped, __ATOMIC_RELAXED);
         c->completed = __atomic_load_n(&p->completed, __ATOMIC_RELAXED);
         c->retired = __atomic_load_n(&p->retired, __ATOMIC_RELAXED);
@@ -366,6 +368,7 @@ IOReturn RTL8125::r17TxConfigure(r17tx::Configure *c)
     c->retired = __atomic_load_n(&p->retired, __ATOMIC_RELAXED);
     c->dropped = __atomic_load_n(&p->dropped, __ATOMIC_RELAXED);
     c->held = __atomic_load_n(&p->held, __ATOMIC_RELAXED);
+    c->modeReserved = r17TxLiveGens();
     c->maxHeld = __atomic_load_n(&p->maxHeld, __ATOMIC_RELAXED);
     c->evidenceUsed = c->retired;
     c->rejected = __atomic_load_n(&p->rejected, __ATOMIC_RELAXED);
@@ -673,6 +676,7 @@ bool RTL8125::r17TxMapAdmitted(mbuf_t m, IOPhysicalSegment *segments,
     g->current.cumulative = txTailPtr0;
     g->current.firstSlot = txNextDescIndex;
     g->packet = NULL; g->stdMD = NULL; g->stdCmd = NULL; g->stdWired = false;
+    g->stdCompleteAttempted = false; g->stdRetireResult = kIOReturnNotReady;
     g->stdHandle = 0; g->lastSlot = 0;
     bzero(&g->request, sizeof(g->request));
     g->request.version = r17tx::kVersion; g->request.bytes = sizeof(g->request);
@@ -981,7 +985,7 @@ bool RTL8125::r17TxMapStd(R17TxState *p, R17Gen *g, mbuf_t m,
             0, &plen0, kIOMemoryMapperNone);
         if (kr == kIOReturnSuccess && pa0 && segs[0].fIOVMAddr == (UInt64)pa0)
             g->stdW.flags |= r18std::kIdentity;
-        return r17TxStdRollback(p, g, m, cmd->complete(true, false));
+        return r17TxStdRollback(p, g, m);
     }
     g->stdW.mapAddress = segs[0].fIOVMAddr;
     /* Logical bytes covered by the mapping. The length IOKit hands back to
@@ -1009,8 +1013,42 @@ bool RTL8125::r17TxMapStd(R17TxState *p, R17Gen *g, mbuf_t m,
     return true;
 }
 
+/* Round29: complete() is still the only standard API that initiates unmap, but
+ * its return value does not carry every mapper/CompletionWait failure. Query
+ * the backend's confirmed record for THIS stamped handle before any release.
+ * Never issue complete twice: the framework may already have discarded its
+ * own mapping bookkeeping even when the backend retained the owner. */
+IOReturn RTL8125::r17TxStdComplete(R17TxState *p, R17Gen *g)
+{
+    if (g->stdCompleteAttempted) return g->stdRetireResult;
+    g->stdCompleteAttempted = true;
+    g->stdW.tCompleteBegin = mach_absolute_time();
+    const IOReturn result = g->stdCmd ? g->stdCmd->complete(true, false)
+                                    : kIOReturnNotReady;
+    g->stdW.tCompleteEnd = mach_absolute_time();
+    g->stdW.completeResult = (UInt32)result; /* keep the actual framework result */
+    g->stdRetireResult = result;
+    if (result != kIOReturnSuccess) return result;
+    r17tx::Request ack = g->request;
+    /* Standard mode does not populate Request::handle. The mapper mark taken
+     * around prepare() is the source of this generation's backend identity. */
+    ack.handle = g->stdHandle;
+    ack.tRetire = 0;
+    if (!ack.handle || !p->callback) {
+        g->stdRetireResult = kIOReturnNotReady;
+        return g->stdRetireResult;
+    }
+    IOReturn confirmed = p->callback(p->context, r17tx::kRetireAck, &ack);
+    if (confirmed == kIOReturnSuccess &&
+        (ack.handle != g->stdHandle || !ack.tRetire))
+        confirmed = kIOReturnIOError;
+    if (confirmed == kIOReturnSuccess) g->request.tRetire = ack.tRetire;
+    g->stdRetireResult = confirmed;
+    return confirmed;
+}
+
 /* The single rollback exit for "the standard map was published, then found
- * unusable". Only the unmap result decides what happens next:
+ * unusable". Both API completion and backend confirmation decide the ending:
  *
  *   confirmed -> the translation is gone. Release this generation's descriptor,
  *     command and packet, clear the generation handle AND the owner state, so
@@ -1023,16 +1061,12 @@ bool RTL8125::r17TxMapStd(R17TxState *p, R17Gen *g, mbuf_t m,
  *     complete(): the archived XNU IOMemoryDescriptor::dmaUnmap clears its own
  *     mapping bookkeeping even when the mapper fails, so a second complete()
  *     would report success without unmapping anything. */
-bool RTL8125::r17TxStdRollback(R17TxState *p, R17Gen *g, mbuf_t m,
-                               IOReturn unmap)
+bool RTL8125::r17TxStdRollback(R17TxState *p, R17Gen *g, mbuf_t m)
 {
-    g->stdW.completeResult = (UInt32)unmap;
-    g->stdW.tCompleteBegin = g->stdW.tCompleteBegin ? g->stdW.tCompleteBegin
-                                                    : mach_absolute_time();
-    g->stdW.tCompleteEnd = mach_absolute_time();
-    if (g->stdCmd) g->stdCmd->clearMemoryDescriptor();
+    const IOReturn unmap = r17TxStdComplete(p, g);
     if (unmap == kIOReturnSuccess) {
-        if (g->stdCmd) { g->stdCmd->release(); g->stdCmd = nullptr; }
+        if (g->stdCmd) { g->stdCmd->clearMemoryDescriptor(false);
+                         g->stdCmd->release(); g->stdCmd = nullptr; }
         if (g->stdMD && g->stdWired) g->stdMD->complete(kIODirectionOut);
         if (g->stdMD) { g->stdMD->release(); g->stdMD = nullptr; }
         g->stdWired = false;
@@ -1266,6 +1300,8 @@ void RTL8125::r17TxReport(r17tx::Configure *c)
     c->ringOwn = r17TxRingOwn();
     c->outstanding = r17TxOutstanding();
     c->activeCover = __atomic_load_n(&p->coverActive, __ATOMIC_ACQUIRE);
+    c->held = __atomic_load_n(&p->held, __ATOMIC_ACQUIRE);
+    c->modeReserved = r17TxLiveGens(); /* native v7: independent live-generation count */
     c->gateFails = __atomic_load_n(&p->gateFails, __ATOMIC_RELAXED);
     c->barrierFails = __atomic_load_n(&p->barrierFails, __ATOMIC_RELAXED);
     c->edgeSeq = p->edgeSeq;
@@ -1542,14 +1578,7 @@ void RTL8125::r17TxRetire(R17TxState *p, R17Gen *g, UInt64 handle)
 {
     IOReturn result;
     if (p->stdMode) {
-        /* complete() is what makes IOKit call iovmUnmapMemory(); the driver
-         * never invokes the mapper itself. Note the contract cost: complete()
-         * drops the command's own bookkeeping even when the unmap fails, so a
-         * failed unmap cannot be retried -- it is reported as pinned. */
-        g->stdW.tCompleteBegin = mach_absolute_time();
-        result = g->stdCmd ? g->stdCmd->complete(true, false) : kIOReturnNotReady;
-        g->stdW.tCompleteEnd = mach_absolute_time();
-        g->stdW.completeResult = (UInt32)result;
+        result = r17TxStdComplete(p, g);
     } else {
         result = p->callback(p->context, r17tx::kRetire, &g->request);
     }
@@ -1567,7 +1596,7 @@ void RTL8125::r17TxRetire(R17TxState *p, R17Gen *g, UInt64 handle)
         g->packet = NULL;
         __atomic_fetch_sub(&p->held, 1u, __ATOMIC_ACQ_REL);
         if (p->stdMode) {
-            if (g->stdCmd) { g->stdCmd->clearMemoryDescriptor();
+            if (g->stdCmd) { g->stdCmd->clearMemoryDescriptor(false);
                              g->stdCmd->release(); g->stdCmd = nullptr; }
             if (g->stdMD && g->stdWired) g->stdMD->complete(kIODirectionOut);
             if (g->stdMD) { g->stdMD->release(); g->stdMD = nullptr; }
@@ -1613,7 +1642,7 @@ void RTL8125::r17TxRetire(R17TxState *p, R17Gen *g, UInt64 handle)
          * objects and mbuf, and park THIS generation. A failed retire is never
          * reported as recycled, and the other live generations are untouched. */
         g->request.handle = handle;
-        if (p->stdMode) {
+        if (p->stdMode && !(g->stdW.flags & r18std::kPinned)) {
             g->stdW.flags |= r18std::kPinned;
             __atomic_fetch_add(&p->stdPinned, 1u, __ATOMIC_RELAXED);
         }
@@ -1671,6 +1700,13 @@ void RTL8125::r17TxTimer(IOTimerEventSource *timer)
                 __ATOMIC_ACQUIRE))
                 __atomic_fetch_add(&p->completed, 1u, __ATOMIC_RELAXED);
         }
+        /* A failed standard retirement is terminal for this generation. The
+         * command may have dropped its mapping bookkeeping; re-entering it
+         * cannot establish that the retained backend owner was unmapped. The
+         * acquire load also covers pinned post-prepare rollback publication. */
+        state = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
+        if (state != r17tx::kPending ||
+            (p->stdMode && (g->stdW.flags & r18std::kPinned))) continue;
         UInt32 pending = r17tx::kPending;
         if (__atomic_compare_exchange_n(&g->state, &pending,
             (UInt32)r17tx::kRetiring, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))

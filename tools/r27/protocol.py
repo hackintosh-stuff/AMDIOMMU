@@ -12,6 +12,7 @@ MAGIC = b'R27P'
 REQUESTS = tuple(range(1, 8193))
 TAIL_MAGIC = b'R28T'
 TAIL_MAX = 4096
+TAIL_DONE_MAGIC = b'R29D'
 
 
 def tail(token, seq):
@@ -26,6 +27,21 @@ def tail_identify(data):
         return None
     magic, token, seq = struct.unpack_from('>4sII', data)
     return (token, seq) if magic == TAIL_MAGIC else None
+
+
+def tail_done(token, seq):
+    """One exact termination marker, after every numbered tail echo arrived."""
+    if not 0 < token < 0x80000000 or not 1 <= seq <= TAIL_MAX:
+        raise ValueError('invalid bounded tail termination')
+    return struct.pack('>4sII', TAIL_DONE_MAGIC, token, seq)
+
+
+def tail_done_identify(data):
+    if len(data) != 12:
+        return None
+    magic, token, seq = struct.unpack('>4sII', data)
+    return (token, seq) if magic == TAIL_DONE_MAGIC else None
+
 
 SEED = bytes(1024)
 LARGE = (2, 4, 6, 8, 11)

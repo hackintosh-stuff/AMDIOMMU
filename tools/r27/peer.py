@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round28 finite UDP peer: byte validation, group-local reorder, no duplicates.
+"""Round29 finite UDP peer: byte validation, group-local reorder, no duplicates.
 
 The 8192 R27P application requests are ordinary traffic to the driver.  Keep
 echoing seed and ordinary probes after the batch so exit recovery is observable.
@@ -10,7 +10,8 @@ import select
 import socket
 import time
 from protocol import (BURST, REQUESTS, SEED, bursts, evidence, identify,
-                      ordinary, ordinary_seq, payload, tail, tail_identify)
+                      ordinary, ordinary_seq, payload, tail, tail_identify,
+                      tail_done, tail_done_identify, TAIL_MAX)
 
 PEER_MAX_SECONDS = 1800
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,6 +27,7 @@ def serve(s, token, seconds, emit, idle_exit=0):
     seed_seen = False
     endpoint = None
     tail_seen = set()
+    tail_done_seen = False
     while time.monotonic() < end:
         if idle_exit and time.monotonic() - last_seen > idle_exit:
             emit('peer_idle_exit idle_s=%.1f' % (time.monotonic() - last_seen))
@@ -59,10 +61,29 @@ def serve(s, token, seconds, emit, idle_exit=0):
             emit('peer_ord_sent seq=%d to=%s:%d t=%d' %
                  (oseq, *addr, time.monotonic_ns()))
             continue
+        done_id = tail_done_identify(data)
+        if done_id is not None:
+            tok, seq = done_id
+            valid = (tok == token and 1 <= seq <= TAIL_MAX and
+                     not tail_done_seen and addr == endpoint and
+                     received == set(REQUESTS) and
+                     tail_seen == set(range(1, seq + 1)) and
+                     data == tail_done(token, seq))
+            emit('peer_tail_done_recv token=0x%08x seq=%d %s payload_ok=%d from=%s:%d t=%d' %
+                 (tok, seq, evidence(data), int(valid), *addr, when))
+            if not valid:
+                bad += 1
+                continue
+            tail_done_seen = True
+            if s.sendto(data, addr) != len(data):
+                raise RuntimeError('short tail termination send')
+            emit('peer_tail_done_sent token=0x%08x seq=%d %s to=%s:%d t=%d' %
+                 (tok, seq, evidence(data), *addr, time.monotonic_ns()))
+            continue
         tail_id = tail_identify(data)
         if tail_id is not None:
             tok, seq = tail_id
-            valid = (tok == token and 1 <= seq <= 4096 and
+            valid = (tok == token and 1 <= seq <= TAIL_MAX and not tail_done_seen and
                      seq not in tail_seen and addr == endpoint and
                      received == set(REQUESTS) and data == tail(token, seq))
             emit('peer_tail_recv token=0x%08x seq=%d %s payload_ok=%d from=%s:%d t=%d' %
@@ -101,7 +122,7 @@ def serve(s, token, seconds, emit, idle_exit=0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--log', default='runs/r28/peer.log')
+    ap.add_argument('--log', default='runs/r29/peer.log')
     ap.add_argument('--run-token', required=True, type=lambda x: int(x, 0))
     ap.add_argument('--bind', default='192.168.50.122')
     ap.add_argument('--port', type=int, default=9110)
