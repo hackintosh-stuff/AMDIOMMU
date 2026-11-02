@@ -30,6 +30,49 @@ def status():
     return parse_status(text)
 
 
+def find_probe_entry(io):
+    """Return the retained registry entry for the probe object.
+
+    The probe is an unregistered IOService nub: it publishes properties but is
+    not a published service, so IOServiceMatching/IOServiceGetMatchingService
+    and IORegistryEntryIDMatching all return no match. Walk the IOService plane
+    and match the entry name, which is what ioreg -c reports as well.
+    """
+    ptr = ctypes.c_void_p
+    io.IORegistryGetRootEntry.argtypes = [ctypes.c_uint32]
+    io.IORegistryGetRootEntry.restype = ctypes.c_uint32
+    io.IORegistryEntryCreateIterator.argtypes = [ctypes.c_uint32, ctypes.c_char_p,
+                                                 ctypes.c_uint32, ctypes.POINTER(ptr)]
+    io.IORegistryEntryCreateIterator.restype = ctypes.c_int
+    io.IOIteratorNext.argtypes = [ptr]
+    io.IOIteratorNext.restype = ctypes.c_uint32
+    io.IORegistryEntryGetName.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
+    io.IORegistryEntryGetName.restype = ctypes.c_int
+    io.IOObjectRelease.argtypes = [ctypes.c_uint32]
+    root = io.IORegistryGetRootEntry(0)
+    if not root:
+        raise RuntimeError('cannot get IORegistry root')
+    iterator = ptr()
+    try:
+        if io.IORegistryEntryCreateIterator(root, b'IOService', 1,
+                                            ctypes.byref(iterator)):
+            raise RuntimeError('cannot iterate IOService plane')
+        buffer = ctypes.create_string_buffer(256)
+        while True:
+            entry = io.IOIteratorNext(iterator)
+            if not entry:
+                break
+            if (io.IORegistryEntryGetName(entry, buffer) == 0 and
+                    buffer.value.decode('utf-8', 'replace') == SERVICE):
+                return entry
+            io.IOObjectRelease(entry)
+        raise RuntimeError('Round31 probe service not found')
+    finally:
+        if iterator:
+            io.IOObjectRelease(iterator.value)
+        io.IOObjectRelease(root)
+
+
 def stop():
     """Send one R31Stop=true property RPC; kernel work completes asynchronously.
 
@@ -41,10 +84,6 @@ def stop():
     io = ctypes.CDLL('/System/Library/Frameworks/IOKit.framework/IOKit')
     cf = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
     ptr = ctypes.c_void_p
-    io.IOServiceMatching.argtypes = [ctypes.c_char_p]
-    io.IOServiceMatching.restype = ptr
-    io.IOServiceGetMatchingService.argtypes = [ctypes.c_uint32, ptr]
-    io.IOServiceGetMatchingService.restype = ctypes.c_uint32
     io.IORegistryEntrySetCFProperties.argtypes = [ctypes.c_uint32, ptr]
     io.IORegistryEntrySetCFProperties.restype = ctypes.c_uint32
     io.IOObjectRelease.argtypes = [ctypes.c_uint32]
@@ -57,13 +96,7 @@ def stop():
     cf.CFRelease.argtypes = [ptr]
     cf.CFRelease.restype = None
 
-    matching = io.IOServiceMatching(SERVICE.encode('ascii'))
-    if not matching:
-        raise RuntimeError('cannot create probe service match')
-    # IOServiceGetMatchingService consumes the matching dictionary.
-    service = io.IOServiceGetMatchingService(0, matching)
-    if not service:
-        raise RuntimeError('Round31 probe service not found')
+    service = find_probe_entry(io)
     key = properties = None
     try:
         key = cf.CFStringCreateWithCString(None, b'R31Stop', 0x08000100)
