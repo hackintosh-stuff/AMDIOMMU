@@ -32,7 +32,27 @@ Generation selects `--tx 21 --rx 31`. Run defaults are `runs/r31` and
 `python3 -B tools/r31/session.py status` reads the live state;
 `sudo python3 -B tools/r31/session.py stop` requests the normal asynchronous exit.
 The finite load requests this stop itself after its second half.
-Mac builds and hardware acceptance of this candidate are pending.
+
+**Round31 session PASSED; strict 14-check acceptance NOT met (13/14).** Two boots
+were made. The first exposed an RPC defect: the probe is an unregistered
+IOService nub, so `IOServiceMatching` found nothing; the stop is now sent to the
+registry entry found by walking the IOService plane (commit `9461218`, the
+deployed source). The single valid measurement used token `0x31c0de31`:
+4096 + 125.105 s idle + 4096, 8192/8192 replies, one stop request, R28T
+1024/1024, R29D seq 1024, RX1024 map/unmap 1024/1024 with 9454 completions,
+TX retired 10339, owners/pending/pinned/ring 0, and 3/3 post-exit probes.
+
+The failing check is the pre-existing cumulative TX rule: `driver.rejected=1`.
+`R26TxAttempts == R26TxMapped == 10339` proves the refused frame never entered
+the all-standard mapping entry; the consistent site is the legacy cover branch
+before session start or after detach. No application frame was lost. Next step
+is the minimal fix there (do not reject cover failures once translation is off)
+and one retest. Deployed source commit: `9461218491846fd5432b31b166e596c5ee597642`.
+
+Round31 result and archive are outside this source repository:
+[Round31 result](<../../docs/m2-3l-round31-result.md>) and
+[evidence archive](<../../docs/evidence/r31-final-20261103.tgz>)
+(SHA256 `8e328133575032db8223ca1959531d4e99bc4be99e5979be681d5f752659ccf0`).
 
 ## Historical Round30 / full-ring cyclic RX1024
 
