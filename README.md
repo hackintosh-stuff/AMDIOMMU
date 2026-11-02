@@ -22,8 +22,30 @@ sh tools/r27/build.sh _scratch/r29-upstream
 The build runs the current main-path checks against generated `--tx 21 --rx 29`
 source. The normal analyzer fixture is selected; historical corruption matrices
 remain available separately. Defaults are `runs/r29` and `org.example.round29load`.
-After one successful RX64 hardware run, proceed to RX1024. Hardware acceptance
-of this candidate is pending.
+
+**Round29 hardware acceptance PASSED.** The tested implementation was committed
+before deployment as `2b77ec8d6c4e65eb27af130cfdf5596694202884` (tree
+`e5780791aee8c5d60216e401c4d402ead1049dbb`), then built and deployed as Lucy
+1.1.214 / Probe 0.38.0. One finite measurement run used token `0x29d1a401`;
+no second run was made.
+
+- Application: 8192/8192 valid replies, bad 0, no retransmission; tail 1024/1024;
+  one R29D echo (seq 1024) confirmed before TX close.
+- RX: 64/64 standard maps and unmaps, 640 posted/completed and 64 restored,
+  pending 0, live owners 0.
+- TX: driver mapped/retired 10284/10284, live/held 0; backend owners/pending/
+  pinned/ring 0; commands 20699 submitted and completed, 80 wraps; device page
+  faults 0. Ordinary traffic resumed after exit and the network remained usable.
+- Strict analyzer: `ok=true`, 13/13 checks; capture complete with no errors.
+
+This documentation update is not a newly deployed or hardware-tested revision;
+the deployed source commit remains `2b77ec8`. Next stage is RX1024: full
+1024-slot RX takeover, not further RX64 defensive hardening.
+
+Round29 result and archive are outside this source repository:
+[Round29 result](<../../docs/m2-3j-round29-result.md>) and
+[evidence archive](<../../docs/evidence/r29-final-20261103.tgz>)
+(SHA256 `36b9618a39a499ce1dba08da114a1ec52272a5883f34ae8eb1688efac906f802`).
 
 ## Historical Round28 / cyclic64 RX implementation
 
