@@ -524,6 +524,10 @@ static inline const char *kNicPaths[] = {
                                  M2B2_4K_L1_PAGES + M2B2_4K_LEAF_PAGES + \
                                  M2B2_BADROOT_PAGES)                      // 8211
 
+// Round30: the 64GiB subtree needs one L2 and five L1 tables for TX16 +
+// RX1024*2 pages. Keep two more pages for the existing identity cover path.
+#define M2B2_IOVA_RESERVED_PAGES 8u
+
 // PTE 位定义（amd_iommu_types.h:376-380）
 #define M2B2_PTE_PR             (1ULL << 0)
 #define M2B2_PTE_FC             (1ULL << 60)

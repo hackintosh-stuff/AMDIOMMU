@@ -1,6 +1,6 @@
-/* Round29: cyclic RX DMA with a tail-finished observation after RX release.
- * Separate ABI: RTL812xRxPool.hpp remains byte-for-byte compatible.
- * Probe owns the 64 physical MD/DMACommand objects; Lucy retains the actual
+/* Round30: cyclic RX DMA across all 1024 receive ring slots.
+ * The matching pool ABI provides 1024 retained spare buffers.
+ * Probe owns the 1024 physical MD/DMACommand objects; Lucy retains the actual
  * mbufs until kRelease acknowledges every standard unmap. No kernel pointer
  * crosses this control ABI. Times are mach_absolute_time ticks.
  */
@@ -13,7 +13,7 @@ typedef unsigned long long u64;
 static const char kFunctionName[] = "rtl812x-r27-rxmap";
 static const u64 kIovaBase = 0x1000010000ULL;
 enum {
-    kVersion = 3, kCount = 64, kPagesPerSlot = 2, kCapacity = 4096,
+    kVersion = 4, kCount = 1024, kPagesPerSlot = 2, kCapacity = 4096,
     kTailMax = 4096,
     kInstall = 1, kSnapshot = 2, kDisarm = 3, kDrain = 4, kRelease = 5,
     kHold = 6,
@@ -80,9 +80,9 @@ struct BackendSnapshot {
 static_assert(sizeof(Mapping) == 32, "round27 mapping ABI");
 static_assert(sizeof(Cycle) == 40, "round28 cycle ABI");
 static_assert(sizeof(Witness) == 272, "round28 witness ABI");
-static_assert(sizeof(Snapshot) == 19536, "round28 driver snapshot ABI");
-static_assert(sizeof(Request) == 21632, "round28 request ABI");
+static_assert(sizeof(Snapshot) == 311376, "round30 driver snapshot ABI");
+static_assert(sizeof(Request) == 344192, "round30 request ABI");
 static_assert(sizeof(MapRecord) == 200, "round27 map record ABI");
-static_assert(sizeof(BackendSnapshot) == 12864, "round27 backend snapshot ABI");
+static_assert(sizeof(BackendSnapshot) == 204864, "round30 backend snapshot ABI");
 } // namespace r27rx
 #endif

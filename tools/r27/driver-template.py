@@ -1,7 +1,7 @@
-"""Round28 cyclic RX hooks retaining the round27 integration interfaces.
+"""Round30 full-ring cyclic RX hooks retaining the round27 integration interfaces.
 
 The probe prepares mappings outside Lucy's command gate. Lucy binds each of
-64 fixed spares once and reposts that same IOVA after copy and completion while
+1024 fixed spares once and reposts that same IOVA after copy and completion while
 authorized. Drain restores originals before physical OWN publication detaches
 each association. No mapping, allocation, or waiting occurs in the interrupt.
 """
@@ -19,7 +19,7 @@ MEMBERS = r'''
 '''
 
 METHODS = r'''
-#pragma mark --- round 28 cyclic standard-mapped receive spares ---
+#pragma mark --- round 30 full-ring cyclic standard-mapped receive spares ---
 
 IOReturn RTL8125::r27RxAction(OSObject *owner, void *arg0,
                             void *, void *, void *)
@@ -98,7 +98,7 @@ IOReturn RTL8125::r27RxControl(r27rx::Request *request)
                 s.state = (request->op == r27rx::kDrain && !s.pendingPosted)
                     ? r27rx::kDrained : r27rx::kDisarmed;
         } else if (request->op == r27rx::kRelease) {
-            /* This is the probe's acknowledgement of all 64 confirmed unmaps.
+            /* This is the probe's acknowledgement of all 1024 confirmed unmaps.
              * A clear pending count alone is insufficient: every live ring
              * association must again be its retained original physical object. */
             if (s.state != r27rx::kDrained || s.pendingPosted ||
@@ -333,7 +333,7 @@ bool RTL8125::r27RxParse(mbuf_t packet, UInt32 *token, UInt32 *reqId)
 
 
 def pool_methods(text):
-    """Transform only shared R15 state/call sites; old wire types stay intact."""
+    """Add full-ring mapped RX state/call sites to the matching pool ABI."""
     def once(old, new):
         nonlocal text
         if text.count(old) != 1:

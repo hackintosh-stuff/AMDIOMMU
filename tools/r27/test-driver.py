@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile and exercise the actual generated round29 cyclic RX methods.
+"""Compile and exercise the actual generated round30 full-ring cyclic RX methods.
 
 This is one RX ownership/lifecycle check, not a replay of previous rounds.
 --source additionally checks the newly generated Lucy call sites, and uses its
@@ -150,50 +150,50 @@ struct Fixture {
 };
 
 int main() {
-    static_assert(r27rx::kVersion==3 && sizeof(r27rx::Cycle)==40);
+    static_assert(r27rx::kVersion==4 && (int)r27rx::kCount==(int)r15pool::kRingCount);
+    static_assert(r15pool::kVersion==2 && (int)r15pool::kSpareCount==(int)r27rx::kCount);
+    static_assert(sizeof(r27rx::Cycle)==40);
     static_assert(sizeof(r27rx::Witness)==272 && offsetof(r27rx::Witness,tLastPost)==80);
     static_assert(offsetof(r27rx::Witness,samples)==112);
-    static_assert(sizeof(r27rx::Snapshot)==19536 && sizeof(r27rx::Request)==21632);
-    static_assert(sizeof(r27rx::BackendSnapshot)==12864);
+    static_assert(sizeof(r27rx::Snapshot)==311376 && sizeof(r27rx::Request)==344192);
+    static_assert(sizeof(r27rx::BackendSnapshot)==204864);
     {
         Fixture f; f.install();
         auto &p=*f.d.r15Pool;
-        for (UInt32 i=0; i<64; ++i) {
+        for (UInt32 i=0; i<r27rx::kCount; ++i) {
             const UInt64 addr=f.receive(i);
             assert(addr==f.q.maps[i].iova && addr!=f.q.maps[i].pa);
             assert(!p.rx27.witnesses[i].tPost);
             f.post(i,addr);
         }
-        assert(p.rx27.posted==64 && p.rx27.pendingPosted==64);
+        assert(p.rx27.posted==r27rx::kCount && p.rx27.pendingPosted==r27rx::kCount);
         // Legacy deadline is not a cyclic selector. Tokens do not select either.
         p.snap.deadline=1;
         for (UInt32 cycle=1; cycle<=4; ++cycle) {
-            for (UInt32 i=0; i<64; ++i) {
+            for (UInt32 i=0; i<r27rx::kCount; ++i) {
                 auto addr=f.receive(i,cycle%2 ? 0 : 0x27abcd,cycle*100+i);
-                assert(addr==f.q.maps[i].iova && p.rx27.pendingPosted==64);
+                assert(addr==f.q.maps[i].iova && p.rx27.pendingPosted==r27rx::kCount);
                 f.post(i,addr);
                 auto &w=p.rx27.witnesses[i];
                 assert(w.postCount==cycle+1 && w.doneCount==cycle);
                 assert(w.reuseCount==cycle && w.sampleCount<=4);
             }
         }
-        assert(p.rx27.posted==320 && p.rx27.completed==256);
-        auto untouched=f.receive(70); f.post(70,untouched);
-        assert(untouched==p.snap.entries[70].addr && p.rx27.posted==320);
-        assert(p.snap.replacements==64 && p.snap.completions==256);
+        assert(p.rx27.posted==5*r27rx::kCount && p.rx27.completed==4*r27rx::kCount);
+        assert(p.snap.replacements==r27rx::kCount && p.snap.completions==4*r27rx::kCount);
         f.q.op=r27rx::kRelease;
         assert(f.d.r27RxControl(&f.q)==kIOReturnBusy);
         f.op(r27rx::kDisarm);
         const auto disarmed=p.rx27.tDisarmed;
         UInt64 addr=0;
-        for (UInt32 i=0; i<64; ++i) {
+        for (UInt32 i=0; i<r27rx::kCount; ++i) {
             addr=f.receive(i);
             assert(addr==p.snap.entries[i].addr);
             f.post(i,addr);
         }
-        assert(p.rx27.posted==320 && p.rx27.completed==320 && p.rx27.restored==64 && !p.rx27.pendingPosted);
+        assert(p.rx27.posted==5*r27rx::kCount && p.rx27.completed==5*r27rx::kCount && p.rx27.restored==r27rx::kCount && !p.rx27.pendingPosted);
         assert(!p.rx27.flags);
-        for (UInt32 i=0; i<64; ++i) {
+        for (UInt32 i=0; i<r27rx::kCount; ++i) {
             auto &w=p.rx27.witnesses[i];
             assert(w.flags==7 && w.tPost<w.tDone && w.tDone<w.tRestoreOwn);
             assert(w.postCount==5 && w.doneCount==5 && w.reuseCount==4 && w.sampleCount==4);
@@ -212,7 +212,7 @@ int main() {
         assert(p.rx27.state==r27rx::kReleased);
         // Release must not re-enter the old permanent-spare R15 path.
         addr=f.receive(70); f.post(70,addr);
-        assert(addr==p.snap.entries[70].addr && p.snap.replacements==64);
+        assert(addr==p.snap.entries[70].addr && p.snap.replacements==r27rx::kCount);
     }
     {
         Fixture f; f.install(); auto &p=*f.d.r15Pool;
@@ -281,7 +281,7 @@ int main() {
         assert(!f.d.r27RxParse(&m,&token,&req) && !token && !req);
         assert(f.d.r15Pool->rx27.tailSeq==16);
     }
-    std::puts("R29 RX: same 64 objects, 5 cumulative DMA cycles, first4 samples; physical-OWN restore; R27P observation; R29D only after release; v3 ABI PASS");
+    std::puts("R30 RX: all 1024 ring slots, 5120 cumulative DMA cycles, first4 samples per slot; physical-OWN restore; R27P observation; R29D only after release; RX4/pool2 ABI PASS");
 }
 '''
 
@@ -294,7 +294,7 @@ def main():
     spec = importlib.util.spec_from_file_location('r27_lucy_generator', ROOT / 'tools/apply-lucy-obs2.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    module.select_tx('21'); module.select_rx('27')
+    module.select_tx('21'); module.select_rx('30')
     template = module.POOL_METHODS
     text = template
     names = ('r27RxControl', 'r27RxRearm', 'r27RxPosted', 'r27RxActive', 'r27RxParse',
@@ -326,7 +326,7 @@ def main():
             '-I', str(ROOT / 'tools/lucy-obs'), str(source), '-o', str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
     if args.source:
-        print('R27 actual generated RX call sites and methods: PASS')
+        print('R30 actual generated RX call sites and methods: PASS')
 
 
 if __name__ == '__main__':

@@ -42,6 +42,7 @@ struct IOService;
 #include "RTL812xTxMapStd.hpp"
 #include "AMDAliveTxDomainNative.hpp"
 #include "RTL812xRxMap.hpp"
+#include "RTL812xRxPool.hpp"
 int main() {
     std::printf("{\n");
     std::printf("  \"domain_version\": %u,\n", r17domain::kVersion);
@@ -60,6 +61,12 @@ int main() {
     std::printf("  \"rx_version\": %u, \"rx_snapshot_bytes\": %zu, \"rx_request_bytes\": %zu,\n",
                 r27rx::kVersion, sizeof(r27rx::Snapshot), sizeof(r27rx::Request));
     std::printf("  \"rx_tail_seq_offset\": %zu,\n", offsetof(r27rx::Snapshot, tailSeq));
+    std::printf("  \"rx_count\": %u, \"rx_backend_bytes\": %zu,\n",
+                r27rx::kCount, sizeof(r27rx::BackendSnapshot));
+    std::printf("  \"pool_version\": %u, \"pool_spares\": %u,\n",
+                r15pool::kVersion, r15pool::kSpareCount);
+    std::printf("  \"pool_snapshot_bytes\": %zu, \"pool_request_bytes\": %zu,\n",
+                sizeof(r15pool::Snapshot), sizeof(r15pool::Request));
     std::printf("  \"kInstall\": %d, \"kDisarm\": %d, \"kQuery\": %d,\n",
                 (int)r17tx::kInstall, (int)r17tx::kDisarm, (int)r17tx::kQuery);
     std::printf("  \"kDetach\": %d, \"kQuiesce\": %d, \"kResume\": %d,\n",
@@ -177,6 +184,11 @@ def check():
         ('STD_VERSION', want['std_version']),
         ('HISTORY_CAPACITY', want['history_capacity']),
     ]
+    if round29:
+        current_pairs += [('RX_VERSION', want['rx_version']),
+                          ('RX_COUNT', want['rx_count']),
+                          ('RX_DRIVER_BYTES', want['rx_snapshot_bytes']),
+                          ('RX_BACKEND_BYTES', want['rx_backend_bytes'])]
     for name, expect in current_pairs:
         if current.get(name) != expect:
             bad.append('%s: %s=%r headers=%r' %
@@ -240,6 +252,21 @@ def check_r26():
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == '--check-r30':
+        want = abi()
+        pins = {'domain_version': 3, 'native_version': 7, 'std_version': 5,
+                'configure_bytes': 176, 'retire_ack_op': 4,
+                'history_capacity': 32, 'mapping_slots': 4,
+                'rx_version': 4, 'rx_count': 1024, 'rx_snapshot_bytes': 311376,
+                'rx_request_bytes': 344192, 'rx_backend_bytes': 204864,
+                'rx_tail_seq_offset': 44, 'pool_version': 2, 'pool_spares': 1024,
+                'pool_snapshot_bytes': 114808, 'pool_request_bytes': 114856}
+        bad = {k: (want.get(k), v) for k, v in pins.items() if want.get(k) != v}
+        if bad:
+            print('round30 ABI MISMATCH: ' + repr(bad))
+            return 1
+        print('round30 ABI: %d header-derived pins passed' % len(pins))
+        return check()
     if len(sys.argv) > 1 and sys.argv[1] == '--check-r29':
         want = abi()
         pins = {'domain_version': 3, 'native_version': 7, 'std_version': 5,

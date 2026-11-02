@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round29: close tail traffic and confirmed TX retirement with cyclic RX64.
+"""Round30: extend cyclic standard RX mapping to the complete 1024-slot ring.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,12 +29,12 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round29-8192-ordinary-application; RX64-cyclic-standard-map; acknowledged-tail-and-TX-retirement'
+SCOPE = 'round30-8192-ordinary-application; RX1024-cyclic-standard-map; acknowledged-tail-and-TX-retirement'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
-RX_VERSION, RX_COUNT = 3, 64
-RX_DRIVER_BYTES, RX_BACKEND_BYTES = 19536, 12864
+RX_VERSION, RX_COUNT = 4, 1024
+RX_DRIVER_BYTES, RX_BACKEND_BYTES = 311376, 204864
 RX_BASE, RX_STRIDE, RX_CAPACITY = 0x1000010000, 8192, 4096
 ALL_STANDARD_MODE = 2
 DOMAIN_VERSION, DOMAIN_HEADER, DOMAIN_RECORD_BYTES = 3, 80, 720
@@ -91,7 +91,7 @@ def retained(h, rows, total_key, expected_total):
 
 
 def decode_rx(blob):
-    A.need(len(blob) == RX_DRIVER_BYTES, 'RX driver snapshot must be 19536 bytes')
+    A.need(len(blob) == RX_DRIVER_BYTES, 'RX driver snapshot must be %d bytes' % RX_DRIVER_BYTES)
     h = A.unpack('version bytes state flags generation mapCount posted completed '
                  'restored pendingPosted businessToken tailSeq poolId tInstalled '
                  'tDisarmed tLastRestore', '12I4Q', blob)
@@ -130,6 +130,26 @@ def decode_rx_backend(blob):
         r['unmapCommand'] = A.cmdrec(blob, at + 160)
         rows.append(r)
     return h, rows
+
+
+def rx_leaf_address(pt, root_pa, pt_base, level, iova):
+    """Find this stripe's L1 table through the exported parent entries.
+
+    RX1024 spans five L1 tables. The TX snapshot's leafPA identifies only the
+    first one, so it cannot locate every RX leaf after the window grows.
+    """
+    A.need(level in (3, 4), 'impossible RX root level')
+    pa = root_pa
+    while level > 1:
+        A.need(pa & 4095 == 0 and 0 <= pa - pt_base <= len(pt) - 4096,
+               'RX parent table outside the exported arena')
+        index = (iova >> (12 + 9 * (level - 1))) & 511
+        entry = struct.unpack_from('<Q', pt, pa - pt_base + 8 * index)[0]
+        A.need(entry & 1 and entry & A.PTE_IR and (entry >> 9) & 7 == level - 1,
+               'RX parent table missing or wrong level')
+        pa = entry & 0x000FFFFFFFFFF000
+        level -= 1
+    return pa
 
 
 def check(cap):
@@ -172,9 +192,9 @@ def check(cap):
         A.need(0 < token < 0x80000000 and sh['token'] == bh['token'] == token,
                'inconsistent/non-low-half token')
         A.need(dh['devid'] == gh['bdf'] == sh['bdf'] == bh['bdf'], 'capture device association differs')
-        checks.append({'id': 'capture-ABI-domain3-native7-std5-rx3', 'state': 'ok'})
+        checks.append({'id': 'capture-ABI-domain3-native7-std5-rx4', 'state': 'ok'})
     except (A.Refused, OSError, ValueError, KeyError, IndexError, struct.error) as exc:
-        checks.append({'id': 'capture-ABI-domain3-native7-std5-rx3', 'state': 'FAIL', 'detail': str(exc)})
+        checks.append({'id': 'capture-ABI-domain3-native7-std5-rx4', 'state': 'FAIL', 'detail': str(exc)})
         return result()
 
     def driver_property(key, numeric=False):
@@ -586,13 +606,13 @@ def check(cap):
         return {'before': len(before), 'during': len(during), 'after': len(after)}
     run('ordinary-traffic-before-during-and-three-after', ordinary)
     def rx_mappings():
-        A.need(P['m2-3h-rx-mode'] == 'standard-nonidentity-cyclic64' and
+        A.need(P['m2-3h-rx-mode'] == 'standard-nonidentity-cyclic1024' and
                P['m2-3h-rx-state'] == 'drained-and-unmapped' and
                P['m2-3h-rx-ready'] == 'no', 'RX run did not reach its released final state')
         A.need(rb['count'] == rb['mapCalls'] == rb['mapOk'] == rb['unmapCalls'] ==
                rb['unmapOk'] == RX_COUNT and rb['flags'] == rb['mapRejects'] ==
                rb['liveOwners'] == 0 and rb['ready'] == 1,
-               'RX64 map/unmap totals or final backend owners differ')
+               'RX1024 map/unmap totals or final backend owners differ')
         A.need(0 < rb['tReady'] <= rb['tDrained'] <= P['m2-3e-exit-gate-close'],
                'RX ready/drained timestamps differ from the active window')
         A.need(P['m2-3h-rx-live-owners'] == P['m2-3h-rx-pending'] == 0,
@@ -602,7 +622,7 @@ def check(cap):
         by_id = {m['entryId']: m for m in rxmaps}
         A.need(len(by_id) == RX_COUNT and set(by_id) == {r['entryId'] for r in rxrecords},
                'RX driver/backend entry IDs differ or repeat')
-        iovas = set()
+        iovas, leaf_tables = set(), set()
         sequences = {d[key]['expected'] for d in dom
                      for key in ('mapCommand', 'retireCommand')}
         for i, r in enumerate(rxrecords):
@@ -646,15 +666,18 @@ def check(cap):
                 A.need(iova not in iovas and r['mapPte'][j] & A.PTE_IW and
                        r['clearPte'][j] == 0, label + 'RX page repeated, not writable, or not cleared')
                 iovas.add(iova)
-                got, pte = A.walk_with_leaf(pt, dh['rootPA'], dh['ptBase'], dh['leafPA'],
+                leaf_pa = rx_leaf_address(pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'], iova)
+                leaf_tables.add(leaf_pa)
+                got, pte = A.walk_with_leaf(pt, dh['rootPA'], dh['ptBase'], leaf_pa,
                                             dh['rootLevel'], iova, r['mapPte'][j])
                 A.need(got == pa and pte == r['mapPte'][j], label + 'RX PTE does not map the spare PA')
         A.need(dh['commandCompleted'] >= 2 * (mapped_total + RX_COUNT),
                'shared command ring total cannot cover TX and RX invalidations')
         return {'mapped': RX_COUNT, 'unmapped': RX_COUNT, 'liveOwners': 0,
-                'writablePages': len(iovas), 'iovaBase': RX_BASE, 'slotBytes': RX_STRIDE,
+                'writablePages': len(iovas), 'leafTables': len(leaf_tables),
+                'iovaBase': RX_BASE, 'slotBytes': RX_STRIDE,
                 'mapBeforePost': True, 'unmapAfterDrain': True}
-    run('rx64-standard-mapping-PTE-and-confirmed-unmap', rx_mappings)
+    run('rx1024-standard-mapping-PTE-and-confirmed-unmap', rx_mappings)
 
     def rx_completions():
         A.need(rh['state'] == 4 and rh['flags'] == 0 and rh['generation'] > 0 and rh['poolId'] > 0 and
@@ -662,7 +685,7 @@ def check(cap):
                rh['posted'] == rh['completed'] >= 4 * RX_COUNT and
                rh['posted'] == sum(w['postCount'] for w in rxwitnesses) and
                rh['completed'] == sum(w['doneCount'] for w in rxwitnesses) and
-               rh['pendingPosted'] == 0, 'RX64 cumulative DMA counts or association restoration differs')
+               rh['pendingPosted'] == 0, 'RX1024 cumulative DMA counts or association restoration differs')
         A.need(0 < rh['tInstalled'] <= rb['tReady'] <= rh['tDisarmed'] <= rb['tDrained'] and
                rh['tLastRestore'] == max(w['tRestoreOwn'] for w in rxwitnesses) <= rb['tDrained'],
                'RX driver installation/drain/last-restore timestamps differ')
@@ -670,7 +693,7 @@ def check(cap):
         A.need(len({w['entryId'] for w in rxwitnesses}) == RX_COUNT and
                {w['entryId'] for w in rxwitnesses} == set(records) and
                len({w['slot'] for w in rxwitnesses}) == RX_COUNT,
-               'RX one-shot entry IDs or ring slots repeat')
+               'RX cyclic entry IDs or ring slots repeat')
         replies, sends = {}, {}
         peer_ids = set()
         for line in client.splitlines():
@@ -749,8 +772,8 @@ def check(cap):
                 'additionalFinalBusinessCompletions': len(final_business),
                 'applicationRequests': sorted(business),
                 'correlation': 'first four cycles per association and final completion; R27P token+ID and FCS length',
-                'scope': '64 cyclic spare associations; first four cycles retained, cumulative DMA totals'}
-    run('rx64-real-DMA-restoration-and-application-correlation', rx_completions)
+                'scope': '1024 cyclic spare associations; first four cycles retained, cumulative DMA totals'}
+    run('rx1024-real-DMA-restoration-and-application-correlation', rx_completions)
     return result()
 
 

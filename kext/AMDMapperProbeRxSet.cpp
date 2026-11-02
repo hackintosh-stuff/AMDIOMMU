@@ -695,11 +695,12 @@ bool org_example_AMDMapperProbe::m2b2R15PrepareMap(
         setHexProperty(this, probeKey, v);
         obj->release();
     }
-    if (physicalAttempts > 64 || s.allocationAttempts < physicalAttempts ||
-        s.allocationAttempts - physicalAttempts > 512) {
+    if (physicalAttempts > r15pool::kExtraIOBufferAttempts ||
+        s.allocationAttempts < physicalAttempts ||
+        s.allocationAttempts - physicalAttempts > r15pool::kMaxAttempts) {
         setProperty("m2-b2-r15", "FAIL-allocation-budget"); return false;
     }
-    setProperty("m2-b2-r15-allocation-policy", "512-mbuf4k-plus-64-owned-physical");
+    setProperty("m2-b2-r15-allocation-policy", "bounded-mbuf4k-plus-owned-physical");
     if (s.reserved[0] != fR15Request.reserved ||
         s.version != r15pool::kVersion || s.bytes != sizeof(s) ||
         s.state != r15pool::kPrepared || s.vtdPath != 0 || !s.poolId ||

@@ -1,6 +1,40 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round29 / normal TX retirement and tail completion
+## Current Round30 / full-ring cyclic RX1024
+
+Base: `27664efbafdbea9e3f13141aff5c49d01c42a8b8`.
+Candidate: Lucy **1.1.215** / Probe **0.39.0**; domain3/native7/std5, RX4, pool2.
+
+Round29 passed its complete hardware measurement: 8192/8192 main replies,
+64 RX mappings with 640 completions, 1024/1024 tails, the R29D echo, and
+10284/10284 confirmed TX retirements with zero remaining owners. Deployment
+involved two boots; the first had no running peer and was not a valid measurement.
+See [Round29 result](../../docs/m2-3j-round29-result.md).
+
+Round30 expands the same path to all 1024 RX ring slots:
+
+- Retain and standard-map 1024 spare buffers, then reuse each mapping cyclically.
+- Give RX an 8 MiB IOVA range across five L1 tables alongside the existing TX window.
+- Restore every physical RX descriptor before confirmed unmap and buffer release.
+- Keep four TX slots, 8192 main requests, bounded R28T tails and the R29D final echo.
+
+Use a fresh upstream tree at `639144d1f284a9fee222a518691b01494f5e265d`
+with the existing MacKernelSDK, then run from this repository:
+
+```sh
+sh tools/r27/build.sh _scratch/r30-upstream
+```
+
+The build runs focused software checks against generated `--tx 21 --rx 30`
+source. RX4 sizes are Snapshot 311376, Request 344192 and BackendSnapshot 204864
+bytes; pool2 sizes are Snapshot 114808 and Request 114856 bytes. Large kernel
+control/evidence objects stay in heap or persistent storage. The normal analyzer
+fixture covers 1024 associations, first four cycles per association and all five
+L1 tables. Defaults are `runs/r30` and `org.example.round30load`; compatibility
+entry points and evidence filenames under `tools/r27` remain in use. Mac builds
+and hardware acceptance of this candidate are pending.
+
+## Historical Round29 / normal TX retirement and tail completion
 
 Base: `feb014bd0172cbc0e897dab8332d7a2e1fcae948`.
 Candidate: Lucy **1.1.214** / Probe **0.38.0**; domain3/native7/std5, RX3.
@@ -26,8 +60,9 @@ remain available separately. Defaults are `runs/r29` and `org.example.round29loa
 **Round29 hardware acceptance PASSED.** The tested implementation was committed
 before deployment as `2b77ec8d6c4e65eb27af130cfdf5596694202884` (tree
 `e5780791aee8c5d60216e401c4d402ead1049dbb`), then built and deployed as Lucy
-1.1.214 / Probe 0.38.0. One finite measurement run used token `0x29d1a401`;
-no second run was made.
+1.1.214 / Probe 0.38.0. The single valid finite measurement used token
+`0x29d1a401`. Deployment involved two boots; the first had no running peer
+and was excluded from the valid measurement.
 
 - Application: 8192/8192 valid replies, bad 0, no retransmission; tail 1024/1024;
   one R29D echo (seq 1024) confirmed before TX close.

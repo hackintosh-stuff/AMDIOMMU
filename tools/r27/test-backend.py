@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Compile actual R27 RX mapper methods against the existing R25 host stubs.
+"""Compile actual RX1024 mapper methods against the existing R25 host stubs.
 
 This executes the production layout/identity/stripe/unmap code and real command
-ring helpers. Begin/finish/release bodies also compile against API placeholders.
+ring helpers and the inactive five-L1 preparation. Lifecycle bodies also compile
+against API placeholders.
 It does not emulate IOKit command lifetime, Lucy, or NIC DMA.
 """
 import argparse
@@ -19,6 +20,8 @@ base = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(base)
 
 DECLARATIONS = r'''
+    bool fM22b2Use3L=false;
+    bool r17Prepare(volatile UInt64 *,UInt64,UInt32);
     struct R27RxDomain;
     R27RxDomain *fR27Rx=nullptr;
     UInt64 fR15InvTicks=0;
@@ -102,6 +105,7 @@ public:
 };
 static void *IOMalloc(size_t bytes) { return std::malloc(bytes); }
 static void IOFree(void *p,size_t) { std::free(p); }
+static IOLock *IOLockAlloc() { return new IOLock; }
 static void nanoseconds_to_absolutetime(UInt64 n,UInt64 *ticks) { *ticks=n; }
 static void absolutetime_to_nanoseconds(UInt64 t,UInt64 *ns) { *ns=t; }
 static void IOSleep(unsigned ms) { clockTick+=ms*1000000ULL; }
@@ -111,10 +115,10 @@ static bool r17ModeRequested(const char *,size_t) { return true; }
 TESTS = r'''
 struct Fixture {
     org_example_AMDMapperProbe self;
-    org_example_AMDMapperProbe::R17Domain domain{};
+    org_example_AMDMapperProbe::R17Domain *domain=nullptr;
     org_example_AMDMapperProbe::R27RxDomain rx{};
-    IOLock lock;
-    UInt64 leaves[512]={};
+    static constexpr UInt64 tableBase=0x80000000ULL;
+    UInt64 tables[16*512]={};
     UInt8 fakeMMIO=0;
     IOMemoryDescriptor memory[r27rx::kCount];
     IODMACommand command[r27rx::kCount];
@@ -122,15 +126,21 @@ struct Fixture {
         std::memset(commandMemory,0,sizeof(commandMemory));
         commandMemory[M23_CMD_BUF_SIZE/4]=0xfeedbeef;
         semaphore=hardwareHead=tailWrites=0; signalCompletion=true;
-        domain.lock=&lock; domain.mmio=&fakeMMIO;
-        domain.pt=domain.leaves=leaves; domain.ptBytes=sizeof(leaves);
-        domain.installed=domain.accepting=domain.stdMode=domain.commandOwned=true;
-        domain.stdMapper=&self;
-        domain.command.buf=commandMemory; domain.command.sem=&semaphore;
-        domain.command.semPA=0x1000; domain.command.domid=7;
-        self.fR17=&domain; self.fR27Rx=&rx;
+        const UInt64 rw=amdpte::PTE_IR|amdpte::PTE_IW;
+        tables[0]=amdpte::makeTablePde(3,tableBase+4096,rw);
+        tables[512]=amdpte::makeDefaultLeaf(3,0,rw);
+        assert(self.r17Prepare(tables,tableBase,16));
+        domain=self.fR17;
+        assert(domain->coverNext==14 && domain->coverEnd==16);
+        assert(domain->kIovaL1Count==5 && domain->leaves==domain->iovaL1[0]);
+        domain->mmio=&fakeMMIO;
+        domain->installed=domain->accepting=domain->stdMode=domain->commandOwned=true;
+        domain->stdMapper=&self;
+        domain->command.buf=commandMemory; domain->command.sem=&semaphore;
+        domain->command.semPA=0x1000; domain->command.domid=7;
+        self.fR27Rx=&rx;
         rx.snapshot.count=r27rx::kCount;
-        for(unsigned j=0;j<amdtx::kPages;++j) leaves[j]=0xa5000000ULL+j;
+        for(unsigned j=0;j<amdtx::kPages;++j) domain->leaves[j]=0xa5000000ULL+j;
         for(unsigned i=0;i<r27rx::kCount;++i) {
             memory[i].pa[0]=0x800000000ULL+i*0x10000ULL+(i%2 ? 384 : 0);
             memory[i].bytes[0]=r27rx::kCapacity;
@@ -139,6 +149,15 @@ struct Fixture {
             w.pa=memory[i].pa[0]; w.capacity=r27rx::kCapacity;
             w.entryId=1024+i; w.flags=r27rx::kMapRegistered;
         }
+    }
+    ~Fixture() { delete domain->lock; IOFree(domain,sizeof(*domain)); }
+    UInt64 leaf(unsigned page) const { return domain->iovaL1[page/512][page%512]; }
+    amdpte::WalkResult walk(UInt64 address) const {
+        auto read = [&](UInt64 pa,unsigned ix) -> UInt64 {
+            assert(pa>=tableBase && pa-tableBase<sizeof(tables));
+            return tables[(pa-tableBase)/8+ix];
+        };
+        return amdpte::walkPageTable(read,4,tableBase,address);
     }
     IOReturn map(unsigned i,uint32_t options=kIODMAMapWriteAccess) {
         uint64_t address=0,length=0;
@@ -153,13 +172,14 @@ struct Fixture {
 };
 
 static void normalBatch() {
-    static_assert(r27rx::kVersion == 3, "Round29 RX ABI3");
+    static_assert(r27rx::kVersion == 4 && r27rx::kCount == 1024, "Round30 RX ABI4");
     static_assert(sizeof(r27rx::Cycle) == 40, "first four cycle samples");
     static_assert(sizeof(r27rx::Witness) == 272, "cyclic witness");
-    static_assert(sizeof(r27rx::Snapshot) == 19536, "driver snapshot");
-    static_assert(sizeof(r27rx::Request) == 21632, "control request");
-    static_assert(sizeof(r27rx::BackendSnapshot) == 12864, "backend unchanged");
+    static_assert(sizeof(r27rx::Snapshot) == 311376, "driver snapshot");
+    static_assert(sizeof(r27rx::Request) == 344192, "control request");
+    static_assert(sizeof(r27rx::BackendSnapshot) == 204864, "backend snapshot");
     Fixture f;
+    assert(f.walk(0x123456).ok && f.walk(0x123456).outPA==0x123456);
     for(unsigned i=0;i<r27rx::kCount;++i) {
         assert(f.self.r27RxCandidate(&f.memory[i],&f.command[i]));
         assert(f.map(i)==kIOReturnSuccess);
@@ -175,16 +195,18 @@ static void normalBatch() {
             uint64_t physical=0;
             assert(f.self.r27RxTranslate(w.iova+byte,&physical));
             assert(physical==w.pa+byte);
+            const auto walked=f.walk(w.iova+byte);
+            assert(walked.ok && walked.outPA==w.pa+byte && walked.leafLevel==1);
         }
         for(unsigned p=0;p<w.pages;++p) {
-            const auto raw=f.leaves[amdtx::kPages+i*2+p];
+            const auto raw=f.leaf(amdtx::kPages+i*2+p);
             assert((raw&(amdpte::PTE_IR|amdpte::PTE_IW))==
                    (amdpte::PTE_IR|amdpte::PTE_IW));
             assert(amdpte::decodePte(raw,1).outPA==(w.pa&~4095ULL)+p*4096ULL);
         }
     }
-    assert(f.rx.snapshot.mapOk==64 && f.rx.snapshot.liveOwners==64);
-    assert(f.domain.slotLive==0 && f.domain.liveOwner==0 && f.self.fStdMapOk==0);
+    assert(f.rx.snapshot.mapOk==1024 && f.rx.snapshot.liveOwners==1024);
+    assert(f.domain->slotLive==0 && f.domain->liveOwner==0 && f.self.fStdMapOk==0);
     f.rx.installed=true; f.rx.drained=true;
     // Different retirement order proves per-command identity, not newest map.
     for(unsigned n=0;n<r27rx::kCount;++n) {
@@ -192,7 +214,7 @@ static void normalBatch() {
         assert(f.unmap(i)==kIOReturnSuccess);
         const auto &w=f.rx.snapshot.records[i];
         assert(w.flags==15 && w.unmapResult==0);
-        assert(w.unmapCommand.expected==65+n && w.unmapCommand.observed==65+n);
+        assert(w.unmapCommand.expected==1025+n && w.unmapCommand.observed==1025+n);
         assert(w.mapCommand.expected==i+1 && w.mapCommand.observed==i+1);
         assert(w.unmapCommand.tComplete==w.tUnmapInv);
         assert(w.unmapCommand.d[0]==0 && w.unmapCommand.d[1]==((3u<<28)|7u) &&
@@ -201,13 +223,15 @@ static void normalBatch() {
         assert(!w.clearPte[0] && !w.clearPte[1]);
         uint64_t physical=0;
         assert(!f.self.r27RxTranslate(w.iova,&physical));
+        assert(f.walk(w.iova).absent);
     }
-    assert(f.rx.snapshot.unmapOk==64 && !f.rx.snapshot.liveOwners);
-    assert(f.rx.snapshot.flags==0 && f.domain.command.completed==128);
-    for(unsigned i=0;i<amdtx::kPages;++i) assert(f.leaves[i]==0xa5000000ULL+i);
-    for(unsigned i=amdtx::kPages;i<512;++i) assert(!f.leaves[i]);
-    assert(commandMemory[M23_CMD_BUF_SIZE/4]==0xfeedbeef && !f.lock.held);
-    std::puts("R27 production mapper: 64 distinct RX stripes, IW, exact PA, 128 CW, TX untouched PASS");
+    assert(f.rx.snapshot.unmapOk==1024 && !f.rx.snapshot.liveOwners);
+    assert(f.rx.snapshot.flags==0 && f.domain->command.completed==2048);
+    for(unsigned i=0;i<amdtx::kPages;++i) assert(f.leaf(i)==0xa5000000ULL+i);
+    for(unsigned i=amdtx::kPages;i<5*512;++i) assert(!f.leaf(i));
+    assert(f.walk(0x123456).outPA==0x123456);
+    assert(commandMemory[M23_CMD_BUF_SIZE/4]==0xfeedbeef && !f.domain->lock->held);
+    std::puts("R30 production mapper: 1024 RX stripes across five L1 tables, 2048 CW, TX/identity untouched PASS");
 }
 
 static void identityAndDrain() {
@@ -225,7 +249,7 @@ static void identityAndDrain() {
     f.rx.installed=true;
     const auto &w=f.rx.snapshot.records[0];
     assert(f.unmap(0)==kIOReturnNotReady);
-    assert(f.rx.snapshot.liveOwners==1 && f.leaves[amdtx::kPages]);
+    assert(f.rx.snapshot.liveOwners==1 && f.leaf(amdtx::kPages));
     f.rx.drained=true;
     assert(f.self.r27RxUnmap(&f.memory[0],&foreignCommand,w.iova,w.mapLength)
         ==kIOReturnBadArgument);
@@ -263,7 +287,8 @@ def harness():
     tx = (ROOT / 'kext/AMDMapperProbeTx.cpp').read_text()
     names = ['M23_CMD_BUF_SIZE', 'M2B2_CMD_LOG_MAX', 'M2B2_CMD_COMPL_WAIT',
              'M2B2_OFF_CMD_HEAD', 'M2B2_OFF_CMD_TAIL', 'M2B2_CMD_INV_IOMMU_PAGES',
-             'M2B2_CMD_PDE_MASK', 'M2B2_CMD_ALL_PAGES_ADDR', 'M2B2_IDENTITY_LIMIT']
+             'M2B2_CMD_PDE_MASK', 'M2B2_CMD_ALL_PAGES_ADDR', 'M2B2_IDENTITY_LIMIT',
+             'M2B2_IOVA_RESERVED_PAGES']
     constants = '\n'.join(re.search(r'^#define\s+' + n + r'\s+\S+', header, re.M).group(0)
                           for n in names)
     prefix = base.PREFIX.replace('#include <cassert>', '#include <cassert>\n#include <cstdlib>')
@@ -298,7 +323,7 @@ public:
     text += base.section(header, 'static inline UInt64 m2b2InvAddress()', '// ---- M2B2 measurement')
     text += base.section(header, 'static inline bool m2b2Submit(', '// ---- m2b2ReadBar64')
     text += base.section(tx, 'struct org_example_AMDMapperProbe::R17Domain {',
-                         'bool org_example_AMDMapperProbe::r17Prepare(')
+                         '// Round23: take a free window slot,')
     text += base.section(tx, 'static bool r17Invalidate(',
                          'IOReturn org_example_AMDMapperProbe::r17Callback(')
     text += tx[tx.index('bool org_example_AMDMapperProbe::r27RxRequested()'):]

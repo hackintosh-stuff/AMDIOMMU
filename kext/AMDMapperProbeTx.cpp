@@ -25,6 +25,10 @@ struct org_example_AMDMapperProbe::R17Domain {
     IOLock *lock;
     volatile UInt8 *mmio;
     volatile UInt64 *pt, *leaves;
+    // TX retains its first 16 leaves; RX1024 extends into four more L1 tables.
+    enum { kIovaL1Count = (amdtx::kPages +
+        r27rx::kCount * r27rx::kPagesPerSlot + 511) / 512 };
+    volatile UInt64 *iovaL1[kIovaL1Count];
     UInt64 ptBase, ptBytes, handle, handleCounter;
     M2B2CmdCtx command;
     // Install precedes the caller's DTE invalidations. The domain owns this
@@ -52,8 +56,8 @@ struct org_example_AMDMapperProbe::R17Domain {
     bool stdMode;
     void *stdMapper;
     // Round20: identity coverage of ordinary TX objects (kCover). `coverNext`
-    // is the first table page this path may use; the 64 GiB window consumed two
-    // of the four pages reserved for it. `rootLevel` is the live table's root.
+    // is the first table page this path may use after TX/RX preparation.
+    // `rootLevel` is the live table's root.
     UInt32 rootLevel, coverNext, coverEnd;
     UInt32 coverCalls, coverChunks, coverPages, coverLeaves, coverPresent;
     UInt32 coverInvals, coverFails, coverUnconfirmed;
@@ -96,12 +100,13 @@ struct org_example_AMDMapperProbe::R27RxDomain {
 };
 static_assert(r27rx::kIovaBase == amdtx::kBase + amdtx::kPages * 4096ULL,
               "RX stripes follow the unchanged TX window");
-static_assert(amdtx::kPages + r27rx::kCount * r27rx::kPagesPerSlot <= 512,
-              "RX and TX share one L1 table without overlapping");
+static_assert(amdtx::kPages % r27rx::kPagesPerSlot == 0 &&
+              512 % r27rx::kPagesPerSlot == 0,
+              "Each RX stripe stays within its own L1 table");
 
 bool org_example_AMDMapperProbe::r17Prepare(volatile UInt64 *pt, UInt64 base,
                                            UInt32 pages) {
-    if (fR17 || pages < 5) return false;
+    if (fR17 || pages <= M2B2_IOVA_RESERVED_PAGES) return false;
     R17Domain *d = (R17Domain *)IOMalloc(sizeof(R17Domain));
     if (!d) return false;
     bzero(d, sizeof(*d));
@@ -110,15 +115,21 @@ bool org_example_AMDMapperProbe::r17Prepare(volatile UInt64 *pt, UInt64 base,
     fR17 = d;
     d->pt=pt; d->ptBase=base; d->ptBytes=pages*4096ULL;
     // Command space is checked against hardware HEAD on each submission.
-    // RX sparse arena excludes the last four pages. These pages are exclusively
-    // reserved for this IOVA subtree, initialized while root is inactive.
-    amdsparse::Arena a={pt,base,pages,pages-4,
+    // Owned physical ranges exclude this tail. Initialize the complete IOVA
+    // subtree while root is inactive: one L2 + five L1 pages, then cover space.
+    static_assert(R17Domain::kIovaL1Count + 3 <= M2B2_IOVA_RESERVED_PAGES,
+                  "IOVA arena includes L2, all L1s and two cover pages");
+    amdsparse::Arena a={pt,base,pages,pages-M2B2_IOVA_RESERVED_PAGES,
         fM22b2Use3L?3u:4u,base,0,0,nullptr};
     d->rootLevel = a.rootLevel;
-    d->leaves=amdtx::prepare(a);
-    if (!d->leaves) { setProperty("m2-3b-prepare","FAIL-iova-conflict"); return false; }
-    // amdtx::prepare() consumes exactly two table pages from the reserved tail;
-    // whatever is left may be used by the round-20 cover path, never beyond.
+    for (UInt32 i = 0; i < R17Domain::kIovaL1Count; ++i) {
+        d->iovaL1[i] = amdtx::prepareAt(a, amdtx::kBase + i * 0x200000ULL, 512);
+        if (!d->iovaL1[i]) {
+            setProperty("m2-3b-prepare", "FAIL-iova-conflict"); return false;
+        }
+    }
+    d->leaves = d->iovaL1[0];
+    // Whatever remains may be used by the round-20 cover path, never beyond.
     d->coverNext = a.next;
     d->coverEnd = a.pages;
     auto &s=d->snapshot;
@@ -1149,7 +1160,9 @@ bool org_example_AMDMapperProbe::r27RxTranslate(uint64_t iova,
     R17Domain *d = fR17;
     if (!outPA || !d || !d->leaves || !r27RxOwnsAddress(iova)) return false;
     const UInt32 page = amdtx::kPages + (UInt32)((iova - r27rx::kIovaBase) / 4096ULL);
-    const auto dec = amdpte::decodePte(d->leaves[page], 1);
+    const volatile UInt64 *leaves = d->iovaL1[page / 512];
+    if (!leaves) return false;
+    const auto dec = amdpte::decodePte(leaves[page % 512], 1);
     if (dec.kind != amdpte::PTE_LEAF_DEFAULT) return false;
     *outPA = dec.outPA + (iova & 4095ULL);
     return true;
@@ -1193,22 +1206,25 @@ IOReturn org_example_AMDMapperProbe::r27RxMap(
             L.run[0].pa != w.pa || !L.pages || L.pages > r27rx::kPagesPerSlot ||
             (pageList && pageList->pageOffset != L.firstOffset)) goto out;
         const UInt32 first = amdtx::kPages + ix * r27rx::kPagesPerSlot;
+        volatile UInt64 *table = d->iovaL1[first / 512];
+        if (!table) { result = kIOReturnNotReady; goto out; }
+        volatile UInt64 *leaves = table + first % 512;
         for (UInt32 j = 0; j < r27rx::kPagesPerSlot; ++j)
-            if (d->leaves[first + j]) { result = kIOReturnBusy; goto out; }
+            if (leaves[j]) { result = kIOReturnBusy; goto out; }
         w.pages = L.pages; w.mapOptions = mapOptions;
         w.iova = r27rx::kIovaBase + ix * r27rx::kPagesPerSlot * 4096ULL + L.firstOffset;
         w.mapLength = length;
         // A physically contiguous 4096-byte object may straddle two pages.
         // Its standard mapLength stays 4096, not the reserved stripe length.
         for (UInt32 j = 0; j < w.pages; ++j)
-            d->leaves[first + j] = amdpte::makeDefaultLeaf(1,
+            leaves[j] = amdpte::makeDefaultLeaf(1,
                 (w.pa & ~4095ULL) + j * 4096ULL, amdpte::PTE_IR | amdpte::PTE_IW);
         OSSynchronizeIO();
         w.tMapPublish = mach_absolute_time();
         w.flags |= r27rx::kMapPublished;
         s.liveOwners++;
         for (UInt32 j = 0; j < r27rx::kPagesPerSlot; ++j)
-            w.mapPte[j] = d->leaves[first + j];
+            w.mapPte[j] = leaves[j];
         if (!r17Invalidate(d->mmio, d->command, w.mapCommand, "r27-rx-map")) {
             d->accepting = false; result = kIOReturnIOError; goto out;
         }
@@ -1252,11 +1268,14 @@ IOReturn org_example_AMDMapperProbe::r27RxUnmap(
                 r27rx::kMapInvalidated ||
             mapAddress != w.iova || mapLength != w.mapLength) goto out;
         const UInt32 first = amdtx::kPages + ix * r27rx::kPagesPerSlot;
-        for (UInt32 j = 0; j < r27rx::kPagesPerSlot; ++j) d->leaves[first + j] = 0;
+        volatile UInt64 *table = d->iovaL1[first / 512];
+        if (!table) { result = kIOReturnNotReady; goto out; }
+        volatile UInt64 *leaves = table + first % 512;
+        for (UInt32 j = 0; j < r27rx::kPagesPerSlot; ++j) leaves[j] = 0;
         OSSynchronizeIO();
         w.tUnmapPublish = mach_absolute_time();
         for (UInt32 j = 0; j < r27rx::kPagesPerSlot; ++j)
-            w.clearPte[j] = d->leaves[first + j];
+            w.clearPte[j] = leaves[j];
         if (!r17Invalidate(d->mmio, d->command, w.unmapCommand, "r27-rx-unmap")) {
             d->accepting = false; result = kIOReturnIOError; goto out;
         }
@@ -1325,7 +1344,7 @@ bool org_example_AMDMapperProbe::r27RxBegin() {
         !r18StdReady() || !fR17->commandOwned || !fR15Service)
         return false;
     R27ClientContext client(this, fM22b2Timer);
-    setProperty("m2-3h-rx-mode", "standard-nonidentity-cyclic64");
+    setProperty("m2-3h-rx-mode", "standard-nonidentity-cyclic1024");
     setProperty("m2-3h-rx-ready", "no");
     setProperty("m2-3h-rx-state", "preparing");
     R27RxDomain *r = (R27RxDomain *)IOMalloc(sizeof(R27RxDomain));

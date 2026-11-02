@@ -78,6 +78,7 @@ struct IODMAMapPageList { UInt32 pageOffset; };
 #include "tools/lucy-obs/RTL812xTxMapNative.hpp"
 #pragma GCC diagnostic pop
 #include "tools/lucy-obs/AMDAliveTxDomainNative.hpp"
+#include "tools/lucy-obs/RTL812xRxMap.hpp"
 '''
 
 MMIO = r'''

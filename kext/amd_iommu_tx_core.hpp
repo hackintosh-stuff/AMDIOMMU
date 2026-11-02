@@ -61,14 +61,16 @@ inline bool plan(Plan &p, const Segment *s, unsigned n, unsigned slot) {
 }
 // Build only absent branches in a reserved inactive arena. Never split or
 // overwrite an existing mapping; owned RX/bootstrap mappings remain untouched.
-inline volatile u64 *prepare(amdsparse::Arena &a) {
+inline volatile u64 *prepareAt(amdsparse::Arena &a, u64 iova, unsigned pages) {
     if (a.rootLevel != 3 && a.rootLevel != 4) return nullptr;
+    const unsigned ix = amdpte::indexAt(1, iova);
+    if (!pages || (iova & 4095ULL) || pages > 512 - ix) return nullptr;
     u64 pa = a.rootPA;
     for (unsigned level = a.rootLevel; level > 1; --level) {
         volatile u64 *t = amdsparse::table(a, pa);
         if (!t) return nullptr;
-        const unsigned ix = amdpte::indexAt(level, kBase);
-        const u64 raw = t[ix];
+        const unsigned parent = amdpte::indexAt(level, iova);
+        const u64 raw = t[parent];
         const auto d = amdpte::decodePte(raw, level);
         if (d.kind == amdpte::PTE_TABLE) {
             if ((raw & (amdpte::PTE_IR|amdpte::PTE_IW)) !=
@@ -80,14 +82,15 @@ inline volatile u64 *prepare(amdsparse::Arena &a) {
         volatile u64 *child = amdsparse::table(a, pa);
         if (!child) return nullptr;
         for (unsigned j = 0; j < 512; ++j) child[j] = 0;
-        t[ix] = amdpte::makeTablePde(level-1, pa, amdpte::PTE_IR|amdpte::PTE_IW);
+        t[parent] = amdpte::makeTablePde(level-1, pa, amdpte::PTE_IR|amdpte::PTE_IW);
     }
     volatile u64 *t = amdsparse::table(a, pa);
     if (!t) return nullptr;
-    const unsigned ix = amdpte::indexAt(1, kBase);
-    if (ix + kPages > 512) return nullptr;
-    for (unsigned j = 0; j < kPages; ++j) if (t[ix+j]) return nullptr;
+    for (unsigned j = 0; j < pages; ++j) if (t[ix+j]) return nullptr;
     return t+ix;
+}
+inline volatile u64 *prepare(amdsparse::Arena &a) {
+    return prepareAt(a, kBase, kPages);
 }
 inline bool publish(volatile u64 *leaves, const Plan &p) {
     if (!leaves || !p.pages || p.pages > kPages) return false;

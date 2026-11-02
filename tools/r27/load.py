@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Round29 ordinary UDP load: 8192 requests in 512 send-all-16/receive groups.
-Wait for 64 persistent RX mappings, then drive cyclic DMA and bounded drain.
+"""Round30 ordinary UDP load: 8192 requests in 512 send-all-16/receive groups.
+Wait for 1024 persistent RX mappings, then drive cyclic DMA and bounded drain.
 Only a fresh all-standard window permits the batch; never retransmit requests.
 """
 import argparse
@@ -163,7 +163,7 @@ def exchange(s, local, peer, token, emit, ord_state, window_deadline_ns=None):
     s.settimeout(.5)
     emit('client_bound %s:%d' % s.getsockname())
     sent = acked = bad = 0
-    # Each of the 128 groups sends all 16 before recv; no retransmission.
+    # Each of the 512 groups sends all 16 before recv; no retransmission.
     for group in bursts():
         if window_deadline_ns is not None and now() >= window_deadline_ns:
             emit('client_window_expired sent=%d acked=%d' % (sent, acked))
@@ -263,7 +263,7 @@ def ord_probe(s, peer, seq, emit, tag):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('out', nargs='?', default='runs/r29')
+    ap.add_argument('out', nargs='?', default='runs/r30')
     ap.add_argument('--iface', default='en2')
     ap.add_argument('--peer', default='192.168.50.122')
     ap.add_argument('--port', type=int, default=9110)
@@ -278,7 +278,7 @@ def main():
     if int((out / 'batch.txt').read_text().strip()) != 512:
         raise ValueError('round27 keeps the kernel declaration batch512')
     if int((out / 'requests.txt').read_text().strip()) != len(REQUESTS):
-        raise ValueError('round29 requires 8192 application requests')
+        raise ValueError('round30 requires 8192 application requests')
     payload(token, 1)
     with (out / 'load.txt').open('w') as f:
         def log(line):
@@ -377,7 +377,7 @@ def main():
                     if pre_sent < PRE_PROBES:
                         continue
                     log('load_m2_3g_mode : all-standard')
-                    log('load_m2_3h_rx : standard-nonidentity-cyclic64')
+                    log('load_m2_3h_rx : standard-nonidentity-cyclic1024')
                     log('load_authorization_age_ns : %d (%.3f s, deadline %.0f s)'
                         % (age, age / 1e9, PROBE_DEADLINE_NS / 1e9))
                     window_deadline_ns = inv + PROBE_DEADLINE_NS

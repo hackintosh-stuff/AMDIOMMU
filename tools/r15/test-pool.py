@@ -5,6 +5,7 @@ No hardware, remote access, full gate suite, or substitute state-machine model.
 Only mbuf/clock/IOKit allocation plumbing is stubbed. Default runs a local C++
 compiler; --emit PATH writes the standalone generated test for another compiler.
 --check-extraction validates source-hook wiring without requiring a compiler.
+--mainline checks only normal full-pool Prepare and release for Round30.
 """
 import argparse
 import os
@@ -229,7 +230,7 @@ static IOReturn act(RTL8125 &d,r15pool::Request *r) {
     return RTL8125::r15PoolAction(&d,r,nullptr,nullptr,nullptr);
 }
 int main() {
-    static_assert(sizeof(r15pool::Request)==30376,"actual shared ABI size");
+    static_assert(sizeof(r15pool::Request)==114856,"actual shared ABI size");
     mbuf_t span=makeMbuf(0x700000000ULL); UInt64 pa=0;
     assert(r15PhysicalSpan(span,&pa) && pa==span->pa);
     span->capacity=4095; assert(!r15PhysicalSpan(span,&pa));
@@ -249,14 +250,14 @@ int main() {
     d.stateFlags&=~(1u<<__POLLING);
     assert(act(d,r)==kIOReturnSuccess);
     assert(r->out.state==r15pool::kPrepared && r->out.mtu==1500);
-    assert(r->out.entryCount==1088 && r->out.spareCount==64);
-    assert(r->out.allocationAttempts==576 && allocations==512);
-    assert(d.r15Pool->physicalAttempts==64);
-    for (unsigned i=1024;i<1088;i++) {
+    assert(r->out.entryCount==r15pool::kMaxEntries && r->out.spareCount==r15pool::kSpareCount);
+    assert(r->out.allocationAttempts==r15pool::kMaxAttempts+r15pool::kExtraIOBufferAttempts && allocations==r15pool::kMaxAttempts);
+    assert(d.r15Pool->physicalAttempts==r15pool::kExtraIOBufferAttempts);
+    for (unsigned i=1024;i<r15pool::kMaxEntries;i++) {
         assert(r->out.entries[i].reserved==r15pool::kSourceIOBuffer);
         assert(d.r15Pool->regions[i] && d.r15Pool->regions[i]->prepared);
     }
-    assert(r->out.highSpareCount==64);
+    assert(r->out.highSpareCount==r15pool::kSpareCount);
     assert(r->out.reserved[0]==444 && std::strstr(d.scope,"declared-business-only"));
     assert(d.r15PoolObserve(kObsKindTxDone,10,0)); // prior-pending is retained
     assert(!d.r15PoolObserve(kObsKindTxSubmit,10,77));
@@ -267,9 +268,9 @@ int main() {
     assert(!d.r15PoolObserve(kObsKindTxDoorbell,10,77));
     assert(d.r15PoolObserve(kObsKindRxDone,0,444));
     assert(d.r15PoolObserve(kObsKindTxDoorbell,11,444));
-    for (unsigned i=1025;i<1088;i++)
+    for (unsigned i=1025;i<r15pool::kMaxEntries;i++)
         assert(r->out.entries[i-1].addr>r->out.entries[i].addr);
-    std::vector<r15pool::Entry> immutable(r->out.entries,r->out.entries+1088);
+    std::vector<r15pool::Entry> immutable(r->out.entries,r->out.entries+r15pool::kMaxEntries);
     mbuf_t original=d.rxBufArray[0].mbuf;
     UInt64 old=original->pa, addr=old;
     d.r15PoolRearm(0,old,128,128,0,0,&addr);
@@ -323,7 +324,7 @@ int main() {
     assert(d.r15Pool->snap.generation==gen+1);
     assert(d.r15Pool->snap.flags&r15pool::kFlagRingReset);
     r->op=r15pool::kAuthorize; assert(act(d,r)==kIOReturnBadArgument);
-    std::vector<mbuf_t> owned(d.r15Pool->mbufs,d.r15Pool->mbufs+1088);
+    std::vector<mbuf_t> owned(d.r15Pool->mbufs,d.r15Pool->mbufs+r15pool::kMaxEntries);
     for (mbuf_t m:owned) assert(m->freed==0);
     d.r15PoolFree(); assert(!d.r15Pool);
     for (mbuf_t m:owned) assert(m->freed==1);
@@ -357,13 +358,13 @@ int main() {
         physicalFailureMode=mode;
         RTL8125 failed; initialize(failed,pool,hdr); nowTicks+=1000;
         r->op=r15pool::kPrepare; assert(act(failed,r)==kIOReturnSuccess);
-        assert(failed.r15Pool->physicalAttempts==64 && r->out.spareCount==64);
-        for (unsigned i=1024;i<1088;i++) {
+        assert(failed.r15Pool->physicalAttempts==r15pool::kExtraIOBufferAttempts && r->out.spareCount==r15pool::kSpareCount);
+        for (unsigned i=1024;i<r15pool::kMaxEntries;i++) {
             assert(r->out.entries[i].reserved==r15pool::kSourceMbuf);
             assert(!failed.r15Pool->regions[i]);
         }
         unsigned stage=(mode==1)?0:(mode==2)?1:(mode==3||mode==4)?2:3;
-        if (mode<=5) assert(failed.r15Pool->physicalFailures[stage]==64);
+        if (mode<=5) assert(failed.r15Pool->physicalFailures[stage]==r15pool::kExtraIOBufferAttempts);
         else for (unsigned i=0;i<4;i++) assert(failed.r15Pool->physicalFailures[i]==0);
         failed.r15PoolFree(); delete[] failed.rxBufArray; delete[] failed.rxDescArray;
     }
@@ -381,7 +382,52 @@ int main() {
 '''
 
 
-def generate():
+MAINLINE_TEST = r'''
+int main() {
+    static_assert(r15pool::kVersion==2 && r15pool::kSpareCount==1024);
+    static_assert(sizeof(r15pool::Request)==114856);
+    RTL8125 d; RxPoolStub pool; PostHdr hdr;
+    initialize(d,pool,hdr);
+    auto *r=new r15pool::Request{};
+    r->version=r15pool::kVersion; r->bytes=sizeof(*r);
+    r->op=r15pool::kPrepare; r->reserved=0x30abcd;
+    assert(act(d,r)==kIOReturnSuccess);
+    assert(r->out.state==r15pool::kPrepared && r->out.entryCount==2048);
+    assert(r->out.spareCount==1024 && r->out.highSpareCount==1024);
+    assert(r->out.allocationAttempts==r15pool::kMaxAttempts+r15pool::kExtraIOBufferAttempts);
+    assert(allocations==r15pool::kMaxAttempts);
+    for (unsigned i=0;i<r15pool::kMaxEntries;++i) {
+        const auto &e=r->out.entries[i];
+        assert(e.id==i && e.capacity==4096 && d.r15Pool->mbufs[i]);
+        if (i<r15pool::kRingCount) {
+            assert(e.kind==r15pool::kEntryRing);
+            assert(d.rxBufArray[i].mbuf==d.r15Pool->mbufs[i]);
+            assert(d.rxDescArray[i].buf.addr==e.addr);
+        } else {
+            assert(e.kind==r15pool::kEntrySpare);
+            assert(e.reserved==r15pool::kSourceIOBuffer);
+            assert(d.r15Pool->regions[i] && d.r15Pool->regions[i]->prepared);
+            if (i>r15pool::kRingCount) assert(r->out.entries[i-1].addr>e.addr);
+        }
+    }
+    std::vector<mbuf_t> owned(d.r15Pool->mbufs,d.r15Pool->mbufs+r15pool::kMaxEntries);
+    for (mbuf_t m:owned) assert(m->freed==0);
+    d.r15PoolFree(); assert(!d.r15Pool);
+    for (mbuf_t m:owned) assert(m->freed==1);
+    for (unsigned i=0;i<r15pool::kRingCount;++i) assert(!d.rxBufArray[i].mbuf);
+    for (auto *region:allRegions) {
+        assert(region->completeCount==1 && region->releaseCount==1);
+        assert(region->wrapper && region->wrapper->callbackCount==1);
+    }
+    delete[] d.rxBufArray; delete[] d.rxDescArray; delete r;
+    for (mbuf_t m:allMbufs) delete m;
+    for (auto *region:allRegions) delete region;
+    std::puts("R30 actual pool Prepare/release: 1024 borrowed ring + 1024 retained spares; pool2 ABI PASS");
+}
+'''
+
+
+def generate(mainline=False):
     n = runpy.run_path(str(ROOT / 'tools/apply-lucy-obs2.py'))
     text = n['POOL_METHODS']
     state = extract(text, 'struct RTL8125::R15PoolState') + ';'
@@ -403,15 +449,17 @@ def generate():
     assert 'r15PoolCopy' in n['POOL_RX_NEW']
     obs = extract(n['OBS_METHODS'], 'void RTL8125::obsWrite')
     assert obs.index('r15PoolObserve(') < obs.index('obslog::writeRecord(')
-    return PREFIX + '\n' + state + '\n' + '\n\n'.join(functions) + TESTS
+    tests = TESTS[:TESTS.index('int main()')] + MAINLINE_TEST if mainline else TESTS
+    return PREFIX + '\n' + state + '\n' + '\n\n'.join(functions) + tests
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--emit', type=Path)
     parser.add_argument('--check-extraction', action='store_true')
+    parser.add_argument('--mainline', action='store_true')
     args = parser.parse_args()
-    source = generate()
+    source = generate(args.mainline)
     if args.emit:
         args.emit.write_text(source, encoding='utf-8')
         print('emitted actual driver-body test:', args.emit)

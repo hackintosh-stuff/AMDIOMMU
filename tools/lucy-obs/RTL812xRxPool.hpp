@@ -1,8 +1,8 @@
-/* Round 15: kernel-to-kernel finite RX allocation-domain ABI.
+/* Round30: kernel-to-kernel RX allocation-domain ABI for 1024 ring spares.
  * No mbuf/kernel pointers are exported. All addresses are actual host physical
  * DMA spans. This version deliberately refuses the AppleVTD/IOVM path.
  * callPlatformFunction(kFunctionName,false,&Request,NULL,NULL,NULL).
- * Request is ~32 KiB: allocate it in persistent/heap memory, never kernel stack.
+ * Request is ~112 KiB: allocate it in persistent/heap memory, never kernel stack.
  * Times use mach_absolute_time ticks, NOT nanoseconds.
  */
 #ifndef RTL812xRxPool_hpp
@@ -12,9 +12,9 @@ typedef unsigned int u32;
 typedef unsigned long long u64;
 static const char kFunctionName[] = "rtl812x-r15-pool";
 enum {
-    kVersion = 1, kRingCount = 1024, kSpareCount = 64,
+    kVersion = 2, kRingCount = 1024, kSpareCount = 1024,
     kMaxEntries = kRingCount + kSpareCount,
-    kMaxAttempts = 512, kExtraIOBufferAttempts = 64,
+    kMaxAttempts = 2048, kExtraIOBufferAttempts = 1024,
     kSourceMbuf = 0, kSourceIOBuffer = 2,
     kMaxWitnesses = kSpareCount,
     kPrepare = 1, kAuthorize = 2, kSnapshot = 3, kDisarm = 4,
@@ -87,7 +87,7 @@ struct Request {
 };
 static_assert(sizeof(Entry) == 24, "round15 entry ABI");
 static_assert(sizeof(Witness) == 64, "round15 witness ABI");
-static_assert(sizeof(Snapshot) == 30328, "round15 snapshot ABI");
-static_assert(sizeof(Request) == 30376, "round15 request ABI");
+static_assert(sizeof(Snapshot) == 114808, "round30 pool snapshot ABI");
+static_assert(sizeof(Request) == 114856, "round30 pool request ABI");
 } // namespace r15pool
 #endif

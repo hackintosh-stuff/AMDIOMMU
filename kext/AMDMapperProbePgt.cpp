@@ -224,9 +224,10 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     const UInt32 basePtPageCount =
         fM22b2Use4K ? M2B2_4K_TOTAL_PAGES
                     : (fM22b2Use3L ? M2B2_3L_TOTAL_PAGES : M2B2_TOTAL_PAGES);
-    // Bounded extra arena for sparse 4KiB mappings of actual retained RX
-    // allocations. This is table capacity, NOT an identity-mapped RAM limit.
-    const UInt32 ptPageCount = basePtPageCount + 128u;
+    // Round30 doubles the owned pool to 2048 entries (1024 ring + 1024 spare).
+    // Sparse identity tables and the TX/RX IOVA subtree have separate budgets.
+    // This is table capacity, NOT an identity-mapped RAM limit.
+    const UInt32 ptPageCount = basePtPageCount + 256u + M2B2_IOVA_RESERVED_PAGES;
     const UInt64 ptBytes = (UInt64)ptPageCount * M2B2_PAGE_SIZE;
 
     IOBufferMemoryDescriptor *ptMem =
@@ -433,7 +434,8 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // DTE can switch. The driver becomes copy-only until explicitly authorized;
     // all ordinary replacement allocations are excluded for this transaction.
     if (!fM22b2SleepOnly &&
-        (!m2b2R15PrepareMap(pt, (UInt64)ptPA, ptPageCount - 4, basePtPageCount) ||
+        (!m2b2R15PrepareMap(pt, (UInt64)ptPA,
+                           ptPageCount - M2B2_IOVA_RESERVED_PAGES, basePtPageCount) ||
          !r17Prepare(pt, (UInt64)ptPA, ptPageCount))) {
         setProperty("m2-b2-verdict", "FAIL-r15-owned-pre-map");
         setProperty("m2-b2-stage", "3b-abort-owned-map");

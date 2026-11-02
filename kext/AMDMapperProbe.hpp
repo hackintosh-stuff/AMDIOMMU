@@ -163,7 +163,7 @@ private:
     uint32_t fStdRuns = 0, fStdDiscontig = 0, fStdMaxRuns = 0, fStdCapRejects = 0;
     void publishStdStats();
 
-    // Round27: 64 one-shot RX mappings. Commands are registered by BOTH object
+    // Round30: 1024 cyclic RX mappings. Commands are registered by BOTH object
     // identities before IOKit can call the mapper. They never consume TX slots.
     struct R27RxDomain;
     R27RxDomain *fR27Rx = nullptr;
@@ -1253,8 +1253,8 @@ public:
                        UInt64 ptBasePA, UInt64 ptBytes);
     void m2b2PublishRxSet();
 
-    // Round 15: finite owned allocation domain. The request is 30KiB and must
-    // never be a stack local. Driver retains all ring/spare mbufs until stop.
+    // Finite owned allocation domain. The request stays in this heap-owned
+    // service, never on the kernel stack. Driver retains ring/spare mbufs.
     IOService *fR15Service;
     r15pool::Request fR15Request;
     UInt64 fR15MapTicks;

@@ -8,10 +8,12 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.38.0</string>
-    <key>CFBundleVersion</key><string>0.38.0</string>
+    <key>CFBundleShortVersionString</key><string>0.39.0</string>
+    <key>CFBundleVersion</key><string>0.39.0</string>
     <!--
       版本历史：
+        0.39.0 M2-3k 第30轮：RX1024全环标准映射及循环复用；8MiB RX IOVA跨5张L1表，
+               全部物理描述符恢复后unmap，沿用R29D尾流与标准TX退休确认。
         0.38.0 M2-3i 第29轮：RX释放后R29D确认尾流结束；标准TX按句柄确认退休，
                软件generation与后端owner/slot/CW闭合后才恢复DTE及命令引擎。
         0.37.0 M2-3h 第28轮：64个RX对象各映射一次并循环使用；Disarm后发布draining，
