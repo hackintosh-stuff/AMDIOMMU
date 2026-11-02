@@ -372,6 +372,13 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     // 而那正是 B2-0 的 16 KiB buffer，不是网卡。
     bool isProbeCall = fProbeCallActive;
 
+    // The RX commands describe the driver's retained spare mbufs. Dispatch
+    // before TX/self-test handling, using registered MD/command identities.
+    if (r27RxCandidate(memory, dmaCommand))
+        return r27RxMap(memory, descriptorOffset, length, mapOptions,
+                       mapSpecification, dmaCommand, pageList,
+                       mapAddress, mapLength);
+
     // ---- ROUND 18: the standard path, and why it is checked first ----
     // r18StdReady() is true only when THIS run installed the round-17/18 domain
     // with a standard mode (selected or all-TX) AND the driver handed back this very object as its
@@ -519,6 +526,9 @@ IOReturn org_example_AMDMapperProbe::iovmUnmapMemory(
 
     fUnmapCalls++;
 
+    if (r27RxCandidate(memory, dmaCommand) || r27RxOwnsAddress(mapAddress))
+        return r27RxUnmap(memory, dmaCommand, mapAddress, mapLength);
+
     // ROUND 18: an address inside our own bounded IOVA window can only have come
     // from r18StdMap(), so this is the framework completing that mapping. It is
     // dispatched before the identity bookkeeping below, which knows nothing
@@ -573,6 +583,11 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
 uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress) {
     fPhysAddrCalls++;
 
+    if (r27RxOwnsAddress(mappedAddress)) {
+        uint64_t pa = 0;
+        return r27RxTranslate(mappedAddress, &pa) ? pa : 0;
+    }
+
     // ROUND 18: a real page-table translation for the addresses this backend
     // actually installed. Outside that window nothing is claimed (see below).
     if (r18StdOwnsAddress(mappedAddress)) {
@@ -611,7 +626,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.35.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.36.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

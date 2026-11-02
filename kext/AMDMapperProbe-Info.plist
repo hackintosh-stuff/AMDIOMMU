@@ -8,11 +8,11 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.35.0</string>
-    <key>CFBundleVersion</key><string>0.35.0</string>
+    <key>CFBundleShortVersionString</key><string>0.36.0</string>
+    <key>CFBundleVersion</key><string>0.36.0</string>
     <!--
       版本历史：
-        0.35.0 M2-3g 第26轮：.std.alltx 窗口内全部 TX 使用标准映射；
+        0.36.0 M2-3h 第27轮：.std.alltx.rxstd 增加64个RX spare的一次标准映射闭环；
                token 只标识运行，req 为内部映射序号。保留四槽与32条历史。
         0.1.0  M1-A：只验证 copyMapperForDevice(自己) 能否返回本 mapper。
         0.2.0  M1-B/B1：给真实设备 IOMA（pci1022,1481）设 iommu-parent 并验证。

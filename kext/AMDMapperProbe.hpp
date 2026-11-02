@@ -12,11 +12,13 @@
 // 同一个文件"，见 tests/rxpost-test.cpp。
 #include "amd_iommu_rxset_core.hpp"
 #include "../tools/lucy-obs/RTL812xRxPool.hpp"
+#include "../tools/lucy-obs/RTL812xRxMap.hpp"
 // Round17: native-mbuf TX mapping ABI (round16's RTL812xTxMap.hpp is kept as
 // the archived staging ABI and is no longer included by the probe).
 #include "../tools/lucy-obs/RTL812xTxMapNative.hpp"
 
 class IOTimerEventSource;   // 前置声明，避免头文件相互包含
+class R27ProbeTimer;
 
 // M1-B 探针（B1 + B2-0 + B2-a）
 //
@@ -160,6 +162,25 @@ private:
     /* round19: multi-run windows */
     uint32_t fStdRuns = 0, fStdDiscontig = 0, fStdMaxRuns = 0, fStdCapRejects = 0;
     void publishStdStats();
+
+    // Round27: 64 one-shot RX mappings. Commands are registered by BOTH object
+    // identities before IOKit can call the mapper. They never consume TX slots.
+    struct R27RxDomain;
+    R27RxDomain *fR27Rx = nullptr;
+    bool r27RxRequested() const;
+    bool r27RxBegin();
+    void r27RxReady();
+    bool r27RxFinish(UInt32 budgetMs);
+    void r27RxExport();
+    void r27RxRelease();
+    IOReturn r27RxControl(UInt32 op);
+    bool r27RxCandidate(IOMemoryDescriptor *, IODMACommand *) const;
+    bool r27RxOwnsAddress(uint64_t) const;
+    bool r27RxTranslate(uint64_t, uint64_t *) const;
+    IOReturn r27RxMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r27RxUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
 
     // ---- B2 观测计数器 ----
     // iovmMapMemory 可能被高频调用，不能每次都 setProperty（会持续分配内存）。
@@ -384,7 +405,7 @@ private:
     // 定时器回调（静态，符合 IOTimerEventSource::Action 签名）
     static void m22b2TimerFired(OSObject *owner, IOTimerEventSource *sender);
 
-    IOTimerEventSource *fM22b2Timer;   // 一次性定时器（stop() 里释放）
+    R27ProbeTimer *fM22b2Timer;   // 一次性定时器（stop() 里释放）
     uint32_t            fM22b2DelayMS; // 延迟毫秒数（可被 boot-arg 覆盖）
 
     // 叶子页大小模式：

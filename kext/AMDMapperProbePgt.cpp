@@ -54,6 +54,17 @@
 
 #include "AMDMapperProbeInternal.hpp"
 
+OSDefineMetaClassAndStructors(R27ProbeTimer, IOTimerEventSource);
+
+R27ProbeTimer *R27ProbeTimer::create(OSObject *owner, Action action) {
+    R27ProbeTimer *timer = new R27ProbeTimer;
+    if (timer && !timer->init(owner, action)) {
+        timer->release();
+        timer = nullptr;
+    }
+    return timer;
+}
+
 // ===== AMDMapperProbePgt.cpp (original lines 5206..5278) =====
 bool org_example_AMDMapperProbe::scheduleM22b2() {
     if (!parsePgtBootArg()) {
@@ -101,7 +112,7 @@ bool org_example_AMDMapperProbe::scheduleM22b2() {
         return false;
     }
 
-    fM22b2Timer = IOTimerEventSource::timerEventSource(
+    fM22b2Timer = R27ProbeTimer::create(
         this, &org_example_AMDMapperProbe::m22b2TimerFired);
     if (!fM22b2Timer) {
         setProperty("m2-b2-verdict", "FAIL-no-timer");
@@ -1162,11 +1173,19 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         firstFailReason = "admission refused to reopen after the DTE flip";
         goto recover;
     }
+    // RX DMACommands use the already handed-over R17 command cursor. Prepare
+    // and Install complete before R15 is allowed to publish any RX IOVA.
+    if (!r27RxBegin()) {
+        firstFailStage = "15e-abort-rx-standard-map";
+        firstFailReason = "standard RX mappings or pool binding failed";
+        goto recover;
+    }
     if (!m2b2R15Authorize()) {
         firstFailStage = "15e-abort-pool-authorize";
         firstFailReason = "finite RX domain rejected authorization";
         goto recover;
     }
+    r27RxReady();
 
     // ---- 第 16 步：稳态观察窗口（唯一的功能判据窗口）----
     //
@@ -2031,6 +2050,11 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     m2b2PublishRxSet();
 
 recover:
+    // One-shot RX spares return to their original physical ring buffers on
+    // completion. Keep TX open while waiting so remaining echo traffic can
+    // finish that ring traversal. All standard RX unmaps happen here, while
+    // translation and the shared command buffer are still active.
+    const bool rxDrained = r27RxFinish(2000);
     // ---- 第 17e 步：退出窗口的前半段（round22）----
     //
     // 【顺序】停止接纳 → 等已获准的提交写完 OWN → 排空硬件持有的 TX →
@@ -2060,6 +2084,15 @@ recover:
             // 继续走第 18 步；只是把"没排空"这件事记下来。
             setProperty("m2-3e-exit-drain", "TIMEOUT-before-dte-flip");
         }
+    }
+    if (!rxDrained) {
+        // No DTE restoration, command-buffer stop, detach or page-table free
+        // while the NIC might still own an RX IOVA (or its unmap is unconfirmed).
+        setProperty("m2-3b-cleanup", "PINNED-RX-no-DTE-restore");
+        setProperty("m2-b2-verdict", "INVALID-RX-outstanding-or-unmap-pinned");
+        setProperty("m2-b2-stage", "17e-pinned-RX");
+        r17Export(&ctx);
+        return;
     }
     // ---- 第 18 步：恢复（状态机，任何一步失败都阻止释放）----
     //

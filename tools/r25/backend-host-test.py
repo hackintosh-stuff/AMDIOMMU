@@ -360,7 +360,7 @@ def harness():
     text += section(header, 'static inline UInt64 m2b2InvAddress()', '// ---- M2B2 measurement')
     text += section(header, 'static inline bool m2b2Submit(', '// ---- m2b2ReadBar64')
     text += section(tx, 'struct org_example_AMDMapperProbe::R17Domain {',
-                    'bool org_example_AMDMapperProbe::r17Prepare(')
+                    '// The pool owns mbufs;')
     text += section(tx, 'static const UInt32 kNoSlot', '// Round18: is the standard')
     text += section(tx, 'void org_example_AMDMapperProbe::r17SyncCommand(',
                     'void org_example_AMDMapperProbe::r17PublishWindow(')
@@ -368,7 +368,8 @@ def harness():
                     'void org_example_AMDMapperProbe::r17Release(')
     text += section(tx, 'static inline UInt64 r18LeafFor(',
                     'bool org_example_AMDMapperProbe::r18StdReady(')
-    text += tx[tx.index('IOReturn org_example_AMDMapperProbe::r18StdMap('):]
+    text += section(tx, 'IOReturn org_example_AMDMapperProbe::r18StdMap(',
+                    '// ================= Round27:')
     return text + TESTS
 
 

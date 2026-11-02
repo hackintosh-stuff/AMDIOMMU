@@ -295,6 +295,10 @@ def main():
     if a.source:
         cpp = Path(a.source).read_text()
         g['select_tx']('21')  # this harness exercises the r21 generator, not r18
+        # The TX module is unchanged when Round27 adds its separate RX pool.
+        # Select that real pool before comparing the complete generated body.
+        if 'bool RTL8125::r27RxActive()' in cpp:
+            g['select_rx']('27')
         output = cpp[cpp.index('IOReturn RTL8125::outputStart('):
                      cpp.index('void RTL8125::txInterrupt()')]
         assert output.index('getPhysicalSegmentsWithCoalesce') < \

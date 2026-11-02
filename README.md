@@ -1,4 +1,21 @@
-# AMDIOMMU — Round26 source baseline
+# AMDIOMMU — authoritative source repository
+
+## Round27 / M2-3h
+
+Round27 adds a finite one-shot lifecycle for 64 standard-mapped RX spares alongside the established four-slot ordinary TX path. Expected versions: Lucy 1.1.212 / Probe 0.36.0; TX domain3/native6/std5, RX v1. This source change does not itself assert hardware acceptance. Results and the exact deployed commit are recorded in the parent project's Round27 report.
+
+Base commit: `ddf188b7381aac84461ed2dbeb962a8592f2be87`.
+
+On macOS with Python 3.9+ and C++17, obtain a fresh upstream tree at `639144d1f284a9fee222a518691b01494f5e265d` in a repository-relative directory, supplying the existing MacKernelSDK dependency:
+
+```sh
+python3 -B tools/r27/check-local.py
+sh tools/r27/build.sh _scratch/r27-upstream
+```
+
+The build generates `--tx 21 --rx 27`; do not edit `generated/round26`. Commit tested canonical source before deployment; the Mac checkout must match that commit and remain source-clean. Runtime evidence, runs, SDKs and upstream source copies are not committed.
+
+## Historical Round26 baseline
 
 This repository is the authoritative source baseline starting at M2-3g / Round26 (2026-11-02). Commit source changes here; do not maintain a new independently edited source baseline in evidence archives or the parent working directory.
 

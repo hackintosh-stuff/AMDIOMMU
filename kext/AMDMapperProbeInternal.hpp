@@ -39,6 +39,16 @@
     #define M1A_HAS_SHARED_PTR 0
 #endif
 
+// Actual allocated timer subtype: IOEventSource's gate methods are protected.
+// Only this source's own workloop gate is exposed; no access/downcast trick.
+class R27ProbeTimer : public IOTimerEventSource {
+    OSDeclareDefaultStructors(R27ProbeTimer);
+public:
+    static R27ProbeTimer *create(OSObject *owner, Action action);
+    void openClientGate() { openGate(); }
+    void closeClientGate() { closeGate(); }
+};
+
 // ---- probeRawMapper (original lines 42..49) ----
 static inline IOMapper *probeRawMapper(IOService *device) {
 #if M1A_HAS_SHARED_PTR
