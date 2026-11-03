@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round32: dynamic IOVA mappings in the explicit-stop RX1024 session.
+"""Round33: service-owned device domain after setup worker exit.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,7 +29,7 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round32-dynamic-IOVA; normal-capacity-probe; explicit-stop-RX1024-session; 4096+4096-after-125s-idle'
+SCOPE = 'round33-service-owned-domain; setup-worker-exited; dynamic-IOVA; RX1024; 4096+4096-after-125s-idle'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
@@ -145,8 +145,8 @@ def decode_rx_backend(blob):
 def rx_leaf_address(pt, root_pa, pt_base, level, iova):
     """Find this stripe's L1 table through the exported parent entries.
 
-    RX1024 spans five L1 tables. The TX snapshot's leafPA identifies only the
-    first one, so it cannot locate every RX leaf after the window grows.
+    RX1024 spans four L1 tables after the separate TX L1. The TX snapshot's
+    leafPA cannot locate the RX leaves on its own.
     """
     A.need(level in (3, 4), 'impossible RX root level')
     pa = root_pa
@@ -317,12 +317,46 @@ def check(cap):
                rh['tDisarmed'] < P['m2-3i-tail-confirmed-time'] <=
                P['m2-3e-t-resume'] <= end <= observed_end,
                'explicit stop/drain/tail/restore/session-end order differs')
-        return {'mode': 'explicit-stop', 'state': 'stopped', 'requestsPerPhase': 4096,
+        # The two observations happen after the setup worker has returned,
+        # before each half of actual network traffic. The same owned resources
+        # survive the 125-second idle; final properties retain their identity.
+        A.need(P.get('m2-3n-domain-mode') == 'service-owned' and
+               P.get('m2-3n-domain-state') == 'stopped' and
+               P.get('m2-3n-setup-worker-active') == 0 and
+               P.get('m2-3n-install-count') == 1,
+               'service-owned domain did not complete one setup/teardown lifecycle')
+        identity = tuple(P.get('m2-3n-' + key, 0) for key in
+                         ('setup-worker-exit-time', 'root-pa', 'dt-pa', 'command-pa'))
+        A.need(all(isinstance(value, int) and value > 0 for value in identity) and
+               identity[1] == dh['rootPA'], 'persistent domain resource identity differs')
+        observations = re.findall(
+            r'^client_domain phase=([12]) mode=service-owned state=active setup_worker=0 '
+            r'setup_exit=(\d+) root_pa=(0x[0-9a-fA-F]+) dt_pa=(0x[0-9a-fA-F]+) '
+            r'command_pa=(0x[0-9a-fA-F]+) installs=1 t_ns=(\d+)$', client, re.M)
+        A.need(len(observations) == 2 and [row[0] for row in observations] == ['1', '2'] and
+               len(re.findall(r'^client_domain .*$', client, re.M)) == 2,
+               'two active domain observations after setup exit are missing')
+        observation_times = []
+        for row in observations:
+            A.need(tuple(int(value, 0) for value in row[1:5]) == identity,
+                   'device domain was rebuilt or changed between traffic phases')
+            observation_times.append(int(row[5]))
+        A.need(start <= identity[0] <= observation_times[0] <= phase1 and
+               idle_end <= observation_times[1] <= phase2 and
+               stopped <= P['m2-3n-teardown-start'] <= rh['tDisarmed'] and
+               P['m2-3e-t-resume'] <= P['m2-3n-teardown-end'] <= end,
+               'setup worker exit or separate teardown order differs')
+        return {'mode': 'service-owned', 'state': 'stopped', 'requestsPerPhase': 4096,
                 'idleSeconds': (idle_end - idle_begin) / 1e9,
                 'secondPhaseAfterSeconds': (min(halves[1]) - start) / 1e9,
                 'stopRequests': 1, 'txDeadline': 0, 'rxDeadline': 0,
-                'durationSeconds': (end - start) / 1e9}
-    run('persistent-session-125s-idle-second4096-explicit-stop-and-restore', session_lifecycle)
+                'durationSeconds': (end - start) / 1e9,
+                'setupWorkerExited': identity[0], 'activeObservations': 2,
+                'rootPA': identity[1], 'deviceTablePA': identity[2],
+                'commandPA': identity[3], 'domainInstalls': 1,
+                'teardownStart': P['m2-3n-teardown-start'],
+                'teardownEnd': P['m2-3n-teardown-end']}
+    run('service-owned-domain-after-setup-exit-125s-idle-stop-and-restore', session_lifecycle)
 
     def drain_tail():
         observed = re.findall(r'^client_drain_observed t_ns=(\d+)$', client, re.M)

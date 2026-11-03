@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Inspect or explicitly stop the active Round31 mapper session on macOS."""
+"""Inspect or explicitly stop the service-owned device domain on macOS.
+
+The accepted R31Stop registry-entry RPC remains the control interface. Status
+also exposes Round33 domain ownership and setup/teardown worker boundaries.
+"""
 import argparse
 import ctypes
 import json
@@ -12,15 +16,20 @@ SERVICE = 'org_example_AMDMapperProbe'
 PREFIX = 'm2-3l-'
 FIELDS = ('session-mode', 'session-state', 'session-start',
           'stop-request-time', 'session-end', 'tx-deadline')
+DOMAIN_PREFIX = 'm2-3n-'
+DOMAIN_FIELDS = ('domain-mode', 'domain-state', 'setup-worker-active',
+                 'setup-worker-exit-time', 'root-pa', 'dt-pa', 'command-pa',
+                 'install-count', 'teardown-start', 'teardown-end')
 
 
 def parse_status(text):
     result = {}
-    for name in FIELDS:
-        match = re.search(r'"' + PREFIX + name + r'"\s*=\s*(?:"([^"]*)"|(0x[0-9a-fA-F]+|\d+))', text)
-        if match:
-            value = match.group(1) if match.group(1) is not None else match.group(2)
-            result[name] = int(value, 0) if re.fullmatch(r'0x[0-9a-fA-F]+|\d+', value) else value
+    for prefix, fields in ((PREFIX, FIELDS), (DOMAIN_PREFIX, DOMAIN_FIELDS)):
+        for name in fields:
+            match = re.search(r'"' + prefix + name + r'"\s*=\s*(?:"([^"]*)"|(0x[0-9a-fA-F]+|\d+))', text)
+            if match:
+                value = match.group(1) if match.group(1) is not None else match.group(2)
+                result[name] = int(value, 0) if re.fullmatch(r'0x[0-9a-fA-F]+|\d+', value) else value
     return result
 
 

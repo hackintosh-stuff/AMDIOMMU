@@ -87,6 +87,9 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
     fR31WorkerActive = 0;
     fR31StopRequestTime = 0;
     fR31SessionCompleted = false;
+    fR33Domain = nullptr;
+    fR33TeardownState = 0;
+    fR33InstallCount = 0;
     for (int i = 0; i < kMaxActiveMaps; i++) {
         fMaps[i].pa = 0;
         fMaps[i].len = 0;
@@ -279,6 +282,7 @@ void org_example_AMDMapperProbe::r31RequestStop() {
     (void)__atomic_compare_exchange_n(&fR31StopRequestTime, &expected, now,
                                      false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     __atomic_store_n(&fR31StopRequested, 1u, __ATOMIC_RELEASE);
+    r33ScheduleDomainStop();
 }
 
 IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
@@ -303,12 +307,13 @@ void org_example_AMDMapperProbe::stop(IOService *provider) {
         if (wl) fM22b2Timer->openClientGate();
     }
 
-    // Round31's worker must finish RX drain / R29D / TX retire / restore while
-    // its mapper and provider dependencies still exist. Never hold the probe
-    // workloop gate across the join, even if stop's caller originally held it.
+    // Wait for domain teardown as well as workers: setup can return before the
+    // queued stop worker begins. Its mapper/provider dependencies stay alive
+    // across that handoff. Never hold the probe workloop gate across the join.
     if (fR31Session) {
         r31RequestStop();
-        while (__atomic_load_n(&fR31WorkerActive, __ATOMIC_ACQUIRE))
+        while (__atomic_load_n(&fR31WorkerActive, __ATOMIC_ACQUIRE) ||
+               r33DomainStopPending())
             IOSleep(10);
     }
     if (wl && callerInGate) fM22b2Timer->closeClientGate();
@@ -668,7 +673,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.41.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.42.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

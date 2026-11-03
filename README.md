@@ -1,6 +1,44 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round32 / dynamic IOVA mappings
+## Current Round33 / service-owned device domain
+
+Base: `fc0da752550e08c497fe8c105f4056655b68b8b9`.
+Candidate: Lucy **1.1.218** / Probe **0.42.0**; domain4/native7/std5, RX4, pool2.
+
+Round32 passed its hardware run and all 14 checks, including dynamic IOVA
+allocation, sixteen live mappings, the wide-map capacity probe, zero TX
+rejections and complete RX1024 recovery. Round33 moves the hardware domain's
+lifetime out of the long-running measurement worker:
+
+- The service owns the page tables, device table, command/event buffers,
+  MMIO mappings, saved register state and retained pool/driver dependencies.
+- The setup worker installs the domain and returns. Ordinary mapped DMA
+  continues with the existing TX/RX paths while no setup worker is running.
+- The existing `R31Stop` property schedules a separate teardown worker,
+  which completes event sampling, RX/R29D/TX drain and hardware restoration
+  before releasing the domain's resources.
+- The normal 4096 + 125 s idle + 4096 load records active-domain observations
+  before each phase. Both must show setup already finished and the same
+  page-table, device-table and command-buffer addresses.
+
+Keep using the fixed `repos/AMDIOMMU` checkout with Git branches and commits;
+do not create a source directory or worktree for each round. Prepare pristine
+files from upstream `639144d1f284a9fee222a518691b01494f5e265d` in the reusable
+`_scratch/lucy-upstream` directory, retaining the existing MacKernelSDK:
+
+```sh
+sh tools/r27/build.sh _scratch/lucy-upstream
+```
+
+Generation selects `--tx 21 --rx 33`. Run defaults are `runs/r33` and
+`org.example.round33load`. ABI layouts and the compatible stop RPC remain
+unchanged. Mac builds and hardware acceptance of this candidate are pending.
+
+This round retains the existing RX pool and bootstrap identity mappings.
+The next functional step is Lucy-owned native RX command/buffer replacement
+and remapping, using the persistent domain established here.
+
+## Historical Round32 / dynamic IOVA mappings
 
 Base: `561400ae756199035baa9b5593619835bd8471de`.
 Candidate: Lucy **1.1.217** / Probe **0.41.0**; domain4/native7/std5, RX4, pool2.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Round32 UDP session: 4096 requests, 125 s idle, another 4096, explicit stop.
+"""Round33 device domain: 4096 requests, 125 s idle, another 4096, explicit stop.
 Wait for 1024 persistent RX mappings, then drive cyclic DMA and bounded drain.
-Only an active all-standard session permits the batch; never retransmit requests.
+Both phases run after setup worker exit in the same service-owned domain.
+Only an active all-standard domain permits the batch; never retransmit requests.
 """
 import argparse
 import importlib.util
@@ -33,6 +34,29 @@ def now():
 CLIENT_BUDGET_NS = 300_000_000_000
 SESSION_IDLE_SECONDS = 125
 SESSION_SPLIT = 4096
+
+
+def observe_domain(emit, phase, expected=None):
+    """Record the actual live domain before a normal traffic phase."""
+    state = session.status()
+    if (state.get('domain-mode') != 'service-owned' or
+            state.get('domain-state') != 'active' or
+            state.get('setup-worker-active') != 0 or
+            state.get('install-count') != 1):
+        raise RuntimeError('service-owned domain is not active after setup worker exit')
+    keys = ('setup-worker-exit-time', 'root-pa', 'dt-pa', 'command-pa')
+    identity = tuple(state.get(key, 0) for key in keys)
+    if not all(isinstance(value, int) and value > 0 for value in identity):
+        raise RuntimeError('domain ownership addresses or setup exit are missing')
+    if expected is not None and identity != expected:
+        raise RuntimeError('device domain changed between traffic phases')
+    stamp = now()
+    if identity[0] > stamp:
+        raise RuntimeError('setup exit follows the live domain observation')
+    emit('client_domain phase=%d mode=service-owned state=active setup_worker=0 '
+         'setup_exit=%d root_pa=0x%x dt_pa=0x%x command_pa=0x%x installs=1 t_ns=%d' %
+         (phase, *identity, stamp))
+    return identity
 
 
 def session_idle(emit, client_deadline_ns):
@@ -196,11 +220,13 @@ def exchange(s, local, peer, token, emit, ord_state, client_deadline_ns=None,
     emit('client_bound %s:%d' % s.getsockname())
     sent = acked = bad = 0
     if persistent_session:
+        domain_identity = observe_domain(emit, 1)
         emit('client_session_phase phase=1 first=1 last=4096 t_ns=%d' % now())
     # Each of the 512 groups sends all 16 before recv; no retransmission.
     for group in bursts():
         if persistent_session and group[0] == SESSION_SPLIT + 1:
             session_idle(emit, client_deadline_ns)
+            observe_domain(emit, 2, domain_identity)
             emit('client_session_phase phase=2 first=4097 last=8192 t_ns=%d' % now())
         if client_deadline_ns is not None and now() >= client_deadline_ns:
             emit('client_budget_expired sent=%d acked=%d' % (sent, acked))
@@ -300,7 +326,7 @@ def ord_probe(s, peer, seq, emit, tag):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('out', nargs='?', default='runs/r32')
+    ap.add_argument('out', nargs='?', default='runs/r33')
     ap.add_argument('--iface', default='en2')
     ap.add_argument('--peer', default='192.168.50.122')
     ap.add_argument('--port', type=int, default=9110)
@@ -315,7 +341,7 @@ def main():
     if int((out / 'batch.txt').read_text().strip()) != 512:
         raise ValueError('round27 keeps the kernel declaration batch512')
     if int((out / 'requests.txt').read_text().strip()) != len(REQUESTS):
-        raise ValueError('round32 requires 8192 application requests')
+        raise ValueError('round33 requires 8192 application requests')
     payload(token, 1)
     with (out / 'load.txt').open('w') as f:
         def log(line):
@@ -394,6 +420,14 @@ def main():
                     if state.get('session-state') != 'active':
                         time.sleep(.02)
                         continue
+                    if state.get('domain-mode') != 'service-owned':
+                        log('load_result FAIL-not-service-owned-domain')
+                        return 2
+                    if (state.get('domain-state') != 'active' or
+                            state.get('setup-worker-active') != 0 or
+                            not state.get('setup-worker-exit-time')):
+                        time.sleep(.02)
+                        continue
                     if '"m2-3g-mode" = "all-standard"' not in props:
                         log('load_result FAIL-not-all-standard')
                         return 2
@@ -420,7 +454,7 @@ def main():
                     log('load_m2_3h_rx : standard-nonidentity-cyclic1024')
                     log('load_authorization_age_ns : %d (%.3f s, explicit-stop)'
                         % (age, age / 1e9))
-                    log('load_session : 4096+4096 idle=125s explicit-stop=1')
+                    log('load_session : 4096+4096 idle=125s explicit-stop=1 service-owned=1')
                     break
             time.sleep(.05)
         else:

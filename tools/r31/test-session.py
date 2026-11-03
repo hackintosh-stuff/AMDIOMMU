@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Run the production Round31 worker, stop RPC, wait and stop() on host stubs.
+"""Compile the production service-domain lifecycle against host hardware stubs.
 
-Only the normal lifecycle is exercised: a 125 s logical active interval, explicit
-stop/restore, and service stop joining a retained worker with its gate open.
-Time and hardware are stubbed; the actual kernel entry points and event-window
-function are extracted and compiled, not reimplemented as a parallel model.
+One normal cycle: setup returns, the domain/driver survive 125 logical seconds,
+R31Stop queues teardown, and stop() joins it with its gate open. The real context,
+capture/handoff, workers, event endpoints, RX/TX recovery ordering, register
+restore/readback and resource-release blocks are compiled. Hardware setup and
+the historical evidence-analysis blocks are omitted; this is not a macOS kext
+build or a NIC/DMA emulation.
 """
 import os
 from pathlib import Path
@@ -28,10 +30,17 @@ def body(source, start):
     raise AssertionError('unterminated production body: ' + start)
 
 
+def section(source, start, end):
+    begin = source.index(start)
+    return source[begin:source.index(end, begin)]
+
+
 PREFIX = r'''
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <string>
@@ -47,15 +56,36 @@ using thread_continue_t = void (*)(void *, wait_result_t);
 constexpr thread_t THREAD_NULL = nullptr;
 enum { KERN_SUCCESS=0, kIOReturnSuccess=0, kIOReturnBadArgument=1,
        kIOReturnNotReady=2, kIOReturnUnsupported=3 };
-static UInt64 tick = 1;
+static UInt64 tick = 1, restoredAt = 0;
+static std::vector<std::string> lifecycle;
 static UInt64 mach_absolute_time() { return ++tick; }
 static std::function<void(unsigned)> sleepHook;
-static void IOSleep(unsigned ms) { tick += UInt64(ms) * 1000000; sleepHook(ms); }
+static void IOSleep(unsigned ms) {
+    tick += UInt64(ms) * 1000000;
+    if (sleepHook) sleepHook(ms);
+}
+static std::map<void *, size_t> allocations;
+static void *IOMalloc(size_t bytes) {
+    void *p=std::malloc(bytes); assert(p); allocations[p]=bytes; return p;
+}
+static void IOFree(void *p, size_t bytes) {
+    assert(restoredAt && allocations.at(p) == bytes);
+    allocations.erase(p); lifecycle.emplace_back("context-release"); std::free(p);
+}
+static void hostBzero(void *p, size_t bytes) { std::memset(p, 0, bytes); }
+#define bzero hostBzero
 struct OSObject {
     int refs = 1;
+    const char *tag = nullptr;
+    bool releaseAfterRestore = false;
     virtual ~OSObject() = default;
     void retain() { ++refs; }
-    void release() { assert(refs > 0); --refs; }
+    void release() {
+        assert(refs > 0);
+        if (releaseAfterRestore) assert(restoredAt);
+        if (tag) lifecycle.emplace_back(tag);
+        --refs;
+    }
 };
 struct OSBoolean : OSObject {} trueValue;
 static OSObject *kOSBooleanTrue = &trueValue;
@@ -74,8 +104,8 @@ struct IOService : OSObject {
         strings[key] = value;
         if (std::string(key) == "m2-3l-session-state") states.emplace_back(value);
     }
-    void removeProperty(const char *) { removed = true; }
-    void disable() { disabled = true; }
+    void removeProperty(const char *) { assert(restoredAt); removed = true; }
+    void disable() { assert(restoredAt); disabled = true; }
     IOReturn setProperties(OSObject *) { return kIOReturnUnsupported; }
     void stop(IOService *) { baseStopped = true; }
 };
@@ -84,6 +114,9 @@ using IOMapper = IOService;
 static void setHexProperty(IOService *self, const char *key, UInt64 value) {
     self->numbers[key] = value;
 }
+struct IOMemoryDescriptor : OSObject {};
+struct IOBufferMemoryDescriptor : IOMemoryDescriptor {};
+struct IOMemoryMap : OSObject {};
 struct R27ProbeTimer;
 struct IOWorkLoop {
     bool gated = false, removed = false;
@@ -101,7 +134,7 @@ struct R27ProbeTimer : IOTimerEventSource {
     void closeClientGate() { assert(loop && !loop->gated); loop->gated = true; }
 };
 void IOWorkLoop::removeEventSource(R27ProbeTimer *timer) {
-    removed = true; timer->loop = nullptr;
+    assert(restoredAt); removed = true; timer->loop = nullptr;
 }
 static thread_continue_t queued = nullptr;
 static void *queuedParameter = nullptr;
@@ -119,131 +152,270 @@ static void dispatchWorker() {
     auto fn=queued; auto p=queuedParameter; queued=nullptr; queuedParameter=nullptr;
     assert(fn); fn(p, 0);
 }
+namespace r15pool {
+enum { kDisarmed=1, kActive=2 };
+struct Request { UInt32 poolId; struct { UInt32 state; } out; };
+}
+namespace r20tx { enum { kStageExit=3 }; }
+COMMAND_STRUCTS
 class org_example_AMDMapperProbe : public IOMapper {
 public:
+    struct R33DeviceDomain;
     bool fR31Session=true, fR31SessionCompleted=false;
     volatile UInt32 fR31StopRequested=0, fR31WorkerActive=0;
     volatile UInt64 fR31StopRequestTime=0;
+    R33DeviceDomain *fR33Domain=nullptr;
+    volatile UInt32 fR33TeardownState=0;
+    UInt32 fR33InstallCount=0;
     R27ProbeTimer *fM22b2Timer=nullptr;
     bool fMapWindowOpen=true, fArmed=true;
     IOService *fPublishNotifier=nullptr, *fNicDevice=nullptr, *fTarget=nullptr;
+    IOService *fR15Service=nullptr, *driver=nullptr;
+    r15pool::Request fR15Request{};
+    UInt64 fR15MapTicks=0, fR15InvTicks=0;
     IOWorkLoop *loop=nullptr;
     unsigned runs=0;
-    bool resourcesAlive=false, postSampled=false;
-    UInt64 restoreTime=0;
+    bool rxDrained=false, tailDrained=false, txDrained=false;
+    bool detached=false, resumed=false, backendReleased=false;
+    IOBufferMemoryDescriptor memory[5];
+    IOMemoryDescriptor descriptor;
+    IOMemoryMap mapping, postMapping;
+    UInt8 fakeMMIO=0;
+    UInt32 commands[16]{}, events[4]{};
+    UInt64 tables[1024]{}, deviceTable[4]{}, semaphore=0;
+    struct {
+        UInt64 tWinStart=0, tWinEnd=0, tRecoveryStart=0, tTranslateOff=0;
+    } fM22b2Dma;
     IOWorkLoop *getWorkLoop() { return loop; }
     static void m22b2TimerFired(OSObject *, IOTimerEventSource *);
     static void r31SessionWorker(void *, wait_result_t);
+    static void r33DomainStopWorker(void *, wait_result_t);
     void r31RequestStop();
+    void r33ScheduleDomainStop();
+    bool r33DomainStopPending() const;
     IOReturn setProperties(OSObject *);
     void stop(IOService *);
     void runM22b2PageTableProbe();
+    void finishM22b2PageTableProbe(R33DeviceDomain *, bool);
+    void m2b2R15Finish();
+    void m2b2R15Release();
+R15_SCOPE;
     static const unsigned kM22b2RawKeep=16;
 WINDOW_STRUCT;
-    M22b2EventWindow window{};
+    M22b2EventWindow fM22b2WinPre{}, fM22b2WinMain{};
+    bool resourcesAlive() const {
+        for (const auto &m : memory) if (m.refs != 1) return false;
+        return descriptor.refs == 1 && mapping.refs == 1;
+    }
+    bool r27RxFinish(unsigned timeout) {
+        assert(timeout == 15000 && resourcesAlive() && !restoredAt);
+        assert(fR15Service == driver && driver->refs == 2);
+        rxDrained=true; lifecycle.emplace_back("rx-drain"); return true;
+    }
+    bool r29WaitTailDone(unsigned timeout) {
+        assert(timeout == 5000 && rxDrained && !restoredAt);
+        tailDrained=true; lifecycle.emplace_back("tail-drain"); return true;
+    }
+    bool r17Installed() const { return true; }
+    bool r17StopSubmit(unsigned timeout, const char *) {
+        assert(timeout == 2000 && tailDrained && !restoredAt);
+        txDrained=true; lifecycle.emplace_back("tx-drain"); return true;
+    }
+    void r17SampleExit(unsigned) { assert(txDrained && !restoredAt); }
+    void r17SetTranslateOff(UInt64 when) {
+        assert(txDrained && resourcesAlive());
+        restoredAt=when; lifecycle.emplace_back("restore");
+    }
+    bool r17Detach() {
+        assert(restoredAt && resourcesAlive());
+        detached=true; lifecycle.emplace_back("detach"); return true;
+    }
+    bool r17ResumeOutput() {
+        assert(detached && resourcesAlive());
+        resumed=true; lifecycle.emplace_back("resume"); return true;
+    }
+    void r17Export(void *) {}
+    void r17Release() { assert(resumed); backendReleased=true; }
 };
+DOMAIN_STRUCT;
 static UInt64 m2b2NowNS() { return mach_absolute_time(); }
 static UInt64 m2b2WallSecs() { return tick / 1000000000; }
 static UInt64 m2b2ToMS(UInt64 ticks) { return ticks / 1000000; }
-static UInt64 mmioRead64(volatile UInt8 *, UInt32) { return 0; }
-static UInt32 mmioRead32(volatile UInt8 *, UInt32) { return 1u << 3; }
-static void mmioWrite64(volatile UInt8 *, UInt32, UInt64) {}
+static std::map<UInt32, UInt64> registers;
+static UInt64 mmioRead64(volatile UInt8 *base, UInt32 off) {
+    assert(base); return registers[off];
+}
+static UInt32 mmioRead32(volatile UInt8 *base, UInt32 off) {
+    assert(base && off == M2B2_OFF_STATUS);
+    const auto control=registers[M2B2_OFF_CONTROL];
+    return ((control & M2B2_CTRL_EVT_LOG_EN) ? M2B2_STATUS_EVT_RUN : 0) |
+           ((control & M2B2_CTRL_CMDBUF_EN) ? M2B2_STATUS_CMDBUF_RUN : 0);
+}
+static void mmioWrite64(volatile UInt8 *base, UInt32 off, UInt64 value) {
+    assert(base); registers[off]=value;
+}
+static void OSSynchronizeIO() {}
 static void m2b2DoPostSample(void *p) {
-    auto *self=static_cast<org_example_AMDMapperProbe *>(p);
-    assert(self->fR31StopRequested && self->resourcesAlive);
-    self->postSampled=true;
+    auto *sample=static_cast<M2b2PostSample *>(p);
+    assert(sample && sample->haveBar && sample->bar);
+    assert(!restoredAt); sample->tClo=m2b2NowNS(); sample->tTail=m2b2NowNS();
+    sample->cloOk=sample->tailOk=true; lifecycle.emplace_back("post-sample");
+}
+void org_example_AMDMapperProbe::m2b2R15Finish() {
+    assert(backendReleased && restoredAt && resourcesAlive());
+    fR15Request.out.state=r15pool::kDisarmed;
+    lifecycle.emplace_back("pool-disarm");
 }
 '''
 
-SUFFIX = r'''
+SETUP = r'''
 void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     ++runs;
     assert(refs == 2 && !loop->inGate());
     assert(fArmed && fMapWindowOpen && fTarget && !fTarget->removed);
-    resourcesAlive=true;
-    struct Resources {
-        org_example_AMDMapperProbe *self;
-        ~Resources() { self->resourcesAlive=false; }
-    } resources{this};
-    volatile UInt8 *base=nullptr;
-    volatile UInt32 *evtBuf=nullptr;
-    const UInt32 tgt=0x300;
-    auto &winMain=window;
-    bool mainWindowRan=false, postSampleDone=true;
-    // The real call takes &postSample. Use a one-pointer shim for its callback.
-    struct Post { org_example_AMDMapperProbe *self; } postSample{this};
-    const char *firstFailStage=nullptr;
-    struct { bool failed=false; } ctx;
-MAIN_WINDOW
-    assert(mainWindowRan && postSampled && resourcesAlive);
-    assert(fArmed && fMapWindowOpen && fTarget && !fTarget->removed);
-    setProperty("m2-3l-session-state", "draining");
-    // Hardware RX/R29D/TX/restore are stubbed here; the worker must publish
-    // stopped/end only after this function and its local resources complete.
-    restoreTime=mach_absolute_time();
-SESSION_COMPLETE
+SETUP_OWNERS
+    // Hardware setup is a fixture; all captures and owner transfers below are
+    // production code. Independent object identities make stale copies visible.
+DOMAIN_LOCALS
+    (void)resourcesReleased;
+    ptMem=&memory[0]; tbl=&memory[1]; cmdBufMd=&memory[2];
+    semMd=&memory[3]; evtMd=&memory[4]; md=&descriptor;
+    map=&mapping; postMap=&postMapping;
+    base=&fakeMMIO; pt=tables; dte=deviceTable; root=tables; l2=tables+512;
+    sem=&semaphore; evtBuf=events;
+    ptPA=0x100000; tblPA=0x200000; cmdPA=0x300000; semPA=0x400000;
+    evtPA=0x500000; rootPA=ptPA; l2PA=ptPA+4096; ptBytes=8192;
+    ptPageCount=2; tgt=0x300;
+    origDT=0xa000; origCmd=0xb000; origEvt=0xc000; origCtrl=0x100;
+    preWindowRan=evtResetOk=invAllOk=invDevOk=invPagesOk=true;
+    ctx.buf=commands; ctx.sem=sem; ctx.rootPA=rootPA;
+    ctx.completionSequence=129; ctx.idx=7; ctx.tail=128; ctx.completed=129;
+    postSampleDone=true; postSample.bar=&fakeMMIO; postSample.haveBar=true;
+    fR15Service=driver; driver->retain();
+    fR15Request.poolId=0x3301; fR15Request.out.state=r15pool::kActive;
+    registers[M2B2_OFF_DEV_TABLE]=tblPA;
+    registers[M2B2_OFF_CMD_BUF]=cmdPA;
+    registers[M2B2_OFF_EVT_BUF]=evtPA;
+    registers[M2B2_OFF_CONTROL]=origCtrl | M2B2_CTRL_IOMMU_EN |
+        M2B2_CTRL_CMDBUF_EN | M2B2_CTRL_EVT_LOG_EN;
+    auto &winMain=fM22b2WinMain;
+SAVE_DOMAIN;
+SETUP_HANDOFF
 }
+'''
+
+FINISH = r'''
+void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
+    R33DeviceDomain *domain, bool finishWindow) {
+    assert(domain && allocations.count(domain));
+    assert(fR15Service == driver && driver->refs == 2 && resourcesAlive());
+    assert(domain->ctx.completionSequence == 129 && domain->ctx.idx == 7);
+    assert(domain->ctx.buf == commands && domain->ctx.sem == &semaphore);
+    assert(domain->postMap == &postMapping && domain->pt == tables);
+FINISH_ALIASES
+    // The omitted historical diagnostics use these aliases. Compile all of
+    // them anyway, including their exact production types and member names.
+USE_ALIASES
+FINISH_WINDOW
+RECOVER
+RESOURCE_RELEASE
+}
+'''
+
+TEST = r'''
 int main() {
     using Probe=org_example_AMDMapperProbe;
-    for (bool serviceStop : {false, true}) {
-        Probe p; IOWorkLoop loop; R27ProbeTimer timer(&loop);
-        IOService nic, target, notifier;
-        p.loop=&loop; p.fM22b2Timer=&timer;
-        p.fNicDevice=&nic; p.fTarget=&target; p.fPublishNotifier=&notifier;
-        p.setProperty("m2-3l-session-state", "preparing");
-        loop.gated=true;
-        Probe::m22b2TimerFired(&p, &timer);
-        assert(p.runs == 0 && p.fR31WorkerActive && p.refs == 2 && queued);
-        assert(threadRefsReleased == (serviceStop ? 2u : 1u));
-        const UInt64 started=tick;
-        UInt64 rpcBefore=0, rpcAfter=0;
-        if (!serviceStop) {
-            loop.gated=false; // timer callback has returned
-            sleepHook=[&](unsigned ms) {
-                assert(ms == 100 && p.resourcesAlive && p.fR31WorkerActive);
-                assert(!loop.inGate() && p.fArmed && !target.removed);
-                assert(p.strings["m2-3l-session-state"] == "active");
-                if (tick-started >= 125000000000ULL) {
-                    OSDictionary stop;
-                    rpcBefore=mach_absolute_time();
-                    assert(p.setProperties(&stop) == kIOReturnSuccess);
-                    rpcAfter=mach_absolute_time();
-                    assert(p.resourcesAlive && p.runs == 1);
-                    assert(p.strings["m2-3l-session-state"] == "active");
-                }
-            };
-            dispatchWorker();
-            assert(p.window.durMS >= 125000 && p.window.valid);
-            assert(p.numbers["m2-3l-stop-request-time"] > rpcBefore);
-            assert(p.numbers["m2-3l-stop-request-time"] < rpcAfter);
-            p.stop(nullptr);
-            assert(!loop.inGate());
-        } else {
-            // A normal service stop entered with the probe gate held. The
-            // actual stop() must open it and keep every dependency until join.
-            sleepHook=[&](unsigned ms) {
-                assert(ms == 10 && !loop.inGate());
-                assert(timer.cancelled && !loop.removed);
-                assert(p.fArmed && p.fTarget == &target && !target.removed);
-                dispatchWorker();
-            };
-            p.stop(nullptr);
-            assert(loop.inGate()); // caller's original gate state restored
-        }
-        assert(p.runs == 1 && p.refs == 1 && !p.fR31WorkerActive);
-        assert(!p.resourcesAlive && p.fR31SessionCompleted && p.postSampled);
-        assert(p.strings["m2-3l-session-state"] == "stopped");
-        assert(p.numbers["m2-3l-session-end"] > p.restoreTime);
-        const std::vector<std::string> expected{
-            "preparing", "active", "stop-requested", "draining", "stopped"};
-        assert(p.states == expected);
-        assert(loop.removed && timer.refs == 0 && !p.fM22b2Timer);
-        assert(!p.fArmed && !p.fMapWindowOpen && p.baseStopped);
-        assert(target.removed && nic.removed && notifier.disabled);
-        assert(!p.fTarget && !p.fNicDevice && !p.fPublishNotifier);
+    Probe p; IOWorkLoop loop; R27ProbeTimer timer(&loop);
+    IOService nic, target, notifier, driver;
+    p.loop=&loop; p.fM22b2Timer=&timer; p.driver=&driver;
+    p.fNicDevice=&nic; p.fTarget=&target; p.fPublishNotifier=&notifier;
+    for (auto &m : p.memory) { m.tag="memory-release"; m.releaseAfterRestore=true; }
+    p.mapping.tag="mapping-release"; p.mapping.releaseAfterRestore=true;
+    p.descriptor.tag="descriptor-release"; p.descriptor.releaseAfterRestore=true;
+    driver.tag="driver-release"; driver.releaseAfterRestore=true;
+    p.postMapping.tag="post-map-release";
+    p.setProperty("m2-3l-session-state", "preparing");
+    loop.gated=true;
+    Probe::m22b2TimerFired(&p, &timer);
+    assert(p.runs == 0 && p.fR31WorkerActive && p.refs == 2 && queued);
+    loop.gated=false; // timer callback returns before the setup worker runs
+    dispatchWorker();
+    assert(threadEnds == 1 && threadRefsReleased == 1 && !queued);
+    assert(p.runs == 1 && p.refs == 1 && !p.fR31WorkerActive);
+    assert(p.fR33Domain && p.resourcesAlive() && allocations.size() == 1);
+    assert(p.fR15Service == &driver && driver.refs == 2);
+    assert(p.fR15Request.out.state == r15pool::kActive);
+    assert(lifecycle.empty() && !p.fR31SessionCompleted);
+    assert(p.numbers["m2-3n-setup-worker-exit-time"] >
+           p.numbers["m2-3l-session-start"]);
+    assert(p.numbers["m2-3n-setup-worker-active"] == 0);
+    assert(p.numbers["m2-3n-install-count"] == 1);
+    auto *domain=p.fR33Domain;
+    const UInt64 started=tick;
+    // Logical idle/traffic intervals pass with no session worker kept alive.
+    // Neither domain identity nor the driver/pool owner may change between them.
+    for (unsigned ms : {40000u, 45000u, 40000u}) {
+        IOSleep(ms);
+        assert(!queued && !p.fR31WorkerActive && p.refs == 1);
+        assert(p.fR33Domain == domain && allocations.size() == 1);
+        assert(domain->rootPA == 0x100000 && domain->tblPA == 0x200000);
+        assert(domain->ctx.completionSequence == 129 && p.resourcesAlive());
+        assert(p.fR15Service == &driver && driver.refs == 2);
+        assert(p.fR15Request.out.state == r15pool::kActive);
+        assert(p.strings["m2-3l-session-state"] == "active");
+        assert(p.strings["m2-3n-domain-state"] == "active");
+        assert(lifecycle.empty());
     }
-    assert(threadEnds == 2 && threadRefsReleased == 2);
-    std::puts("PASS: production worker/RPC/window/stop; 125s logical active time; restore before dependency release");
+    assert(tick-started >= 125000000000ULL);
+    OSDictionary request;
+    const UInt64 rpcBefore=mach_absolute_time();
+    assert(p.setProperties(&request) == kIOReturnSuccess);
+    const UInt64 rpcAfter=mach_absolute_time();
+    assert(queued && p.fR31WorkerActive && p.fR33TeardownState == 1);
+    assert(p.fR33Domain == domain && p.resourcesAlive() && driver.refs == 2);
+    assert(!p.fR31SessionCompleted && lifecycle.empty());
+    // Service stop joins the already-requested teardown. Dependencies must
+    // remain available and the caller's original workloop gate must be opened.
+    loop.gated=true;
+    sleepHook=[&](unsigned ms) {
+        assert(ms == 10 && !loop.inGate() && queued);
+        assert(timer.cancelled && !loop.removed);
+        assert(p.fArmed && p.fTarget == &target && !target.removed);
+        assert(p.fR15Service == &driver && driver.refs == 2);
+        dispatchWorker();
+    };
+    p.stop(nullptr);
+    assert(loop.inGate() && threadEnds == 2 && threadRefsReleased == 2);
+    assert(p.runs == 1 && p.refs == 1 && !p.fR31WorkerActive && !queued);
+    assert(!p.fR33Domain && !p.r33DomainStopPending() && allocations.empty());
+    assert(!p.resourcesAlive() && p.fR31SessionCompleted);
+    assert(!p.fR15Service && driver.refs == 1);
+    assert(p.fM22b2WinMain.durMS >= 125000 && p.fM22b2WinMain.valid);
+    assert(p.numbers["m2-3l-stop-request-time"] > rpcBefore);
+    assert(p.numbers["m2-3l-stop-request-time"] < rpcAfter);
+    assert(p.strings["m2-3l-session-state"] == "stopped");
+    assert(p.strings["m2-3n-domain-state"] == "stopped");
+    assert(p.numbers["m2-3n-teardown-start"] > rpcAfter);
+    assert(p.numbers["m2-3l-session-end"] > restoredAt);
+    assert(registers[M2B2_OFF_DEV_TABLE] == 0xa000);
+    assert(registers[M2B2_OFF_CMD_BUF] == 0xb000);
+    assert(registers[M2B2_OFF_EVT_BUF] == 0xc000);
+    assert(registers[M2B2_OFF_CONTROL] == 0x100);
+    const std::vector<std::string> expectedStates{
+        "preparing", "active", "stop-requested", "draining", "stopped"};
+    assert(p.states == expectedStates);
+    const std::vector<std::string> expectedLifecycle{
+        "post-sample", "post-map-release", "rx-drain", "tail-drain", "tx-drain",
+        "restore", "detach", "resume", "pool-disarm", "mapping-release",
+        "descriptor-release", "memory-release", "memory-release", "memory-release",
+        "memory-release", "memory-release", "driver-release", "context-release"};
+    assert(lifecycle == expectedLifecycle);
+    assert(loop.removed && timer.refs == 0 && !p.fM22b2Timer);
+    assert(!p.fArmed && !p.fMapWindowOpen && p.baseStopped);
+    assert(target.removed && nic.removed && notifier.disabled);
+    assert(!p.fTarget && !p.fNicDevice && !p.fPublishNotifier);
+    std::puts("PASS: production domain handoff/recovery/RPC/stop; setup worker exits; "
+              "125s logical ownership; restored registers precede resource/driver release");
 }
 '''
 
@@ -253,35 +425,64 @@ def main():
     pgt = (ROOT / 'kext/AMDMapperProbePgt.cpp').read_text()
     internal = (ROOT / 'kext/AMDMapperProbeInternal.hpp').read_text()
     header = (ROOT / 'kext/AMDMapperProbe.hpp').read_text()
-    window_struct = body(header, '    struct M22b2EventWindow {')
+    rxset = (ROOT / 'kext/AMDMapperProbeRxSet.cpp').read_text()
+    setup = body(pgt, 'void org_example_AMDMapperProbe::runM22b2PageTableProbe(')
+    finish = body(pgt, 'void org_example_AMDMapperProbe::finishM22b2PageTableProbe(')
+    domain = body(pgt, 'struct org_example_AMDMapperProbe::R33DeviceDomain {')
+    domain_locals = domain[domain.index('{') + 1:domain.rindex('}')]
+    # Initialize only fixture locals, while keeping each production field type.
+    domain_locals = re.sub(r';', '{};', domain_locals)
+    save_domain = body(setup, '    auto saveDomain = [&]()')
+    owners = section(setup, '    setProperty("m2-b2-stage", "0-start");',
+                     '    // 门控已在 scheduleM22b2()')
+    handoff = setup[setup.index('    if (!m2b2BeginEventWindow('):setup.rindex('}')]
+    aliases = section(finish, '    auto &winPre =', '    if (!finishWindow)')
+    window = section(finish, '    if (!finishWindow)',
+                     '    // ---- 第 16b 步：')
+    recover = section(finish, 'recover:\n', '    // ---- 第 19 步：')
+    release = finish[finish.index('    // ---- 第 20 步：'):finish.rindex('}')]
+    alias_names = re.findall(r'auto &(\w+) =', aliases)
+    # Every recovery alias must have a capture. The two window objects are
+    # service members; resourcesReleased starts false in the context.
+    captures = re.findall(r'domain->(\w+) = (\w+);', save_domain)
+    assert all(left == right for left, right in captures)
+    captured = {left for left, _ in captures}
+    assert set(alias_names) - {'winPre', 'winMain'} <= captured
+    assert captured == set(re.findall(r'\b(\w+);', domain)) - {'resourcesReleased'}
+    assert setup.index('r27RxReady();') < setup.index('    if (!m2b2BeginEventWindow(')
+    assert finish.index('r17ResumeOutput();') < finish.index('    // ---- 第 20 步：')
     constants = '\n'.join(re.findall(
-        r'^#define M2B2_(?:EVT_BUFFER_SIZE|EVENT_TYPE_SHIFT|EVENT_TYPE_MASK|'
-        r'EVENT_DEVID_MASK|OFF_EVT_HEAD|OFF_EVT_TAIL|OFF_STATUS|'
-        r'STATUS_EVT_OVERFLOW|STATUS_EVT_RUN|MAIN_MEAS_SECS)\s+[^\n]+', internal, re.M))
-    methods = [body(entry, 'void org_example_AMDMapperProbe::r31RequestStop('),
+        r'^#define (?:M2B1_LOOP_TIMEOUT|M2B2_(?:EVT_BUFFER_SIZE|EVENT_TYPE_SHIFT|'
+        r'EVENT_TYPE_MASK|EVENT_DEVID_MASK|OFF_\w+|CTRL_\w+|STATUS_\w+|'
+        r'CMD_LOG_MAX|MAIN_MEAS_SECS))\s+[^\n]+', internal, re.M))
+    commands = '\n'.join(body(internal, 'struct ' + name + ' {') + ';'
+                         for name in ['M2B2CmdRecord', 'M2B2CmdCtx', 'M2b2PostSample'])
+    methods = [body(internal, 'static inline bool m2b2BeginEventWindow('),
+               body(internal, 'static inline void m2b2EndEventWindow('),
+               body(entry, 'void org_example_AMDMapperProbe::r31RequestStop('),
                body(entry, 'IOReturn org_example_AMDMapperProbe::setProperties('),
                body(entry, 'void org_example_AMDMapperProbe::stop('),
                body(pgt, 'void org_example_AMDMapperProbe::m22b2TimerFired('),
                body(pgt, 'void org_example_AMDMapperProbe::r31SessionWorker('),
-               body(internal, 'static inline void r31WaitForSessionStop('),
-               body(internal, 'static inline void m2b2SampleEvents(')]
-    start = pgt.index('    if (fR31Session) {\n        setHexProperty(this, "m2-3l-session-start"')
-    end = pgt.index('    // 【第九轮】把窗口边界', start)
-    window = pgt[start:end]
-    complete = body(pgt, '        if (fR31Session) {\n            fR31SessionCompleted =')
-    assert pgt.index('r27RxReady();') < start
-    assert pgt.index('r17ResumeOutput();') < pgt.index(complete)
-    assert 'fR31Session ? &fR31StopRequested : nullptr' in window
-    # Adjust only the hardware-specific post-sample callback's host argument.
-    prefix = PREFIX.replace('WINDOW_STRUCT', window_struct)
-    prefix = prefix.replace('static_cast<org_example_AMDMapperProbe *>(p);\n    assert(self->',
-                            '*static_cast<org_example_AMDMapperProbe **>(p);\n    assert(self->')
+               body(pgt, 'bool org_example_AMDMapperProbe::r33DomainStopPending('),
+               body(pgt, 'void org_example_AMDMapperProbe::r33ScheduleDomainStop('),
+               body(pgt, 'void org_example_AMDMapperProbe::r33DomainStopWorker('),
+               body(rxset, 'void org_example_AMDMapperProbe::m2b2R15Release(')]
+    prefix = PREFIX.replace('COMMAND_STRUCTS', commands).replace('DOMAIN_STRUCT', domain)
+    prefix = prefix.replace('WINDOW_STRUCT', body(header, '    struct M22b2EventWindow {'))
+    prefix = prefix.replace('R15_SCOPE', body(header, '    struct R15Scope {'))
+    setup_test = SETUP.replace('SETUP_OWNERS', owners).replace('DOMAIN_LOCALS', domain_locals)
+    setup_test = setup_test.replace('SAVE_DOMAIN', save_domain).replace('SETUP_HANDOFF', handoff)
+    finish_test = FINISH.replace('FINISH_ALIASES', aliases)
+    finish_test = finish_test.replace('USE_ALIASES', '\n'.join('    (void)' + n + ';' for n in alias_names))
+    finish_test = finish_test.replace('FINISH_WINDOW', window).replace('RECOVER', recover)
+    finish_test = finish_test.replace('RESOURCE_RELEASE', release)
     source = constants + '\n' + prefix + '\n' + '\n\n'.join(methods) + '\n'
-    source += SUFFIX.replace('MAIN_WINDOW', window).replace('SESSION_COMPLETE', complete)
+    source += setup_test + finish_test + TEST
     compiler = shlex.split(os.environ.get('CXX', ''))
     if not compiler:
         compiler = [shutil.which('clang++') or shutil.which('g++') or 'c++']
-    with tempfile.TemporaryDirectory(prefix='r31-session-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='r33-domain-') as tmp:
         cpp, exe = Path(tmp) / 'session.cpp', Path(tmp) / 'session'
         cpp.write_text(source)
         subprocess.run(compiler + ['-std=c++17', '-Wall', '-Wextra', '-Werror',

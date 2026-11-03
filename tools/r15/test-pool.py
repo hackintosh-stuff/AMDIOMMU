@@ -447,7 +447,7 @@ int main() {
 def generate(mainline=False):
     n = runpy.run_path(str(ROOT / 'tools/apply-lucy-obs2.py'))
     if mainline:
-        n['select_rx']('32')
+        n['select_rx']('33')
         n = n['select_rx'].__globals__
     text = n['POOL_METHODS']
     state = extract(text, 'struct RTL8125::R15PoolState') + ';'

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused Round32 software checks; no device, install or reboot actions.
+"""Focused Round33 software checks; no device, install or reboot actions.
 
 The C++ harnesses compile real driver/backend bodies with host plumbing.
 They do not replace a macOS kext build or the one required hardware run.
@@ -42,7 +42,8 @@ def main():
                PYTHONDONTWRITEBYTECODE='1', ASAN_OPTIONS='detect_leaks=0')
     for path in sorted(list((ROOT / 'tools/r27').glob('*.py')) +
                        list((ROOT / 'tools/r31').glob('*.py')) +
-                       list((ROOT / 'tools/r32').glob('*.py'))):
+                       list((ROOT / 'tools/r32').glob('*.py')) +
+                       list((ROOT / 'tools/r33').glob('*.py'))):
         data = path.read_bytes()
         if b'\r' in data:
             raise ValueError('Mac source must use LF: ' + path.name)
@@ -77,7 +78,7 @@ def main():
         run([exe], env)
     run(py + ['tools/r27/test-analyzer.py',
               'AnalyzerTests.test_rx1024_full_lifecycle_with_actual_headers_and_real_logs'], env)
-    print('Round32 focused software checks passed; macOS build and hardware acceptance remain separate.')
+    print('Round33 focused software checks passed; macOS build and hardware acceptance remain separate.')
 
 
 if __name__ == '__main__':

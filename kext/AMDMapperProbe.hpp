@@ -401,6 +401,8 @@ private:
     // （默认 20 秒），那时 PCI 枚举、网卡驱动、链路协商都已完成。
     // 这样既不阻塞启动，又能在有真实 DMA 的窗口里做实验。
     void runM22b2PageTableProbe();
+    struct R33DeviceDomain;
+    void finishM22b2PageTableProbe(R33DeviceDomain *, bool finishWindow);
 
     // 延迟调度：在 start() 末尾挂一个一次性定时器，到点后调用
     // runM22b2PageTableProbe()。返回 false 表示调度失败（记录属性后放弃）。
@@ -409,16 +411,22 @@ private:
     // 定时器回调（静态，符合 IOTimerEventSource::Action 签名）
     static void m22b2TimerFired(OSObject *owner, IOTimerEventSource *sender);
 
-    // Round31: the timer only launches this retained, dedicated worker. The
-    // probe's local tables/command context live until explicit stop + restore.
+    // Round33: setup transfers its hardware resources to the service and
+    // returns. Explicit stop launches a separate worker for drain + restore.
     bool r31SessionRequested() const;
     static void r31SessionWorker(void *parameter, wait_result_t result);
+    static void r33DomainStopWorker(void *parameter, wait_result_t result);
+    void r33ScheduleDomainStop();
+    bool r33DomainStopPending() const;
     void r31RequestStop();
     bool fR31Session = false;
     volatile UInt32 fR31StopRequested = 0;
     volatile UInt32 fR31WorkerActive = 0;
     volatile UInt64 fR31StopRequestTime = 0;
     bool fR31SessionCompleted = false; // written/read by the worker only
+    R33DeviceDomain *fR33Domain = nullptr;
+    volatile UInt32 fR33TeardownState = 0; // 0 active, 1 queued/running, 2 finished
+    UInt32 fR33InstallCount = 0;
 
     R27ProbeTimer *fM22b2Timer;   // 一次性定时器（stop() 里释放）
     uint32_t            fM22b2DelayMS; // 延迟毫秒数（可被 boot-arg 覆盖）
@@ -1241,10 +1249,8 @@ public:
     //   目标设备那一条，解码出 mode 与根表地址，把它作为走表起点；同时把
     //   那条 DTE 的原始值一起导出，使"起点来自 DTE"可被独立核对。
     //
-    // 【为什么把页表指针作为参数传进来】
-    //   它们是 runM22b2PageTableProbe() 的局部变量，生命周期与该函数一致。
-    //   传参比把它们提升为成员更安全：成员会活得更久，而这块内存在恢复
-    //   之后就被释放了，留下一个悬空成员正是要避免的形态。
+    // 页表由 R33DeviceDomain 持有；诊断只在域仍有效时借用这些指针。
+    // 恢复硬件并完成诊断后，域统一释放页表，走表函数不保存借用指针。
     void m2b2WalkBusinessRanges(const volatile UInt64 *dte, UInt32 tgt,
                                 const volatile UInt64 *ptMem,
                                 UInt64 ptBasePA, UInt64 ptBytes);
@@ -1281,7 +1287,8 @@ public:
     void m2b2R15Release();
     struct R15Scope {
         org_example_AMDMapperProbe *self;
-        ~R15Scope() { self->m2b2R15Release(); }
+        bool transferred = false;
+        ~R15Scope() { if (!transferred) self->m2b2R15Release(); }
     };
 
     // 第十轮：本轮声明的受控批次请求数；0 = 未声明。

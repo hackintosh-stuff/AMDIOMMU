@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused Round32 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round33 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
@@ -43,7 +43,7 @@ HISTORY_CHECK = 'retained32-standard-handles-PTE-and-retirement-lifecycles'
 EXIT_CHECK = 'zero-pending-owners-pins-ring-and-no-device-page-fault'
 RX_MAP_CHECK = 'rx1024-standard-mapping-PTE-and-confirmed-unmap'
 RX_DONE_CHECK = 'rx1024-real-DMA-restoration-and-application-correlation'
-SESSION_CHECK = 'persistent-session-125s-idle-second4096-explicit-stop-and-restore'
+SESSION_CHECK = 'service-owned-domain-after-setup-exit-125s-idle-stop-and-restore'
 ALLOCATION_CHECK = 'dynamic-IOVA-wide-map-eight-live-and-confirmed-reuse'
 IDLE_NS = 125_000_000_000
 
@@ -312,6 +312,12 @@ def properties():
          'm2-3l-session-mode': 'explicit-stop', 'm2-3l-session-state': 'stopped',
          'm2-3l-session-start': 420, 'm2-3l-stop-request-time': session_time(8751),
          'm2-3l-session-end': session_time(9060),
+         'm2-3n-domain-mode': 'service-owned', 'm2-3n-domain-state': 'stopped',
+         'm2-3n-setup-worker-active': 0, 'm2-3n-setup-worker-exit-time': 430,
+         'm2-3n-root-pa': 0x100000, 'm2-3n-dt-pa': 0x200000,
+         'm2-3n-command-pa': 0x300000, 'm2-3n-install-count': 1,
+         'm2-3n-teardown-start': session_time(8790),
+         'm2-3n-teardown-end': session_time(9055),
          'm2-3l-tx-deadline': 0, 'm2-b2-r15-authorize-deadline': 0,
          'm2-3h-rx-mode': 'standard-nonidentity-cyclic1024',
          'm2-3h-rx-state': 'drained-and-unmapped', 'm2-3h-rx-ready': 'no',
@@ -403,9 +409,11 @@ def real_logs(client_reorder=True, peer_reorder=True):
     def sleep(seconds):
         offset[0] += round(seconds * 1e9)
 
+    active = load.session.parse_status(properties())
+    active.update({'session-state': 'active', 'domain-state': 'active'})
     with patch.object(load, 'now', side_effect=clock), \
          patch.object(load.time, 'sleep', side_effect=sleep), \
-         patch.object(load.session, 'status', return_value={'session-state': 'active'}):
+         patch.object(load.session, 'status', return_value=active):
         assert load.exchange(s, '127.0.0.1', PEER, TOKEN, client_lines.append, seq,
                              persistent_session=True) == 0
     with patch.object(load, 'now', side_effect=[session_time(8750), session_time(8752)]), \
@@ -527,6 +535,12 @@ class AnalyzerTests(unittest.TestCase):
         report = self.expect(True)
         self.assertEqual(len(report['checks']), 14)
         by_id = {c['id']: c.get('detail') for c in report['checks']}
+        lifecycle = by_id[SESSION_CHECK]
+        self.assertEqual((lifecycle['mode'], lifecycle['activeObservations'],
+                          lifecycle['domainInstalls']), ('service-owned', 2, 1))
+        self.assertEqual((lifecycle['setupWorkerExited'], lifecycle['rootPA'],
+                          lifecycle['deviceTablePA'], lifecycle['commandPA']),
+                         (430, 0x100000, 0x200000, 0x300000))
         self.assertEqual(by_id[COUNTER_CHECK]['mode'], 2)
         self.assertEqual((by_id[COUNTER_CHECK]['Mapped'], by_id[COUNTER_CHECK]['Unmarked']), (10240, 10240))
         self.assertEqual((by_id[CMD_CHECK]['commandCapacity'], by_id[CMD_CHECK]['commandRingBytes']), (512, 8192))

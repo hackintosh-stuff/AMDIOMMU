@@ -1120,21 +1120,11 @@ static inline void m2b2DoPostSample(void *ctx) {
     p->tailOk = true;
 }
 
-// ---- m2b2SampleEvents (original lines 2753..2916) ----
-static inline void r31WaitForSessionStop(const volatile UInt32 *stopRequested) {
-    // The dedicated worker keeps all local probe resources alive while normal
-    // driver work continues. No elapsed-time deadline ends a Round31 session.
-    while (!__atomic_load_n(stopRequested, __ATOMIC_ACQUIRE)) IOSleep(100);
-}
-
-static inline void m2b2SampleEvents(volatile UInt8 *base,
-                             volatile UInt32 *evtBuf,
-                             UInt32 measureSecs,
-                             UInt32 tgtDevid,
-                             org_example_AMDMapperProbe::M22b2EventWindow *w,
-                             void (*postSample)(void *) = nullptr,
-                             void *postCtx = nullptr,
-                             const volatile UInt32 *stopRequested = nullptr) {
+// Round33 event-window endpoints do not own the device domain. The setup
+// worker records the beginning and returns; teardown records the end while the
+// service-owned resources and translation are still active.
+static inline bool m2b2BeginEventWindow(
+    volatile UInt8 *base, org_example_AMDMapperProbe::M22b2EventWindow *w) {
     w->valid = false;
     w->invalidReason = "not-run";
     w->tStart = 0; w->tEnd = 0; w->durMS = 0;
@@ -1156,17 +1146,17 @@ static inline void m2b2SampleEvents(volatile UInt8 *base,
 
     if (w->statusStart & M2B2_STATUS_EVT_OVERFLOW) {
         w->invalidReason = "overflow-at-window-start";
-        return;
+        return false;
     }
     if ((w->statusStart & M2B2_STATUS_EVT_RUN) == 0) {
         w->invalidReason = "evt-log-not-running-at-start";
-        return;
+        return false;
     }
     if ((w->headStart & 0xF) || (w->tailStart & 0xF) ||
         w->headStart >= M2B2_EVT_BUFFER_SIZE ||
         w->tailStart >= M2B2_EVT_BUFFER_SIZE) {
         w->invalidReason = "head-tail-out-of-range-at-start";
-        return;
+        return false;
     }
 
     // 【v0.20.0】记录窗口开始时的**前置积压**：[HEAD, TAIL) 里已经存在、
@@ -1182,11 +1172,14 @@ static inline void m2b2SampleEvents(volatile UInt8 *base,
     w->tStart = m2b2NowNS();
     w->wallStart = m2b2WallSecs();
 
-    // ---- 观察窗口 ----
-    if (stopRequested) r31WaitForSessionStop(stopRequested);
-    else IOSleep(measureSecs * 1000);
+    return true;
+}
 
-    // 【第九轮】窗口内后置采样：在 tEnd 之前、睡眠刚结束的这一刻。
+static inline void m2b2EndEventWindow(
+    volatile UInt8 *base, volatile UInt32 *evtBuf, UInt32 tgtDevid,
+    org_example_AMDMapperProbe::M22b2EventWindow *w,
+    void (*postSample)(void *) = nullptr, void *postCtx = nullptr) {
+    // 窗口内后置采样：在结束测量时、记录 tEnd 之前完成。
     //
     // 放在这里而不是调用方，是因为"窗口内部"这个性质只有在这里才成立。
     // 调用方拿到返回值时窗口已经关闭，之后读到的任何样本都只能证明
@@ -1292,6 +1285,16 @@ static inline void m2b2SampleEvents(volatile UInt8 *base,
 
     w->valid = true;
     w->invalidReason = nullptr;
+}
+
+// Historical finite observations share the same endpoint implementation.
+static inline void m2b2SampleEvents(
+    volatile UInt8 *base, volatile UInt32 *evtBuf, UInt32 measureSecs,
+    UInt32 tgtDevid, org_example_AMDMapperProbe::M22b2EventWindow *w,
+    void (*postSample)(void *) = nullptr, void *postCtx = nullptr) {
+    if (!m2b2BeginEventWindow(base, w)) return;
+    IOSleep(measureSecs * 1000);
+    m2b2EndEventWindow(base, evtBuf, tgtDevid, w, postSample, postCtx);
 }
 
 // ---- m2b2EventTypeName (original lines 2918..2937) ----

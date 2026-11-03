@@ -113,9 +113,20 @@ class ProtocolTests(unittest.TestCase):
             self.assertGreaterEqual(ticks[0], 126_000_000_000)
             self.assertEqual(s.queue, [])
 
+        active = load.session.parse_status('''
+"m2-3l-session-state" = "active"
+"m2-3n-domain-mode" = "service-owned"
+"m2-3n-domain-state" = "active"
+"m2-3n-setup-worker-active" = "0x0"
+"m2-3n-setup-worker-exit-time" = "0x100"
+"m2-3n-root-pa" = "0x100000"
+"m2-3n-dt-pa" = "0x200000"
+"m2-3n-command-pa" = "0x300000"
+"m2-3n-install-count" = "0x1"
+''')
         with patch.object(load, 'now', side_effect=clock), \
              patch.object(load.time, 'sleep', side_effect=sleep), \
-             patch.object(load.session, 'status', return_value={'session-state': 'active'}) as status, \
+             patch.object(load.session, 'status', return_value=active) as status, \
              patch.object(load.session, 'stop', side_effect=stop) as request:
             rc = load.exchange(s, '127.0.0.1', ('127.0.0.2', 9110), 7,
                                logs.append, load.OrdSeq(),
@@ -123,7 +134,7 @@ class ProtocolTests(unittest.TestCase):
                                persistent_session=True)
             self.assertEqual(rc, 0)
             load.request_session_stop(logs.append)
-        self.assertEqual(status.call_count, 2)
+        self.assertEqual(status.call_count, 4)
         request.assert_called_once_with()
         self.assertEqual(s.sent, list(protocol.REQUESTS))
         self.assertIn('client_summary sent=8192 acked=8192 bad=0', logs)
@@ -131,6 +142,12 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(sum(line.startswith('client_session_' + name + ' ')
                                  for line in logs), 1)
         self.assertEqual(sum(line.startswith('client_ord_recv ') for line in logs), 1024)
+        domains = [line for line in logs if line.startswith('client_domain ')]
+        self.assertEqual(len(domains), 2)
+        for phase, line in enumerate(domains, 1):
+            self.assertTrue(line.startswith('client_domain phase=%d ' % phase))
+            self.assertIn('setup_worker=0 setup_exit=256 root_pa=0x100000 '
+                          'dt_pa=0x200000 command_pa=0x300000 installs=1', line)
 
     def test_peer_full_8192_and_reject_duplicate(self):
         class PeerSocket:
