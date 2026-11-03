@@ -36,10 +36,31 @@ Generation selects `--tx 21 --rx 34`. Run defaults are `runs/r34` and
 The build uses focused existing checks; this round does not add unit tests or
 expand failure-injection coverage.
 
-**Round34 hardware acceptance is pending.** The patch's host checks do not
-replace a complete Mac SDK build or actual NIC/DMA measurement. This step uses
-per-slot streaming mappings, not upstream's 64-by-16 RX batch optimization;
-bootstrap identity mappings still remain.
+**Round34 hardware acceptance PASSED (14/14).** One planned boot and one valid
+measurement used token `0x34c0de34`. Lucy owned 1024 reusable MD/Cmd pairs; the
+setup worker exited at 32,157,545,362 ns and both active-domain observations
+report `installs=1` with the same root/DT/command addresses
+`0x31880000`/`0x31a00000`/`0x31c00000` across the 125.2008 s idle. RX maps and
+unmaps were both 10578 = 9554 posted DMA operations + 1024 install-time
+preparations that never published an IOVA OWN; posted equalled completed at
+9554, 2669 real replacements occurred, 976 of 1024 slots changed physical
+address, and all 1024 slots returned to their current mbuf's physical address
+with owners/boundPairs/pending zero. TX retired 10382 with rejected 0; domain
+maps 10391 = 10382 + 9 capacity probes; the command ring completed 41941/41941
+through 163 wraps, the higher rate being the cost of per-slot streaming.
+R28T drained 1024/1024, R29D completed before TX close, registers were restored
+and 3/3 post-exit ordinary probes succeeded.
+
+Deployed source commit: `09c1cff732cf953c9d7bfe652acbf6eb97a534fc`. This
+documentation update is not a deployed revision.
+
+Round34 result and archive are outside this source repository:
+[Round34 result](<../../docs/m2-3o-round34-result.md>) and
+[evidence archive](<../../docs/evidence/r34-final-20261103.tgz>)
+(SHA256 `d418e94aebc262b64da4a392f67f12e7d6a0e6b050644bf0325f109b7bfa7e5a`).
+
+This step uses per-slot streaming mappings, not upstream's 64-by-16 RX batch
+optimization; bootstrap identity mappings still remain.
 
 ## Historical Round33 / service-owned device domain
 
