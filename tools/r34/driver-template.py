@@ -7,6 +7,8 @@ The existing ring is prepared directly without an R15 pool. Round36 batches
 up to sixteen already completed slots, without waiting across poll calls.
 Round37 exports the driver's actual TX/RX descriptor and tally spans so the
 bootstrap table can map only these objects and the frozen RX buffers.
+Round38 retires the RX bootstrap aliases once all slots have actually
+published their first IOVA OWN, after completing the current batch.
 The older RX4 path remains selectable from its original template.
 """
 from pathlib import Path
@@ -29,6 +31,7 @@ MEMBERS = BASE['MEMBERS'] + r'''
     bool r36RxBatchCall(UInt32, UInt32, UInt32);
     bool r36RxBeginBatch(UInt32, UInt32);
     bool r36RxPublish(UInt32, UInt64, UInt64, UInt64);
+    bool r38RxRetireBootstrap();
     bool r34RxRearm(UInt32, UInt32, UInt32, bool, UInt64 *);
     void r34RxPosted(UInt32, UInt64);
     bool r34RxCanReplace() const;
@@ -60,6 +63,9 @@ struct RTL8125::R34RxState {
     UInt32 batchFirst, batchCount, batchQueued;
     UInt32 batches, batchSlots, maxBatch;
     UInt64 batchOld[r34rx::kBatchSize], batchWord[r34rx::kBatchSize];
+    UInt32 firstIovaSlots;
+    UInt64 tLastFirstIovaPost, tBootstrapRetired;
+    bool bootstrapRetireAttempted, bootstrapRetired;
 };
 
 bool RTL8125::r34RxBinding(UInt32 op, UInt32 slot,
@@ -287,7 +293,7 @@ bool RTL8125::r36RxPublish(UInt32 slot, UInt64 addr, UInt64 oldAddr, UInt64 word
         rxDescArray[slot].buf.blen = OSSwapHostToLittleInt64(word1);
         r34RxPosted(slot, addr);
         rxpostRecordRearm(slot, addr, oldAddr, word1);
-        return true;
+        return r38RxRetireBootstrap();
     }
     const UInt32 n = p->batchQueued;
     if (n >= p->batchCount || slot != (p->batchFirst + n) % r34rx::kCount) {
@@ -316,6 +322,28 @@ bool RTL8125::r36RxPublish(UInt32 slot, UInt64 addr, UInt64 oldAddr, UInt64 word
     ++p->batches; p->batchSlots += p->batchCount;
     if (p->batchCount > p->maxBatch) p->maxBatch = p->batchCount;
     p->batchCount = p->batchQueued = 0;
+    return r38RxRetireBootstrap();
+}
+
+bool RTL8125::r38RxRetireBootstrap()
+{
+    R34RxState *p = r34Rx;
+    if (p->physicalResumed || p->snapshot.state != r34rx::kInstalled ||
+        !p->authorized || p->firstIovaSlots != r34rx::kCount) return true;
+    if (p->bootstrapRetireAttempted) return p->bootstrapRetired;
+    // Each slot's old physical DMA has completed, and the whole current
+    // batch has published IOVA OWN. Retire the bootstrap aliases only once.
+    p->bootstrapRetireAttempted = true;
+    r34rx::Binding b = {};
+    b.version = r34rx::kVersion; b.bytes = sizeof(b);
+    b.op = r34rx::kRetireBootstrap; b.slot = 0;
+    b.pa = p->tLastFirstIovaPost; b.length = r34rx::kCount;
+    if (p->callback(p->context, &b) != kIOReturnSuccess) {
+        p->snapshot.flags |= r34rx::kFlagMapFailed;
+        return false;
+    }
+    p->bootstrapRetired = true;
+    p->tBootstrapRetired = mach_absolute_time();
     return true;
 }
 
@@ -363,6 +391,10 @@ void RTL8125::r34RxPosted(UInt32 slot, UInt64 addr)
     auto &w = p->current[slot];
     if (p->mapped[slot] && addr == w.iova && !w.tPost) {
         w.tPost = mach_absolute_time(); w.flags |= r34rx::kWitnessPosted;
+        if (!d.postCount) {
+            ++p->firstIovaSlots;
+            p->tLastFirstIovaPost = w.tPost;
+        }
         s.posted++; d.postCount++; s.pendingPosted++;
     } else if (p->restorePending[slot] && addr == d.currentPA) {
         p->restorePending[slot] = false;
@@ -546,6 +578,10 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
     setProperty("rtl812x-r36-rx-batch-slots", p->batchSlots, 32);
     setProperty("rtl812x-r36-rx-max-batch", p->maxBatch, 32);
     setProperty("rtl812x-r36-rx-pending-batch", p->batchCount, 32);
+    setProperty("rtl812x-r38-rx-first-iova-slots", p->firstIovaSlots, 32);
+    setProperty("rtl812x-r38-rx-last-first-iova-time", p->tLastFirstIovaPost, 64);
+    setProperty("rtl812x-r38-rx-bootstrap-retired", p->bootstrapRetired ? 1u : 0u, 32);
+    setProperty("rtl812x-r38-rx-bootstrap-retire-time", p->tBootstrapRetired, 64);
     return kIOReturnSuccess;
 }
 

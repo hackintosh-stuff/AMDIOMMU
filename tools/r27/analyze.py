@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round37: ordinary RX batching with exact physical DMA coverage.
+"""Round38: retire physical RX bootstrap after full IOVA takeover.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,7 +29,7 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round37-normal-RX-ring; owned-sparse-4k; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
+SCOPE = 'round38-normal-RX-ring; bootstrap-retired-after-takeover; owned-sparse-4k; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
@@ -41,6 +41,7 @@ RX_BACKEND_HEADER, RX_BACKEND_SLOT_BYTES = 80, 464
 RX_WITNESS_BYTES, RX_MAP_RECORD_BYTES = 104, 224
 PHYSICAL_LAYOUT_VERSION, PHYSICAL_LAYOUT_BYTES = 1, 64
 PHYSICAL_LAYOUT_HEADER, PHYSICAL_SPAN_BYTES, PHYSICAL_SPAN_COUNT = 16, 16, 3
+BOOTSTRAP_COMMAND_BYTES = 40
 RX_BASE, RX_STRIDE, RX_CAPACITY = 0x1000200000, 8192, 4096
 ALL_STANDARD_MODE = 2
 DOMAIN_VERSION, DOMAIN_HEADER, DOMAIN_RECORD_BYTES = 4, 80, 1304
@@ -196,18 +197,14 @@ def physical_pages(ranges):
     return pages
 
 
-def identity_leaf_pages(pt, root_pa, pt_base, level):
-    """Enumerate the final tree, including leaves outside the declared spans.
-
-    All TX/RX IOVAs have retired at capture. Remaining leaves must therefore
-    be exact 4 KiB physical mappings, not an implicit RAM-wide aperture.
-    """
-    A.need(level in (3, 4), 'impossible physical identity root level')
-    pages, pending = set(), [(root_pa, level, 0)]
+def page_leaves(pt, root_pa, pt_base, level):
+    """Enumerate every present 4 KiB RW leaf in an immutable arena copy."""
+    A.need(level in (3, 4), 'impossible page-table root level')
+    pages, pending = {}, [(root_pa, level, 0)]
     while pending:
         table, depth, base = pending.pop()
         A.need(table & 4095 == 0 and 0 <= table - pt_base <= len(pt) - 4096,
-               'physical identity table outside the exported arena')
+               'page table outside the exported arena')
         entries = struct.unpack_from('<512Q', pt, table - pt_base)
         for index, entry in enumerate(entries):
             if not entry & 1:
@@ -216,13 +213,20 @@ def identity_leaf_pages(pt, root_pa, pt_base, level):
             target = entry & 0x000FFFFFFFFFF000
             A.need(entry & A.PTE_IR and entry & A.PTE_IW and
                    (entry >> 9) & 7 == depth - 1,
-                   'physical identity tree contains a large leaf or wrong permissions/level')
+                   'page table contains a large leaf or wrong permissions/level')
             if depth > 1:
                 pending.append((target, depth - 1, address))
             else:
-                A.need(target == address, 'remaining physical leaf is not identity-mapped')
-                pages.add(address)
+                pages[address] = target
     return pages
+
+
+def identity_leaf_pages(pt, root_pa, pt_base, level):
+    # All TX/RX IOVAs have retired at final capture.
+    pages = page_leaves(pt, root_pa, pt_base, level)
+    A.need(all(address == target for address, target in pages.items()),
+           'remaining physical leaf is not identity-mapped')
+    return set(pages)
 
 
 def check(cap):
@@ -837,13 +841,45 @@ def check(cap):
         fixed_pages = physical_pages((s['pa'], s['bytes']) for s in fixed_spans)
         bootstrap_pages = fixed_pages | physical_pages((s['originalPA'], RX_CAPACITY) for s in rxslots)
         restored_pages = physical_pages((s['currentPA'], RX_CAPACITY) for s in rxslots)
-        expected_pages = bootstrap_pages | restored_pages
+        removed_pages = bootstrap_pages - fixed_pages
+        expected_pages = fixed_pages | restored_pages
+        active_pt = blob('m2-3s-rx-active-pt-raw', 'r38-active-pt-raw.bin')
+        A.need(len(active_pt) == len(pt) == dh['ptBytes'],
+               'active and final page-table arena sizes differ')
+        active_leaves = page_leaves(active_pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'])
+        active_identity = {address for address, target in active_leaves.items() if address == target}
+        rx_end = RX_BASE + RX_COUNT * RX_STRIDE
+        A.need(active_identity == fixed_pages and
+               all(address == target or
+                   dh['iovaBase'] <= address < dh['iovaBase'] + dh['iovaBytes'] or
+                   RX_BASE <= address < rx_end for address, target in active_leaves.items()) and
+               all(RX_BASE + i * RX_STRIDE in active_leaves for i in range(RX_COUNT)),
+               'active tree does not retain only fixed identity DMA and the TX/RX IOVA windows')
+        retire_raw = blob('m2-3s-rx-bootstrap-retire-command', 'r38-bootstrap-retire-command.bin')
+        A.need(len(retire_raw) == BOOTSTRAP_COMMAND_BYTES, 'bootstrap retirement command size differs')
+        bootstrap_command = A.cmdrec(retire_raw, 0)
+        last_first_post = max(s['first']['tPost'] for s in rxslots)
+        bootstrap_clear = P['m2-3s-bootstrap-clear-time']
+        bootstrap_done = driver_property('rtl812x-r38-rx-bootstrap-retire-time', True)
+        A.need(P['m2-3s-rx-bootstrap-retired'] == 'yes' and
+               driver_property('rtl812x-r38-rx-bootstrap-retired', True) == 1 and
+               driver_property('rtl812x-r38-rx-first-iova-slots', True) == RX_COUNT and
+               driver_property('rtl812x-r38-rx-last-first-iova-time', True) == last_first_post and
+               0 < last_first_post <= bootstrap_clear <= bootstrap_command['tComplete'] ==
+               P['m2-3s-bootstrap-retire-time'] <= bootstrap_done <
+               P['m2-3l-stop-request-time'] <= rh['tDisarmed'] and
+               0 < bootstrap_command['expected'] == bootstrap_command['observed'] <= dh['completionSequence'] and
+               bootstrap_command['words'] == [0, dh['domid'] | (3 << 28), 0xfffff003, 0x7fffffff],
+               'bootstrap retirement did not follow all first IOVA publications with confirmed invalidation')
         actual_pages = identity_leaf_pages(pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'])
         A.need(actual_pages == expected_pages and
                P['m2-3r-bootstrap-pages'] == len(bootstrap_pages) and
-               P['m2-3r-restore-added-pages'] == len(restored_pages - bootstrap_pages) and
+               P['m2-3s-fixed-pages'] == len(fixed_pages) and
+               P['m2-3s-bootstrap-removed-pages'] == len(removed_pages) > 0 and
+               P['m2-3r-restore-added-pages'] == len(restored_pages - fixed_pages) and
+               len(actual_pages) == len(bootstrap_pages) - len(removed_pages) + len(restored_pages - fixed_pages) and
                P['m2-3r-identity-pages'] == len(actual_pages),
-               'final 4KiB identity leaves differ from fixed DMA plus original/current RX spans')
+               'final 4KiB identity leaves differ from fixed DMA plus current RX spans')
         resumed = driver_property('rtl812x-r35-rx-resume-time', True)
         A.need(P['m2-3p-rx-physical-resume'] == 'done' and
                P['m2-3e-t-translate-off'] <= resumed <= P['m2-3e-t-resume'],
@@ -861,6 +897,8 @@ def check(cap):
                'native RX readiness/drain or raw/property ownership differs')
         tx_sequences = {d[key]['expected'] for d in dom + [dh['probeFirst'], dh['probeReuse']]
                         for key in ('mapCommand', 'retireCommand')}
+        A.need(bootstrap_command['expected'] not in tx_sequences,
+               'bootstrap retirement reuses a TX invalidation sequence')
         rx_sequences = {}
         batch_stats = {key: P['m2-3q-rx-' + key] for key in
                        ('map-invalidations', 'unmap-invalidations', 'map-batch-calls',
@@ -911,8 +949,9 @@ def check(cap):
                     first, width = packed & 0xffff, packed >> 16
                     A.need(c['expected'] > 0 and c['expected'] == c['observed'] and
                            c['words'] == [0, dh['domid'] | (3 << 28), 0xfffff003, 0x7fffffff] and
-                           c['expected'] not in tx_sequences,
-                           label + 'invalidation command/completion or TX sequence differs')
+                           c['expected'] not in tx_sequences and
+                           c['expected'] != bootstrap_command['expected'],
+                           label + 'invalidation command/completion or TX/bootstrap sequence differs')
                     if packed:
                         A.need(first < RX_COUNT and 1 <= width <= RX_BATCH_MAX and
                                (i - first) % RX_COUNT < width,
@@ -950,8 +989,8 @@ def check(cap):
                            label + 'RX PTE walk differs from the mapped receive buffer')
         A.need(sum(s['mapCount'] for s in rxbackend) == rb['mapOk'] and
                sum(s['unmapCount'] for s in rxbackend) == rb['unmapOk'] and
-               dh['commandCompleted'] >= 2 * dh['mapsTotal'] + invalidations,
-               'shared command totals do not cover TX/probe and actual RX invalidation batches')
+               dh['commandCompleted'] >= 2 * dh['mapsTotal'] + invalidations + 1,
+               'shared command totals do not cover TX/probe, RX batches and bootstrap retirement')
         return {'mapped': rb['mapOk'], 'unmapped': rb['unmapOk'], 'initialMappings': RX_COUNT,
                 'driverOwnedPairs': len(memory_ids), 'liveOwners': 0,
                 'source': 'lucy-normal-ring', 'ringId': rh['ringId'],
@@ -959,9 +998,14 @@ def check(cap):
                 'physicalMode': 'owned-sparse-4k', 'physicalLayoutGeneration': layout['generation'],
                 'fixedPhysicalSpans': fixed_spans, 'fixedPhysicalPages': len(fixed_pages),
                 'bootstrapPages': len(bootstrap_pages),
-                'restoreAddedPages': len(restored_pages - bootstrap_pages),
+                'bootstrapRemovedPages': len(removed_pages),
+                'activeIdentityPages': len(active_identity),
+                'activeRxIovaPages': sum(RX_BASE <= address < rx_end for address in active_leaves),
+                'bootstrapLastFirstPost': last_first_post, 'bootstrapClearTime': bootstrap_clear,
+                'bootstrapRetireCommand': bootstrap_command, 'bootstrapDriverDone': bootstrap_done,
+                'restoreAddedPages': len(restored_pages - fixed_pages),
                 'identityPages': len(actual_pages), 'identityBytes': len(actual_pages) * 4096,
-                'physicalEvidence': 'all final present leaves; exact 4KiB union of fixed DMA and original/current RX spans',
+                'physicalEvidence': 'active identity leaves equal fixed DMA; final identity leaves equal fixed DMA plus current RX',
                 'normalReplacementResumedAt': resumed,
                 'mapInvalidations': batch_stats['map-invalidations'],
                 'unmapInvalidations': batch_stats['unmap-invalidations'],

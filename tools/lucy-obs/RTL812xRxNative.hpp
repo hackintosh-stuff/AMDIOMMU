@@ -3,6 +3,8 @@
  * map/unmap invalidations while standard DMA callbacks remain synchronous.
  * Round37 separately exports the three driver-owned physical DMA objects
  * needed alongside the initial RX buffers by the sparse bootstrap table.
+ * Round38 retires the RX bootstrap aliases after every slot has published
+ * its first IOVA OWN; fixed DMA objects stay mapped until domain teardown.
  * Kernel-only control pointers stay in Request/Binding. Exported snapshots
  * contain numeric identities, mapping evidence and completed DMA witnesses.
  * Each slot keeps its first IOVA DMA lifecycle and its latest lifecycle.
@@ -24,7 +26,7 @@ enum {
     kAbsent = 0, kInstalled = 1, kDisarmed = 2, kDrained = 3, kReleased = 4,
     kPrepared = 5,
     kBind = 1, kRead = 2, kCover = 3, kUnbind = 4,
-    kBatchMap = 5, kBatchUnmap = 6,
+    kBatchMap = 5, kBatchUnmap = 6, kRetireBootstrap = 7,
     kMapPublished = 1, kMapInvalidated = 2, kMapUnmapped = 4,
     kWitnessPosted = 1, kWitnessDone = 2, kWitnessUnmapped = 4,
     kWitnessError = 8,
@@ -85,6 +87,7 @@ struct Snapshot {
 struct Binding {
     u32 version, bytes, op, slot;
     void *memory, *command;
+    // kRetireBootstrap: slot=0, pa=last first-IOVA-OWN time, length=kCount.
     u64 pa, length;
     MapRecord out;
 };

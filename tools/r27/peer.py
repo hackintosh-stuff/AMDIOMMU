@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round37 finite UDP peer: byte validation, group-local reorder, no duplicates.
+"""Round38 finite UDP peer: byte validation, group-local reorder, no duplicates.
 
 The 8192 R27P application requests are ordinary traffic to the driver.  Keep
 echoing seed and ordinary probes after the batch so exit recovery is observable.
@@ -122,7 +122,7 @@ def serve(s, token, seconds, emit, idle_exit=0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--log', default='runs/r37/peer.log')
+    ap.add_argument('--log', default='runs/r38/peer.log')
     ap.add_argument('--run-token', required=True, type=lambda x: int(x, 0))
     ap.add_argument('--bind', default='192.168.50.122')
     ap.add_argument('--port', type=int, default=9110)

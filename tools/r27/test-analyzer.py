@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Focused Round37 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round38 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
 The positive fixture covers all 1024 RX map/post/done/restore/unmap lifecycles,
-including remapping, batch16/partial batches and exact physical DMA page coverage.
+including remapping, batch16/partial batches, bootstrap retirement and current-buffer restoration.
 Rejection cases cover missing restoration and corrupted RX command evidence.
 """
 import importlib.util
@@ -103,7 +103,7 @@ int main(int argc, char **argv) {
     constexpr uint32_t batchGroups = 4 * 65;
     constexpr uint32_t rxInvalidations = r34rx::kCount + batchGroups;
     d.commandSubmits = d.commandCompleted = d.completionSequence =
-        2 * (10240 + 9) + 2 * rxInvalidations + 3;
+        2 * (10240 + 9) + 2 * rxInvalidations + 4;
     d.commandWraps = d.commandSubmits * 2 / d.commandCapacity;
     d.commandPostWrapCompleted = d.commandCompleted - (d.commandCapacity / 2 - 1);
     d.slotsUsed = 65535; d.maxLiveOwners = 16;
@@ -272,9 +272,8 @@ int main(int argc, char **argv) {
         }
         ds.currentPA = ds.last.pa;
     }
-    // The final physical tree is the union of the initial ring, the current
-    // restored ring and three fixed DMA objects. Build it with the production
-    // sparse helper; none of the gaps between these spans should be present.
+    // Build and retire bootstrap with the production sparse helpers. Preserve
+    // one active copy alongside the final fixed-DMA/current-RX physical tree.
     r34rx::PhysicalLayout physical{};
     physical.version = r34rx::kPhysicalLayoutVersion;
     physical.bytes = sizeof(physical); physical.generation = 2;
@@ -288,9 +287,35 @@ int main(int argc, char **argv) {
     for (const auto &slot : rx.slots)
         if (!amdsparse::mapOwnedRange(identity, slot.originalPA, r34rx::kCapacity)) std::abort();
     if (identity.addedLeaves != 1033) std::abort();
+    auto fixedPage = [&](amdsparse::u64 page) {
+        for (const auto &span : physical.spans)
+            if (page < span.pa + span.bytes && page + 4096 > span.pa) return true;
+        return false;
+    };
+    unsigned removed = 0;
+    for (const auto &slot : rx.slots)
+        if (!amdsparse::unmapOwnedRange(identity, slot.originalPA, r34rx::kCapacity,
+                                       fixedPage, removed)) std::abort();
+    if (removed != 1024) std::abort();
+    amdsparse::u64 activePt[32 * 512];
+    std::memcpy(activePt, pt, sizeof(pt));
+    // Earlier slots may already be on an unretained intermediate generation.
+    // Active IOVAs need not equal the final retained first/last PA samples.
+    for (uint32_t i = 0; i < r34rx::kCount; ++i) {
+        const auto &w = rb.slots[i].samples[0];
+        const uint64_t pa = w.tUnmapInv < 2241 ?
+            0xb0000000ULL + i * 0x3000 + (w.pa & 4095) : w.pa;
+        for (uint32_t j = 0; j < w.pages; ++j)
+            activePt[(3 + i / 256) * 512 + (i % 256) * 2 + j] =
+                ((pa & ~4095ULL) + j * 4096) | perm;
+    }
+    activePt[2 * 512] = 0x70000000ULL | perm; // one contemporaneous TX IOVA
+    r17domain::Command retire = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
+                                20000, 20000, 2242};
+    identity.addedLeaves = 0;
     for (const auto &slot : rx.slots)
         if (!amdsparse::mapOwnedRange(identity, slot.currentPA, r34rx::kCapacity)) std::abort();
-    if (identity.addedLeaves != 2569) std::abort();
+    if (identity.addedLeaves != 1536) std::abort();
     // Shift timestamp fields only; ABI, addresses, counters and protocol stay
     // identical. Both snapshots and real client logs include the idle gap.
 #define SESSION_TIME(field) field = sessionTime(field)
@@ -311,6 +336,7 @@ int main(int argc, char **argv) {
     }
     SESSION_TIME(rx.tInstalled); SESSION_TIME(rx.tDisarmed); SESSION_TIME(rx.tLastRestore);
     SESSION_TIME(rb.tReady); SESSION_TIME(rb.tDrained);
+    SESSION_TIME(retire.tComplete);
     for (uint32_t i = 0; i < r34rx::kCount; ++i) {
         auto &ds = rx.slots[i]; auto &bs = rb.slots[i];
         SESSION_TIME(ds.tPhysicalOwn);
@@ -329,6 +355,8 @@ int main(int argc, char **argv) {
     save(dir, "r34-rx-driver.bin", &rx, sizeof(rx));
     save(dir, "r34-rx-backend.bin", &rb, sizeof(rb));
     save(dir, "r37-physical-layout.bin", &physical, sizeof(physical));
+    save(dir, "r38-active-pt-raw.bin", activePt, sizeof(activePt));
+    save(dir, "r38-bootstrap-retire-command.bin", &retire, sizeof(retire));
     save(dir, "r21-domain-raw.bin", &d, sizeof(d));
     save(dir, "r21-driver-raw.bin", &g, sizeof(g));
     save(dir, "r21-std-raw.bin", &s, sizeof(s));
@@ -356,7 +384,11 @@ def properties():
          'm2-3p-rx-pool-rpcs': 0, 'm2-3p-rx-spares': 0, 'm2-3p-rx-ring-id': 0x355200,
          'm2-3p-rx-physical-resume': 'done',
          'm2-3r-physical-mode': 'owned-sparse-4k', 'm2-3r-bootstrap-pages': 1033,
-         'm2-3r-restore-added-pages': 1536, 'm2-3r-identity-pages': 2569,
+         'm2-3r-restore-added-pages': 1536, 'm2-3r-identity-pages': 1545,
+         'm2-3s-rx-bootstrap-retired': 'yes', 'm2-3s-fixed-pages': 9,
+         'm2-3s-bootstrap-removed-pages': 1024,
+         'm2-3s-bootstrap-clear-time': session_time(2241),
+         'm2-3s-bootstrap-retire-time': session_time(2242),
          'm2-3q-rx-map-invalidations': 1284, 'm2-3q-rx-unmap-invalidations': 1284,
          'm2-3q-rx-map-batch-calls': 260, 'm2-3q-rx-unmap-batch-calls': 260,
          'm2-3q-rx-map-batch-slots': 4096, 'm2-3q-rx-unmap-batch-slots': 4096,
@@ -380,7 +412,7 @@ def properties():
                 'm2-3e-enter-last-inflight', 'm2-3e-enter-last-ring',
                 'm2-3e-exit-last-inflight', 'm2-3e-exit-last-ring'):
         p[key] = 0
-    command_total = 2 * 10249 + 2 * 1284 + 3
+    command_total = 2 * 10249 + 2 * 1284 + 4
     p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': command_total,
               'm2-3b-command-completed': command_total, 'm2-3b-command-wraps': command_total * 2 // 512,
               'm2-3b-command-post-wrap-completed': command_total - 255,
@@ -558,6 +590,10 @@ class AnalyzerTests(unittest.TestCase):
             '"rtl812x-r35-rx-experimental-pool" = 0\n'
             '"rtl812x-r35-rx-spares" = 0\n'
             '"rtl812x-r35-rx-ring-id" = 0x355200\n'
+            '"rtl812x-r38-rx-first-iova-slots" = 1024\n'
+            f'"rtl812x-r38-rx-last-first-iova-time" = {session_time(2222)}\n'
+            '"rtl812x-r38-rx-bootstrap-retired" = 1\n'
+            f'"rtl812x-r38-rx-bootstrap-retire-time" = {session_time(2243)}\n'
             f'"rtl812x-r35-rx-resume-time" = {session_time(9035)}\n')
 
     def setUp(self):
@@ -624,8 +660,13 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual((by_id[RX_MAP_CHECK]['fixedPhysicalPages'],
                           by_id[RX_MAP_CHECK]['bootstrapPages'],
                           by_id[RX_MAP_CHECK]['restoreAddedPages'],
-                          by_id[RX_MAP_CHECK]['identityPages']), (9, 1033, 1536, 2569))
-        self.assertEqual(by_id[RX_MAP_CHECK]['identityBytes'], 2569 * 4096)
+                          by_id[RX_MAP_CHECK]['identityPages']), (9, 1033, 1536, 1545))
+        self.assertEqual((by_id[RX_MAP_CHECK]['bootstrapRemovedPages'],
+                          by_id[RX_MAP_CHECK]['activeIdentityPages'],
+                          by_id[RX_MAP_CHECK]['activeRxIovaPages']), (1024, 9, 1536))
+        self.assertEqual(by_id[RX_MAP_CHECK]['bootstrapRetireCommand']['expected'], 20000)
+        self.assertEqual(by_id[RX_MAP_CHECK]['bootstrapDriverDone'], session_time(2243))
+        self.assertEqual(by_id[RX_MAP_CHECK]['identityBytes'], 1545 * 4096)
         self.assertEqual((by_id[RX_MAP_CHECK]['source'], by_id[RX_MAP_CHECK]['ringId'],
                           by_id[RX_MAP_CHECK]['experimentalPoolRPCs'],
                           by_id[RX_MAP_CHECK]['experimentalSpares']),

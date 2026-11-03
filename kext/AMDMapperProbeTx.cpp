@@ -111,8 +111,14 @@ struct org_example_AMDMapperProbe::R34RxDomain {
     UInt32 mapInvalidations, unmapInvalidations;
     UInt32 mapBatchCalls, unmapBatchCalls, mapBatchSlots, unmapBatchSlots, maxBatch;
     // One sparse arena serves bootstrap, IOVA tables and physical restore.
-    // Identity leaves stay present until the device domain is restored.
-    UInt32 physicalNext, bootstrapPages, restoreAddedPages;
+    // Initial RX identity leaves retire once all descriptors use IOVA. Fixed
+    // NIC objects remain physical; stop adds each slot's current buffer back.
+    UInt32 physicalNext, bootstrapPages, fixedPages, removedPages, restoreAddedPages;
+    bool bootstrapRetired;
+    UInt64 tBootstrapClear;
+    r17domain::Command bootstrapRetireCommand;
+    void *activePt;
+    UInt32 activePtBytes;
     r34rx::PhysicalLayout physical;
     r34rx::Request control;
     r34rx::BackendSnapshot snapshot;
@@ -1802,6 +1808,60 @@ IOReturn org_example_AMDMapperProbe::r34RxOperation(r34rx::Binding *b) {
                          __ATOMIC_RELEASE);
         --s.boundPairs;
         result = kIOReturnSuccess;
+    } else if (b->op == r34rx::kRetireBootstrap) {
+        // Lucy calls once, after all 1024 distinct slots publish their first
+        // IOVA OWN and the current batch has finished. No physical RX remains.
+        if (b->slot || b->length != r34rx::kCount || !b->pa ||
+            !r->installed || r->released || r->bootstrapRetired ||
+            !r->activePt || r->activePtBytes != d->ptBytes ||
+            !d->installed || !d->commandOwned || s.coverCalls ||
+            s.boundPairs != r34rx::kCount || s.liveOwners != r34rx::kCount)
+            goto retireFailed;
+        for (UInt32 slot = 0; slot < r34rx::kCount; ++slot)
+            if (s.slots[slot].mapCount < 2 || r->preMapped[slot] ||
+                r->preUnmapped[slot]) goto retireFailed;
+        {
+            amdsparse::Arena a = {d->pt, d->ptBase,
+                (unsigned)(d->ptBytes / 4096ULL), d->coverNext,
+                d->rootLevel, d->ptBase, 0, 0, nullptr};
+            auto fixed = [&](UInt64 page) -> bool {
+                for (UInt32 i = 0; i < r34rx::kPhysicalSpanCount; ++i) {
+                    const auto &span = r->physical.spans[i];
+                    if (page < span.pa + span.bytes && page + 4096ULL > span.pa)
+                        return true;
+                }
+                return false;
+            };
+            unsigned removed = 0;
+            for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
+                if (!amdsparse::unmapOwnedRange(a,
+                        r->control.out.slots[slot].originalPA,
+                        r34rx::kCapacity, fixed, removed)) {
+                    d->accepting = false;
+                    goto retireFailed;
+                }
+            }
+            OSSynchronizeIO();
+            r->tBootstrapClear = mach_absolute_time();
+            if (r->tBootstrapClear < b->pa ||
+                removed != r->bootstrapPages - r->fixedPages ||
+                !r17Invalidate(d->mmio, d->command, r->bootstrapRetireCommand,
+                               "r38-rx-bootstrap-retire")) {
+                d->accepting = false;
+                goto retireFailed;
+            }
+            // Preallocated during Prepare; take the active image before any
+            // other mapper operation can modify the table under the same lock.
+            for (UInt32 i = 0; i < r->activePtBytes / sizeof(UInt64); ++i)
+                static_cast<UInt64 *>(r->activePt)[i] = d->pt[i];
+            r->removedPages = removed;
+            r->bootstrapRetired = true;
+            result = kIOReturnSuccess;
+            goto done;
+        }
+retireFailed:
+        s.flags |= r34rx::kFlagUnmapFailed;
+        result = kIOReturnIOError;
     } else if (b->op == r34rx::kCover) {
         ++s.coverCalls;
         if (live || !b->pa || b->length != r34rx::kCapacity ||
@@ -2133,6 +2193,9 @@ bool org_example_AMDMapperProbe::r34RxPrepareMap(
     R34RxDomain *r = (R34RxDomain *)IOMalloc(sizeof(R34RxDomain));
     if (!r) return false;
     bzero(r, sizeof(*r));
+    r->activePtBytes = totalPages * 4096u;
+    r->activePt = IOMalloc(r->activePtBytes);
+    if (!r->activePt) { IOFree(r, sizeof(*r)); return false; }
     r->driver = fR15Service; r->driver->retain();
     r->snapshot.version = r34rx::kVersion;
     r->snapshot.bytes = sizeof(r->snapshot);
@@ -2210,6 +2273,7 @@ bool org_example_AMDMapperProbe::r34RxPrepareMap(
             return false;
         }
     }
+    r->fixedPages = arena.addedLeaves;
     for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
         const UInt64 pa = s.slots[slot].originalPA;
         if (!mapAndWalk(pa, r34rx::kCapacity)) {
@@ -2380,8 +2444,14 @@ void org_example_AMDMapperProbe::r34RxExport() {
     R34RxDomain *r = fR34Rx;
     if (!r) return;
     // Native bootstrap exists before the TX/page-table backend is prepared.
+    OSData *activeRaw = nullptr, *retireRaw = nullptr;
     if (fR17) IOLockLock(fR17->lock);
     OSData *raw = OSData::withBytes(&r->snapshot, sizeof(r->snapshot));
+    if (r->bootstrapRetired) {
+        activeRaw = OSData::withBytes(r->activePt, r->activePtBytes);
+        retireRaw = OSData::withBytes(&r->bootstrapRetireCommand,
+                                     sizeof(r->bootstrapRetireCommand));
+    }
     if (fR17) IOLockUnlock(fR17->lock);
     if (raw) { setProperty("m2-3o-rx-backend-raw", raw); raw->release(); }
     raw = OSData::withBytes(&r->control.out, sizeof(r->control.out));
@@ -2411,8 +2481,16 @@ void org_example_AMDMapperProbe::r34RxExport() {
     setProperty("m2-3r-physical-mode", "owned-sparse-4k");
     setHexProperty(this, "m2-3r-bootstrap-pages", r->bootstrapPages);
     setHexProperty(this, "m2-3r-restore-added-pages", r->restoreAddedPages);
-    setHexProperty(this, "m2-3r-identity-pages", r->bootstrapPages + r->restoreAddedPages);
+    setHexProperty(this, "m2-3r-identity-pages",
+                   r->bootstrapPages - r->removedPages + r->restoreAddedPages);
     if (fR17) setHexProperty(this, "m2-3r-pt-used-pages", fR17->coverNext);
+    setProperty("m2-3s-rx-bootstrap-retired", r->bootstrapRetired ? "yes" : "no");
+    setHexProperty(this, "m2-3s-fixed-pages", r->fixedPages);
+    setHexProperty(this, "m2-3s-bootstrap-removed-pages", r->removedPages);
+    setHexProperty(this, "m2-3s-bootstrap-clear-time", r->tBootstrapClear);
+    setHexProperty(this, "m2-3s-bootstrap-retire-time", r->bootstrapRetireCommand.tComplete);
+    if (activeRaw) { setProperty("m2-3s-rx-active-pt-raw", activeRaw); activeRaw->release(); }
+    if (retireRaw) { setProperty("m2-3s-rx-bootstrap-retire-command", retireRaw); retireRaw->release(); }
 }
 
 void org_example_AMDMapperProbe::r34RxRelease() {
@@ -2422,5 +2500,6 @@ void org_example_AMDMapperProbe::r34RxRelease() {
     // Lucy has completed/unbound its objects; final OSData copies own evidence.
     r->driver->release();
     __atomic_store_n(&fR34Rx, (R34RxDomain *)nullptr, __ATOMIC_RELEASE);
+    IOFree(r->activePt, r->activePtBytes);
     IOFree(r, sizeof(*r));
 }

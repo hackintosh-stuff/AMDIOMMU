@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restore next-boot arm after confirmed Round37 cleanup; remove its finite job.
+"""Restore next-boot arm after confirmed Round38 cleanup; remove its finite job.
 
 Run from the project: python3 -B tools/r27/disarm-next.py --efi "$EFI_MOUNT"
 Does not modify the current DMA window, unload a kext, or reboot.
@@ -31,7 +31,7 @@ def main():
                        ('m2-3b-cleanup', 'detached-after-restore-confirmed'),
                        ('m2-3e-after-exit', 'ordinary-output-resumed')):
         if not re.search(r'"' + re.escape(key) + r'"\s*=\s*"' + value + r'"', props):
-            raise ValueError('Round37 exit not confirmed: ' + key)
+            raise ValueError('Round38 exit not confirmed: ' + key)
     owners = re.search(r'"m2-3b-owners-held"\s*=\s*"?(0x[0-9a-fA-F]+|\d+)"?', props)
     if not owners or int(owners[1], 0) != 0:
         raise ValueError('a DMA owner remains or its count is absent')
@@ -44,9 +44,9 @@ def main():
     cfg = plistlib.loads(config.read_bytes())
     if cfg['NVRAM']['Add'][D.NVRAM_GUID]['boot-args'].split() != current.split():
         raise ValueError('current EFI and NVRAM boot-args differ')
-    job = Path('/Library/LaunchDaemons/org.example.round37load.plist')
+    job = Path('/Library/LaunchDaemons/org.example.round38load.plist')
     if job.exists() and (job.resolve() != job or
-                        plistlib.loads(job.read_bytes()).get('Label') != 'org.example.round37load'):
+                        plistlib.loads(job.read_bytes()).get('Label') != 'org.example.round38load'):
         raise ValueError('unexpected finite job target')
     wanted = ' '.join([x for x in current.split() if not x.startswith('amdiommu=')]
                       + ['amdiommu=arm'])
@@ -60,7 +60,7 @@ def main():
     if job.exists():
         subprocess.run(['sudo', '-n', 'launchctl', 'bootout', 'system', str(job)], check=False)
         D.run(['sudo', '-n', 'rm', '-f', job])
-    print('Next boot arm; Round37 finite daemon removed; current exit was confirmed. No reboot issued.')
+    print('Next boot arm; Round38 finite daemon removed; current exit was confirmed. No reboot issued.')
     return 0
 
 

@@ -76,7 +76,8 @@ Round 34 uses driver-owned virtual MD/command pairs for the normal RX
 replaceOrCopyPacket path. Each completed slot unmaps before mbuf delivery and
 remaps its current buffer before the next OWN store. Stop restores the current
 physical ring before release. Round35 uses Lucy's ordinary ring without an experimental pool; Round36
-batches confirmed invalidations. Round37 also exports the driver's three owned
+batches confirmed invalidations. Round38 retires initial RX identity mappings
+once every slot has posted IOVA OWN. Round37 exports the driver's three owned
 physical DMA spans for sparse4K bootstrap. Select --tx 21 --rx 34.
 
 Usage:

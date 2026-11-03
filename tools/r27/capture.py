@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture Round37 evidence after the finite load.
+"""Capture Round38 evidence after the finite load.
 
 All workspace paths are relative to the project. Missing evidence is recorded
 in the manifest and returns 1 after saving the available failure diagnostics.
@@ -17,7 +17,7 @@ import struct
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSIONS = {'RTL812xLucy': '1.1.222', 'AMDMapperProbe': '0.46.0'}
+VERSIONS = {'RTL812xLucy': '1.1.223', 'AMDMapperProbe': '0.47.0'}
 ABI = {'native': 7, 'standard': 5, 'domain': 4, 'driver_mode': 2,
        'rx_driver': 3, 'rx_backend': 3, 'physical_layout': 1}
 EXPORTS = (
@@ -28,7 +28,9 @@ EXPORTS = (
     ('driver', 'rtl812x-txmap-block-raw', 'r21-block-raw.bin'),
     ('driver', 'rtl812x-r34-rx-native-raw', 'r34-rx-driver.bin'),
     ('probe', 'm2-3o-rx-backend-raw', 'r34-rx-backend.bin'),
-    ('driver', 'rtl812x-r37-physical-layout', 'r37-physical-layout.bin'))
+    ('driver', 'rtl812x-r37-physical-layout', 'r37-physical-layout.bin'),
+    ('probe', 'm2-3s-rx-active-pt-raw', 'r38-active-pt-raw.bin'),
+    ('probe', 'm2-3s-rx-bootstrap-retire-command', 'r38-bootstrap-retire-command.bin'))
 OPTIONAL_EXPORTS = (
     ('probe', 'm2-b2-obs-snapshot-used', 'obs-snapshot-used.bin', 'm2-b2-obs-used-sha256'),
     ('probe', 'm2-b2-rxset-raw', 'rxset-raw.bin', 'm2-b2-rxset-raw-sha256'),
@@ -91,7 +93,7 @@ def collect_system(out, stamp):
         rc, text = command(args)
         lines.append('%s : %s' % (label, text.strip() if rc == 0 else '(unavailable)'))
     loaded_rc, loaded = command(['kmutil', 'showloaded', '--list-only'])
-    identity = ['scope : r37', 'expected_abi : native7/std5/domain4/nativeRX3 physicalLayout1 mode2',
+    identity = ['scope : r38', 'expected_abi : native7/std5/domain4/nativeRX3 physicalLayout1 mode2',
                 'captured_utc : ' + stamp, 'kmutil_returncode : %d' % loaded_rc,
                 '# loaded kext identity (read-only)', loaded]
     installed = {}
@@ -130,8 +132,8 @@ def collect_system(out, stamp):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('out', help='new or empty project-relative capture directory')
-    parser.add_argument('--load', default='runs/r37')
-    parser.add_argument('--peer-log', default='runs/r37/peer.log')
+    parser.add_argument('--load', default='runs/r38')
+    parser.add_argument('--peer-log', default='runs/r38/peer.log')
     parser.add_argument('--iface', default='en2')
     args = parser.parse_args()
     out, load, peer_log = (project_path(value) for value in (args.out, args.load, args.peer_log))
@@ -197,9 +199,10 @@ def main():
                 continue
             expected_bytes = {'r21-domain-raw.bin': 44592,
                               'r34-rx-driver.bin': 270432, 'r34-rx-backend.bin': 475216,
-                              'r37-physical-layout.bin': 64}.get(name)
+                              'r37-physical-layout.bin': 64,
+                              'r38-bootstrap-retire-command.bin': 40}.get(name)
             if expected_bytes is not None and len(data) != expected_bytes:
-                errors.append('Round37 export size mismatch: %s: %d != %d' %
+                errors.append('Round38 export size mismatch: %s: %d != %d' %
                               (name, len(data), expected_bytes))
             (out / name).write_bytes(data)
             digest = sha(data)
@@ -213,6 +216,9 @@ def main():
                              'published_sha256_verified': verified}
         except ValueError as exc:
             errors.append(str(exc))
+    if 'r38-active-pt-raw.bin' in exports and 'r21-pt-raw.bin' in exports and \
+            exports['r38-active-pt-raw.bin']['bytes'] != exports['r21-pt-raw.bin']['bytes']:
+        errors.append('active and final page-table arena sizes differ')
     installed = collect_system(out, stamp)
     network = []
     load_text = (out / 'load.txt').read_text(errors='replace') if (out / 'load.txt').exists() else ''
@@ -241,7 +247,7 @@ def main():
             data = path.read_bytes()
             observed[label] = struct.unpack_from('<I', data, offset)[0] if len(data) >= offset + 4 else None
     report = {
-        'scope': 'r37', 'captured_utc': stamp, 'interface': args.iface,
+        'scope': 'r38', 'captured_utc': stamp, 'interface': args.iface,
         'load_source': args.load, 'peer_source': args.peer_log,
         'declared_token': token, 'token_scope': 'userspace-integrity-and-rx-observation-only',
         'batch': batch, 'application_requests': requests,
@@ -252,6 +258,7 @@ def main():
         'rx_source': property_text(texts['probe'], 'm2-3p-rx-source'),
         'rx_driver_source': property_text(texts['driver'], 'rtl812x-r35-rx-source'),
         'physical_mapping': property_text(texts['probe'], 'm2-3r-physical-mode'),
+        'rx_bootstrap_retired': property_text(texts['probe'], 'm2-3s-rx-bootstrap-retired'),
         'session_mode': property_text(texts['probe'], 'm2-3l-session-mode'),
         'session_state': property_text(texts['probe'], 'm2-3l-session-state'),
         'domain_lifetime': property_text(texts['probe'], 'm2-3n-domain-mode'),
@@ -263,10 +270,11 @@ def main():
                 'the client request id; no old ABI verifier or OBS-ring-completeness '
                 'requirement; ordinary Lucy RX ring supplies bootstrap ranges without an experimental '
                 'pool or spares; r34 raw filenames identify native RX ABI3 with synchronous RX invalidation batches; '
-                'physicalLayout1 declares the fixed DMA spans for exact 4KiB identity coverage; '
+                'physicalLayout1 declares fixed DMA spans; one active PT and confirmed command '
+                'record preserve RX bootstrap retirement before final current-buffer restoration; '
                 'later TX publications are cross-checks only'}
     write_text(out / 'R27-EXPORTS.json', json.dumps(report, indent=2) + '\n')
-    lines = ['scope : r37', 'captured_utc : ' + stamp,
+    lines = ['scope : r38', 'captured_utc : ' + stamp,
              'interface : ' + args.iface, 'expected_abi : native7/std5/domain4/nativeRX3 physicalLayout1 mode2',
              'capture_status : ' + report['capture_status'],
              'No correctness verdict; hashes are computed from archived bytes.',
@@ -276,7 +284,7 @@ def main():
             data = path.read_bytes()
             lines.append('  %s  %10d  %s' % (sha(data), len(data), path.relative_to(out).as_posix()))
     write_text(out / 'MANIFEST.txt', '\n'.join(lines) + '\n')
-    print('Round37 capture %s: %s' % (report['capture_status'], args.out))
+    print('Round38 capture %s: %s' % (report['capture_status'], args.out))
     for error in errors:
         print('  INCOMPLETE: ' + error)
     return int(bool(errors))

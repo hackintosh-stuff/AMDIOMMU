@@ -1,5 +1,40 @@
 # AMDIOMMU — authoritative source repository
 
+## Current Round38 / retire initial RX physical bootstrap after IOVA takeover
+
+Base: `fa65abf486a2b181ceae9ad8ea4c42ff7e911940`, the documentation successor
+of the accepted Round37 implementation `bbeed6028f249ec842733b5fe685e87efc654110`.
+Round37's original capture was independently reanalyzed: all 14 checks passed.
+Its implementation tree exactly matches the prepared Round38 preimage.
+
+Candidate: Lucy **1.1.223** / Probe **0.47.0**; TX domain4/native7/std5,
+native RX ABI3 and the separate PhysicalLayout1 export keep their sizes.
+
+- Install still prepares mappings without replacing NIC-owned physical
+  addresses. Authorize still starts normal receive processing immediately.
+- Count each slot's first actual IOVA OWN. After all 1024 distinct slots have
+  switched, finish the current publish batch and request one bootstrap retire.
+- Remove initial RX identity leaves except pages shared with the three fixed
+  DMA objects. Keep intermediate tables and confirm one INV/CW through the
+  existing domain lock and command producer. RX batch counts stay separate.
+- Keep one immutable post-retirement active page-table image and the existing
+  40-byte Command record. Active identity leaves must equal fixed DMA pages;
+  the established TX/RX IOVA windows remain mapped during ordinary traffic.
+- Stop uses existing current-buffer physical restore. The final identity set
+  must equal fixed DMA plus current RX pages; original RX pages no longer
+  remain solely because they belonged to the initial ring.
+
+Keep the same 14-check normal workload, 8192 requests, 125-second idle and
+single stop. Ready must not wait for all-slot takeover: traffic drives it.
+No per-packet physical reference counting or table-page reclamation is added.
+Use the fixed checkout and `_scratch/lucy-upstream`; generator selection
+remains `--tx 21 --rx 34`. The build runner uses `--check-r38`, `runs/r38`
+and `org.example.round38load` with token `0x38c0de38`.
+Existing focused host checks, the generated receive-loop normal flow and the
+production bootstrap/backend normal flow passed during preparation.
+The accepted base and final patch application are checked separately.
+A real Mac build and one normal hardware acceptance run remain outstanding.
+
 ## Accepted Round37 / owned sparse physical DMA mappings
 
 Base: `11b7c10975f8fd021624f10bc23fa9863231f1ca`, the documentation successor
