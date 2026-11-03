@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Round44 candidate / ordinary per-device IOMapper
+## Accepted Round44 / attach the RTL8125 to an ordinary device IOMapper
 
 Formal base: `102560a59bc448ddfd5600d5d958952e4875eb16`, the actual accepted
 Round43 documentation successor; tree `078a46e38a9a1f15e6f97f2f6d304448936f3a81`.
@@ -11,9 +11,23 @@ An independent raw walk confirmed 1024 RX + 13 fixed IOVA leaves, no identity
 leaves, zero final leaves, and NIC stopped before the DTE write. The DTE write
 was 31,745,105,654 ns; invalidation completed at 31,745,126,384 ns.
 
-**Lucy 1.1.229 / Probe 0.53.0, `amdiommu=auto`.** This round connects the
+**Lucy 1.1.229 / Probe 0.53.0, `amdiommu=auto`. Accepted: nine ordinary
+mainline checks passed on the real Mac.** The deployed implementation is
+`6c3e8ca7424dbfa0810ab0f4516ad4a5251e1092`, on top of the base implementation
+`9178196b51259ccb30960d330d62ff4b5cddd03c` and the dependency fix
+`fb8c5da746f26d0ff30a18cdf8d18f7c9f0e42bd`; the later `418a0138…` and
+`a0a29812…` only repair the capture and disarm tooling. This round connects the
 ordinary driver path to a per-device mapper from its normal startup. It does
 not install the legacy R17/R34 experimental session. `fIsSystem` remains false.
+
+Two real blockers had to be fixed before a normal boot could work. `kmutil`
+resolves a bundle dependency only inside the provider's compatible range, so
+the driver must request `0.53.0` rather than `0.0.0`. The mapper then has to be
+visible before the driver's single `copyMapperForDevice()` call: the publish
+notification is delivered asynchronously and lost to the driver's `start()`, so
+the probe now enumerates `IOPCIDevice` during its own `start()` and matches the
+vendor and device config words — the nub is already published and still
+unclaimed at that point, and it is named `ethernet`, not `pci10ec,8127`.
 
 `AMDMapperProbeAuto.cpp` prepares a resident controller, an initially empty
 IOVA domain and passthrough DTEs during the target PCI publication. It then
@@ -50,8 +64,16 @@ Use the same Git checkout and pinned upstream input. Entry points:
 Use `runs/r44`, token `0x44c0de44` only in userspace, and
 `org.example.round44load`. Successful closure removes that finite job and sets
 the next boot to `amdiommu=off`, while the current ordinary mapper stays active.
-Host mainline validation, real Mac kext compilation and hardware acceptance
-are separate; the latter two remain pending for this candidate.
+Host mainline validation is separate from the two that this round completed:
+real Mac kext compilation and hardware acceptance both passed.
+
+Result and archive are outside this source repository:
+[Round44 result](<../../docs/m2-3y-round44-result.md>) and
+[evidence archive](<../../docs/evidence/r44-final-20261103.tgz>)
+(SHA256 `898e6ecb68b0d9a4301555427fbc5243c27cf6ec06d49823054d4000816fb418`).
+The accepted run took three planned boots and four load runs; the first two
+boots reported `failed-too-late` and the third boot's first load run failed
+only in the capture lookup, so exactly one load run is the valid measurement.
 
 ## Accepted Round43 / an IOVA-only device domain from entry through stop
 
