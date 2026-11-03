@@ -1,12 +1,29 @@
 # AMDIOMMU — authoritative source repository
 
-## Round51 candidate / omit map invalidation when NPCache is absent
+## Accepted Round51 / omit map invalidation when NPCache is absent, PM hardware TODO
 
 Base: `da99156d3e6b20694c88124afb75341f5f437545`, the accepted Round50 documentation successor.
 Round50 was independently re-analyzed from its original capture: all eleven
 ordinary checks passed and the result matched the saved analysis exactly.
 Its actual implementation is `f17507ca33ca2d1e25d656f99cb91c250b52438c`.
-This candidate has not been deployed or accepted on hardware.
+
+**Accepted: eleven mainline checks passed on the real Mac with Lucy 1.1.236 /
+Probe 0.58.0.** The deployed implementation is
+`a41e5ac715b62e3bdf00d36e6614f13c6322052c`, built once, deployed once and
+validated in one planned boot, one load run and one valid measurement (the
+target was found powered off before the round and was powered on through
+NanoKVM, which is not counted as the planned boot); the deployment build log is
+`runs/r51-build.log`. The real capability header `0x190b640f` decoded to
+NPCache=0 and the driver selected the same policy. Every phase completed
+exactly one full-domain invalidation and `range = unmapOk` ranged ones, with
+`skipped = mapOk - 1` (37625 at the end), `pageInvalidations = unmapOk + 1` and
+`commandsCompleted = unmapOk + 2`; the R50-equivalent command count would have
+been 75234, so 37625 INV/CW waits were avoided while every unmap stayed
+synchronous and the last real range matched `lastUnmap`. Four phases still held
+19 maps/1037 leaves/11 tables of one domain with 16 real 64-page RX groups,
+1025 of 1037 live pages above 4 GiB, 32-bit requests with `map32ok == mapOk`
+inside `[0x80000000, 0x81000000)`, 272 MiB of IPv6 traffic and TSO6 increments
+2054/133, all with zero target faults.
 
 Use the discovered IOMMU PCI capability header's NPCache bit26. Preserve the
 first INV_DEV/full-domain activation, PTE publication barrier, synchronous
