@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round39 / local NIC stop without peer drain packets
+## Accepted Round39 / local NIC stop without peer drain packets
 
 Base: `00b12033c60fb88f51618fde5e8b908014f072cf`, the accepted Round38
 result-documentation successor. The deployed implementation is
@@ -33,9 +33,44 @@ exchange is required by the native session. Legacy finite helpers remain
 separate from this current path. Keep the same fixed checkout and upstream
 input directory; do not create a source copy or worktree for the round.
 Generator selection remains `--tx 21 --rx 34`, with `--check-r39`, `runs/r39`,
-`org.example.round39load` and token `0x39c0de39`. Existing focused software
-checks and generated receive-loop/backend normal-flow host checks passed.
-A real Mac build and one normal hardware acceptance run remain outstanding.
+`org.example.round39load` and token `0x39c0de39`.
+
+**Round39 hardware acceptance PASSED (14/14).** Two planned boots were needed
+and one measurement is valid. The first boot completed the local stop and
+resume (the client saw stopped and `resumed=1`) but its first post-exit probe
+failed with `EADDRNOTAVAIL`, because configd withdrew and re-published en2's
+manual address around the NIC reset while the client still held the pre-stop
+socket. The client now waits up to 20 s for the declared address and rebinds a
+fresh socket per probe; that is a tools-only change, the kexts were unchanged.
+
+In the valid run the stop record shows `stopCalls=1`, `resetVerified=1`,
+`ChipCmd` 12 -> 0, `IMR0` 32821 -> 0, `rxNext` 599 -> 0, `stopRetired=1024` and
+`restored=1024`. TX admission closed and drained at 163,823,246,182 ns, the
+registers read back stopped at 163,823,743,412 ns, the last unmap and physical
+OWN followed at 163,837,864,436 and 163,837,870,206 ns, the resume began at
+163,838,902,997 ns and completed at 164,277,231,944 ns after real link and
+RX/TX enable, and the teardown ended at 164,278,501,125 ns. The peer log holds
+no `peer_tail_*` record, the client sent nothing while waiting for stop, and
+3/3 ordinary probes succeeded after resume.
+
+Completion accounting is `posted 9670 = completed 8646 + stopRetired 1024`;
+RX maps and unmaps were 10694 = 9670 + 1024 preparations, restored 1024, with
+2610 real replacements and owners/boundPairs/pending/nativeActive zero. The
+sparse page set kept 13 fixed pages, 1037 bootstrap pages, removed 1024 after
+takeover, added 1024 at stop and ended at 1037 identity pages with the arena
+cursor at 141. RX batch invalidations were 10679 each over 9655 calls and 9670
+slots (`max-batch=3`, 30 saved cycles). TX retired 9248, domain maps 9257 =
+9248 + 9 probes, the command ring completed 40900/40900 through 159 wraps, and
+8192/8192 replies crossed 125.1780 s idle.
+
+Deployed implementation commit: `f041f04a95bc6e5d2e037fad1d6e1ee6100f2b78`;
+the client fix is `18e621845b8ecfda75cb156459f05cd4c0409924`. This
+documentation update is not a deployed revision.
+
+Round39 result and archive are outside this source repository:
+[Round39 result](<../../docs/m2-3t-round39-result.md>) and
+[evidence archive](<../../docs/evidence/r39-final-20261103.tgz>)
+(SHA256 `6fd581d34d92f2a75c5d12be849b29e62ec96d0781f199717df28fa3f6d22fb6`).
 
 ## Accepted Round38 / retire initial RX physical bootstrap after IOVA takeover
 
