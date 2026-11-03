@@ -112,9 +112,22 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
     // Lucy closes the PCI provider after start() has allocated its resources,
     // so isOpen() alone would also admit an already running physical driver.
     // A publish notification can replay an existing service when installed.
-    if (nic->isOpen() || nic->getChildEntry(gIOServicePlane)) {
-        setProperty("r44-state", "failed-too-late");
+    // Attachment alone is not the boundary: the client is attached before its
+    // start() runs, and that start() is exactly the copyMapperForDevice() call
+    // this mapper must be visible to. Only a client that already started (or a
+    // provider that is still open) means the lookup has been missed.
+    IOService *client = nic->getChildEntry(gIOServicePlane);
+    const bool clientStarted = client && client->isStarted();
+    if (nic->isOpen()) {
+        setProperty("r44-state", "failed-too-late-open");
         return false;
+    }
+    if (clientStarted) {
+        setProperty("r44-state", "failed-too-late-started");
+        return false;
+    }
+    if (client) {
+        setProperty("r44-state", "attaching-to-pending-client");
     }
 
     R44Controller *c = (R44Controller *)IOMalloc(sizeof(R44Controller));

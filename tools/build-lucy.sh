@@ -246,6 +246,11 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 		<string>8.10.0</string>
 		<key>com.apple.kpi.mach</key>
 		<string>8.10.0</string>
+		<!-- The device mapper must be resident before this driver starts: its
+		     copyMapperForDevice() lookup happens once inside start(), so an
+		     iommu-parent published afterwards would always be too late. -->
+		<key>org.example.AMDMapperProbe</key>
+		<string>0.53.0</string>
 	</dict>
 	<key>OSBundleRequired</key>
 	<string>Network-Root</string>
