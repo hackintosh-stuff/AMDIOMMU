@@ -2121,6 +2121,7 @@ TX20 = runpy.run_path(os.path.join(HERE, 'r20', 'driver-template.py'))
 TX21 = runpy.run_path(os.path.join(HERE, 'r21', 'driver-template.py'))
 R44 = runpy.run_path(os.path.join(HERE, 'r44', 'driver-template.py'))
 R45 = runpy.run_path(os.path.join(HERE, 'r45', 'driver-template.py'))
+R46 = runpy.run_path(os.path.join(HERE, 'r46', 'driver-template.py'))
 # round -> (module, [headers written into the driver tree, in include order])
 TXR = {'16': (TX16, ['RTL812xTxMap.hpp']),
        '17': (TX17, ['RTL812xTxMapNative.hpp']),
@@ -2453,9 +2454,14 @@ def main():
             if fresh and TX_SELECT == '21' and RX_SELECT == '34':
                 fresh = R45['is_current'](hpp_text, cpp_text,
                     read(os.path.join(drv, 'RTL812xLucySetup.cpp')),
-                    read(os.path.join(drv, 'RTL812xLucyVTD.cpp')))
+                    read(os.path.join(drv, 'RTL812xLucyVTD.cpp')), R46['rewrite'])
                 if not fresh:
                     stale = 'round45 normal mapped TCP/TSO'
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R46['is_current'](hpp_text, cpp_text,
+                    read(os.path.join(drv, 'RTL812xLucySetup.cpp')))
+                if not fresh:
+                    stale = 'round46 normal mapped IPv6 TSO'
             if not fresh:
                 print("REFUSED: the tree is patched but its %s() body is STALE."
                       % stale)
@@ -2582,6 +2588,7 @@ def main():
         hpp_text, cpp_text, setup_text = R44['patch'](hpp_text, cpp_text, setup_text)
         hpp_text, cpp_text, setup_text, vtd_text = R45['patch'](
             hpp_text, cpp_text, setup_text, vtd_text)
+        hpp_text, cpp_text, setup_text = R46['patch'](hpp_text, cpp_text, setup_text)
         write(hpp, hpp_text)
         write(setup, setup_text)
         write(vtd, vtd_text)

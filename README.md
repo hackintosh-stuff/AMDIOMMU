@@ -1,5 +1,62 @@
 # AMDIOMMU — authoritative source repository
 
+## Candidate Round46 / ordinary IPv6 TCP and hardware TSO
+
+Formal base: `b7869df730b33107f16d277f4974b826df667c53`, the accepted Round45
+result-documentation successor; tree `95d6528fb704c7bdcc67b511f4e264f21ef6dabe`.
+The deployed implementation is `1a43d40039798e0ae21526c11c7151cfd289a834`.
+The actual Round45 analyzer rerun passed 9/9 with JSON identical to the archive.
+Independent raw and TCP verification confirmed 272 MiB, TSO4 hardware completion
+increments 2071 and 132, four snapshots with 67 mappings/1037 IOVA leaves,
+58754 completed commands and no target faults. Two planned boots and two load
+attempts produced one valid measurement. The actual bounded pre-open mapper
+wait and matching-boundary repair are included in this baseline.
+
+**Candidate: Lucy 1.1.231 / Probe 0.53.0, `amdiommu=auto`, MTU1500,
+both IPv4 and IPv6 TSO enabled.** Exercise the ordinary IPv6 TCP path using
+the existing mapper, command pool, descriptors and interface lifecycle.
+Keep the ordinary mapper ABI1 and accepted resource capacities.
+
+R46 reuses the actual TX post/retire methods and selects separate counters
+from the descriptor's GiantSendv4/GiantSendv6 bits. Hardware close-pointer
+completion and stop reclamation remain separate. `R46Snapshot` samples both
+families through the existing command gate; the R45 fields and RPC stay usable.
+Only TSO6 requires positive traffic increments during this round's two windows.
+Both families must be drained at snapshots, with no stop-retired TSO packets
+or mapping failures. The normal command-pool backpressure is unchanged.
+
+The existing `prepareTSO6()` summed 16 words by indexing the source IPv6
+address's eight-word array into its adjacent destination address. The new
+template explicitly sums eight source and eight destination words, preserving
+the checksum while removing the out-of-bounds access on the normal path.
+
+The finite load uses explicit AF_INET6 sockets, existing local/peer numeric
+IPv6 addresses, and TCP port 9112. Both endpoints record the real socket
+addresses, ports and local scope IDs. The peer processes upload/download
+128 MiB each, then upload/download 8 MiB each after ordinary interface down/up.
+All 272 MiB are verified by deterministic content, SHA256 and peer receipts.
+The four phases remain before/pre-down/down/after-up. IPv4 fallback is not
+accepted as IPv6 evidence; scope IDs belong to each endpoint's own system.
+
+Choose existing addresses on en2 and the actual peer, preferably the same LAN
+ULA/global prefix, or scoped link-local addresses. The tools read address,
+MTU, link and IPv6 route state and wait for the same address after interface
+up. They do not install addresses or change routes. The prompt includes the
+explicit address-selection step rather than inventing a peer IPv6 address.
+
+Use the same Git checkout and pinned upstream with `tools/r46/build.sh`.
+The generator remains --tx21/--rx34 and --check-r44 validates the unchanged
+mapper ABI. Entry points under tools/r46 are deploy.py, peer.py, boot-load.sh,
+load.py, capture.py, analyze.py and disarm-next.py. Use runs/r46, userspace
+token 0x46c0de46 and org.example.round46load. Closure removes the finite job
+and sets the next boot to off while the current ordinary mapper stays active.
+
+Host validation covers actual generated dual-family TX methods, actual IPv6
+header preparation, four real localhost IPv6 streams and analyzer contracts.
+The default R45 analysis still exactly reproduces its accepted archive.
+R46 real Mac build and hardware acceptance remain pending. The result belongs
+in `../../docs/m2-3aa-round46-result.md` with the actual evidence archive.
+
 ## Accepted Round45 / ordinary IPv4 TCP and hardware TSO
 
 Formal base: `035d1dd0f5e60afbc5f2715de3f425cb694d3f56`, the accepted Round44

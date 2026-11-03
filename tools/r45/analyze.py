@@ -24,7 +24,15 @@ def log_rows(path):
     return rows
 
 
-def analyze(cap):
+def analyze(cap, *, round_id=45, base_commit=BASE_COMMIT, versions=None,
+            protocol=None, tso_version=4, tcp_record_check=None):
+    # R46 reuses the accepted mapper/lifecycle checks and supplies only its
+    # IPv6 transport, TSO counters and source/binary identity differences.
+    versions = VERSIONS if versions is None else versions
+    protocol = P if protocol is None else protocol
+    round_name = 'r%d' % round_id
+    tso_prefix = PREFIX if tso_version == 4 else 'rtl812x-r46-'
+    tso_name = 'tso%d' % tso_version
     checks, states = [], {}
 
     def check(name, function):
@@ -35,43 +43,46 @@ def analyze(cap):
             checks.append({'id': name, 'state': 'FAIL', 'detail': str(exc)})
 
     def result():
-        return {'scope': 'r45-ordinary-ipv4-tcp-tso',
+        return {'scope': '%s-ordinary-ipv%d-tcp-tso' % (round_name, tso_version),
                 'ok': len(checks) == 9 and all(c['state'] == 'ok' for c in checks),
                 'checks': checks, 'limitations': [
-                    'One target NIC, MTU1500, IPv4 TSO and one ordinary interface down/up.',
+                    'One target NIC, MTU1500, IPv%d TSO and one ordinary interface down/up.' % tso_version,
                     'Throughput is observed without a line-rate threshold; normal TCP retransmission is allowed.',
                     'The domain remains active with 64 RX groups and 3 fixed mappings while the interface is down.',
-                    'This run does not establish IPv6 TSO, system-wide IOMapper, full PM or multi-device support.']}
+                    ('This run does not establish IPv6 TSO, system-wide IOMapper, full PM or multi-device support.'
+                     if tso_version == 4 else
+                     'This run does not establish system-wide IOMapper, full PM or multi-device support.')]}
 
     def capture_identity():
         manifest = json.loads((cap / 'manifest.json').read_text())
-        need(manifest['scope'] == 'r45' and not manifest['errors'], 'capture reports missing evidence')
+        need(manifest['scope'] == round_name and not manifest['errors'], 'capture reports missing evidence')
         for name, wanted in manifest['files'].items():
             data = (cap / name).read_bytes()
             need(wanted == {'bytes': len(data), 'sha256': sha(data)}, 'capture hash differs: ' + name)
         source = json.loads((cap / 'source-ref.json').read_text())
-        need(source['base_commit'] == BASE_COMMIT and
-             re.fullmatch('[0-9a-f]{40}', source['commit']) and source['commit'] != BASE_COMMIT,
-             'source is not a recorded R45 successor')
+        need(source['base_commit'] == base_commit and
+             re.fullmatch('[0-9a-f]{40}', source['commit']) and source['commit'] != base_commit,
+             'source is not a recorded R%d successor' % round_id)
         expected = json.loads((cap / 'expected-version.json').read_text())
-        loaded = (cap / 'r45-version-confirmation.txt').read_text().lower()
-        for name, version in VERSIONS.items():
+        loaded = (cap / (round_name + '-version-confirmation.txt')).read_text().lower()
+        for name, version in versions.items():
             got = manifest['installed'][name]
             need(got['version'] == version and got['codesign_returncode'] == 0 and
                  all(got[key] == expected[name][key] for key in ('version', 'sha256', 'uuid')) and
                  got['uuid'].lower() in loaded and re.fullmatch('[0-9a-f]{64}', got['sha256']),
                  'installed/loaded binary identity differs: ' + name)
         driver = manifest['installed']['RTL812xLucy']
-        need(driver['enableTSO4'] is True and driver['enableTSO6'] is False,
-             'IPv4 TSO must be enabled and IPv6 TSO must remain off')
+        need(driver['enableTSO4'] is True and driver['enableTSO6'] is (tso_version == 6),
+             'IPv4 TSO must be enabled and IPv6 TSO must remain off' if tso_version == 4 else
+             'IPv4 and IPv6 TSO must both be enabled')
         boot = (cap / 'boot-args.txt').read_text().split()
         need([v for v in boot if v.startswith('amdiommu=')] == ['amdiommu=auto'],
              'this boot did not select ordinary auto mode')
         need(re.search(r'\bmtu 1500\b', (cap / 'network.txt').read_text()), 'target MTU is not 1500')
         for label in PHASES:
             states[label] = read_snapshot(cap / 'snapshots' / label)
-        return {'sourceCommit': source['commit'], 'versions': VERSIONS, 'snapshots': len(states),
-                'mtu': 1500, 'tsoIPv4': True, 'tsoIPv6': False}
+        return {'sourceCommit': source['commit'], 'versions': versions, 'snapshots': len(states),
+                'mtu': 1500, 'tsoIPv4': True, 'tsoIPv6': tso_version == 6}
     check('capture-source-binary-and-tso-configuration', capture_identity)
     if len(states) != len(PHASES):
         return result()
@@ -132,7 +143,7 @@ def analyze(cap):
     def traffic():
         token = int((cap / 'token.txt').read_text().strip(), 0)
         logs = {side: log_rows(cap / (side + '.log')) for side in ('client', 'peer')}
-        expected = {(phase, direction): size for phase, direction, size in P.TRANSFERS}
+        expected = {(phase, direction): size for phase, direction, size in protocol.TRANSFERS}
         records = {}
         for side, rows in logs.items():
             transfers = [row for row in rows if row.get('event') == 'transfer']
@@ -153,18 +164,21 @@ def analyze(cap):
         outcomes = [row for row in logs['client'] if row.get('event') == 'result']
         need(len(outcomes) == 1 and outcomes[0].get('ok') is True, 'client did not finish successfully')
         detail = []
-        for phase, direction, size in P.TRANSFERS:
+        for phase, direction, size in protocol.TRANSFERS:
             key = (phase, direction)
-            digest = P.expected_digest(token, phase, direction, size)
+            digest = protocol.expected_digest(token, phase, direction, size)
             client, peer = (records[side][key] for side in ('client', 'peer'))
             for side, row in (('client', client), ('peer', peer)):
                 need(row['sha256'] == row['expected_sha256'] == digest,
                      '%s %s %s: TCP SHA256 differs' % (side, phase, direction))
             need(client['peer_bytes'] == size and client['peer_sha256'] == peer['sha256'],
                  phase + ' ' + direction + ': peer acknowledgement differs')
-            detail.append({'phase': phase, 'direction': direction, 'bytes': size, 'sha256': digest,
-                           'clientMiBPerSecond': size * 1e9 / (1048576 * client['duration_ns']),
-                           'peerMiBPerSecond': size * 1e9 / (1048576 * peer['duration_ns'])})
+            transfer = {'phase': phase, 'direction': direction, 'bytes': size, 'sha256': digest,
+                        'clientMiBPerSecond': size * 1e9 / (1048576 * client['duration_ns']),
+                        'peerMiBPerSecond': size * 1e9 / (1048576 * peer['duration_ns'])}
+            if tcp_record_check is not None:
+                transfer['transport'] = tcp_record_check(client, peer)
+            detail.append(transfer)
         return {'transfers': detail, 'totalBytes': sum(expected.values()),
                 'throughputThreshold': None, 'normalTCPRetransmissionAllowed': True}
     check('four-tcp-transfers-and-end-to-end-byte-integrity', traffic)
@@ -173,31 +187,44 @@ def analyze(cap):
         detail = {'snapshots': {}, 'intervals': {}}
         for label, value in states.items():
             d = value['driver']
-            need(d[PREFIX + 'tso4-enabled'] == 1 and d[PREFIX + 'tso6-enabled'] == 0,
+            need(d[PREFIX + 'tso4-enabled'] == 1 and
+                 d[PREFIX + 'tso6-enabled'] == int(tso_version == 6),
                  label + ': running TSO configuration differs')
-            need(d[PREFIX + 'tso4-posted'] == d[PREFIX + 'tso4-completed'] and
-                 d[PREFIX + 'tso4-posted-bytes'] == d[PREFIX + 'tso4-completed-bytes'] and
-                 d[PREFIX + 'tso4-stop-retired'] == 0,
-                 label + ': posted TSO packets were not completed by hardware before capture')
+            families = [(PREFIX, 'tso4')]
+            if tso_version == 6:
+                families.append((tso_prefix, tso_name))
+            for prefix, family in families:
+                need(d[prefix + family + '-posted'] == d[prefix + family + '-completed'] and
+                     d[prefix + family + '-posted-bytes'] == d[prefix + family + '-completed-bytes'] and
+                     d[prefix + family + '-stop-retired'] == 0,
+                     label + ': posted TSO packets were not completed by hardware before capture')
             detail['snapshots'][label] = {
-                key: d[PREFIX + key] for key in (
+                key: d[tso_prefix + key] for key in ['snapshot-seq'] + [
+                    tso_name + '-' + key for key in (
+                        'posted', 'completed', 'stop-retired', 'posted-bytes', 'completed-bytes',
+                        'max-length', 'max-segments', 'max-mss')]}
+            detail['snapshots'][label].update({key: d[PREFIX + key]
+                for key in ('tx-free-commands', 'tx-free-descriptors')})
+            if tso_version == 6:
+                detail['snapshots'][label]['ipv4'] = {key: d[PREFIX + key] for key in (
                     'snapshot-seq', 'tso4-posted', 'tso4-completed', 'tso4-stop-retired',
-                    'tso4-posted-bytes', 'tso4-completed-bytes', 'tso4-max-length',
-                    'tso4-max-segments', 'tso4-max-mss', 'tx-free-commands', 'tx-free-descriptors')}
+                    'tso4-posted-bytes', 'tso4-completed-bytes')}
         for begin, end in (('before', 'pre-down'), ('down', 'after-up')):
             first, last = states[begin]['driver'], states[end]['driver']
-            delta = {key: last[PREFIX + key] - first[PREFIX + key] for key in (
-                'tso4-posted', 'tso4-completed', 'tso4-posted-bytes', 'tso4-completed-bytes')}
+            delta = {tso_name + '-' + key:
+                     last[tso_prefix + tso_name + '-' + key] - first[tso_prefix + tso_name + '-' + key]
+                     for key in ('posted', 'completed', 'posted-bytes', 'completed-bytes')}
             need(all(value > 0 for value in delta.values()) and
-                 delta['tso4-posted'] == delta['tso4-completed'] and
-                 delta['tso4-posted-bytes'] == delta['tso4-completed-bytes'],
-                 begin + ' -> ' + end + ': no completed TSO4 work from this TCP phase')
-            need(last[PREFIX + 'tso4-max-length'] > 1514 and last[PREFIX + 'tso4-max-segments'] > 1 and
-                 last[PREFIX + 'tso4-max-mss'] > 0,
-                 end + ': actual large multisegment TSO4 descriptor evidence is missing')
+                 delta[tso_name + '-posted'] == delta[tso_name + '-completed'] and
+                 delta[tso_name + '-posted-bytes'] == delta[tso_name + '-completed-bytes'],
+                 begin + ' -> ' + end + ': no completed TSO%d work from this TCP phase' % tso_version)
+            need(last[tso_prefix + tso_name + '-max-length'] > 1514 and
+                 last[tso_prefix + tso_name + '-max-segments'] > 1 and
+                 last[tso_prefix + tso_name + '-max-mss'] > 0,
+                 end + ': actual large multisegment TSO%d descriptor evidence is missing' % tso_version)
             detail['intervals'][begin + ' -> ' + end] = delta
         return detail
-    check('actual-tso4-posted-and-hardware-completed-in-both-phases', tso)
+    check('actual-tso%d-posted-and-hardware-completed-in-both-phases' % tso_version, tso)
 
     def persistent():
         values = [list(identity(states[label])) for label in PHASES]
@@ -205,7 +232,7 @@ def analyze(cap):
              'device domain was recreated across TCP or interface down/up')
         sequences = ([states[label]['mapper']['snapshotTime'] for label in PHASES],
                      [states[label]['mapper']['snapshotSequence'] for label in PHASES],
-                     [states[label]['driver'][PREFIX + 'snapshot-seq'] for label in PHASES])
+                     [states[label]['driver'][tso_prefix + 'snapshot-seq'] for label in PHASES])
         need(all(all(a < b for a, b in zip(values, values[1:])) for values in sequences),
              'mapper/driver snapshot order differs')
         return {'sameDomain': True, 'identity': values[0], 'phases': list(PHASES)}

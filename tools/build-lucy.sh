@@ -179,9 +179,9 @@ echo "== Info.plist =="
 # xcodeproj 用 GENERATE_INFOPLIST_FILE=YES 生成 plist，源码树里没有现成文件。
 # 这里从已发布的同版本二进制里取 plist 结构做模板是**不必要**的：
 # 我们直接生成一个等价的最小 plist。
-# Round45：pinned RTL812xLucy.hpp 的实际键是小写 enableTSO4/enableTSO6。
+# Round46：pinned RTL812xLucy.hpp 的实际键是小写 enableTSO4/enableTSO6。
 # getParams() 在 attachInterface() 前读取它们，getFeatures() 据此公布能力。
-# 在普通 per-device IOMapper 路径上开启 IPv4 TSO；IPv6 TSO 保持关闭。
+# 在普通 per-device IOMapper 路径上开启 IPv4 和 IPv6 TSO。
 # 一旦加入字典，缺省 µsPollTime2G 会由原 160000ns 变成 120000ns，
 # 因此同时写 160µs 保留原值；其余缺省值（ASPM/10G/5G）与无字典一致。
 cat > "$KEXT/Contents/Info.plist" <<'PLIST'
@@ -202,9 +202,9 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.230</string>
+	<string>1.1.231</string>
 	<key>CFBundleVersion</key>
-	<string>1.1.230</string>
+	<string>1.1.231</string>
 	<key>IOKitPersonalities</key>
 	<dict>
 		<key>RTL8125</key>
@@ -216,7 +216,7 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 				<key>enableTSO4</key>
 				<true/>
 				<key>enableTSO6</key>
-				<false/>
+				<true/>
 				<key>µsPollTime2G</key>
 				<integer>160</integer>
 			</dict>

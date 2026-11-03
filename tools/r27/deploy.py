@@ -19,6 +19,7 @@ HERE = Path(__file__).resolve().parent
 ROUND = 43
 BATCH = 512
 DEFAULT_TOKEN = None
+DEFAULT_PEER = '192.168.50.122'
 DEFAULT_PORT = 9110
 TSO4, TSO6 = False, False
 ENTRY_POINTS = ('boot-load.sh', 'load.py', 'protocol.py')
@@ -172,16 +173,18 @@ def round_plan():
             'capacity_probe_maps': 9, 'capacity_probe_peak_owners': 8}
 
 
-def main():
+def main(add_arguments=None, check_peer=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--efi', required=True, help='already mounted exact target EFI')
     parser.add_argument('--token', required=DEFAULT_TOKEN is None, default=DEFAULT_TOKEN,
                         type=lambda value: int(value, 0))
     parser.add_argument('--out', default='runs/r%d' % ROUND)
     parser.add_argument('--backup', help='project-relative recovery directory')
-    parser.add_argument('--peer', default='192.168.50.122')
+    parser.add_argument('--peer', default=DEFAULT_PEER, required=DEFAULT_PEER is None)
     parser.add_argument('--port', type=int, default=DEFAULT_PORT)
     parser.add_argument('--check-only', action='store_true')
+    if add_arguments:
+        add_arguments(parser)
     args = parser.parse_args()
     if not 0 < args.token < 0x80000000 or not 0 < args.port <= 65535:
         raise ValueError('invalid token or port')
@@ -205,7 +208,9 @@ def main():
                             output('route', '-n', 'get', 'default')):
         raise ValueError('RNDIS en3 10.44.51.100 or selected default en2 missing')
     require_target_ready(output('ifconfig', TARGET_IFACE))
-    if route_iface(output('route', '-n', 'get', args.peer)) != [TARGET_IFACE]:
+    if check_peer:
+        check_peer(args)
+    elif route_iface(output('route', '-n', 'get', args.peer)) != [TARGET_IFACE]:
         raise ValueError('peer route must already use en2')
     for name in ENTRY_POINTS:
         if not (HERE / name).is_file():

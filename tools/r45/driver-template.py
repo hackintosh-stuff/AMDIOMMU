@@ -237,16 +237,16 @@ def patch(hpp, cpp, setup, vtd):
     return hpp, cpp, setup, vtd
 
 
-def is_current(hpp, cpp, setup, vtd):
+def is_current(hpp, cpp, setup, vtd, rewrite=lambda text: text):
     import re
     norm = lambda s: re.sub(r'\s+', ' ', s).strip()
     for text, blocks in (
         (hpp, (PUBLIC, MEMBERS)),
         (cpp, (METHODS, INIT_NEW, DEQUEUE_NEW, RESULT_NEW, FAILED_NEW,
-               POST_NEW, COMPLETE_NEW, DISABLE_NEW)),
+               POST_NEW, COMPLETE_NEW, DISABLE_NEW, WAIT_NEW)),
         (setup, (CLEAR_NEW,)),
         (vtd, (MAP_NEW, MAP_BLOCK_NEW)),
     ):
-        if any(norm(block) not in norm(text) for block in blocks):
+        if any(norm(rewrite(block)) not in norm(text) for block in blocks):
             return False
     return True
