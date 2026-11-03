@@ -192,7 +192,7 @@ MAP_BLOCK_NEW = '''        /* The sole output thread consumes commands; completi
 # start(): IOKit matching for the two providers is not ordered. The single
 # copyMapperForDevice() lookup must see iommu-parent, so wait for that
 # publication with a hard bound while the PCI provider is still unopened.
-WAIT_OLD = '    pciDevice->retain();\n\n    if (!pciDevice->open(this)) {'
+WAIT_OLD = '    pciDevice->retain();\n    \n    if (!pciDevice->open(this)) {'
 WAIT_NEW = '''    pciDevice->retain();
 
     /* Round45: the per-device mapper is published by a separate IOResources
