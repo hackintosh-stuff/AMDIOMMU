@@ -146,6 +146,15 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
         return false;
     }
     setProperty("m1b-stage", "2-super-start-ok");
+    if (fR52Owner) {
+        // This instance is attached to the controller service, not matched to
+        // PCI. The owner prepares its domain before publishing iommu-parent.
+        fR44Auto = true;
+        setProperty("r44-mode", "auto");
+        setProperty("r52-role", "device");
+        setProperty("r44-system-mapper", "no");
+        return true;
+    }
 
     char mode[32] = {};
     fR44Auto = PE_parse_boot_argn("amdiommu", mode, sizeof(mode) - 1)
@@ -314,10 +323,18 @@ IOReturn org_example_AMDMapperProbe::callPlatformFunction(
 
 IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
     OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    OSObject *all = dict ? dict->getObject("R52Snapshot") : nullptr;
+    if (fR44Auto && all) {
+        if (all != kOSBooleanTrue) return kIOReturnBadArgument;
+        if (fR52Owner) return kIOReturnUnsupported;
+        r52PublishDomains();
+        return kIOReturnSuccess;
+    }
     OSObject *snapshot = dict ? dict->getObject("R44Snapshot") : nullptr;
     if (fR44Auto && snapshot) {
         if (snapshot != kOSBooleanTrue) return kIOReturnBadArgument;
-        r44PublishMappings();
+        if (fR52Owner) r44PublishMappings();
+        else r52PublishDomains();
         return kIOReturnSuccess;
     }
     OSObject *request = dict ? dict->getObject("R31Stop") : nullptr;
@@ -337,7 +354,8 @@ void org_example_AMDMapperProbe::stop(IOService *provider) {
         }
         if (!r44StopAuto()) return;
         if (fNicDevice) {
-            fNicDevice->removeProperty("iommu-parent");
+            if (fNicDevice->getProperty("iommu-parent") == this)
+                fNicDevice->removeProperty("iommu-parent");
             fNicDevice->release();
             fNicDevice = nullptr;
         }
@@ -759,7 +777,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.58.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.59.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

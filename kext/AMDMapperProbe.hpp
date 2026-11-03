@@ -2,6 +2,7 @@
 #include <IOKit/IOMapper.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOLocks.h>
 #include <IOKit/IODMACommand.h>
 #include <kern/thread.h>
 
@@ -22,6 +23,7 @@
 
 class IOTimerEventSource;   // 前置声明，避免头文件相互包含
 class R27ProbeTimer;
+struct R47HardwareInfo;
 
 // M1-B 探针（B1 + B2-0 + B2-a）
 //
@@ -86,6 +88,23 @@ private:
     // Round44: a persistent per-device mapper. Ordinary IODMACommand calls
     // use this backend without the experiment's registered object bindings.
     bool fR44Auto = false;
+    // R52: the root owns the hardware; auto-device instances own one mapper.
+    // fR52Owner is set before start() and must survive initHardware().
+    static constexpr UInt32 kR52MaxDomains = 2;
+    org_example_AMDMapperProbe *fR52Owner = nullptr;
+    org_example_AMDMapperProbe *fR52Mappers[kR52MaxDomains] = {};
+    IOLock *fR52AttachLock = nullptr;
+    UInt64 fR52SnapshotSequence = 0;
+    bool fR52Stopping = false;
+    struct R52Domain;
+    R52Domain *fR52Domain = nullptr;
+    void r52AttachExistingDevices();
+    bool r52PrepareController(const R47HardwareInfo &);
+    bool r52PrepareDomain(IOService *, UInt32);
+    bool r52ReleaseDomain();
+    void r52PublishDomains();
+    bool r52PowerSupported() const;
+    bool r52InvalidateLocked(bool, UInt64, UInt64, bool, bool *);
     struct R44Controller;
     R44Controller *fR44Controller = nullptr;
     struct R44MapperState;
@@ -108,7 +127,7 @@ private:
     bool r44QuiesceMappings();
     bool r44ReleaseMappings();
     UInt32 r44LiveMappings() const;
-    void r44PublishMappings();
+    void r44PublishMappings(OSDictionary **copy = nullptr);
     IOReturn r44MapMemory(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
         const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
         uint64_t *, uint64_t *);

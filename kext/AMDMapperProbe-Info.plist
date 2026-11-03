@@ -8,14 +8,15 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.58.0</string>
-    <key>CFBundleVersion</key><string>0.58.0</string>
+    <key>CFBundleShortVersionString</key><string>0.59.0</string>
+    <key>CFBundleVersion</key><string>0.59.0</string>
     <!-- Client requests must fit [OSBundleCompatibleVersion, CFBundleVersion].
          Existing mapper ABI1 clients remain compatible with 0.53.0;
-         Round51 Lucy requires 0.58.0 for NPCache-aware ordinary map invalidation. -->
+         Round52 Lucy requires 0.59.0 for independent device domains on a shared controller. -->
     <key>OSBundleCompatibleVersion</key><string>0.53.0</string>
     <!--
       版本历史：
+        0.59.0 第52轮：同一控制器接入两个RTL8127；每设备独立IOMapper、域、页表与IOVA池，共享命令环同步。
         0.58.0 第51轮：按PCI NPCache选择普通map失效；无NP缓存时省去新map的INV/CW，unmap同步回收不变。
         0.57.0 第50轮：普通map/unmap按实际IOVA页范围同步失效，首激活及PM仍全域；PM实机验证仍TODO。
         0.56.0 第49轮：普通map支持64页/64runs，RX改为16组每组64页；PM实机验证仍TODO。

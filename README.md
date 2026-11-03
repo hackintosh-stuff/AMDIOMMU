@@ -1,5 +1,48 @@
 # AMDIOMMU — authoritative source repository
 
+## Candidate Round52 / two device domains on one controller
+
+Base: `a75864596ba0e371685f029e7978d795fce1d39f`, the accepted Round51
+result-documentation successor. The original R51 capture was re-analyzed:
+all eleven checks passed and the complete result matched the saved analysis.
+R52 is a source candidate; its macOS build and two-device hardware result
+must be recorded after execution, not inferred from source review.
+
+The controller owns the device table, command/event rings and completion
+semaphore once. Each discovered RTL8127 has its own IOMapper instance,
+requester, domain ID, page-table root, mapping records and low IOVA allocator.
+Domain IOVA ranges may overlap; translation is selected by requester/DTE.
+Command submission is serialized across domains. First activation remains
+INV_DEV plus a full-domain fence; R51 NPCache-selected map invalidation and
+synchronous range invalidation before unmap reuse remain per device.
+
+The owner is identified by `r52-role=controller`; device mapper children by
+`r52-role=device`. `R52Snapshot` publishes `r52-domains`, and shared command
+counters use `r52-controller-*`. Lucy publishes the requester, actual mapper
+registry ID and domain ID per instance. Tools select exact registry entries
+and bind each IPv6 socket to its configured interface; neither PCI matching
+order nor a fixed BSD interface number defines the two devices.
+
+Build with `sh tools/r52/build.sh <existing-pinned-upstream-input>`, retaining
+`--tx21 --rx34` and the ABI2 `--check-r49` layout contract.
+Target versions: Lucy **1.1.237**, Probe **0.59.0**.
+Use `tools/r52` and a concrete two-endpoint JSON configuration. A short off
+baseline transfers 32 MiB. The auto run transfers 64 MiB: each endpoint in
+normal operation, the surviving endpoint while the selected endpoint is
+down, and the selected endpoint after it is up again. Four analysis groups
+cover runtime identity, independent live translation, real traffic and
+one-device down/up, and completed invalidations without target faults.
+This proves business can complete in the other domain during the down
+window; it does not claim an existing TCP connection crossed the transition
+without interruption.
+
+Keep the accepted 64-page/64-run maps, RX16x64, DMA32, IPv4/IPv6 TSO and
+synchronous IOVA retirement. No throughput threshold, long stress matrix,
+system mapper, alias support or multi-controller claim is added.
+Real system PM remains `TODO(R47-PM-HARDWARE)`; dual-device PM is explicitly
+unsupported in this stage and is not part of the ordinary down/up test.
+Use the existing fixed Git checkouts and finite deployment/recovery workflow.
+
 ## Accepted Round51 / omit map invalidation when NPCache is absent, PM hardware TODO
 
 Base: `da99156d3e6b20694c88124afb75341f5f437545`, the accepted Round50 documentation successor.

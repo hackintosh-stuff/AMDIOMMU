@@ -3,10 +3,19 @@
 #include "AMDMapperProbeInternal.hpp"
 #include "AMDMapperProbeDiscovery.hpp"
 #include "amd_iommu_mapper_abi.hpp"
+#include <libkern/c++/OSArray.h>
+#include <libkern/c++/OSCollectionIterator.h>
 
 namespace {
+// Ordering: per-device mapper lock -> shared controller lock. Attachment
+// serializes the fixed device list independently; no controller path takes
+// a mapper lock or invokes the network driver.
+struct R52LockGuard {
+    IOLock *lock;
+    explicit R52LockGuard(IOLock *value) : lock(value) { IOLockLock(lock); }
+    ~R52LockGuard() { IOLockUnlock(lock); }
+};
 constexpr UInt32 kR44TablePages = 16;
-constexpr UInt32 kR44Domain = 1;
 // PCI IOMMU capability, not EFR: Linux v6.6 IOMMU_CAP_NPCACHE.
 constexpr UInt32 kR51NpCache = 1u << 26;
 constexpr UInt64 kR44Enabled = M2B2_CTRL_IOMMU_EN |
@@ -24,33 +33,45 @@ bool r44Allocate(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
 }
 }
 
-struct org_example_AMDMapperProbe::R44Controller {
-    IOBufferMemoryDescriptor *tables, *devices, *commands, *semaphore, *events;
-    IOMemoryDescriptor *mmioMemory;
-    IOMemoryMap *mmioMap;
-    volatile UInt8 *base;
-    UInt64 tablePA, devicePA, commandPA, semaphorePA, eventPA;
-    UInt64 originalDT, originalCommand, originalEvent, originalControl;
-    R47HardwareInfo hardware;
-    UInt64 startupEfr;
-    UInt64 readyTime, activeTime;
+
+struct org_example_AMDMapperProbe::R52Domain {
+    IOBufferMemoryDescriptor *tables;
+    UInt64 tablePA, activeTime;
+    UInt32 deviceID, domainID;
     UInt64 invDevCompleted, invPagesCompleted;
-    // R50 counters describe successfully completed ordinary invalidations.
     UInt64 invFullCompleted, invRangeCompleted, invRangePages;
     UInt64 mapInvalidationSkipped;
     UInt64 lastRangeAddress, lastRangeBytes, lastRangeSequence;
     UInt32 lastRangeCommand[4];
     UInt64 lastInvDevSequence, lastInvPagesSequence;
+    UInt64 targetFaults;
+    UInt32 lastEvent[4];
+    const char *state;
+    bool active;
+};
+
+struct org_example_AMDMapperProbe::R44Controller {
+    IOBufferMemoryDescriptor *devices, *commands, *semaphore, *events;
+    IOLock *lock;
+    R52Domain *domains[kR52MaxDomains];
+    UInt32 domainCount;
+    IOMemoryDescriptor *mmioMemory;
+    IOMemoryMap *mmioMap;
+    volatile UInt8 *base;
+    UInt64 devicePA, commandPA, semaphorePA, eventPA;
+    UInt64 originalDT, originalCommand, originalEvent, originalControl;
+    R47HardwareInfo hardware;
+    UInt64 startupEfr;
+    UInt64 readyTime;
     UInt64 eventEntries, targetFaults;
     UInt64 sleepControl, observedControl;
     UInt64 suspendTime, resumeTime, suspendSequence;
     UInt64 resumeDevSequence, resumePagesSequence;
     UInt64 suspendCount, resumeCount, powerFailures;
     UInt32 lastEvent[4];
-    UInt32 deviceID;
     M2B2CmdCtx command;
     const char *state;
-    bool configured, ready, active, pinned, restored;
+    bool configured, ready, pinned, restored;
     bool eventOverflow, eventInvalid;
     bool suspended, powerFailed, resumeRegistersRestored;
 
@@ -91,8 +112,14 @@ struct org_example_AMDMapperProbe::R44Controller {
                 if (!type) { eventInvalid = true; break; }
                 for (UInt32 i = 0; i < 4; ++i) lastEvent[i] = entries[entry + i];
                 ++eventEntries;
-                if ((lastEvent[0] & M2B2_EVENT_DEVID_MASK) == deviceID)
+                for (UInt32 slot = 0; slot < kR52MaxDomains; ++slot) {
+                    R52Domain *d = domains[slot];
+                    if (!d || (lastEvent[0] & M2B2_EVENT_DEVID_MASK) != d->deviceID)
+                        continue;
+                    ++d->targetFaults;
                     ++targetFaults;
+                    for (UInt32 i = 0; i < 4; ++i) d->lastEvent[i] = lastEvent[i];
+                }
                 head = (head + 16) % M2B2_EVT_BUFFER_SIZE;
             }
             mmioWrite64(base, M2B2_OFF_EVT_HEAD, head);
@@ -121,7 +148,7 @@ struct org_example_AMDMapperProbe::R44Controller {
             mmioRead64(base, M2B2_OFF_CMD_BUF) == originalCommand &&
             mmioRead64(base, M2B2_OFF_EVT_BUF) == originalEvent &&
             observedControl == originalControl;
-        if (restored) { configured = false; ready = false; active = false; }
+        if (restored) { configured = false; ready = false; }
         return restored;
     }
 
@@ -132,84 +159,116 @@ struct org_example_AMDMapperProbe::R44Controller {
         if (semaphore) semaphore->release();
         if (commands) commands->release();
         if (devices) devices->release();
-        if (tables) tables->release();
+        if (lock) IOLockFree(lock);
     }
 };
 
+
 bool org_example_AMDMapperProbe::r44StartAuto() {
     setProperty("r44-mode", "auto");
+    setProperty("r52-role", "controller");
+    setProperty("r52-snapshot-consistency", "per-domain");
+    setProperty("r52-max-domains", kR52MaxDomains, 32);
+    setProperty("r52-domain-count", 0ULL, 64);
     setProperty("r44-state", "waiting-for-pci-publication");
     setProperty("r44-controller-ready", "no");
-    setProperty("r44-dte-active", "no");
     setProperty("r44-system-mapper", "no");
     setProperty("m1b-gsystem", IOMapper::gSystem ? "NONNULL" : "NULL-as-expected");
+    fR52AttachLock = IOLockAlloc();
+    if (!fR52AttachLock) return false;
     installPublishNotifier();
     if (!fPublishNotifier) {
         setProperty("r44-state", "failed-publish-notifier");
+        IOLockFree(fR52AttachLock); fR52AttachLock = nullptr;
         return false;
     }
-
-    // Existing unclaimed PCI services are also usable. An already attached
-    // client is too late: Lucy only looks up its mapper once during start().
-    if (!fNicDevice && !fR44Controller) {
-        IOService *nic = findNicServiceOnly();
-        if (nic) {
-            setProperty("r44-start-nic", "found");
-            setProperty("r44-start-nic-open", nic->isOpen() ? "yes" : "no");
-            setProperty("r44-start-nic-client",
-                        nic->getChildEntry(gIOServicePlane) ? "yes" : "no");
-            r44AttachAuto(nic);
-            nic->release();
-        } else {
-            setProperty("r44-start-nic", "absent");
-        }
-    }
+    // Notifications prepare new nubs before Lucy starts. Replay every already
+    // published, unopened endpoint too; identical PCI IDs are not identities.
+    r52AttachExistingDevices();
+    r52PublishDomains();
     return true;
 }
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
-    if (!fR44Auto || fR44Controller) return fNicDevice == service;
+    if (!fR44Auto || fR52Owner || !fR52AttachLock) return false;
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
     if (!nic || nic->configRead16(kIOPCIConfigVendorID) != 0x10ec ||
         nic->configRead16(kIOPCIConfigDeviceID) != 0x8127) return false;
-    // The driver's single copyMapperForDevice() lookup runs before it opens
-    // the PCI provider. A client attached to the nub but not yet started is
-    // still safe to publish for: Round45's start() waits for this publication
-    // with the nub unopened, so the lookup has not been missed. Only an open
-    // provider means the driver already chose its DMA path. A publish
-    // notification can replay an existing service when installed.
-    if (nic->isOpen()) {
-        setProperty("r44-state", "failed-too-late-open");
-        return false;
-    }
-
-    R47HardwareInfo hardware{};
-    if (!r47DiscoverHardware(this, nic, hardware)) {
-        setProperty("r44-state", "failed-hardware-discovery");
-        return false;
-    }
-
-    R44Controller *c = (R44Controller *)IOMalloc(sizeof(R44Controller));
-    if (!c) { setProperty("r44-state", "failed-controller-memory"); return false; }
-    bzero(c, sizeof(*c));
-    fR44Controller = c;
-    c->state = "preparing";
-    c->hardware = hardware;
-    c->deviceID = ((UInt32)nic->getBusNumber() << 8) |
+    R52LockGuard attachment(fR52AttachLock);
+    if (fR52Stopping) return false;
+    const UInt32 requester = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
+    UInt32 slot = kR52MaxDomains;
+    for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
+        auto *mapper = fR52Mappers[i];
+        if (!mapper) { if (slot == kR52MaxDomains) slot = i; continue; }
+        if (mapper->fNicDevice == nic) return true;
+        if (mapper->fR52Domain && mapper->fR52Domain->deviceID == requester) {
+            setProperty("r52-attach-failure", "duplicate-requester");
+            return false;
+        }
+    }
+    if (slot == kR52MaxDomains) {
+        setProperty("r52-attach-failure", "two-device-capacity");
+        return false;
+    }
+    if (nic->isOpen()) {
+        setProperty("r52-attach-failure", "too-late-open");
+        setProperty("r52-rejected-requester", requester, 32);
+        return false;
+    }
+    auto *mapper = new org_example_AMDMapperProbe;
+    if (!mapper) return false;
+    if (!mapper->init()) { mapper->release(); return false; }
+    mapper->fR52Owner = this;
+    mapper->setName("AMDMapperDevice");
+    if (!mapper->attach(this)) { mapper->release(); return false; }
+    if (!mapper->start(this)) {
+        mapper->detach(this); mapper->release(); return false;
+    }
+    if (!mapper->r52PrepareDomain(nic, slot)) {
+        setProperty("r52-attach-failure", "device-prepare");
+        setProperty("r52-rejected-requester", requester, 32);
+        mapper->r52ReleaseDomain();
+        mapper->stop(this);
+        mapper->detach(this); mapper->release();
+        return false;
+    }
+    fR52Mappers[slot] = mapper;
+    mapper->registerService();
+    return true;
+}
+#pragma clang diagnostic pop
 
+bool org_example_AMDMapperProbe::r52PrepareController(const R47HardwareInfo &hardware) {
+    if (fR44Controller) {
+        R52LockGuard guard(fR44Controller->lock);
+        const auto &found = fR44Controller->hardware;
+        // This round deliberately owns one IVRS unit. The second requester
+        // must resolve to that same unit; never reprogram its shared registers.
+        return fR44Controller->ready && !fR44Controller->suspended &&
+            !fR44Controller->command.failed &&
+            found.mmioBase == hardware.mmioBase &&
+            found.mmioBytes == hardware.mmioBytes &&
+            found.iommuID == hardware.iommuID &&
+            found.capabilityHeader == hardware.capabilityHeader;
+    }
+    auto *c = (R44Controller *)IOMalloc(sizeof(R44Controller));
+    if (!c) return false;
+    bzero(c, sizeof(*c));
+    c->lock = IOLockAlloc();
+    c->hardware = hardware;
+    c->state = "preparing";
+    fR44Controller = c;
     const char *failure = nullptr;
-    if (!r44Allocate(c->tables, kR44TablePages * M2B2_PAGE_SIZE, c->tablePA) ||
+    if (!c->lock ||
         !r44Allocate(c->devices, M22B_TABLE_SIZE_FULL, c->devicePA) ||
         !r44Allocate(c->commands, M23_CMD_BUF_SIZE, c->commandPA) ||
         !r44Allocate(c->semaphore, M2B2_PAGE_SIZE, c->semaphorePA) ||
         !r44Allocate(c->events, M2B2_EVT_BUFFER_SIZE, c->eventPA)) {
         failure = "failed-dma-memory";
-    } else if (!r44PrepareMappings((volatile UInt64 *)c->tables->getBytesNoCopy(),
-                    c->tablePA, kR44TablePages, M2B2_PAGE_MODE_4_LEVEL)) {
-        failure = "failed-mapper-prepare";
     }
 
     if (!failure) {
@@ -254,8 +313,6 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
     }
     if (failure) {
         setProperty("r44-state", failure);
-        r44QuiesceMappings();
-        r44ReleaseMappings();
         c->releaseBuffers();
         fR44Controller = nullptr;
         IOFree(c, sizeof(*c));
@@ -268,9 +325,6 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
     c->command.buf = (volatile UInt32 *)c->commands->getBytesNoCopy();
     c->command.sem = (volatile UInt64 *)c->semaphore->getBytesNoCopy();
     c->command.semPA = c->semaphorePA;
-    c->command.devid = c->deviceID;
-    c->command.domid = kR44Domain;
-    c->command.rootPA = c->tablePA;
     c->command.pageMode = M2B2_PAGE_MODE_4_LEVEL;
 
     OSSynchronizeIO();
@@ -292,34 +346,109 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
     if ((mmioRead64(c->base, M2B2_OFF_CONTROL) & kR44Enabled) != kR44Enabled) {
         c->state = "failed-controller-enable";
         setProperty("r44-failure", c->state);
-        r44StopAuto();
+        if (c->restore()) {
+            c->releaseBuffers();
+            fR44Controller = nullptr;
+            IOFree(c, sizeof(*c));
+        } else if (!c->pinned) {
+            c->pinned = true;
+            retain();
+        }
         return false;
     }
 
     c->ready = true;
     c->readyTime = mach_absolute_time();
-    c->state = "ready-passthrough";
+    c->state = "ready-shared-controller";
+    return true;
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slot) {
+    IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
+    if (!fR52Owner || !nic || slot >= kR52MaxDomains) return false;
+    R47HardwareInfo hardware{};
+    if (!r47DiscoverHardware(this, nic, hardware)) return false;
+    auto *d = (R52Domain *)IOMalloc(sizeof(R52Domain));
+    if (!d) return false;
+    bzero(d, sizeof(*d));
+    fR52Domain = d;
+    d->domainID = slot + 1;
+    d->deviceID = ((UInt32)nic->getBusNumber() << 8) |
+        ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
+    d->state = "preparing";
+    if (!r44Allocate(d->tables, kR44TablePages * M2B2_PAGE_SIZE, d->tablePA) ||
+        !r44PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
+            d->tablePA, kR44TablePages, M2B2_PAGE_MODE_4_LEVEL))
+        return false;
+    if (!fR52Owner->r52PrepareController(hardware)) return false;
+    R44Controller *c = fR52Owner->fR44Controller;
+    fR44Controller = c;
+    {
+        R52LockGuard guard(c->lock);
+        c->domains[slot] = d;
+        ++c->domainCount;
+        d->state = "ready-passthrough";
+    }
+    nic->retain(); fNicDevice = nic;
+    setProperty("r52-requester", d->deviceID, 32);
+    setProperty("r52-mapper-id", getRegistryEntryID(), 64);
+    setProperty("r52-owner-id", fR52Owner->getRegistryEntryID(), 64);
+    setProperty("r52-device-entry-id", nic->getRegistryEntryID(), 64);
+    setProperty("r47-mmio-efr", c->startupEfr, 64);
+    setProperty("r47-efr-match", c->hardware.pciEfrSupported ?
+        (c->hardware.firmwareEfrPresent ? "yes" : "firmware-absent") : "not-reported");
+    // Identity and a complete domain snapshot precede copyMapperForDevice().
+    // Only first map activates this endpoint's DTE, after Lucy's reset.
     r44PublishMappings();
-    // Publication is the final step: from here every ordinary mapping can
-    // reach the prepared backend. First-map activation happens after Lucy's
-    // rtl812xInit reset, before it receives the first descriptor-ring IOVA.
-    nic->retain();
-    fNicDevice = nic;
-    nic->setProperty("iommu-parent", this);
+    if (!nic->setProperty("iommu-parent", this)) return false;
     setProperty("r44-parent", "set-before-driver-start");
     return true;
 }
 #pragma clang diagnostic pop
 
+bool org_example_AMDMapperProbe::r52ReleaseDomain() {
+    R52Domain *d = fR52Domain;
+    R44Controller *c = fR44Controller;
+    if (!d) return r44QuiesceMappings() && r44ReleaseMappings();
+    // Active roots are released only after the shared owner restored hardware.
+    if (c && c->configured && d->active) return false;
+    if (!r44QuiesceMappings() || !r44ReleaseMappings()) return false;
+    if (c) {
+        R52LockGuard guard(c->lock);
+        for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
+            if (c->domains[i] != d) continue;
+            c->domains[i] = nullptr; --c->domainCount;
+        }
+    }
+    if (d->tables) d->tables->release();
+    fR52Domain = nullptr; fR44Controller = nullptr;
+    IOFree(d, sizeof(*d));
+    return true;
+}
+
+
 bool org_example_AMDMapperProbe::r44Invalidate(
     bool invalidateDevice, UInt64 address, UInt64 bytes,
     bool newMapping, bool *skipped) {
-    // The mapper lock serializes PTE publication, invalidation and IOVA reuse.
-    // A map is usable only after the synchronization required by this IOMMU.
     if (skipped) *skipped = false;
     R44Controller *c = fR44Controller;
-    if (!c || !c->ready || c->command.failed) return false;
-    const bool full = !c->active || invalidateDevice || !bytes;
+    if (!c || !fR52Domain) return false;
+    R52LockGuard guard(c->lock);
+    return r52InvalidateLocked(invalidateDevice, address, bytes, newMapping, skipped);
+}
+
+bool org_example_AMDMapperProbe::r52InvalidateLocked(
+    bool invalidateDevice, UInt64 address, UInt64 bytes,
+    bool newMapping, bool *skipped) {
+    // Both the caller's mapper lock and shared controller lock are held.
+    // One queue cursor and CompletionWait sequence serve all device domains.
+    if (skipped) *skipped = false;
+    R44Controller *c = fR44Controller;
+    R52Domain *d = fR52Domain;
+    if (!c || !d || !c->ready || c->command.failed) return false;
+    const bool full = !d->active || invalidateDevice || !bytes;
     if (!full && (((address | bytes) & 4095ULL) ||
         address < r44mapper::kBase ||
         address - r44mapper::kBase >= r44mapper::kPages * 4096ULL ||
@@ -331,54 +460,67 @@ bool org_example_AMDMapperProbe::r44Invalidate(
     // With no non-present cache, a new mapping therefore needs no INV/CW.
     // First activation, explicit device flush and PM always retain their fence.
     if (newMapping && !full && !(c->hardware.capabilityHeader & kR51NpCache)) {
-        ++c->mapInvalidationSkipped;
+        ++d->mapInvalidationSkipped;
         if (skipped) *skipped = true;
         return true;
     }
-    if (!c->active || invalidateDevice) {
+    c->command.devid = d->deviceID;
+    c->command.domid = d->domainID;
+    c->command.rootPA = d->tablePA;
+    if (!d->active || invalidateDevice) {
         volatile UInt64 *dte = (volatile UInt64 *)c->devices->getBytesNoCopy();
-        dte[c->deviceID * 4 + 1] = kR44Domain;
-        dte[c->deviceID * 4] = (c->tablePA & M2B2_PTE_ADDR_MASK) |
+        dte[d->deviceID * 4 + 1] = d->domainID;
+        dte[d->deviceID * 4] = (d->tablePA & M2B2_PTE_ADDR_MASK) |
             ((UInt64)M2B2_PAGE_MODE_4_LEVEL << M2B2_DEV_ENTRY_MODE_SHIFT) |
             DTE_V | DTE_TV | DTE_IR | DTE_IW;
         OSSynchronizeIO();
-        if (!m2b2Submit(c->base, &c->command, "r44-activate-device", c->deviceID,
+        if (!m2b2Submit(c->base, &c->command, "r44-activate-device", d->deviceID,
                 ((UInt32)M2B2_CMD_INV_DEV_ENTRY << 28), 0, 0)) {
-            c->state = "failed-device-invalidation";
+            d->state = "failed-device-invalidation";
             return false;
         }
-        ++c->invDevCompleted;
-        c->lastInvDevSequence = c->command.completionSequence;
+        ++d->invDevCompleted;
+        d->lastInvDevSequence = c->command.completionSequence;
     }
     // First activation and power transitions still flush the complete domain
     // and PDE cache. Ordinary maps only edit leaves of the prebuilt IOVA tree.
     const UInt64 encoded = full ? m2b2InvAddress() : r50InvRangeAddress(address, bytes);
     const UInt32 d0 = 0;
-    const UInt32 d1 = kR44Domain | ((UInt32)M2B2_CMD_INV_IOMMU_PAGES << 28);
+    const UInt32 d1 = d->domainID | ((UInt32)M2B2_CMD_INV_IOMMU_PAGES << 28);
     const UInt32 d2 = (UInt32)encoded | (full ? M2B2_CMD_PDE_MASK : 0);
     const UInt32 d3 = (UInt32)(encoded >> 32);
     if (!m2b2Submit(c->base, &c->command, "r44-invalidate-pages", d0, d1, d2, d3)) {
-        c->state = "failed-page-invalidation";
+        d->state = "failed-page-invalidation";
         return false;
     }
-    ++c->invPagesCompleted;
-    c->lastInvPagesSequence = c->command.completionSequence;
-    if (full) ++c->invFullCompleted;
+    ++d->invPagesCompleted;
+    d->lastInvPagesSequence = c->command.completionSequence;
+    if (full) ++d->invFullCompleted;
     else {
-        ++c->invRangeCompleted;
-        c->invRangePages += bytes / 4096;
-        c->lastRangeAddress = address;
-        c->lastRangeBytes = bytes;
-        c->lastRangeCommand[0] = d0; c->lastRangeCommand[1] = d1;
-        c->lastRangeCommand[2] = d2; c->lastRangeCommand[3] = d3;
-        c->lastRangeSequence = c->command.completionSequence;
+        ++d->invRangeCompleted;
+        d->invRangePages += bytes / 4096;
+        d->lastRangeAddress = address;
+        d->lastRangeBytes = bytes;
+        d->lastRangeCommand[0] = d0; d->lastRangeCommand[1] = d1;
+        d->lastRangeCommand[2] = d2; d->lastRangeCommand[3] = d3;
+        d->lastRangeSequence = c->command.completionSequence;
     }
-    if (!c->active) {
-        c->active = true;
-        c->activeTime = mach_absolute_time();
-        c->state = "active";
+    if (!d->active) {
+        d->active = true;
+        d->activeTime = mach_absolute_time();
+        d->state = "active";
     }
     return true;
+}
+
+
+bool org_example_AMDMapperProbe::r52PowerSupported() const {
+    R44Controller *c = fR44Controller;
+    if (!c || !fR52Domain) return false;
+    R52LockGuard guard(c->lock);
+    // A per-NIC callback is not authority to suspend a shared IOMMU.
+    // Coordinated multi-device system PM remains a later hardware milestone.
+    return c->domainCount == 1;
 }
 
 // TODO(R47-PM-HARDWARE): validate the real suspend/resume sequence once this
@@ -387,10 +529,13 @@ bool org_example_AMDMapperProbe::r47SuspendAuto() {
     // The mapper lock is held and admission is closed. Lucy's PM gate has
     // already completed the network family's disable/clearRxTxRings path.
     R44Controller *c = fR44Controller;
-    if (!c || !c->ready || c->suspended || c->powerFailed) return false;
+    if (!c || !fR52Domain) return false;
+    R52LockGuard guard(c->lock);
+    if (c->domainCount != 1 || !c->ready || c->suspended || c->powerFailed)
+        return false;
     c->resumeRegistersRestored = false;
     c->sleepControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
-    if ((c->sleepControl & kR44Enabled) != kR44Enabled || !r44Invalidate())
+    if ((c->sleepControl & kR44Enabled) != kR44Enabled || !r52InvalidateLocked(false, 0, 0, false, nullptr))
         return c->powerFailure("failed-pm-suspend-fence");
     c->suspendSequence = c->command.completionSequence;
     if (!c->stopHardware())
@@ -410,7 +555,9 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
     // The PCI parent and Lucy's D0 transition are complete, but its normal
     // enable has not run. All tables, DMA objects and mapping records survive.
     R44Controller *c = fR44Controller;
-    if (!c || !c->suspended || c->powerFailed) return false;
+    if (!c || !fR52Domain) return false;
+    R52LockGuard guard(c->lock);
+    if (c->domainCount != 1 || !c->suspended || c->powerFailed) return false;
     if (c->hardware.pciEfrSupported &&
         mmioRead64(c->base, M21_OFF_EXT_FEAT) != c->startupEfr)
         return c->powerFailure("failed-pm-resume-identity");
@@ -464,22 +611,24 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
     c->ready = true;
     // Force the device-cache invalidation even though the DTE remains active
     // in retained memory. Do not overwrite the original startup timestamps.
-    if (!r44Invalidate(true))
+    if (!r52InvalidateLocked(true, 0, 0, false, nullptr))
         return c->powerFailure("failed-pm-resume-invalidation");
-    c->resumeDevSequence = c->lastInvDevSequence;
-    c->resumePagesSequence = c->lastInvPagesSequence;
+    c->resumeDevSequence = fR52Domain->lastInvDevSequence;
+    c->resumePagesSequence = fR52Domain->lastInvPagesSequence;
     c->resumeTime = mach_absolute_time();
     ++c->resumeCount;
     c->suspended = false;
-    c->state = c->active ? "active" : "ready-passthrough";
+    c->state = "ready-shared-controller";
     return true;
 }
 
 void org_example_AMDMapperProbe::r44PublishAuto() {
     R44Controller *c = fR44Controller;
-    if (!c) return;
-    // Called while the generic mapper lock is held, or before publication /
-    // after quiescing. The event producer owns TAIL; only advance consumed HEAD.
+    R52Domain *d = fR52Domain;
+    if (!c || !d) return;
+    R52LockGuard guard(c->lock);
+    // The per-device snapshot holds its mapper lock. The shared lock also
+    // serializes event HEAD consumption and queue counters across both NICs.
     if (c->configured && !c->suspended) {
         c->collectEvents();
         c->observedControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
@@ -487,9 +636,9 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     auto number = [this](const char *key, UInt64 value) {
         setProperty(key, (unsigned long long)value, 64);
     };
-    setProperty("r44-state", c->state ? c->state : "preparing");
+    setProperty("r44-state", d->state ? d->state : "preparing");
     setProperty("r44-controller-ready", c->ready ? "yes" : "no");
-    setProperty("r44-dte-active", c->active ? "yes" : "no");
+    setProperty("r44-dte-active", d->active && c->configured ? "yes" : "no");
     setProperty("r44-registers-restored", c->restored ? "yes" : "no");
     setProperty("r44-event-overflow", c->eventOverflow ? "yes" : "no");
     setProperty("r44-event-valid", c->eventInvalid ? "no" : "yes");
@@ -506,30 +655,33 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     number("r47-suspend-cw-sequence", c->suspendSequence);
     number("r47-resume-inv-dev-sequence", c->resumeDevSequence);
     number("r47-resume-inv-pages-sequence", c->resumePagesSequence);
-    number("r44-target-devid", c->deviceID);
-    number("r44-domain-id", kR44Domain);
-    number("r44-root-pa", c->tablePA);
-    number("r44-table-pa", c->tablePA);
+    setProperty("r52-command-counters-scope", "controller");
+    setProperty("r52-pm-support", c->domainCount > 1 ? "unsupported-shared" : "single-device");
+    number("r52-domain-cmd-completed", d->invDevCompleted + d->invPagesCompleted);
+    number("r44-target-devid", d->deviceID);
+    number("r44-domain-id", d->domainID);
+    number("r44-root-pa", d->tablePA);
+    number("r44-table-pa", d->tablePA);
     number("r44-table-bytes", kR44TablePages * M2B2_PAGE_SIZE);
     number("r44-device-table-pa", c->devicePA);
     number("r44-command-pa", c->commandPA);
     number("r44-event-pa", c->eventPA);
     number("r44-controller-ready-time", c->readyTime);
-    number("r44-dte-active-time", c->activeTime);
-    number("r44-inv-dev-completed", c->invDevCompleted);
-    number("r44-inv-pages-completed", c->invPagesCompleted);
+    number("r44-dte-active-time", d->activeTime);
+    number("r44-inv-dev-completed", d->invDevCompleted);
+    number("r44-inv-pages-completed", d->invPagesCompleted);
     number("r51-npcache", (c->hardware.capabilityHeader & kR51NpCache) ? 1 : 0);
-    number("r51-map-invalidation-skipped", c->mapInvalidationSkipped);
-    number("r50-inv-full-completed", c->invFullCompleted);
-    number("r50-inv-range-completed", c->invRangeCompleted);
-    number("r50-inv-range-pages", c->invRangePages);
-    number("r50-last-range-address", c->lastRangeAddress);
-    number("r50-last-range-bytes", c->lastRangeBytes);
-    number("r50-last-range-sequence", c->lastRangeSequence);
+    number("r51-map-invalidation-skipped", d->mapInvalidationSkipped);
+    number("r50-inv-full-completed", d->invFullCompleted);
+    number("r50-inv-range-completed", d->invRangeCompleted);
+    number("r50-inv-range-pages", d->invRangePages);
+    number("r50-last-range-address", d->lastRangeAddress);
+    number("r50-last-range-bytes", d->lastRangeBytes);
+    number("r50-last-range-sequence", d->lastRangeSequence);
     for (UInt32 i = 0; i < 4; ++i) {
         char key[32];
         snprintf(key, sizeof(key), "r50-last-range-command%u", i);
-        number(key, c->lastRangeCommand[i]);
+        number(key, d->lastRangeCommand[i]);
     }
     number("r44-cmd-submits", c->command.submits);
     number("r44-cmd-completed", c->command.completed);
@@ -537,45 +689,134 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     number("r44-cmd-post-wrap", c->command.postWrapCompleted);
     number("r44-cmd-completion-sequence", c->command.completionSequence);
     number("r44-event-entries", c->eventEntries);
-    number("r44-target-faults", c->targetFaults);
+    number("r44-target-faults", d->targetFaults);
     for (UInt32 i = 0; i < 4; ++i) {
         char key[32];
         snprintf(key, sizeof(key), "r44-last-event%u", i);
-        number(key, c->lastEvent[i]);
+        number(key, d->lastEvent[i]);
     }
     // A snapshot taken while suspended must never probe powered-down MMIO.
     number("r44-control", c->observedControl);
     if (c->devices) {
         const volatile UInt64 *dte =
             (volatile UInt64 *)c->devices->getBytesNoCopy();
-        number("r44-dte0", dte[c->deviceID * 4]);
-        number("r44-dte1", dte[c->deviceID * 4 + 1]);
+        number("r44-dte0", dte[d->deviceID * 4]);
+        number("r44-dte1", dte[d->deviceID * 4 + 1]);
     }
 }
 
-bool org_example_AMDMapperProbe::r44StopAuto() {
+
+void org_example_AMDMapperProbe::r52PublishDomains() {
+    if (fR52Owner || !fR52AttachLock) return;
+    R52LockGuard attachment(fR52AttachLock);
+    OSArray *domains = OSArray::withCapacity(kR52MaxDomains);
+    if (!domains) return;
+    for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
+        auto *mapper = fR52Mappers[i];
+        if (!mapper || !mapper->fR52Domain) continue;
+        OSDictionary *properties = nullptr;
+        mapper->r44PublishMappings(&properties);
+        if (!properties) continue;
+        domains->setObject(properties);
+        // Retain the historical single-device inspection surface on the owner.
+        // R52 tools explicitly consume every dictionary in r52-domains.
+        if (domains->getCount() == 1) {
+            OSCollectionIterator *keys = OSCollectionIterator::withCollection(properties);
+            if (keys) {
+                while (OSObject *object = keys->getNextObject()) {
+                    OSString *key = OSDynamicCast(OSString, object);
+                    if (!key) continue;
+                    const char *name = key->getCStringNoCopy();
+                    if (!strncmp(name, "r44-", 4) || !strncmp(name, "r47-", 4) ||
+                        !strncmp(name, "r48-", 4) || !strncmp(name, "r50-", 4) ||
+                        !strncmp(name, "r51-", 4))
+                        setProperty(name, properties->getObject(name));
+                }
+                keys->release();
+            }
+        }
+        properties->release();
+    }
+    setProperty("r52-domains", domains);
+    setProperty("r52-domain-count", domains->getCount(), 32);
+    setProperty("r52-snapshot-sequence", ++fR52SnapshotSequence, 64);
+    setProperty("r52-snapshot-time", mach_absolute_time(), 64);
+    domains->release();
     R44Controller *c = fR44Controller;
-    if (!c) return r44QuiesceMappings() && r44ReleaseMappings();
-    if (!r44QuiesceMappings()) {
-        c->state = "retained-live-mappings";
+    if (!c) return;
+    R52LockGuard guard(c->lock);
+    if (c->configured && !c->suspended) c->collectEvents();
+    auto number = [this](const char *key, UInt64 value) {
+        setProperty(key, (unsigned long long)value, 64);
+    };
+    number("r52-controller-device-table-pa", c->devicePA);
+    number("r52-controller-command-pa", c->commandPA);
+    number("r52-controller-event-pa", c->eventPA);
+    number("r52-controller-cmd-submits", c->command.submits);
+    number("r52-controller-cmd-completed", c->command.completed);
+    number("r52-controller-cmd-completion-sequence", c->command.completionSequence);
+    number("r52-controller-cmd-wraps", c->command.wraps);
+    number("r52-controller-event-entries", c->eventEntries);
+    number("r52-controller-target-faults", c->targetFaults);
+    setProperty("r52-controller-ready", c->ready ? "yes" : "no");
+    setProperty("r52-controller-command-failed", c->command.failed ? "yes" : "no");
+    setProperty("r52-controller-event-overflow", c->eventOverflow ? "yes" : "no");
+    setProperty("r52-controller-event-valid", c->eventInvalid ? "no" : "yes");
+}
+
+bool org_example_AMDMapperProbe::r44StopAuto() {
+    if (fR52Owner) {
+        // Device stop closes only that domain. Its root and mapper remain owned
+        // by the controller service until all domains can be stopped together.
+        // In particular, interface disable/enable never stops this controller.
+        if (!r44QuiesceMappings()) {
+            setProperty("r52-device-stop", "retained-live-mappings");
+            return false;
+        }
         r44PublishMappings();
-        if (!c->pinned) { c->pinned = true; retain(); }
-        return false;
+        setProperty("r52-device-stop", "quiesced");
+        return true;
     }
-    r44PublishMappings();
-    if (!c->restore()) {
-        c->state = "retained-hardware-stop-failed";
-        r44PublishAuto();
-        if (!c->pinned) { c->pinned = true; retain(); }
-        return false;
+    R44Controller *c = fR44Controller;
+    if (!fR52AttachLock) return !c;
+    {
+        R52LockGuard attachment(fR52AttachLock);
+        fR52Stopping = true;
+        for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
+            auto *mapper = fR52Mappers[i];
+            if (!mapper || mapper->r44QuiesceMappings()) continue;
+            setProperty("r44-state", "retained-live-mappings");
+            if (c && !c->pinned) { c->pinned = true; retain(); }
+            return false;
+        }
+        if (c) {
+            R52LockGuard guard(c->lock);
+            if (!c->restore()) {
+                c->state = "retained-hardware-stop-failed";
+                setProperty("r44-state", c->state);
+                if (!c->pinned) { c->pinned = true; retain(); }
+                return false;
+            }
+        }
+        for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
+            auto *mapper = fR52Mappers[i];
+            if (!mapper) continue;
+            mapper->stop(this);
+            mapper->r52ReleaseDomain();
+            mapper->fR52Owner = nullptr;
+            mapper->detach(this);
+            mapper->release();
+            fR52Mappers[i] = nullptr;
+        }
+        if (c) {
+            const bool pinned = c->pinned;
+            c->releaseBuffers();
+            fR44Controller = nullptr;
+            IOFree(c, sizeof(*c));
+            if (pinned) release();
+        }
     }
-    c->state = "stopped";
-    r44PublishAuto();
-    if (!r44ReleaseMappings()) return false;
-    const bool pinned = c->pinned;
-    c->releaseBuffers();
-    fR44Controller = nullptr;
-    IOFree(c, sizeof(*c));
-    if (pinned) release();
+    IOLockFree(fR52AttachLock); fR52AttachLock = nullptr;
+    setProperty("r44-state", "stopped");
     return true;
 }

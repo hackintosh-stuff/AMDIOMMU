@@ -343,3 +343,24 @@ IOService *org_example_AMDMapperProbe::findNicServiceOnly() {
     it->release();
     return result;
 }
+
+
+// R52 auto mode enumerates endpoints, never a first match or a saved NIC path.
+// The first-publish callback uses the same per-requester attach routine.
+void org_example_AMDMapperProbe::r52AttachExistingDevices() {
+    OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
+    if (!matching) return;
+    OSIterator *it = IOService::getMatchingServices(matching);
+    matching->release();
+    if (!it) return;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    while (OSObject *object = it->getNextObject()) {
+        IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, object);
+        if (!pci || pci->configRead16(kIOPCIConfigVendorID) != 0x10ec ||
+            pci->configRead16(kIOPCIConfigDeviceID) != 0x8127) continue;
+        r44AttachAuto(pci);
+    }
+#pragma clang diagnostic pop
+    it->release();
+}

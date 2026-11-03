@@ -101,6 +101,10 @@ IOReturn org_example_AMDMapperProbe::r47PowerTransition(UInt32 operation) {
     // Lock order is Lucy command gate -> mapper lock. The backend never
     // calls into the driver. PTE edits, CWs, snapshots and PM share this lock.
     IOLockLock(d->lock);
+    if (!r52PowerSupported()) {
+        IOLockUnlock(d->lock);
+        return kIOReturnUnsupported;
+    }
     if ((operation == 1 && !d->accepting) ||
         (operation == 2 && d->accepting)) {
         IOLockUnlock(d->lock);
@@ -357,9 +361,14 @@ bool org_example_AMDMapperProbe::r44Translate(uint64_t address, uint64_t *physic
     return present;
 }
 
-void org_example_AMDMapperProbe::r44PublishMappings() {
+void org_example_AMDMapperProbe::r44PublishMappings(OSDictionary **copy) {
+    if (copy) *copy = nullptr;
     auto *d = fR44Mapper;
-    if (!d) { r44PublishAuto(); return; }
+    if (!d) {
+        r44PublishAuto();
+        if (copy) *copy = dictionaryWithProperties();
+        return;
+    }
     IOLockLock(d->lock);
     auto &s = d->snapshot;
     s.livePages = d->allocator.livePages; s.peakPages = d->allocator.peakPages;
@@ -404,8 +413,9 @@ void org_example_AMDMapperProbe::r44PublishMappings() {
     boundary("r47-resume-pt-raw", d->resumePT);
     setProperty("r47-pm-snapshots-valid",
         d->suspendLive && d->suspendPT && d->resumeLive && d->resumePT ? "yes" : "no");
-    // The same lock serializes the shared hardware command producer and the
-    // event/command snapshot; platform export never takes this lock again.
+    // Keep this domain's raw state, PTE bytes and hardware counters in one
+    // snapshot. Hardware export takes only the controller lock after this lock.
     r44PublishAuto();
+    if (copy) *copy = dictionaryWithProperties();
     IOLockUnlock(d->lock);
 }
