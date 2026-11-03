@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round40 install, with exact disk checks and a recovery copy under 1 GiB.
+"""Round41 install, with exact disk checks and a recovery copy under 1 GiB.
 
 Run from the project on the Mac. --check-only performs the same read-only
 prechecks and prints the plan. Neither path reboots or changes network settings.
@@ -17,11 +17,11 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 BATCH = 512
-# Accepted R39 result successor, including address wait/rebind after NIC reset.
-BASE_COMMIT = 'db0d411e6e47d95a8e2209753debf88a4ff78595'
+# Recorded R40 hardware failure; retain fixed DMA and repair entry IRQ handoff.
+BASE_COMMIT = '223ac39a05cbcc74d91bce2f98bfbd186ac315a7'
 UPSTREAM_COMMIT = '639144d1f284a9fee222a518691b01494f5e265d'
-DRIVER_VERSION = '1.1.225'
-PROBE_VERSION = '0.49.0'
+DRIVER_VERSION = '1.1.226'
+PROBE_VERSION = '0.50.0'
 EFI_UUID = '7A8D47A3-44C8-47E7-B488-A4C24DB5AC82'
 EFI_VOLUME_UUID = '7029D646-AA46-3D16-950E-6C6AF4AB44B3'
 EFI_SIZE = 272629760
@@ -119,10 +119,10 @@ def bundle_identity(bundle, version, symbol):
 
 
 def source_identity():
-    """Deploy a committed successor of the accepted source, as requested."""
+    """Deploy a committed successor of the recorded source baseline."""
     commit = output('git', 'rev-parse', 'HEAD').strip()
     if not re.fullmatch(r'[0-9a-f]{40}', commit) or commit == BASE_COMMIT:
-        raise ValueError('commit the applied and software-tested Round40 source before deployment')
+        raise ValueError('commit the applied and software-tested Round41 source before deployment')
     subprocess.run(['git', 'merge-base', '--is-ancestor', BASE_COMMIT, commit],
                    cwd=str(ROOT), check=True)
     dirty = output('git', 'status', '--porcelain=v1', '--untracked-files=normal',
@@ -136,7 +136,7 @@ def source_identity():
 
 def daemon_plist(out, peer, port):
     return {
-        'Label': 'org.example.round40load',
+        'Label': 'org.example.round41load',
         'ProgramArguments': ['/bin/sh', str(HERE / 'boot-load.sh'),
                              out.relative_to(ROOT).as_posix()],
         'WorkingDirectory': str(ROOT),
@@ -153,7 +153,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--efi', required=True, help='already mounted exact target EFI')
     parser.add_argument('--token', required=True, type=lambda value: int(value, 0))
-    parser.add_argument('--out', default='runs/r40')
+    parser.add_argument('--out', default='runs/r41')
     parser.add_argument('--backup', help='project-relative recovery directory')
     parser.add_argument('--peer', default='192.168.50.122')
     parser.add_argument('--port', type=int, default=9110)
@@ -164,7 +164,7 @@ def main():
     source_ref = source_identity()
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     out = project_path(args.out)
-    backup = project_path(args.backup or ('runs/recovery-r40-' + stamp))
+    backup = project_path(args.backup or ('runs/recovery-r41-' + stamp))
     if backup.exists() or backup == out:
         raise ValueError('recovery directory must be new and separate from load output')
     if any((out / name).exists() for name in ('load.txt', 'client.log')):
@@ -208,7 +208,7 @@ def main():
     tokenarg = 'amdiommu=pgt.batch%d.t0x%08x.std.alltx.rxstd.session' % (BATCH, args.token)
     bootargs = ' '.join([arg for arg in current_args.split()
                          if not arg.startswith('amdiommu=')] + [tokenarg])
-    plan = {'round': 40, 'driver_mode': 2, 'scope': 'all-DMA-IOVA-active-identity-zero-native-RX1024-batch16',
+    plan = {'round': 41, 'driver_mode': 2, 'scope': 'entry-IRQ-rearm-all-DMA-IOVA-native-RX1024-batch16',
             'kernel_batch': BATCH, 'application_requests': 8192, 'rx_slots': 1024,
             'rx_lifetime': 'driver-owned-streaming', 'rx_batch_max': 16, 'rx_replacement': 'normal-mbuf',
             'physical_mapping': 'owned-sparse-4k', 'fixed_dma_iova': True, 'active_identity_pages': 0, 'rx_source': 'lucy-normal-ring', 'experimental_pool': False, 'experimental_spares': 0,
@@ -261,13 +261,13 @@ def main():
     (out / 'deployment.json').write_text(json.dumps(plan, indent=2) + '\n', encoding='utf-8')
     (out / 'source-ref.json').write_text(json.dumps(source_ref, indent=2) + '\n', encoding='utf-8')
     daemon = daemon_plist(out, args.peer, args.port)
-    generated = out / 'org.example.round40load.plist'
+    generated = out / 'org.example.round41load.plist'
     generated.write_bytes(plistlib.dumps(daemon, sort_keys=False))
     run(['plutil', '-lint', generated])
     for job in jobs:
         subprocess.run(['sudo', 'launchctl', 'bootout', 'system', str(job)], check=False)
         run(['sudo', 'rm', '-f', job])
-    target = Path('/Library/LaunchDaemons/org.example.round40load.plist')
+    target = Path('/Library/LaunchDaemons/org.example.round41load.plist')
     run(['sudo', 'cp', generated, target])
     run(['sudo', 'chown', 'root:wheel', target])
     run(['sudo', 'chmod', '644', target])

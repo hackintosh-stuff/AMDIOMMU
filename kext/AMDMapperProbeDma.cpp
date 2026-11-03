@@ -99,8 +99,8 @@ bool org_example_AMDMapperProbe::m2b2ReadTailPtr(volatile UInt8 *bar,
 //   集合之前就被丢掉了。集合随后"证明"fault 不在设备集合内，而它从来
 //   就不可能在里面。
 //
-//   现在：**所有非零地址一律记录**，无论它在哪里。能不能读那块内存由
-//   readVerdict() 单独判定，结果作为元数据保存。记录地址从不要求读它。
+//   有效描述符中的所有非零地址一律记录，无论它在哪里。已注册 fixed TX
+//   环重建留下的空槽除外。能不能读内存由 readVerdict() 独立判定。
 //
 // 【第八轮：生命周期真的接进来了】
 //   第七轮的版本收下了 tailCum / cloCum 两个参数，然后 `(void)` 掉，
@@ -137,6 +137,11 @@ void org_example_AMDMapperProbe::m2b2CollectTxSegments(const UInt8 *ring,
             const UInt64 addr = amdobs::rd64(d + 8);
             if (addr == 0) continue;          // 从未编程：不是 DMA 目标
             const UInt32 opts1 = amdobs::rd32(d);
+            // The fixed-object entry rebuild clears opts1 but retains the
+            // old address. Such an empty slot is not a current DMA span.
+            if (fR31Session && fM22b2Dma.txRingBasis ==
+                    amdobs::RB_REGISTERED_FIXED_DMA_OBJECT &&
+                !(opts1 & ~amdobs::TX_DESC_RINGEND)) continue;
             UInt32 len = opts1 & amdobs::TX_DESC_LENMASK;
             const bool tso =
                 (opts1 & (amdobs::TX_DESC_LARGESEND | amdobs::TX_DESC_GSO4 |
@@ -904,14 +909,14 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
     // 仍存活、以及这个 PA 映射到它。读错 PA 会 panic，所以那个理由少
     // 了一步。
     //
-    // 探针看不到驱动的 IOBufferMemoryDescriptor，所以"就是那个对象"在
-    // 这里无法直接证明。能证明的是**内容与驱动构出来的环一致**：
+    // 没有注册对象的普通路径只能根据内容与驱动构造的环是否一致判断：
     //   - RX 环的最后一个描述符带 RingEnd（驱动在 setup 时写死，
     //     之后从不清除），这是结构指纹；
     //   - TX 环的地址非零、长度字段在 16 位内或带 TSO 位。
     // 一页随机内存不会满足"RingEnd 恰好在最后一槽"。这是真能失败的检查。
     //
-    // 指纹不通过时：**地址照旧保留**，只是不信任其内容并停止解引用。
+    // 普通路径的指纹不通过时，保留地址但停止扫描。Native fixed TX 已由
+    // 注册对象、原 PA 和活映射确认身份，重建后的空环不依赖历史内容指纹。
     {
         fM22b2Dma.txRingBasis = amdobs::RB_NONE;
         fM22b2Dma.rxRingBasis = amdobs::RB_NONE;
@@ -941,27 +946,28 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
                 // 指纹：内容是否真的像驱动构出来的 TX 环。
                 const amdobs::TxRingFingerprint fp =
                     amdobs::txRingFingerprint(rb, 1024);
+                const bool registeredTx = fR31Session && txBacking;
                 fM22b2Dma.txRingDecoded = fp.decoded;
                 fM22b2Dma.txRingFpOk = fp.ok;
-                fM22b2Dma.txRingBasis = fp.ok ? amdobs::RB_FINGERPRINT
-                                              : amdobs::RB_REGISTER_AND_MAP;
+                fM22b2Dma.txRingBasis = registeredTx
+                    ? amdobs::RB_REGISTERED_FIXED_DMA_OBJECT
+                    : (fp.ok ? amdobs::RB_FINGERPRINT : amdobs::RB_REGISTER_AND_MAP);
                 setProperty("m2-b2-dma-tx-ring-basis",
                             amdobs::ringBasisName(fM22b2Dma.txRingBasis));
                 setHexProperty(this, "m2-b2-dma-tx-ring-decoded",
                                (UInt64)fp.decoded);
                 setHexProperty(this, "m2-b2-dma-tx-ring-badlen",
                                (UInt64)fp.badLen);
-                if (!fp.ok) {
-                    // 指纹不通过：不把这块内存的内容当成环。
-                    setProperty("m2-b2-dma-tx-ring-fp", "FAIL-content-mismatch");
+                setProperty("m2-b2-dma-tx-ring-fp",
+                            fp.ok ? "ok" : "FAIL-content-mismatch");
+                if (!fp.ok && !registeredTx) {
+                    // A failed fingerprint still blocks an unregistered ring.
                     fM22b2Dma.unscanned += 1024;
                     rm->release();
                     ringMd->release();
                     fM22b2Dma.haveTxRing = false;
                     goto afterTxRing;
                 }
-                setProperty("m2-b2-dma-tx-ring-fp", "ok");
-
                 const amdobs::TxRingStats ts = amdobs::scanTxRing(rb, 1024);
                 fM22b2Dma.txSlots = ts.slots;
                 fM22b2Dma.txOwned = ts.owned;

@@ -1,5 +1,36 @@
 # AMDIOMMU — authoritative source repository
 
+## Current Round41 / restore RX interrupt handling after fixed DMA entry
+
+Base: `223ac39a05cbcc74d91bce2f98bfbd186ac315a7`, the recorded Round40 failure
+successor (tree `971608bdda97ffd0bcf9af0cbfb265c061567431`). The deployed
+Round40 implementation is `b64c87cd453e9bd67015b3d8054c4a0eb57bc42d`.
+Its original capture was independently reanalyzed: 6 checks pass and 8 fail,
+with the same JSON result. Raw RX descriptors prove 104 hardware completions
+that the software never consumed after entry.
+
+Candidate: Lucy **1.1.226** / Probe **0.50.0**. Keep all three fixed DMA IOVAs,
+TX native7/std5/domain4, native RX4, PhysicalLayout1, StopRecord1 and FixedDMA1.
+Repair the existing entry handoff by masking/acknowledging the NIC while its
+system event source is still disabled, then enabling that source and using
+the original link-up/HwConfig path to restore the interrupt mask and RX/TX.
+Record the small pending/masked/armed/expected IRQ diagnostics with the existing
+capture; no new binary ABI or periodic RX recovery path is needed.
+
+Use the registered fixed-object identity when observing its TX ring. A normal
+entry reset clears descriptor control words while leaving old address fields,
+so the old used-ring fingerprint is not the authority for this already-owned
+allocation. Keep its actual fingerprint counters and scan the registered ring.
+
+Complete the same normal workload and full Round40 goal: 4096 requests,
+125-second idle, another 4096, all RX slots taken over, active identity=0,
+then one local stop and three ordinary probes after physical recovery.
+The same 14 checks remain; there are no new test files or methods. Use the
+fixed checkout/upstream directory, `--tx 21 --rx 34`, `--check-r41`, `runs/r41`,
+`org.example.round41load` and token `0x41c0de41`.
+Host candidate validation, real Mac compilation and hardware acceptance must
+be reported separately; the Round41 hardware result is still pending.
+
 ## Round40 (attempt failed) / fixed DMA descriptors via standard IOVA
 
 Base: `db0d411e6e47d95a8e2209753debf88a4ff78595`, the accepted Round39
@@ -37,33 +68,32 @@ behavior for startup probes because entry also resets the link. Keep the
 same 14 checks and existing fixture methods; no additional failure matrix.
 Use the same fixed checkout and upstream directory, `--tx 21 --rx 34`,
 `--check-r40`, `runs/r40`, `org.example.round40load`, token `0x40c0de40`.
-**Round40 hardware attempt FAILED; the round is not accepted.** One planned
-boot, zero valid measurements. The Mac SDK build, EFI deployment, entry
-transition and exit path all completed as designed, and the three fixed
-objects are provably correct: TX ring 0x2e25e000/32768, RX ring
-0x2e266000/16384 and tally 0x388e52000/192 were mapped to 0x1000100000,
-0x1000110000 and 0x1000120000 with every PTE pointing at the original PA and
-carrying IR|IW, the six fixed map/unmap commands completed with
-expected == observed, and the NIC registers read back PA before entry, IOVA
-after activation and PA after exit.
+**Round40 hardware attempt FAILED: 6 checks passed, 8 failed.** One planned
+boot, zero valid measurements. The Mac build and fixed-object mapping/readback
+steps completed. TX ring 0x2e25e000/32768, RX ring 0x2e266000/16384 and tally
+0x388e52000/192 map to their reserved IOVAs; all six map/unmap INV/CW records
+and PA -> IOVA -> PA register readbacks agree.
 
-Business traffic nevertheless stopped completely after the entry: the client
-sent 80 frames and received none, the peer received zero business packets and
-zero window probes, native RX recorded maps=1024 with posted=0 and
-completed=0, so the bootstrap was never retired and active identity never
-reached zero. The 20 pre-entry probes and the 3 post-exit probes succeeded, so
-only the interval with the fixed IOVA entry was dead. Interface counters moved
-by +117 out packets and +7 in packets, and the IOMMU reported no device page
-faults. The exit path, which runs the same ring rebuild with translation off,
-restored ordinary traffic, so the leading hypothesis is that the entry's NIC
-reset under active translation does not re-arm the MAC's RX/TX descriptor
-processing; the next step is to sample RCR/IMR0 and the rxpost baseline right
-after activation before changing any ABI.
+Application traffic failed: 80 successful UDP send calls, zero replies and no
+business/window packets at the peer; the client eventually reported errno 65.
+Twenty pre-entry and three post-exit probes succeeded. Native RX posted,
+completed and replaced stayed zero, so bootstrap retirement never occurred.
 
-Nine of the fourteen checks failed (business integrity, session phase 2, local
-stop record, TX totals, retained mappings, ordinary traffic, active page table,
-and both RX lifecycle checks). The machine was disarmed and ordinary traffic
-verified afterwards; the implementation commit is kept for diagnosis.
+Independent raw inspection narrows this further: the active-window RX baseline
+at 80.223163644 s contains 104 completed hardware descriptors in slots 0..103,
+while the driver is still at slot 0 and all 71 rearm records predate entry.
+The NIC did use the fixed IOVA RX ring; the software receive path did not
+consume its completions. There are 116 completed standard TX mappings; the
+independent TX timer can reap these without proving NIC IRQ recovery. Most of
+the retained TX frames are 42 bytes, consistent with neighbor discovery retry,
+but their Ethernet headers were not retained.
+
+The focused next step is the entry IRQ handoff. R40 left the system event
+source disabled while HwConfig enabled the device interrupt mask and the PHY
+came up, then enabled the source without first masking and acknowledging the
+pending device status. A lost/pending MSI is an inference from this order and
+the raw RX evidence, not a directly captured ISR trace. Ordinary physical
+traffic recovered on exit, and the system was disarmed after the attempt.
 
 Failure evidence is outside this source repository:
 [Round40 failure report](<../../docs/m2-3u-round40-result.md>) and

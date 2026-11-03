@@ -87,6 +87,7 @@ struct RTL8125::R34RxState {
     IOAddressRange fixedRanges[r40fixed::kCount];
     bool fixedBound[r40fixed::kCount], fixedWired[r40fixed::kCount];
     bool fixedMapped[r40fixed::kCount], entryRebuilding;
+    UInt32 irqPending, irqMasked, irqArmed, irqExpected;
 };
 
 bool RTL8125::r34RxBinding(UInt32 op, UInt32 slot,
@@ -509,6 +510,12 @@ IOReturn RTL8125::r40FixedActivate()
     // PHY negotiation needs no network callback. Keep the prepared mappings
     // paused until link is up, so a link-down IRQ cannot clear this new ring.
     if (p->hardwarePaused) {
+        // HwConfig enabled the NIC mask while the MSI event source was still
+        // disabled. A pending link event must be acknowledged before arming
+        // that source; the normal link-up HwConfig below restores the mask.
+        p->irqPending = RTL_R32(tp, ISR0_8125);
+        rtl8125_irq_mask_and_ack(tp);
+        p->irqMasked = RTL_R32(tp, IMR0_8125);
         __atomic_store_n(&p->hardwarePaused, false, __ATOMIC_RELEASE);
         interruptSource->enable();
     }
@@ -521,6 +528,8 @@ IOReturn RTL8125::r40FixedActivate()
         f.objects[i].registerActive = r40FixedRegister(i);
         if (f.objects[i].registerActive != f.objects[i].iova) return kIOReturnIOError;
     }
+    p->irqArmed = RTL_R32(tp, IMR0_8125);
+    p->irqExpected = intrMask;
     f.tActive = mach_absolute_time();
     return r40FixedBinding(r40fixed::kEntered, 0, nullptr, f.tActive)
         ? kIOReturnSuccess : kIOReturnIOError;
@@ -918,6 +927,10 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
     if (raw) { setProperty("rtl812x-r39-rx-stop-raw", raw); raw->release(); }
     raw = OSData::withBytes(&p->fixed, sizeof(p->fixed));
     if (raw) { setProperty("rtl812x-r40-fixed-dma-raw", raw); raw->release(); }
+    setProperty("rtl812x-r41-irq-pending", p->irqPending, 32);
+    setProperty("rtl812x-r41-irq-masked", p->irqMasked, 32);
+    setProperty("rtl812x-r41-irq-armed", p->irqArmed, 32);
+    setProperty("rtl812x-r41-irq-expected", p->irqExpected, 32);
     setProperty("rtl812x-r34-rx-mode", "native-ring-batch16");
     setProperty("rtl812x-r34-rx-state", s.state, 32);
     setProperty("rtl812x-r34-rx-maps", s.maps, 32);

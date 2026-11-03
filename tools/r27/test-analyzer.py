@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused Round40 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round41 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
@@ -8,6 +8,7 @@ including remapping, batch16, bootstrap retirement and local NIC stop without pe
 Final uncompleted OWN records are explicitly stop-retired, never counted as DMA completions.
 The same fixture maps the three fixed DMA objects through their actual headers,
 with active IOVA readbacks, no active identity leaves and physical restart readbacks.
+Entry IRQ readbacks accompany the existing window result without a new check.
 Rejection cases cover missing restoration and corrupted RX command evidence.
 """
 import importlib.util
@@ -646,6 +647,10 @@ class AnalyzerTests(unittest.TestCase):
             f'"rtl812x-r38-rx-last-first-iova-time" = {session_time(2222)}\n'
             '"rtl812x-r38-rx-bootstrap-retired" = 1\n'
             f'"rtl812x-r38-rx-bootstrap-retire-time" = {session_time(2243)}\n'
+            '"rtl812x-r41-irq-pending" = 1\n'
+            '"rtl812x-r41-irq-masked" = 0\n'
+            '"rtl812x-r41-irq-armed" = 32821\n'
+            '"rtl812x-r41-irq-expected" = 32821\n'
             f'"rtl812x-r35-rx-resume-time" = {session_time(9035)}\n')
 
     def setUp(self):
@@ -671,6 +676,9 @@ class AnalyzerTests(unittest.TestCase):
         report = self.expect(True)
         self.assertEqual(len(report['checks']), 14)
         by_id = {c['id']: c.get('detail') for c in report['checks']}
+        self.assertEqual(by_id['same-domain-window-enter-and-exit-order']['entryIRQ'],
+                         {'pending': 1, 'masked': 0, 'armed': 32821, 'expected': 32821,
+                          'maskedBeforeEnable': True, 'expectedMaskRestored': True})
         lifecycle = by_id[SESSION_CHECK]
         self.assertEqual((lifecycle['mode'], lifecycle['activeObservations'],
                           lifecycle['domainInstalls']), ('service-owned', 2, 1))

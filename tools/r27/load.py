@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Round40 device domain: 4096 requests, 125 s idle, another 4096, explicit stop.
-Wait for fixed/RX IOVA mappings, then drive normal replacement and local stop.
+"""Round41 device domain: 4096 requests, 125 s idle, another 4096, explicit stop.
+Wait for fixed/RX IOVA and entry IRQ handoff, then drive normal RX and local stop.
 Both phases run after setup worker exit in the same service-owned domain.
 Only an active all-standard domain permits the batch; never retransmit requests.
 """
@@ -353,7 +353,7 @@ def ord_probe(s, peer, seq, emit, tag):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('out', nargs='?', default='runs/r40')
+    ap.add_argument('out', nargs='?', default='runs/r41')
     ap.add_argument('--iface', default='en2')
     ap.add_argument('--peer', default='192.168.50.122')
     ap.add_argument('--port', type=int, default=9110)
@@ -368,7 +368,7 @@ def main():
     if int((out / 'batch.txt').read_text().strip()) != 512:
         raise ValueError('round27 keeps the kernel declaration batch512')
     if int((out / 'requests.txt').read_text().strip()) != len(REQUESTS):
-        raise ValueError('round40 requires 8192 application requests')
+        raise ValueError('round41 requires 8192 application requests')
     payload(token, 1)
     with (out / 'load.txt').open('w') as f:
         def log(line):

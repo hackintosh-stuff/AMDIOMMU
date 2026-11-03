@@ -82,6 +82,7 @@ physical DMA spans for sparse4K bootstrap. Round39 stops NIC DMA locally,
 retires the remaining RX OWN entries and resumes physical traffic without
 peer drain packets. Round40 maps the three fixed DMA objects through standard
 MD/command pairs and removes their bootstrap identity aliases after takeover.
+Round41 masks/acks pending NIC status before rearming the entry MSI source.
 Native RX ABI4 keeps its existing sizes. Select --tx 21 --rx 34.
 
 Usage:
@@ -2551,7 +2552,7 @@ def main():
         cpp_text = RX['pause_entries'](cpp_text)
     write(cpp, cpp_text)
     print("patched %s" % cpp)
-    rx_label = ('native RX batch16 / fixed DMA IOVA / local stop (ABI4)' if RX_SELECT == '34'
+    rx_label = ('native RX batch16 / fixed DMA IOVA / entry IRQ rearm / local stop (ABI4)' if RX_SELECT == '34'
                 else 'round-%s RX pool' % RX_SELECT)
     print("applied observation v2, RX post set, %s and round-%s explicit TX mapping"
           % (rx_label, TX_SELECT))

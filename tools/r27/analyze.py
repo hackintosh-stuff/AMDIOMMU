@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round40: map the existing TX ring, RX ring and tally buffer through IOVA.
+"""Round41: restore receive progress after fixed-DMA entry IRQ handoff.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,7 +29,7 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round40-fixed-DMA-IOVA; zero-active-identity; local-NIC-stop; no-peer-drain-tail; owned-sparse-4k; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
+SCOPE = 'round41-fixed-DMA-entry-IRQ; zero-active-identity; local-NIC-stop; no-peer-drain-tail; owned-sparse-4k; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
@@ -824,7 +824,14 @@ def check(cap):
             for r in rows:
                 A.need(enter[-1] <= r.get('tOwn', r.get('tBegin', 0)) <= r['tFree'] <= leave[3],
                        'retained generation outside same window')
-        return {'entry': enter, 'exit': leave, 'domain': dh['domid'], 'device': dh['devid']}
+        # These readbacks diagnose the entry handoff; the ordinary traffic and
+        # native RX checks still establish whether receive processing works.
+        irq = {name: driver_property('rtl812x-r41-irq-' + name, True)
+               for name in ('pending', 'masked', 'armed', 'expected')}
+        irq['maskedBeforeEnable'] = irq['masked'] == 0
+        irq['expectedMaskRestored'] = irq['armed'] == irq['expected'] > 0
+        return {'entry': enter, 'exit': leave, 'domain': dh['domid'], 'device': dh['devid'],
+                'entryIRQ': irq}
     run('same-domain-window-enter-and-exit-order', window)
 
     def ordinary():
