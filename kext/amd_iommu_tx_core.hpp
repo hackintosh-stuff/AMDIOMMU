@@ -1,62 +1,82 @@
-// Round16 bounded single-device TX domain. No allocation or hardware waits here.
-//
-// ROUND 23: THE WINDOW IS SPLIT INTO FIXED SLOTS.
-// ----------------------------------------------
-//  Rounds 16..22 mapped at most one packet at a time, so "the window" was one
-//  contiguous run of 16 pages starting at kBase and every page of it belonged to
-//  the single live mapping. Round 23 keeps up to kSlots mappings alive at once,
-//  which makes overlap the default failure mode rather than an edge case: two
-//  generations would write the same leaves and the second would silently steal
-//  the first one's translation (the device reads a PTE, not a handle).
-//
-//  Rather than track a free list over the window, each slot owns a FIXED
-//  kPagesPerSlot-page stripe:
-//
-//      slot 0 -> pages 0..3    slot 2 -> pages 8..11
-//      slot 1 -> pages 4..7    slot 3 -> pages 12..15
-//
-//  Non-overlap is then a property of the arithmetic, not something a test has
-//  to keep proving. A generation that needs more than kPagesPerSlot pages is
-//  refused BEFORE any PTE is written (the caller keeps the packet), which keeps
-//  that bound honest instead of growing it silently.
-//
-//  kPagesPerSlot is 4 because that is the measured worst case for this batch:
-//  a 1514-byte frame handed over as two mbufs costs ceil((align+len)/4096)
-//  pages per mbuf, at most 1 (42-byte header mbuf) + 2 (1472-byte tail) = 3.
+// Round32 bounded dynamic IOVA arena. Active-record indices do not choose
+// addresses: each mapping reserves only the pages its physical layout needs.
+// All operations run under the owning domain lock; there are no hardware waits.
 #pragma once
 #include "amd_iommu_sparse_core.hpp"
 namespace amdtx {
 using amdpte::u64;
 static constexpr u64 kBase = 0x1000000000ULL; //64GiB, outside identity bootstrap
-static constexpr unsigned kPages = 16, kSegments = 8;
-static constexpr unsigned kSlots = 4, kPagesPerSlot = kPages / kSlots;
+static constexpr unsigned kPages = 256, kSegments = 16;
+static constexpr unsigned kSlots = 16, kMapPages = 32;
+static constexpr unsigned kRxFirstPage = 512; // RX starts at the next L1 table
+struct Allocator {
+    u64 used[kPages / 64], ever[kPages / 64];
+    unsigned livePages, peakPages, reusedAllocations;
+};
+inline bool allocate(Allocator &a, unsigned pages, unsigned &basePage) {
+    if (!pages || pages > kMapPages) return false;
+    for (unsigned base = 0; base <= kPages - pages; ++base) {
+        bool free = true;
+        for (unsigned j = 0; j < pages; ++j) {
+            const unsigned p = base + j;
+            if (a.used[p / 64] & (1ULL << (p % 64))) { free = false; break; }
+        }
+        if (!free) continue;
+        bool reused = false;
+        for (unsigned j = 0; j < pages; ++j) {
+            const unsigned p = base + j;
+            const u64 bit = 1ULL << (p % 64);
+            reused = reused || (a.ever[p / 64] & bit);
+            a.used[p / 64] |= bit;
+            a.ever[p / 64] |= bit;
+        }
+        a.livePages += pages;
+        if (a.livePages > a.peakPages) a.peakPages = a.livePages;
+        if (reused) ++a.reusedAllocations;
+        basePage = base;
+        return true;
+    }
+    return false;
+}
+inline bool release(Allocator &a, unsigned basePage, unsigned pages) {
+    if (!pages || pages > kMapPages || basePage > kPages - pages ||
+        a.livePages < pages) return false;
+    for (unsigned j = 0; j < pages; ++j) {
+        const unsigned p = basePage + j;
+        if (!(a.used[p / 64] & (1ULL << (p % 64)))) return false;
+    }
+    for (unsigned j = 0; j < pages; ++j) {
+        const unsigned p = basePage + j;
+        a.used[p / 64] &= ~(1ULL << (p % 64));
+    }
+    a.livePages -= pages;
+    return true;
+}
 struct Segment { u64 pa, bytes, iova; };
 struct Plan {
-    unsigned count, pages, basePage, slot;
+    unsigned count, pages, basePage;
     Segment segments[kSegments];
-    // Indexed by ABSOLUTE window page (basePage + j), so the same array can be
-    // compared against the exported leaves without an offset fudge.
-    u64 physical[kPages];
+    // Mapping-local pages. The absolute PTE index is basePage + j.
+    u64 physical[kMapPages];
 };
-inline bool plan(Plan &p, const Segment *s, unsigned n, unsigned slot) {
+inline bool plan(Plan &p, const Segment *s, unsigned n, unsigned basePage = 0) {
     p = {};
-    if (!s || !n || n > kSegments || slot >= kSlots) return false;
+    if (!s || !n || n > kSegments || basePage >= kPages) return false;
     unsigned at = 0;
-    const unsigned base = slot * kPagesPerSlot;
     for (unsigned i = 0; i < n; ++i) {
         const u64 off = s[i].pa & 4095ULL;
         if (!s[i].pa || !s[i].bytes || s[i].pa >= (1ULL<<52) ||
             s[i].bytes > (1ULL<<52) - s[i].pa ||
-            s[i].bytes > kPagesPerSlot*4096ULL)
+            s[i].bytes > kMapPages*4096ULL)
             return false;
         const unsigned pages = (unsigned)((off + s[i].bytes + 4095) / 4096);
-        if (pages > kPagesPerSlot - at) return false;
-        p.segments[i] = {s[i].pa, s[i].bytes, kBase + (base+at)*4096ULL + off};
+        if (pages > kMapPages - at || pages > kPages - basePage - at) return false;
+        p.segments[i] = {s[i].pa, s[i].bytes, kBase + (basePage+at)*4096ULL + off};
         for (unsigned j = 0; j < pages; ++j)
-            p.physical[base+at+j] = (s[i].pa & ~4095ULL) + j*4096ULL;
+            p.physical[at+j] = (s[i].pa & ~4095ULL) + j*4096ULL;
         at += pages;
     }
-    p.count = n; p.pages = at; p.basePage = base; p.slot = slot;
+    p.count = n; p.pages = at; p.basePage = basePage;
     return true;
 }
 // Build only absent branches in a reserved inactive arena. Never split or
@@ -93,14 +113,16 @@ inline volatile u64 *prepare(amdsparse::Arena &a) {
     return prepareAt(a, kBase, kPages);
 }
 inline bool publish(volatile u64 *leaves, const Plan &p) {
-    if (!leaves || !p.pages || p.pages > kPages) return false;
-    for (unsigned i = 0; i < kPages; ++i) if (leaves[i]) return false;
+    if (!leaves || !p.pages || p.pages > kMapPages ||
+        p.basePage > kPages - p.pages) return false;
+    for (unsigned i = 0; i < p.pages; ++i) if (leaves[p.basePage+i]) return false;
     for (unsigned i = 0; i < p.pages; ++i)
-        leaves[i] = amdpte::makeDefaultLeaf(1, p.physical[i], amdpte::PTE_IR);
+        leaves[p.basePage+i] = amdpte::makeDefaultLeaf(1, p.physical[i], amdpte::PTE_IR);
     return true;
 }
-inline void clear(volatile u64 *leaves) {
-    if (leaves) for (unsigned i = 0; i < kPages; ++i) leaves[i] = 0;
+inline void clear(volatile u64 *leaves, unsigned basePage = 0, unsigned pages = kPages) {
+    if (leaves && pages <= kPages && basePage <= kPages - pages)
+        for (unsigned i = 0; i < pages; ++i) leaves[basePage+i] = 0;
 }
 
 // ---- round 20: identity coverage for objects the device reads by PA --------

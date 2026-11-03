@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round31: prove an explicit-stop RX1024 session across a 125-second idle.
+"""Round32: dynamic IOVA mappings in the explicit-stop RX1024 session.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,18 +29,20 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round31-explicit-stop-session; 4096+4096-after-125s-idle; RX1024-cyclic-standard-map; acknowledged-tail-and-TX-retirement'
+SCOPE = 'round32-dynamic-IOVA; normal-capacity-probe; explicit-stop-RX1024-session; 4096+4096-after-125s-idle'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
 RX_VERSION, RX_COUNT = 4, 1024
 RX_DRIVER_BYTES, RX_BACKEND_BYTES = 311376, 204864
-RX_BASE, RX_STRIDE, RX_CAPACITY = 0x1000010000, 8192, 4096
+RX_BASE, RX_STRIDE, RX_CAPACITY = 0x1000200000, 8192, 4096
 ALL_STANDARD_MODE = 2
-DOMAIN_VERSION, DOMAIN_HEADER, DOMAIN_RECORD_BYTES = 3, 80, 720
+DOMAIN_VERSION, DOMAIN_HEADER, DOMAIN_RECORD_BYTES = 4, 80, 1304
+DOMAIN_ARENA_PAGES, DOMAIN_MAX_MAP_PAGES, DOMAIN_SEGMENTS, MAPPING_SLOTS = 256, 32, 16, 16
 HISTORY_CAPACITY = 32
 TAIL = DOMAIN_HEADER + HISTORY_CAPACITY * DOMAIN_RECORD_BYTES
-DOMAIN_BYTES = TAIL + 72
+DOMAIN_PROBE_OFFSET = TAIL + 176
+DOMAIN_BYTES = DOMAIN_PROBE_OFFSET + 2 * DOMAIN_RECORD_BYTES
 DRIVER_VERSION, DRIVER_BYTES = 7, A.DRIVER_HEADER + HISTORY_CAPACITY * A.DRIVER_RECORD_BYTES
 STD_VERSION, STD_BYTES = 5, A.STD_HEADER + HISTORY_CAPACITY * A.STD_RECORD_BYTES
 # Snapshot.commandCapacity and m2-3b-command-capacity count 16-byte entries;
@@ -49,26 +51,34 @@ COMMAND_RING_BYTES, COMMAND_ENTRY_BYTES = 8192, 16
 COMMAND_CAPACITY = COMMAND_RING_BYTES // COMMAND_ENTRY_BYTES
 
 
+def decode_domain_record(blob, at):
+    r = A.unpack('handle tMapPublish tMapInv tClearPublish tRetireInv count '
+                 'pages token req status maplen basePage recordIndex', '5Q8I', blob, at)
+    r['segments'] = [A.unpack('pa bytes iova', '3Q', blob, at + 72 + j * 24)
+                     for j in range(DOMAIN_SEGMENTS)]
+    for j, key in enumerate(('physical', 'mapPte', 'clearPte')):
+        r[key] = struct.unpack_from('<32Q', blob, at + 456 + j * 256)
+    r['mapCommand'] = A.cmdrec(blob, at + 1224)
+    r['retireCommand'] = A.cmdrec(blob, at + 1264)
+    return r
+
+
 def decode_domain(blob):
-    A.need(len(blob) == DOMAIN_BYTES, 'domain v3 size must be %d' % DOMAIN_BYTES)
+    A.need(len(blob) == DOMAIN_BYTES, 'domain v4 size must be %d' % DOMAIN_BYTES)
     h = A.unpack('version bytes count flags iovaBase iovaBytes rootPA leafPA '
                  'ptBase ptBytes rootLevel devid domid active', '4I6Q4I', blob)
-    A.need(h['version'] == DOMAIN_VERSION and h['bytes'] == len(blob), 'domain v3 ABI missing')
+    A.need(h['version'] == DOMAIN_VERSION and h['bytes'] == len(blob), 'domain v4 ABI missing')
     h.update(A.unpack('historyTotal historyStart mapsTotal retiresTotal '
                       'commandCapacity commandSubmits commandCompleted commandWraps '
-                      'commandPostWrapCompleted liveOwners slotsUsed maxLiveOwners '
-                      'slotUse0 slotUse1 slotUse2 slotUse3 completionSequence', '16IQ', blob, TAIL))
-    rows = []
-    for i in range(HISTORY_CAPACITY):
-        at = DOMAIN_HEADER + i * DOMAIN_RECORD_BYTES
-        r = A.unpack('handle tMapPublish tMapInv tClearPublish tRetireInv count '
-                     'pages token req status maplen', '5Q6I', blob, at)
-        r['segments'] = [A.unpack('pa bytes iova', '3Q', blob, at + 64 + j * 24) for j in range(8)]
-        for j, key in enumerate(('physical', 'mapPte', 'clearPte')):
-            r[key] = struct.unpack_from('<16Q', blob, at + 256 + j * 128)
-        r['mapCommand'] = A.cmdrec(blob, at + 640)
-        r['retireCommand'] = A.cmdrec(blob, at + 680)
-        rows.append(r)
+                      'commandPostWrapCompleted liveOwners slotsUsed maxLiveOwners ' +
+                      ' '.join('slotUse%d' % i for i in range(MAPPING_SLOTS)) +
+                      ' completionSequence livePages peakPages maxMappedPages reusedAllocations '
+                      'probeMaps probeUnmaps probePeakOwners probeMaxPages probePassed probeReused '
+                      'probeStart probeEnd', '28IQ10I2Q', blob, TAIL))
+    rows = [decode_domain_record(blob, DOMAIN_HEADER + i * DOMAIN_RECORD_BYTES)
+            for i in range(HISTORY_CAPACITY)]
+    h['probeFirst'] = decode_domain_record(blob, DOMAIN_PROBE_OFFSET)
+    h['probeReuse'] = decode_domain_record(blob, DOMAIN_PROBE_OFFSET + DOMAIN_RECORD_BYTES)
     return h, rows
 
 
@@ -175,7 +185,9 @@ def check(cap):
     try:
         _, _, P, blob = A.read_capture(cap)
         dh, dom = decode_domain(blob('m2-3b-domain-raw', 'r21-domain-raw.bin'))
-        mapped_total = dh['mapsTotal']
+        # Capacity-probe mappings are ordinary mapper calls, counted honestly
+        # in the domain totals but not in the driver's transmitted-frame totals.
+        mapped_total = dh['mapsTotal'] - dh['probeMaps']
         gh, drv = A.decode_driver(blob('rtl812x-txmap-raw', 'r21-driver-raw.bin'))
         gh['historyStart'] = gh.pop('reserved')
         A.need(gh['version'] == DRIVER_VERSION and len(drv) == HISTORY_CAPACITY and gh['bytes'] == DRIVER_BYTES,
@@ -192,9 +204,9 @@ def check(cap):
         A.need(0 < token < 0x80000000 and sh['token'] == bh['token'] == token,
                'inconsistent/non-low-half token')
         A.need(dh['devid'] == gh['bdf'] == sh['bdf'] == bh['bdf'], 'capture device association differs')
-        checks.append({'id': 'capture-ABI-domain3-native7-std5-rx4', 'state': 'ok'})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-rx4', 'state': 'ok'})
     except (A.Refused, OSError, ValueError, KeyError, IndexError, struct.error) as exc:
-        checks.append({'id': 'capture-ABI-domain3-native7-std5-rx4', 'state': 'FAIL', 'detail': str(exc)})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-rx4', 'state': 'FAIL', 'detail': str(exc)})
         return result()
 
     def driver_property(key, numeric=False):
@@ -415,8 +427,11 @@ def check(cap):
 
     def counters():
         A.need(mapped_total >= MIN_MAPPINGS, 'fewer than %d mapped ordinary TX frames' % MIN_MAPPINGS)
-        for h, keys in ((dh, ('mapsTotal', 'retiresTotal', 'historyTotal')),
-                        (sh, ('accepts', 'unmaps', 'historyTotal')), (gh, ('retired',))):
+        A.need(dh['probeMaps'] == dh['probeUnmaps'] and
+               all(dh[k] == mapped_total + dh['probeMaps']
+                   for k in ('mapsTotal', 'retiresTotal', 'historyTotal')),
+               'domain totals do not equal transmitted TX plus capacity-probe mappings')
+        for h, keys in ((sh, ('accepts', 'unmaps', 'historyTotal')), (gh, ('retired',))):
             A.need(all(h[k] == mapped_total for k in keys),
                    'cumulative map/unmap/retirement total differs: ' + str({k: h[k] for k in keys}))
         A.need(sh['mode'] == ALL_STANDARD_MODE and
@@ -432,7 +447,7 @@ def check(cap):
                'all-TX mapped/unmarked/legacy/attempt counts disagree')
         for key in ('m2-3c-map-calls', 'm2-3c-map-ok', 'm2-3c-unmap-ok',
                     'm2-3b-map-accepted', 'm2-3b-retires'):
-            A.need(P[key] == mapped_total, key + ' !=N')
+            A.need(P[key] == dh['mapsTotal'], key + ' !=TX+probe')
         for key in ('m2-3c-insert-calls', 'm2-3c-map-rejects', 'm2-3b-map-rejected',
                     'm2-3c-cover-calls'):
             A.need(P[key] == 0, key + ' !=0')
@@ -441,24 +456,91 @@ def check(cap):
         A.need(not any(sh[k] for k in ('rejects', 'unsupported', 'pinned')) and
                not any(gh[k] for k in ('dropped', 'rejected')), 'driver fallback/refusal/pin')
         return dict(totals, mode=ALL_STANDARD_MODE, standardAccepts=mapped_total,
-                    standardUnmaps=sh['unmaps'], retired=gh['retired'], coverCalls=0)
+                    standardUnmaps=sh['unmaps'], retired=gh['retired'], coverCalls=0,
+                    domainMaps=dh['mapsTotal'], capacityProbeMaps=dh['probeMaps'])
     run('all-TX-standard-mode2-cumulative-and-unmarked-no-cover', counters)
 
+    def mapped_pages(record):
+        A.need(record['handle'] > 0 and record['status'] == 3 and
+               1 <= record['count'] <= DOMAIN_SEGMENTS and
+               1 <= record['pages'] <= DOMAIN_MAX_MAP_PAGES and
+               0 <= record['basePage'] <= DOMAIN_ARENA_PAGES - record['pages'] and
+               0 <= record['recordIndex'] < MAPPING_SLOTS,
+               'dynamic allocation record is incomplete or outside the arena')
+        first = A.K_BASE + record['basePage'] * 4096
+        expect = {}
+        for segment in record['segments'][:record['count']]:
+            A.need(segment['bytes'] > 0 and segment['pa'] != segment['iova'] and
+                   (segment['pa'] & 4095) == (segment['iova'] & 4095),
+                   'dynamic mapping segment is empty, identity or changes the page offset')
+            for page in range(((segment['pa'] & 4095) + segment['bytes'] + 4095) // 4096):
+                index = (segment['iova'] - first) // 4096 + page
+                A.need(0 <= index < record['pages'] and index not in expect,
+                       'dynamic allocation pages overlap or escape the recorded allocation')
+                expect[index] = (segment['pa'] & ~4095) + page * 4096
+        A.need(len(expect) == record['pages'], 'dynamic allocation page count differs')
+        for index, pa in expect.items():
+            got, leaf = A.walk_with_leaf(pt, dh['rootPA'], dh['ptBase'], dh['leafPA'], dh['rootLevel'],
+                                         first + index * 4096, record['mapPte'][index])
+            A.need(got == pa == record['physical'][index] and
+                   leaf == record['mapPte'][index] and record['clearPte'][index] == 0,
+                   'dynamic allocation PTE mapping or confirmed clear differs')
+        A.need(0 < record['tMapPublish'] <= record['tMapInv'] <=
+               record['tClearPublish'] <= record['tRetireInv'], 'dynamic mapping lifecycle order differs')
+        for key in ('mapCommand', 'retireCommand'):
+            command = record[key]
+            A.need(command['expected'] > 0 and command['expected'] == command['observed'] and
+                   command['words'] == [0, dh['domid'] | (3 << 28), 0xfffff003, 0x7fffffff],
+                   'dynamic mapping invalidation was not confirmed')
+        A.need(record['mapCommand']['expected'] < record['retireCommand']['expected'] <=
+               dh['completionSequence'] and
+               record['mapCommand']['tComplete'] == record['tMapInv'] and
+               record['retireCommand']['tComplete'] == record['tRetireInv'],
+               'dynamic mapping completion order differs')
+        return expect
+
     def geometry():
-        A.need(dh['iovaBase'] == A.K_BASE and dh['iovaBytes'] == 16 * 4096, 'window geometry changed')
-        A.need(dh['slotsUsed'] == 15 and all(dh['slotUse%d' % i] > 0 for i in range(4)) and
-               sum(dh['slotUse%d' % i] for i in range(4)) == mapped_total,
-               'four-slot use totals do not cover all mappings')
-        A.need(dh['maxLiveOwners'] == gh['maxHeld'] == sh['maxHeld'] == 4, 'four-slot peak missing')
+        A.need(dh['iovaBase'] == A.K_BASE and dh['iovaBytes'] == DOMAIN_ARENA_PAGES * 4096,
+               'dynamic IOVA arena geometry differs')
+        uses = [dh['slotUse%d' % i] for i in range(MAPPING_SLOTS)]
+        A.need(dh['slotsUsed'] == sum(1 << i for i, count in enumerate(uses) if count) and
+               sum(uses) == dh['mapsTotal'], 'mapping-record use totals differ')
+        A.need(1 <= gh['maxHeld'] == sh['maxHeld'] <= dh['maxLiveOwners'] <= MAPPING_SLOTS,
+               'driver/backend peak owners exceed mapping-record capacity')
+        A.need(dh['probePassed'] == dh['probeReused'] == 1 and
+               dh['probeMaps'] == dh['probeUnmaps'] == 9 and
+               dh['probePeakOwners'] == 8 and dh['probeMaxPages'] >= 8,
+               'normal capacity probe did not complete eight live mappings, wide map and reuse')
+        A.need(dh['livePages'] == 0 and
+               dh['maxLiveOwners'] >= dh['probePeakOwners'] and
+               dh['probeMaxPages'] <= dh['maxMappedPages'] <= DOMAIN_MAX_MAP_PAGES and
+               dh['probeMaxPages'] + 7 <= dh['peakPages'] <= DOMAIN_ARENA_PAGES and
+               dh['reusedAllocations'] > 0, 'dynamic allocator usage/recovery evidence differs')
+        first, reuse = dh['probeFirst'], dh['probeReuse']
+        for record in (first, reuse):
+            mapped_pages(record)
+            A.need(record['pages'] >= 8 and record['req'] == record['token'] == 0,
+                   'wide capacity probe was not a generic mapper allocation')
+        A.need(first['handle'] != reuse['handle'] and
+               first['basePage'] == reuse['basePage'] and first['pages'] == reuse['pages'] and
+               0 < P['m2-3e-t-translate-on'] <= dh['probeStart'] <= first['tMapPublish'] and
+               first['tRetireInv'] < reuse['tMapPublish'] <= reuse['tRetireInv'] <= dh['probeEnd'] and
+               first['retireCommand']['expected'] < reuse['mapCommand']['expected'] and
+               dh['probeEnd'] <= P['m2-3e-t-gate-open'],
+               'capacity probe did not retire before reusing its allocation and opening TX')
         vals = {}
         for key in ('R24TxWaits', 'R24TxResumes', 'R24TxWakes', 'R24TxPending'):
             m = re.search(r'"' + key + r'" = (\d+)', driver)
             A.need(m is not None, 'missing ' + key)
             vals[key] = int(m[1])
-        A.need(all(vals[k] > 0 for k in ('R24TxWaits', 'R24TxResumes', 'R24TxWakes')) and vals['R24TxPending'] == 0,
-               'backpressure/resume counters invalid')
-        return vals
-    run('fixed-four-slots-and-automatic-backpressure-resume', geometry)
+        A.need(vals['R24TxPending'] == 0, 'backpressure request remains pending')
+        return dict(vals, arenaPages=DOMAIN_ARENA_PAGES, recordCapacity=MAPPING_SLOTS,
+                    maxMappedPages=dh['maxMappedPages'], peakPages=dh['peakPages'], livePages=0,
+                    reusedAllocations=dh['reusedAllocations'], probeMaps=dh['probeMaps'],
+                    probeUnmaps=dh['probeUnmaps'], probePeakOwners=dh['probePeakOwners'],
+                    probePages=first['pages'], firstBasePage=first['basePage'],
+                    reusedBasePage=reuse['basePage'])
+    run('dynamic-IOVA-wide-map-eight-live-and-confirmed-reuse', geometry)
 
     def commands():
         A.need(dh['commandCapacity'] == COMMAND_CAPACITY and dh['commandWraps'] >= 2 and
@@ -487,10 +569,10 @@ def check(cap):
     run('original8192-command-ring-wraps-and-postwrap-completion', commands)
 
     def histories():
-        dd = retained(dh, dom, 'historyTotal', mapped_total)
+        dd = retained(dh, dom, 'historyTotal', mapped_total + dh['probeMaps'])
         gg = retained(gh, drv, 'retired', mapped_total)
         ss = retained(sh, std, 'historyTotal', mapped_total)
-        # Retirement order is not issue/request order with four live mappings.
+        # Retirement order is not issue/request order with concurrent mappings.
         # Match standard/backend by real mapper handle, native by token/request.
         # Standard mode stamps stdW.handle, not current.request.handle (native
         # handle remains zero). Never infer handle from ring position/request ID.
@@ -530,7 +612,7 @@ def check(cap):
                    d['tClearPublish'] <= d['tRetireInv'] <= g['tFree'], 'map/OWN/completion/retire/free order')
             A.need(0 < w['tBegin'] <= w['tPrepared'] <= w['tSegmented'] <= w['tCommit'] and
                    0 < w['tCompleteBegin'] <= w['tCompleteEnd'] <= w['tFree'] == g['tFree'], 'standard object lifetime order')
-            expect = {}
+            mapped_pages(d)
             for i in range(n):
                 s, ws, gs = d['segments'][i], w['segments'][i], g['descriptors'][i]
                 A.need(s['iova'] == ws['address'] == gs['address'] == g['iova'][i]['address'] and
@@ -541,45 +623,31 @@ def check(cap):
                 A.need(g['physical'][i]['address'] == g['physical'][i]['length'] == 0,
                        'unexpected native physical run in standard mode')
                 A.need(g['doneOpts1'][i] & 0x80000000, 'descriptor not submitted')
-                for k in range(((s['pa'] & 4095) + s['bytes'] + 4095) // 4096):
-                    j = (s['iova'] - A.K_BASE) // 4096 + k
-                    expect[j] = (s['pa'] & ~4095) + k * 4096
-            A.need(len(expect) == d['pages'] and 1 <= d['pages'] <= 4 and
-                   len({j // 4 for j in expect}) == 1 and all(0 <= j < 16 for j in expect), 'not one fixed stripe')
-            intervals.append((d['tMapPublish'], d['tRetireInv'], next(iter(expect)) // 4))
+            intervals.append((d['tMapPublish'], d['tRetireInv'],
+                              d['basePage'], d['basePage'] + d['pages']))
             A.need(w['mapAddress'] == w['segments'][0]['address'] and d['maplen'] >= w['descriptorLength'],
                    'map address/unmap length invalid')
-            for j, pa in expect.items():
-                got, leaf = A.walk_with_leaf(pt, dh['rootPA'], dh['ptBase'], dh['leafPA'], dh['rootLevel'],
-                                             A.K_BASE + j * 4096, d['mapPte'][j])
-                A.need(got == pa == d['physical'][j] and leaf == d['mapPte'][j] and d['clearPte'][j] == 0,
-                       'retained PTE mapping/clear differs')
-            for key in ('mapCommand', 'retireCommand'):
-                c = d[key]
-                A.need(c['expected'] > 0 and c['expected'] == c['observed'] and c['tComplete'] > 0, 'CompletionWait mismatch')
-                A.need(c['words'] == [0, dh['domid'] | (3 << 28), 0xfffff003, 0x7fffffff],
-                       'not full-domain PDE-inclusive invalidation')
-            A.need(d['mapCommand']['expected'] < d['retireCommand']['expected'] <= dh['completionSequence'] and
-                   d['mapCommand']['tComplete'] == d['tMapInv'] and
-                   d['retireCommand']['tComplete'] == d['tRetireInv'], 'completion order/timestamps differ')
             # The internal req is not a userspace UDP ID. Compare the actual
             # mapped frame/segment/descriptor lengths, never payload(token, req).
             A.need(w['descriptorLength'] == sum(s['length'] for s in w['segments'][:n]) ==
                    sum(s['length'] for s in g['descriptors'][:n]) > 0,
                    'frame/run/descriptor byte mismatch')
-        for start, end, stripe in intervals:
-            for start2, end2, stripe2 in intervals:
-                if start < start2 < end:
-                    A.need(stripe != stripe2, 'live retained generations share a stripe')
-        timeline = sorted([(start, 1) for start, _, _ in intervals] + [(end, -1) for _, end, _ in intervals])
+        for i, (start, end, first, last) in enumerate(intervals):
+            for start2, end2, first2, last2 in intervals[i + 1:]:
+                if max(start, start2) < min(end, end2):
+                    A.need(max(first, first2) >= min(last, last2),
+                           'simultaneously live mappings overlap in the dynamic arena')
+        timeline = sorted([(start, 1) for start, _, _, _ in intervals] +
+                          [(end, -1) for _, end, _, _ in intervals])
         live = peak = 0
         for _, delta in timeline:
             live += delta
             peak = max(peak, live)
-        A.need(1 < peak <= 4, 'retained mappings do not show bounded overlap')
+        A.need(1 < peak <= MAPPING_SLOTS, 'retained mappings do not show bounded overlap')
         return {'peakRetainedLive': peak, 'retained': 32, 'internalRequests': sorted(r['req'] for r in ss), 'correlation': 'standard/backend nonzero handle; native run-token+internal-attempt, prepare/free stamps, segments/descriptors',
                 'handles': sorted(domains), 'nativeHandles': sorted({g['handle'] for g in gg}),
                 'historyTotal': mapped_total, 'historyStart': mapped_total - HISTORY_CAPACITY,
+                'domainHistoryTotal': dh['historyTotal'], 'capacityProbeMaps': dh['probeMaps'],
                 'overwrittenNotIndividuallyProved': mapped_total - HISTORY_CAPACITY}
     run('retained32-standard-handles-PTE-and-retirement-lifecycles', histories)
 
@@ -668,7 +736,7 @@ def check(cap):
         A.need(len(by_id) == RX_COUNT and set(by_id) == {r['entryId'] for r in rxrecords},
                'RX driver/backend entry IDs differ or repeat')
         iovas, leaf_tables = set(), set()
-        sequences = {d[key]['expected'] for d in dom
+        sequences = {d[key]['expected'] for d in dom + [dh['probeFirst'], dh['probeReuse']]
                      for key in ('mapCommand', 'retireCommand')}
         for i, r in enumerate(rxrecords):
             m = by_id[r['entryId']]
@@ -716,8 +784,8 @@ def check(cap):
                 got, pte = A.walk_with_leaf(pt, dh['rootPA'], dh['ptBase'], leaf_pa,
                                             dh['rootLevel'], iova, r['mapPte'][j])
                 A.need(got == pa and pte == r['mapPte'][j], label + 'RX PTE does not map the spare PA')
-        A.need(dh['commandCompleted'] >= 2 * (mapped_total + RX_COUNT),
-               'shared command ring total cannot cover TX and RX invalidations')
+        A.need(dh['commandCompleted'] >= 2 * (dh['mapsTotal'] + RX_COUNT),
+               'shared command ring total cannot cover TX, capacity probe and RX invalidations')
         return {'mapped': RX_COUNT, 'unmapped': RX_COUNT, 'liveOwners': 0,
                 'writablePages': len(iovas), 'leafTables': len(leaf_tables),
                 'iovaBase': RX_BASE, 'slotBytes': RX_STRIDE,

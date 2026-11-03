@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile and exercise the actual generated round30 full-ring cyclic RX methods.
+"""Compile and exercise the actual generated Round32 full-ring cyclic RX methods.
 
 This is one RX ownership/lifecycle check, not a replay of previous rounds.
 --source additionally checks the newly generated Lucy call sites, and uses its
@@ -294,7 +294,7 @@ def main():
     spec = importlib.util.spec_from_file_location('r27_lucy_generator', ROOT / 'tools/apply-lucy-obs2.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    module.select_tx('21'); module.select_rx('30')
+    module.select_tx('21'); module.select_rx('32')
     template = module.POOL_METHODS
     text = template
     names = ('r27RxControl', 'r27RxRearm', 'r27RxPosted', 'r27RxActive', 'r27RxParse',
@@ -326,7 +326,7 @@ def main():
             '-I', str(ROOT / 'tools/lucy-obs'), str(source), '-o', str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
     if args.source:
-        print('R30 actual generated RX call sites and methods: PASS')
+        print('R32 actual generated RX call sites and methods: PASS')
 
 
 if __name__ == '__main__':

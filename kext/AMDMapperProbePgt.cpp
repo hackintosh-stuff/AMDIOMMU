@@ -1206,6 +1206,13 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // the first controlled map would append at a consumed slot and its
     // CompletionWait would never be signalled.
     r17SyncCommand(&ctx);
+    // Round32: exercise ordinary variable-size mappings while TX admission is
+    // still closed. Probe mappings remain in the cumulative domain accounting.
+    if (fR31Session && !r32CapacityProbe()) {
+        firstFailStage = "15e-abort-dynamic-capacity";
+        firstFailReason = "normal dynamic IOVA capacity probe failed";
+        goto recover;
+    }
     if (!r17EnterComplete(fM22b2Dma.tTranslateOn)) {
         firstFailStage = "15e-abort-enter-resume";
         firstFailReason = "admission refused to reopen after the DTE flip";

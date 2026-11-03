@@ -200,7 +200,7 @@ static void normalBatch() {
             assert(walked.ok && walked.outPA==w.pa+byte && walked.leafLevel==1);
         }
         for(unsigned p=0;p<w.pages;++p) {
-            const auto raw=f.leaf(amdtx::kPages+i*2+p);
+            const auto raw=f.leaf(amdtx::kRxFirstPage+i*2+p);
             assert((raw&(amdpte::PTE_IR|amdpte::PTE_IW))==
                    (amdpte::PTE_IR|amdpte::PTE_IW));
             assert(amdpte::decodePte(raw,1).outPA==(w.pa&~4095ULL)+p*4096ULL);
@@ -232,7 +232,7 @@ static void normalBatch() {
     for(unsigned i=amdtx::kPages;i<5*512;++i) assert(!f.leaf(i));
     assert(f.walk(0x123456).outPA==0x123456);
     assert(commandMemory[M23_CMD_BUF_SIZE/4]==0xfeedbeef && !f.domain->lock->held);
-    std::puts("R30 production mapper: 1024 RX stripes across five L1 tables, 2048 CW, TX/identity untouched PASS");
+    std::puts("R32 production mapper: RX1024 across four RX L1 tables, separate TX L1, 2048 CW, TX/identity untouched PASS");
 }
 
 static void identityAndDrain() {
@@ -250,7 +250,7 @@ static void identityAndDrain() {
     f.rx.installed=true;
     const auto &w=f.rx.snapshot.records[0];
     assert(f.unmap(0)==kIOReturnNotReady);
-    assert(f.rx.snapshot.liveOwners==1 && f.leaf(amdtx::kPages));
+    assert(f.rx.snapshot.liveOwners==1 && f.leaf(amdtx::kRxFirstPage));
     f.rx.drained=true;
     assert(f.self.r27RxUnmap(&f.memory[0],&foreignCommand,w.iova,w.mapLength)
         ==kIOReturnBadArgument);
@@ -324,7 +324,7 @@ public:
     text += base.section(header, 'static inline UInt64 m2b2InvAddress()', '// ---- M2B2 measurement')
     text += base.section(header, 'static inline bool m2b2Submit(', '// ---- m2b2ReadBar64')
     text += base.section(tx, 'struct org_example_AMDMapperProbe::R17Domain {',
-                         '// Round23: take a free window slot,')
+                         '// Take a free active-record index')
     text += base.section(tx, 'static bool r17Invalidate(',
                          'IOReturn org_example_AMDMapperProbe::r17Callback(')
     text += tx[tx.index('bool org_example_AMDMapperProbe::r27RxRequested()'):]

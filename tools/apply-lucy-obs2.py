@@ -64,14 +64,15 @@ Detach. Evidence records and the command budget stay finite; the DMA owner does
 not. See tools/r17/driver-template.py and RTL812xTxMapNative.hpp. The default
 remains 16 so the archived round-16 build stays reproducible.
 
-Round 31 keeps 1024 owned RX spares to standard mapper IOVAs
+Round 32 keeps 1024 owned RX spares to standard mapper IOVAs
 and reuses them cyclically until hold/disarm and drain restore the physical
-ring buffers before standard unmap. Select --tx 21 --rx 31 (--rx31 also
-works); --rx 27 aliases the same canonical cyclic template. The original
-physical RX15 path remains the default.
+ring buffers before standard unmap. It uses the dynamic TX arena and reserves
+TX admission before dequeue. Select --tx 21 --rx 32 (--rx32 also works);
+--rx 27..31 alias the same canonical cyclic template. The original physical
+RX15 path remains the default.
 
 Usage:
-    py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31]
+    py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32]
 Exit 0 = applied (or already applied). Non-zero = refused, with the reason.
 """
 import os
@@ -2141,10 +2142,10 @@ def select_rx(round_no):
     """Opt in to standard-mapped RX without rewriting historical TX."""
     global RX_SELECT, RX, RXMAP_NAMES, POOL_METHODS, RX_BIZ_NEW
     global RX_NEW, RX_DECL_NEW, RX_CAPTURE_NEW
-    if round_no not in ('15', '27', '28', '29', '30', '31'):
+    if round_no not in ('15', '27', '28', '29', '30', '31', '32'):
         raise SystemExit('unsupported RX module round: %r' % (round_no,))
     RX_SELECT = round_no
-    RX = runpy.run_path(os.path.join(HERE, 'r27', 'driver-template.py')) if round_no in ('27', '28', '29', '30', '31') else None
+    RX = runpy.run_path(os.path.join(HERE, 'r27', 'driver-template.py')) if round_no in ('27', '28', '29', '30', '31', '32') else None
     RXMAP_NAMES = RX['HEADERS'] if RX else []
     POOL_METHODS = RX['pool_methods'](_POOL_METHODS_BASE) if RX else _POOL_METHODS_BASE
     if RX:
@@ -2241,8 +2242,14 @@ def body_is_current(cpp_text):
                                                  'R%sTxState' % TX_SELECT)
     module_mark = 'IOReturn RTL8125::%s' % TX.get('CONFIG_NAME',
                                                   'r%sTxConfigure' % TX_SELECT)
-    tx_struct = TX['METHODS'][TX['METHODS'].index(state_mark):]
-    tx_struct = tx_struct[:tx_struct.index('\n};') + 3]
+    state_start = TX['METHODS'].index(state_mark)
+    state_end = TX['METHODS'].index('\n};', state_start) + 3
+    struct_start = TX['METHODS'].find('struct RTL8125::R17Gen {')
+    if struct_start < 0 or struct_start > state_start:
+        struct_start = state_start
+    # The generated prefix includes the generation type and the Round32
+    # admission guard; both must match along with the state that uses them.
+    tx_struct = TX['METHODS'][struct_start:state_end]
     for block, label in ((tx_struct, 'round%s TX state' % TX_SELECT),
                          (TX['METHODS'].split(module_mark)[1],
                           'round%s TX module' % TX_SELECT),
@@ -2332,14 +2339,14 @@ def main():
         if a.startswith('--rx'):
             rx = a[4:]; i += 1; continue
         positional.append(a); i += 1
-    if len(positional) != 1 or (tx is not None and tx not in TXR) or (rx is not None and rx not in ('15', '27', '28', '29', '30', '31')):
-        print("usage: apply-lucy-obs2.py <RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31]")
+    if len(positional) != 1 or (tx is not None and tx not in TXR) or (rx is not None and rx not in ('15', '27', '28', '29', '30', '31', '32')):
+        print("usage: apply-lucy-obs2.py <RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32]")
         return 2
     if tx is not None:
         select_tx(tx)
     if rx is not None:
         select_rx(rx)
-    if RX_SELECT in ('27', '28', '29', '30', '31') and TX_SELECT != '21':
+    if RX_SELECT in ('27', '28', '29', '30', '31', '32') and TX_SELECT != '21':
         print("refused: cyclic RX requires the current --tx 21 module")
         return 2
     root = positional[0]

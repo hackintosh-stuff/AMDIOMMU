@@ -8,7 +8,7 @@
 // "how many requests succeeded so far" and "how long a DMA owner must live"
 // (every request's owner is now retired and released per packet).
 //
-// Round25: four active slots own mappings independently of a circular history
+// Round32: sixteen active records own variable-size mappings independently of a circular history
 // of the last 32 completed retirements. History exhaustion never gates Map.
 // The original command ring is reused using hardware HEAD and bounded waits;
 // each mapping owner is released only after its own retire CompletionWait.
@@ -25,8 +25,8 @@ struct org_example_AMDMapperProbe::R17Domain {
     IOLock *lock;
     volatile UInt8 *mmio;
     volatile UInt64 *pt, *leaves;
-    // TX retains its first 16 leaves; RX1024 extends into four more L1 tables.
-    enum { kIovaL1Count = (amdtx::kPages +
+    // The first L1 contains the bounded dynamic TX arena; RX uses four more.
+    enum { kIovaL1Count = (amdtx::kRxFirstPage +
         r27rx::kCount * r27rx::kPagesPerSlot + 511) / 512 };
     volatile UInt64 *iovaL1[kIovaL1Count];
     UInt64 ptBase, ptBytes, handle, handleCounter;
@@ -36,21 +36,21 @@ struct org_example_AMDMapperProbe::R17Domain {
     bool commandOwned;
     r17domain::Snapshot snapshot;
     bool installed, accepting;
-    // Live DMA owners. Round23: a COUNT (0..amdtx::kSlots), not a flag. An
-    // accepted Map takes one of the fixed window slots, a confirmed Retire gives
-    // exactly that slot back; the other live mappings are untouched.
+    // Live DMA owners (0..amdtx::kSlots). Each accepted Map takes an active
+    // record and the pages its layout needs. Confirmed Retire returns both.
     UInt32 liveOwner, maxLiveOwner, mapsOk, mapsRejected, retires;
-    // Round23: the fixed slots. slotLive is a bitmask; slotHandle[k] is the
-    // generation handle owning slot k. Handles are UInt64 (r17domain::Record::
+    // slotLive is a bitmask of active metadata records; slotHandle[k] is the
+    // generation handle owning record k. Handles are UInt64 (r17domain::Record::
     // handle) and are compared verbatim against Request::handle, so storing the
     // full width here is what keeps that comparison exact.
     UInt32 slotLive;
+    amdtx::Allocator allocator;
     UInt64 slotHandle[amdtx::kSlots];
-    // Round23: which stripes have ever been used, and how many times each was
-    // handed out. The first proves the window is not leaked (only kSlots
-    // distinct stripes may appear); the second shows reuse.
+    // Metadata activity is distinct from allocator occupancy and page reuse.
     UInt32 slotsUsed, slotUses[amdtx::kSlots];
     r17domain::Record slotRecord[amdtx::kSlots]; // authoritative active mappings; never overwritten by history
+    IOMemoryDescriptor *slotMemory[amdtx::kSlots];
+    IODMACommand *slotCommand[amdtx::kSlots];
     // Round18: the same owner slot, entered through IOMapper virtuals instead of
     // the platform callback. Only one of the two entry paths may be armed.
     bool stdMode;
@@ -98,9 +98,9 @@ struct org_example_AMDMapperProbe::R27RxDomain {
     r27rx::Request control;
     r27rx::BackendSnapshot snapshot;
 };
-static_assert(r27rx::kIovaBase == amdtx::kBase + amdtx::kPages * 4096ULL,
-              "RX stripes follow the unchanged TX window");
-static_assert(amdtx::kPages % r27rx::kPagesPerSlot == 0 &&
+static_assert(r27rx::kIovaBase == amdtx::kBase + amdtx::kRxFirstPage * 4096ULL,
+              "RX starts after the separate dynamic TX L1 table");
+static_assert(amdtx::kPages <= amdtx::kRxFirstPage &&
               512 % r27rx::kPagesPerSlot == 0,
               "Each RX stripe stays within its own L1 table");
 
@@ -143,8 +143,7 @@ bool org_example_AMDMapperProbe::r17Prepare(volatile UInt64 *pt, UInt64 base,
     return true;
 }
 
-// Round23: take a free window slot, or kNoSlot. Called with d->lock held, so
-// two Maps cannot be handed the same stripe.
+// Take a free active-record index; its index does not choose an IOVA address.
 static const UInt32 kNoSlot = 0xffffffffu;
 static UInt32 r17TakeSlot(UInt32 &liveMask) {
     for (UInt32 k = 0; k < amdtx::kSlots; ++k) {
@@ -155,16 +154,11 @@ static UInt32 r17TakeSlot(UInt32 &liveMask) {
     return kNoSlot;
 }
 
-// Which stripe does a generation's IOVA fall in? Every segment the plan produced
-// starts inside [kBase + slot*4p*4096, kBase + (slot+1)*4p*4096), so the answer
-// follows from the address alone. Returning kNoSlot for anything outside the
-// window is what makes a bad handle a refusal instead of a wild clear.
-static UInt32 r17SlotOf(UInt64 iova) {
-    if (iova < amdtx::kBase) return kNoSlot;
-    const UInt64 off = iova - amdtx::kBase;
-    const UInt64 span = (UInt64)amdtx::kPages * 4096ULL;
-    if (off >= span) return kNoSlot;
-    return (UInt32)(off / ((UInt64)amdtx::kPagesPerSlot * 4096ULL));
+// Locate the exact mapped address in its independent active record.
+static UInt32 r17SlotOf(const r17domain::Record *records, UInt32 live, UInt64 iova) {
+    for (UInt32 k = 0; k < amdtx::kSlots; ++k)
+        if ((live & (1u << k)) && records[k].segments[0].iova == iova) return k;
+    return kNoSlot;
 }
 
 // Only confirmed retirements enter bounded evidence storage. Active state is
@@ -232,42 +226,43 @@ IOReturn org_example_AMDMapperProbe::r17Callback(void *context, UInt32 op,
         if (!d->accepting || r->handle ||
             r->token!=self->fR15Request.reserved ||
             r->reqId<1 || r->reqId>r17tx::kRequestLimit ||
-            !r->count || r->count>amdtx::kSegments) {
+            !r->count || r->count>r17tx::kMaxSegments) {
             d->mapsRejected++; result=kIOReturnBadArgument; goto out;
         }
         {
-            // A slot is reserved BEFORE the geometry is planned, because the
-            // plan needs to know which stripe it may use. A refused plan gives
-            // the slot straight back, so a rejection never consumes one.
+            // Reserve independent metadata and a variable-size IOVA extent.
             const UInt32 slot=r17TakeSlot(d->slotLive);
             if (slot!=kNoSlot) { d->slotsUsed|=1u<<slot; d->slotUses[slot]++; }
             if (slot==kNoSlot) { d->mapsRejected++; result=kIOReturnBusy; goto out; }
             amdtx::Segment input[amdtx::kSegments]={};
             amdtx::Plan plan;
             for (UInt32 i=0;i<r->count;++i) input[i]={r->physical[i].address,r->physical[i].length,0};
-            if (!amdtx::plan(plan,input,r->count,slot)) {
+            if (!amdtx::plan(plan,input,r->count)) {
                 d->slotLive&=~(1u<<slot);
                 d->mapsRejected++; result=kIOReturnUnsupported; goto out;
             }
-            // Admission depends only on a free active slot, never on history.
-            // Only THIS stripe must be absent. Round 22 required the whole
-            // window to be empty, which is exactly the restriction this round
-            // removes: a page of another live mapping is not this one's to
-            // check, and touching it would be the overlap bug.
-            for (unsigned i=0;i<amdtx::kPagesPerSlot;++i)
+            if (!amdtx::allocate(d->allocator,plan.pages,plan.basePage)) {
+                d->slotLive&=~(1u<<slot);
+                d->mapsRejected++; result=kIOReturnBusy; goto out;
+            }
+            for (unsigned i=0;i<plan.count;++i)
+                plan.segments[i].iova += (UInt64)plan.basePage*4096ULL;
+            for (unsigned i=0;i<plan.pages;++i)
                 if (d->leaves[plan.basePage+i]) {
+                    amdtx::release(d->allocator,plan.basePage,plan.pages);
                     d->slotLive&=~(1u<<slot);
                     d->mapsRejected++; result=kIOReturnBusy; goto out;
                 }
             for (unsigned i=0;i<plan.pages;++i)
                 d->leaves[plan.basePage+i]=
-                    amdpte::makeDefaultLeaf(1,plan.physical[plan.basePage+i],
+                    amdpte::makeDefaultLeaf(1,plan.physical[i],
                                             amdpte::PTE_IR);
             OSSynchronizeIO();
             auto &w=d->slotRecord[slot];
             bzero(&w,sizeof(w));
             w.handle=++d->handleCounter; d->handle=w.handle; r->handle=w.handle;
             w.count=plan.count; w.pages=plan.pages; w.token=r->token; w.req=r->reqId;
+            w.basePage=plan.basePage; w.recordIndex=slot;
             d->slotHandle[slot]=w.handle;
             for(unsigned i=0;i<plan.count;++i) {
                 const auto &p=plan.segments[i];
@@ -276,8 +271,10 @@ IOReturn org_example_AMDMapperProbe::r17Callback(void *context, UInt32 op,
             }
             OSSynchronizeIO();
             w.tMapPublish=mach_absolute_time();
-            for(unsigned i=0;i<amdtx::kPages;++i) w.mapPte[i]=d->leaves[i];
-            for(unsigned i=0;i<amdtx::kPages;++i) w.physical[i]=plan.physical[i];
+            for(unsigned i=0;i<plan.pages;++i) {
+                w.mapPte[i]=d->leaves[plan.basePage+i];
+                w.physical[i]=plan.physical[i];
+            }
             // On timeout leave handle nonzero and pin ownership. The slot stays
             // taken for the same reason: its PTEs may still be live.
             if (!r17Invalidate(d->mmio,d->command,w.mapCommand,"r17-map-pages")) {
@@ -291,6 +288,7 @@ IOReturn org_example_AMDMapperProbe::r17Callback(void *context, UInt32 op,
             d->liveOwner++;
             if (d->maxLiveOwner<d->liveOwner) d->maxLiveOwner=d->liveOwner;
             d->mapsOk++;
+            if (w.pages>s.maxMappedPages) s.maxMappedPages=w.pages;
             result=kIOReturnSuccess;
         }
     } else if (op==r17tx::kCover) {
@@ -303,7 +301,7 @@ IOReturn org_example_AMDMapperProbe::r17Callback(void *context, UInt32 op,
         if (d->coverUnconfirmedMap) {
             d->coverFails++; result=kIOReturnBusy; goto out;
         }
-        if (!r->count || r->count>amdtx::kSegments) {
+        if (!r->count || r->count>r17tx::kMaxSegments) {
             d->coverFails++; result=kIOReturnBadArgument; goto out;
         }
         {
@@ -353,31 +351,26 @@ IOReturn org_example_AMDMapperProbe::r17Callback(void *context, UInt32 op,
             auto &w=d->slotRecord[slot];
             if (slot>=amdtx::kSlots || d->slotHandle[slot]!=r->handle ||
                 !(d->slotLive&(1u<<slot)) || w.handle!=r->handle ||
-                r17SlotOf(w.segments[0].iova)!=slot || w.status!=1) {
+                r17SlotOf(d->slotRecord,d->slotLive,w.segments[0].iova)!=slot || w.status!=1) {
                 result=kIOReturnBadArgument; goto out;
             }
-            const UInt32 base=slot*amdtx::kPagesPerSlot;
-            for(unsigned i=0;i<amdtx::kPagesPerSlot;++i) d->leaves[base+i]=0;
+            const UInt32 base=w.basePage;
+            for(unsigned i=0;i<w.pages;++i) d->leaves[base+i]=0;
             OSSynchronizeIO();
             if (!w.tClearPublish) w.tClearPublish=mach_absolute_time();
-            for(unsigned i=0;i<amdtx::kPages;++i) w.clearPte[i]=d->leaves[i];
-            // Round23: name the slot in the label so a timeout says WHICH
-            // generation's unmap did not complete.
-            // M2B2CmdCtx retains this pointer in records/failReason until
-            // export, so a stack-formatted label would already be dangling.
-            static const char *const labels[amdtx::kSlots] = {
-                "r17-retire-slot0", "r17-retire-slot1",
-                "r17-retire-slot2", "r17-retire-slot3"
-            };
-            if (!r17Invalidate(d->mmio,d->command,w.retireCommand,labels[slot])) {
+            for(unsigned i=0;i<w.pages;++i) w.clearPte[i]=d->leaves[base+i];
+            // M2B2CmdCtx retains this label pointer until export. Keep a static
+            // label; the record's handle/basePage identify the allocation.
+            if (!r17Invalidate(d->mmio,d->command,w.retireCommand,"r32-retire-allocation")) {
                 // Keep handle, slot and owner: this translation may still be
-                // live, and freeing the stripe would let the next Map reuse
+                // live, and freeing the allocation would let the next Map reuse
                 // PTEs the device is still translating through.
                 w.status|=8; s.flags|=2; d->accepting=false;
                 result=kIOReturnIOError; goto out;
             }
             w.tRetireInv=w.retireCommand.tComplete; r->tRetire=w.tRetireInv;
             w.status|=2; s.active=(d->liveOwner>1)?1:0;
+            amdtx::release(d->allocator,w.basePage,w.pages);
             r25Archive(s,w);
             d->slotLive&=~(1u<<slot);
             d->slotHandle[slot]=0;
@@ -483,7 +476,8 @@ bool org_example_AMDMapperProbe::r17BackendDrained() {
     R17Domain *d=fR17;
     if (!d) return true;
     IOLockLock(d->lock);
-    const bool clean=!d->liveOwner && !d->slotLive && d->mapsOk==d->retires &&
+    const bool clean=!d->liveOwner && !d->slotLive && !d->allocator.livePages &&
+        d->mapsOk==d->retires &&
         !d->command.failed && d->command.submits==d->command.completed &&
         !d->coverUnconfirmedMap && !d->snapshot.flags;
     IOLockUnlock(d->lock);
@@ -786,6 +780,8 @@ void org_example_AMDMapperProbe::r17Export(void *command) {
     s.commandWraps=d->command.wraps; s.commandPostWrapCompleted=d->command.postWrapCompleted;
     s.completionSequence=d->command.completionSequence;
     s.liveOwners=d->liveOwner; s.maxLiveOwners=d->maxLiveOwner; s.slotsUsed=d->slotsUsed;
+    s.livePages=d->allocator.livePages; s.peakPages=d->allocator.peakPages;
+    s.reusedAllocations=d->allocator.reusedAllocations;
     for (UInt32 k=0;k<amdtx::kSlots;++k) s.slotUses[k]=d->slotUses[k];
     OSData *domainRaw=OSData::withBytes(&d->snapshot,sizeof(d->snapshot));
     OSData *ptRaw=OSData::withBytes((const void *)d->pt,(unsigned)d->ptBytes);
@@ -811,13 +807,16 @@ void org_example_AMDMapperProbe::r17Export(void *command) {
     setHexProperty(this,"m2-3b-retires",(UInt64)d->retires);
     setHexProperty(this,"m2-3b-live-owner-max",(UInt64)d->maxLiveOwner);
     setHexProperty(this,"m2-3b-owners-held",(UInt64)d->liveOwner);
-    // Round23: the slots themselves. `slots-live` is the mask of window stripes
-    // currently owned; `slots-used` counts every distinct slot ever handed out,
-    // so "the same four stripes were reused" is checkable without trusting the
-    // driver's own owner count.
+    // These properties describe metadata records. Allocator page counts below
+    // describe the independent IOVA extents and their reuse.
     setHexProperty(this,"m2-3b-slots-live",(UInt64)d->slotLive);
     setHexProperty(this,"m2-3b-slots-used",(UInt64)d->slotsUsed);
     setHexProperty(this,"m2-3b-slots-capacity",(UInt64)amdtx::kSlots);
+    setHexProperty(this,"m2-3m-iova-pages",(UInt64)amdtx::kPages);
+    setHexProperty(this,"m2-3m-live-pages",(UInt64)s.livePages);
+    setHexProperty(this,"m2-3m-peak-pages",(UInt64)s.peakPages);
+    setHexProperty(this,"m2-3m-max-mapped-pages",(UInt64)s.maxMappedPages);
+    setHexProperty(this,"m2-3m-reused-allocations",(UInt64)s.reusedAllocations);
     setHexProperty(this,"m2-3b-records",(UInt64)d->snapshot.count);
     publishStdStats();
     r17PublishWindow();
@@ -854,7 +853,7 @@ void org_example_AMDMapperProbe::r17Release() {
 //   Round 18 implemented the first contract only: one physically contiguous
 //   run per call, every fragmented descriptor refused before any PTE was
 //   written. Round 19 adds the second contract for bounded fragments: up to
-//   amdtx::kSegments runs and amdtx::kPages window pages, laid out exactly the
+//   amdtx::kSegments runs and amdtx::kMapPages allocation pages, laid out exactly the
 //   way AppleVTD::spaceMapMemory does it (page-aligned slot per run, first
 //   byte keeps its in-page offset, mapAddress = window base + firstPageOffset).
 
@@ -968,11 +967,8 @@ IOReturn org_example_AMDMapperProbe::r18StdMap(
             fStdFragRejects++; fStdMapRejects++;
             goto out;
         }
-        if (L.pages > amdtx::kPagesPerSlot || L.runs > (UInt32)amdtx::kSegments) {
-            // Capacity: refused before a single PTE is written, so a window this
-            // backend cannot express never becomes a half-built mapping. Round23
-            // bounds this by ONE STRIPE, not the whole window: a mapping that
-            // does not fit in its slot would collide with another live one.
+        if (L.pages > amdtx::kMapPages || L.runs > (UInt32)amdtx::kSegments) {
+            // This mapping must fit the bounded per-allocation record.
             fStdCapRejects++; fStdMapRejects++;
             goto out;
         }
@@ -983,15 +979,18 @@ IOReturn org_example_AMDMapperProbe::r18StdMap(
             fStdOffsetRejects++; fStdMapRejects++;
             goto out;
         }
-        // Round23: take a stripe first (the layout below is relative to it), and
-        // give it straight back on every path that refuses.
+        // Metadata and IOVA pages are reserved independently.
         const UInt32 slot = r17TakeSlot(d->slotLive);
         if (slot != kNoSlot) { d->slotsUsed |= 1u << slot; d->slotUses[slot]++; }
         if (slot == kNoSlot) { fStdMapRejects++; result = kIOReturnBusy; goto out; }
-        const UInt32 basePage = slot * amdtx::kPagesPerSlot;
-        // Only THIS stripe must be absent; the other live mappings own theirs.
-        for (UInt32 i = 0; i < amdtx::kPagesPerSlot; i++) {
+        unsigned basePage = 0;
+        if (!amdtx::allocate(d->allocator,L.pages,basePage)) {
+            d->slotLive &= ~(1u << slot);
+            fStdMapRejects++; result = kIOReturnBusy; goto out;
+        }
+        for (UInt32 i = 0; i < L.pages; i++) {
             if (d->leaves[basePage + i]) {
+                amdtx::release(d->allocator,basePage,L.pages);
                 d->slotLive &= ~(1u << slot);
                 fStdMapRejects++; result = kIOReturnBusy; goto out;
             }
@@ -999,7 +998,7 @@ IOReturn org_example_AMDMapperProbe::r18StdMap(
         const UInt32 npages = L.pages;
         // One page-aligned slot per physical run, exactly the layout the command
         // recomputes from fMapSegments: slot i starts at L.run[i].slot and its
-        // bytes sit at slot + align -- now shifted into this stripe.
+        // bytes sit at slot + align -- now shifted into this allocation.
         for (UInt32 i = 0; i < L.runs; i++) {
             L.run[i].slot += (UInt64)basePage * 4096ULL;
             for (UInt32 j = 0; j < L.run[i].pageBytes / 4096U; j++)
@@ -1020,19 +1019,16 @@ IOReturn org_example_AMDMapperProbe::r18StdMap(
         // The mapper never sees the packet, so it cannot stamp token/req: the
         // driver stamps its own handle and the two records are matched on it.
         w.count = L.runs; w.pages = npages; w.token = 0; w.req = 0;
+        w.basePage = basePage; w.recordIndex = slot;
+        d->slotMemory[slot] = memory; d->slotCommand[slot] = dmaCommand;
         for (UInt32 i = 0; i < L.runs; i++)
             w.segments[i] = { L.run[i].pa, L.run[i].bytes,
                               amdtx::kBase + L.run[i].slot + L.run[i].align };
-        // The record keeps the FULL window snapshot (all 16 pages), so the
-        // analyzer sees a stable array and can tell its own stripe from the
-        // other live ones; only the pages this stripe owns are non-zero here.
-        for (UInt32 j = 0; j < amdtx::kPages; j++) {
-            w.physical[j] = 0;
-            w.mapPte[j]   = d->leaves[j];
-        }
+        // Evidence is local to this allocation, never a copy of neighbours.
+        for (UInt32 j = 0; j < npages; j++) w.mapPte[j] = d->leaves[basePage+j];
         for (UInt32 i = 0; i < L.runs; i++)
             for (UInt32 j = 0; j < L.run[i].pageBytes / 4096U; j++)
-                w.physical[L.run[i].slot / 4096U + j] =
+                w.physical[L.run[i].slot / 4096U - basePage + j] =
                     (L.run[i].pa & ~4095ULL) + (UInt64)j * 4096ULL;
         // The exact length IOKit will hand back to iovmUnmapMemory(): the
         // command stores fLocalMapperAllocLength from this return, so the unmap
@@ -1059,6 +1055,7 @@ IOReturn org_example_AMDMapperProbe::r18StdMap(
         d->liveOwner++;
         if (d->maxLiveOwner < d->liveOwner) d->maxLiveOwner = d->liveOwner;
         d->mapsOk++; fStdMapOk++; fStdPageRuns++;
+        if (npages>s.maxMappedPages) s.maxMappedPages=npages;
         fStdRuns += L.runs;
         if (L.runs > fStdMaxRuns) fStdMaxRuns = L.runs;
         if (L.discontig) fStdDiscontig++;
@@ -1078,7 +1075,6 @@ out:
 IOReturn org_example_AMDMapperProbe::r18StdUnmap(
     IOMemoryDescriptor *memory, IODMACommand *dmaCommand,
     uint64_t mapAddress, uint64_t mapLength) {
-    (void)memory; (void)dmaCommand;
     R17Domain *d = fR17;
     if (!d) return kIOReturnNotReady;
     IOLockLock(d->lock);
@@ -1086,9 +1082,9 @@ IOReturn org_example_AMDMapperProbe::r18StdUnmap(
     auto &s = d->snapshot;
     // Round23: route the unmap by the address IOKit hands back, not by "the
     // newest generation". With several live mappings there is no such thing as
-    // the current one, and clearing the wrong stripe would unmap another
+    // the current one, and clearing the wrong allocation would unmap another
     // frame's bytes while its descriptor is still owned by the device.
-    const UInt32 slot = r17SlotOf(mapAddress);
+    const UInt32 slot = r17SlotOf(d->slotRecord,d->slotLive,mapAddress);
     if (slot >= amdtx::kSlots) {
         IOLockUnlock(d->lock);
         return kIOReturnBadArgument;
@@ -1096,7 +1092,8 @@ IOReturn org_example_AMDMapperProbe::r18StdUnmap(
     {
         const UInt64 h = d->slotHandle[slot];
         if (!(d->slotLive & (1u << slot)) || !h ||
-            d->slotRecord[slot].handle!=h || d->slotRecord[slot].status!=1) {
+            d->slotRecord[slot].handle!=h || d->slotRecord[slot].status!=1 ||
+            d->slotMemory[slot]!=memory || d->slotCommand[slot]!=dmaCommand) {
             IOLockUnlock(d->lock);
             return kIOReturnBadArgument;
         }
@@ -1112,25 +1109,23 @@ IOReturn org_example_AMDMapperProbe::r18StdUnmap(
             return kIOReturnBadArgument;
         }
         fStdUnmapCalls++;
-        const UInt32 base = slot * amdtx::kPagesPerSlot;
-        for (UInt32 i = 0; i < amdtx::kPagesPerSlot; i++) d->leaves[base + i] = 0;
+        const UInt32 base = w.basePage;
+        for (UInt32 i = 0; i < w.pages; i++) d->leaves[base + i] = 0;
         OSSynchronizeIO();
         if (!w.tClearPublish) w.tClearPublish = mach_absolute_time();
-        for (UInt32 i = 0; i < amdtx::kPages; i++) w.clearPte[i] = d->leaves[i];
-        static const char *const labels[amdtx::kSlots] = {
-            "r18-std-unmap-slot0", "r18-std-unmap-slot1",
-            "r18-std-unmap-slot2", "r18-std-unmap-slot3"
-        };
-        if (!r17Invalidate(d->mmio, d->command, w.retireCommand, labels[slot])) {
+        for (UInt32 i = 0; i < w.pages; i++) w.clearPte[i] = d->leaves[base+i];
+        if (!r17Invalidate(d->mmio, d->command, w.retireCommand, "r32-std-unmap-allocation")) {
             // Keep handle, slot and owner: the translation may still be live.
             w.status |= 8; s.flags |= 2; d->accepting = false;
             result = kIOReturnIOError; goto out;
         }
         w.tRetireInv = w.retireCommand.tComplete;
         w.status |= 2;
+        amdtx::release(d->allocator,w.basePage,w.pages);
         r25Archive(s,w);
         d->slotLive &= ~(1u << slot);
         d->slotHandle[slot] = 0;
+        d->slotMemory[slot] = nullptr; d->slotCommand[slot] = nullptr;
         if (d->handle == h) d->handle = 0;
         if (d->liveOwner) d->liveOwner--;
         s.active = (d->liveOwner > 0) ? 1 : 0;
@@ -1140,6 +1135,118 @@ IOReturn org_example_AMDMapperProbe::r18StdUnmap(
 out:
     IOLockUnlock(d->lock);
     return result;
+}
+
+// Normal capacity exercise before the driver gate opens. These are genuine
+// IOKit mappings, but no NIC descriptor references these private buffers.
+// Keep their counts and two completed records separate from packet witnesses.
+bool org_example_AMDMapperProbe::r32CapacityProbe() {
+    R17Domain *d = fR17;
+    if (!d || !r18StdReady() || !d->accepting || !d->commandOwned ||
+        !d->stopOk || d->liveOwner || d->allocator.livePages ||
+        d->snapshot.probeStart) return false;
+    auto &s = d->snapshot;
+    s.probeStart = mach_absolute_time();
+    const UInt32 mapsBefore = d->mapsOk, retiresBefore = d->retires;
+    IOBufferMemoryDescriptor *memory[8] = {};
+    IODMACommand *commands[8] = {};
+    bool wired[8] = {}, prepared[8] = {};
+    UInt64 addresses[8] = {}, firstAddress = 0;
+    bool ok = true;
+
+    auto activeRecord = [&](UInt32 i) -> UInt32 {
+        for (UInt32 k = 0; k < amdtx::kSlots; ++k)
+            if ((d->slotLive & (1u << k)) && d->slotCommand[k] == commands[i])
+                return k;
+        return kNoSlot;
+    };
+    auto create = [&](UInt32 i, UInt32 pages) -> bool {
+        const IOByteCount bytes = (IOByteCount)pages * 4096ULL;
+        memory[i] = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+            kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
+            bytes, 0xFFFFFFFFFFFFF000ULL);
+        if (!memory[i] || memory[i]->prepare(kIODirectionInOut) != kIOReturnSuccess)
+            return false;
+        wired[i] = true;
+        commands[i] = IODMACommand::withSpecification(
+            kIODMACommandOutputHost64, 64, 0, IODMACommand::kMapped, 0, 1,
+            this, nullptr);
+        if (!commands[i] ||
+            commands[i]->setMemoryDescriptor(memory[i], true) != kIOReturnSuccess)
+            return false;
+        prepared[i] = true;
+        IODMACommand::Segment64 segment = {};
+        UInt64 offset = 0; UInt32 count = 1;
+        const UInt32 record = activeRecord(i);
+        if (record == kNoSlot ||
+            commands[i]->gen64IOVMSegments(&offset, &segment, &count) != kIOReturnSuccess ||
+            count != 1 || offset != bytes || segment.fLength != bytes)
+            return false;
+        const auto &w = d->slotRecord[record];
+        uint64_t pa = 0;
+        if (segment.fIOVMAddr != w.segments[0].iova ||
+            !r18StdTranslate(segment.fIOVMAddr, &pa) || pa != w.segments[0].pa ||
+            !r18StdTranslate(segment.fIOVMAddr + bytes - 1, &pa) ||
+            pa != w.segments[0].pa + bytes - 1) return false;
+        addresses[i] = segment.fIOVMAddr;
+        if (d->liveOwner > s.probePeakOwners) s.probePeakOwners = d->liveOwner;
+        if (w.pages > s.probeMaxPages) s.probeMaxPages = w.pages;
+        return true;
+    };
+    auto finish = [&](UInt32 i, r17domain::Record *evidence) -> bool {
+        bool finished = true;
+        UInt64 handle = 0;
+        const UInt32 record = commands[i] ? activeRecord(i) : kNoSlot;
+        if (record != kNoSlot) handle = d->slotRecord[record].handle;
+        if (prepared[i]) {
+            if (commands[i]->complete(false, true) != kIOReturnSuccess) finished = false;
+            prepared[i] = false;
+        }
+        if (commands[i] && activeRecord(i) != kNoSlot) {
+            // The backend still owns the pages. Keep the corresponding buffer
+            // and command alive just as the existing TX failure path does.
+            return false;
+        }
+        if (handle) {
+            const auto &last = s.records[(s.historyTotal - 1) % r17domain::kMaxRecords];
+            if (last.handle != handle || last.status != 3) finished = false;
+            else if (evidence) *evidence = last;
+        }
+        if (commands[i]) {
+            if (commands[i]->clearMemoryDescriptor(false) != kIOReturnSuccess) finished = false;
+            commands[i]->release(); commands[i] = nullptr;
+        }
+        if (memory[i]) {
+            if (wired[i] && memory[i]->complete(kIODirectionInOut) != kIOReturnSuccess)
+                finished = false;
+            memory[i]->release(); memory[i] = nullptr; wired[i] = false;
+        }
+        return finished;
+    };
+
+    for (UInt32 i = 0; i < 8 && ok; ++i) ok = create(i, i ? 1 : 8);
+    firstAddress = addresses[0];
+    for (UInt32 i = 0; i < 8; ++i)
+        if (!finish(i, i ? nullptr : &s.probeFirst)) ok = false;
+    if (ok) {
+        ok = create(0, 8);
+        s.probeReused = ok && addresses[0] == firstAddress;
+        if (!finish(0, &s.probeReuse)) ok = false;
+    }
+    s.probeMaps = d->mapsOk - mapsBefore;
+    s.probeUnmaps = d->retires - retiresBefore;
+    s.probeEnd = mach_absolute_time();
+    ok = ok && s.probeMaps == 9 && s.probeUnmaps == 9 &&
+        s.probePeakOwners == 8 && s.probeMaxPages > 4 && s.probeReused &&
+        !d->liveOwner && !d->allocator.livePages;
+    s.probePassed = ok;
+    if (!ok) { d->accepting = false; s.flags |= 4; }
+    setProperty("m2-3m-capacity", ok ? "passed" : "failed");
+    setHexProperty(this,"m2-3m-probe-maps",s.probeMaps);
+    setHexProperty(this,"m2-3m-probe-unmaps",s.probeUnmaps);
+    setHexProperty(this,"m2-3m-probe-peak-owners",s.probePeakOwners);
+    setHexProperty(this,"m2-3m-probe-max-pages",s.probeMaxPages);
+    return ok;
 }
 
 // ================= Round28: map-once standard cyclic RX mappings =================
@@ -1169,7 +1276,7 @@ bool org_example_AMDMapperProbe::r27RxTranslate(uint64_t iova,
                                               uint64_t *outPA) const {
     R17Domain *d = fR17;
     if (!outPA || !d || !d->leaves || !r27RxOwnsAddress(iova)) return false;
-    const UInt32 page = amdtx::kPages + (UInt32)((iova - r27rx::kIovaBase) / 4096ULL);
+    const UInt32 page = amdtx::kRxFirstPage + (UInt32)((iova - r27rx::kIovaBase) / 4096ULL);
     const volatile UInt64 *leaves = d->iovaL1[page / 512];
     if (!leaves) return false;
     const auto dec = amdpte::decodePte(leaves[page % 512], 1);
@@ -1215,7 +1322,7 @@ IOReturn org_example_AMDMapperProbe::r27RxMap(
         if (L.error || L.runs != 1 || L.totalBytes != length ||
             L.run[0].pa != w.pa || !L.pages || L.pages > r27rx::kPagesPerSlot ||
             (pageList && pageList->pageOffset != L.firstOffset)) goto out;
-        const UInt32 first = amdtx::kPages + ix * r27rx::kPagesPerSlot;
+        const UInt32 first = amdtx::kRxFirstPage + ix * r27rx::kPagesPerSlot;
         volatile UInt64 *table = d->iovaL1[first / 512];
         if (!table) { result = kIOReturnNotReady; goto out; }
         volatile UInt64 *leaves = table + first % 512;
@@ -1277,7 +1384,7 @@ IOReturn org_example_AMDMapperProbe::r27RxUnmap(
         if ((w.flags & (r27rx::kMapInvalidated | r27rx::kMapUnmapped)) !=
                 r27rx::kMapInvalidated ||
             mapAddress != w.iova || mapLength != w.mapLength) goto out;
-        const UInt32 first = amdtx::kPages + ix * r27rx::kPagesPerSlot;
+        const UInt32 first = amdtx::kRxFirstPage + ix * r27rx::kPagesPerSlot;
         volatile UInt64 *table = d->iovaL1[first / 512];
         if (!table) { result = kIOReturnNotReady; goto out; }
         volatile UInt64 *leaves = table + first % 512;

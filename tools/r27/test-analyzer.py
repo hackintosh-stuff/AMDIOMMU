@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Focused Round31 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round32 analyzer fixture; synthetic evidence is not hardware evidence.
 
-Actual C++ headers generate native7/std5/domain3 and both new RX snapshots.
+Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
 The positive fixture covers all 1024 RX map/post/done/restore/unmap lifecycles,
 including one matched business receive, and both aligned/unaligned RX pages.
@@ -35,7 +35,7 @@ legacy = analyzer.A
 
 TOKEN = 7
 PEER = ('127.0.0.2', 9110)
-ABI_CHECK = 'capture-ABI-domain3-native7-std5-rx4'
+ABI_CHECK = 'capture-ABI-domain4-native7-std5-rx4'
 COUNTER_CHECK = 'all-TX-standard-mode2-cumulative-and-unmarked-no-cover'
 LOG_CHECK = 'full8192-bytes-no-retry-no-duplicate-credit'
 CMD_CHECK = 'original8192-command-ring-wraps-and-postwrap-completion'
@@ -44,6 +44,7 @@ EXIT_CHECK = 'zero-pending-owners-pins-ring-and-no-device-page-fault'
 RX_MAP_CHECK = 'rx1024-standard-mapping-PTE-and-confirmed-unmap'
 RX_DONE_CHECK = 'rx1024-real-DMA-restoration-and-application-correlation'
 SESSION_CHECK = 'persistent-session-125s-idle-second4096-explicit-stop-and-restore'
+ALLOCATION_CHECK = 'dynamic-IOVA-wide-map-eight-live-and-confirmed-reuse'
 IDLE_NS = 125_000_000_000
 
 
@@ -100,23 +101,47 @@ int main(int argc, char **argv) {
     for (uint32_t i = 0; i < 5; ++i)
         pt[512 + ((base >> 21) & 511) + i] = (ptBase + (2 + i) * 4096) | perm | (1 << 9);
     d.version = r17domain::kVersion; d.bytes = sizeof(d); d.count = 32;
-    d.iovaBase = base; d.iovaBytes = 16 * 4096;
+    d.iovaBase = base; d.iovaBytes = 256 * 4096;
     d.rootPA = d.ptBase = ptBase; d.leafPA = ptBase + 8192;
     d.ptBytes = sizeof(pt); d.rootLevel = 3; d.devid = 0x0200; d.domid = 7;
-    d.historyTotal = d.mapsTotal = d.retiresTotal = 10240; d.historyStart = 10208;
+    d.historyTotal = d.mapsTotal = d.retiresTotal = 10249; d.historyStart = 10217;
     d.commandCapacity = _COMMAND_RING_BYTES_ / 16;
-    d.commandSubmits = d.commandCompleted = d.completionSequence = 2 * (10240 + r27rx::kCount) + 3;
+    d.commandSubmits = d.commandCompleted = d.completionSequence = 2 * (10240 + r27rx::kCount + 9) + 3;
     d.commandWraps = d.commandSubmits * 2 / d.commandCapacity;
     d.commandPostWrapCompleted = d.commandCompleted - (d.commandCapacity / 2 - 1);
-    d.slotsUsed = 15; d.maxLiveOwners = 4;
-    for (auto &uses : d.slotUses) uses = 2560;
+    d.slotsUsed = 65535; d.maxLiveOwners = 16;
+    for (auto &uses : d.slotUses) uses = 640;
+    for (uint32_t i = 0; i < 8; ++i) d.slotUses[i]++;
+    d.slotUses[0]++;
+    d.peakPages = 24; d.maxMappedPages = 8; d.reusedAllocations = 10000;
+    d.probeMaps = d.probeUnmaps = 9; d.probePeakOwners = d.probeMaxPages = 8;
+    d.probePassed = d.probeReused = 1; d.probeStart = 141; d.probeEnd = 159;
+    auto capacityRecord = [&](r17domain::Record &w, uint64_t handle, uint64_t pa,
+                              uint64_t mapTime, uint64_t doneTime, uint64_t sequence) {
+        w.handle = handle; w.status = 3; w.count = 1; w.pages = 8; w.maplen = 8 * 4096;
+        w.basePage = w.recordIndex = 0;
+        w.tMapPublish = mapTime; w.tMapInv = mapTime + 1;
+        w.tClearPublish = doneTime; w.tRetireInv = doneTime + 1;
+        w.segments[0] = {pa, 8 * 4096, base};
+        for (uint32_t i = 0; i < 8; ++i) {
+            w.physical[i] = pa + i * 4096;
+            w.mapPte[i] = w.physical[i] | perm;
+        }
+        w.mapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
+                        sequence, sequence, w.tMapInv};
+        const uint64_t retired = handle == 1 ? 9 : 18;
+        w.retireCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
+                           retired, retired, w.tRetireInv};
+    };
+    capacityRecord(d.probeFirst, 1, 0x70000000, 142, 148, 1);
+    capacityRecord(d.probeReuse, 9, 0x71000000, 151, 156, 17);
     g.magic = 0x37315854; g.version = r17tx::kVersion; g.bytes = sizeof(g);
     g.count = 32; g.bdf = d.devid; g.token = 7;
-    g.retired = 10240; g.maxHeld = 4; g.historyStart = 10208; g.tPublished = 9025;
+    g.retired = 10240; g.maxHeld = 16; g.historyStart = 10208; g.tPublished = 9025;
     s.magic = r18std::kMagic; s.version = r18std::kVersion; s.bytes = sizeof(s);
     s.count = 32; s.bdf = d.devid; s.token = 7;
     s.accepts = s.unmaps = s.historyTotal = 10240;
-    s.maxHeld = 4; s.mode = r17tx::kModeAllStandard;
+    s.maxHeld = 16; s.mode = r17tx::kModeAllStandard;
     s.historyStart = 10208; s.highReqAccepts = 10208; s.tPublished = 9025;
     b.magic = r20tx::kMagic; b.version = r20tx::kVersion; b.bytes = sizeof(b);
     b.bdf = d.devid; b.token = 7; b.nslot = 16;
@@ -124,6 +149,7 @@ int main(int argc, char **argv) {
     b.tSample = 9025; b.ringAddr = 0x800000; b.ringDescSize = 16;
     b.ringBytes = 1024 * b.ringDescSize;
     b.sampleStage = r20tx::kStageExit; b.sampleSeq = 8; b.quiesced = 1;
+    uint32_t nextPage = 0;
     for (uint32_t i = 0; i < 32; ++i) {
         // These are retirement records, not necessarily the last 32 request
         // IDs. All retained internal IDs exceed the userspace range 1..8192.
@@ -132,36 +158,40 @@ int main(int argc, char **argv) {
         const bool large = pattern == 2 || pattern == 4 || pattern == 6 || pattern == 8 || pattern == 11;
         const bool medium = pattern == 3 || pattern == 7 || pattern == 10 || pattern == 13 || pattern == 15;
         const uint32_t frame = large ? 1514 : medium ? 162 : 96;
-        const uint32_t n = large ? 2 : 1, page = (i % 4) * 4;
-        // Four distinct stripes overlap; each group retires before reuse.
-        const uint64_t t = 3000 + (i / 4) * 100 + (i % 4) * 3;
-        const uint64_t commandBase = 20419 + r27rx::kCount + (i / 4) * 8;
+        const uint32_t n = large ? 2 : 1;
+        if (i % 16 == 0) nextPage = 0;
+        const uint32_t page = nextPage;
+        nextPage += n;
+        // Sixteen variable-sized allocations coexist, retire, then are reused.
+        const uint64_t t = 3000 + (i / 16) * 100 + i % 16;
+        const uint64_t commandBase = 20419 + r27rx::kCount + 18 + (i / 16) * 32;
         auto &w = d.records[i];
         // Each history may have its own physical ring permutation. Handles
         // must perform the join; equal array indices must not be assumed.
         auto &v = g.witnesses[(i * 5) % 32];
         auto &u = s.witnesses[(i * 9) % 32];
         // r17StdMap cannot see the packet: only its handle joins to stdW.
-        w.handle = req; w.token = 0; w.req = 0; w.status = 3;
+        w.handle = req + 9; w.token = 0; w.req = 0; w.status = 3;
+        w.basePage = page; w.recordIndex = i % 16;
         w.count = w.pages = n; w.maplen = large ? 8192 - 256 : frame;
         w.tMapPublish = t + 1; w.tMapInv = t + 2;
-        w.tClearPublish = t + 14; w.tRetireInv = t + 16;
+        w.tClearPublish = t + 44; w.tRetireInv = t + 46;
         w.mapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
-                        commandBase + i % 4, commandBase + i % 4, t + 2};
+                        commandBase + i % 16, commandBase + i % 16, t + 2};
         w.retireCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
-                           commandBase + 4 + i % 4, commandBase + 4 + i % 4, t + 16};
+                           commandBase + 16 + i % 16, commandBase + 16 + i % 16, t + 46};
         auto &r = v.request;
         r.version = r17tx::kVersion; r.bytes = sizeof(r); r.bdf = d.devid;
         // r17TxMapStd fills iova/tMap, not native handle or physical. Its
         // timer passes request.handle==0 to r17TxRetire in standard mode.
         r.token = 7; r.reqId = req; r.count = n; r.handle = 0;
-        r.tMap = t + 3; r.tDone = t + 12;
-        v.tOwn = t + 6; v.tFree = t + 20; v.retired = 1;
+        r.tMap = t + 3; r.tDone = t + 42;
+        v.tOwn = t + 6; v.tFree = t + 50; v.retired = 1;
         v.cumulative = 2 * req; v.firstSlot = (2 * req) % 1024;
         v.lastSlot = (v.firstSlot + n - 1) % 1024;
         v.doneClose = v.cumulative + n; v.closeMask = 0xffff;
         u.version = r18std::kVersion; u.bytes = sizeof(u);
-        u.req = req; u.token = 7; u.handle = req; u.segCount = n;
+        u.req = req; u.token = 7; u.handle = req + 9; u.segCount = n;
         u.flags = r18std::kMapped | r18std::kUnmapped;
         u.memory = 0x100000 + req * 64; u.command = 0x200000 + req * 64;
         u.mapLength = u.descriptorLength = frame; u.mbufSegments = n;
@@ -169,15 +199,15 @@ int main(int argc, char **argv) {
         // r17TxPosted uses the exact tOwn stamp; the native Request carries
         // tDone, while the standard witness's tDone remains zero.
         u.tCommit = v.tOwn;
-        u.tCompleteBegin = t + 13; u.tCompleteEnd = t + 17; u.tFree = t + 20;
+        u.tCompleteBegin = t + 43; u.tCompleteEnd = t + 47; u.tFree = t + 50;
         for (uint32_t j = 0; j < n; ++j) {
             const uint64_t off = j ? 512 : 256;
             const uint64_t pa = 0x10000000 + req * 0x10000 + j * 4096 + off;
             const uint64_t iova = base + (page + j) * 4096 + off;
             const uint64_t len = large ? (j ? frame - 96 : 96) : frame;
             w.segments[j] = {pa, len, iova};
-            w.physical[page + j] = pa & ~4095ULL;
-            w.mapPte[page + j] = (pa & ~4095ULL) | perm;
+            w.physical[j] = pa & ~4095ULL;
+            w.mapPte[j] = (pa & ~4095ULL) | perm;
             r.iova[j] = {iova, len};
             v.descriptors[j] = {iova, len, 0x80000000u | (uint32_t)len, 0};
             v.doneOpts1[j] = v.descriptors[j].opts1;
@@ -206,9 +236,9 @@ int main(int argc, char **argv) {
         r.tMapPublish = 200 + i / 16; r.tMapInv = 201 + i / 16;
         r.tUnmapPublish = 8880 + i / 16; r.tUnmapInv = 8900 + i / 16;
         r.mapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
-                        1 + i, 1 + i, r.tMapInv};
+                        19 + i, 19 + i, r.tMapInv};
         r.unmapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
-                          20484 + r27rx::kCount + i, 20484 + r27rx::kCount + i, r.tUnmapInv};
+                          20502 + r27rx::kCount + i, 20502 + r27rx::kCount + i, r.tUnmapInv};
         r.flags = r27rx::kMapRegistered | r27rx::kMapPublished |
                   r27rx::kMapInvalidated | r27rx::kMapUnmapped | r27rx::kMapReleased;
         for (uint32_t j = 0; j < r.pages; ++j)
@@ -293,7 +323,7 @@ def properties():
          'm2-3b-slots-live': 0}
     for key in ('m2-3c-map-calls', 'm2-3c-map-ok', 'm2-3c-unmap-ok',
                 'm2-3b-map-accepted', 'm2-3b-retires'):
-        p[key] = 10240
+        p[key] = 10249
     for key in ('m2-3c-insert-calls', 'm2-3c-map-rejects', 'm2-3b-map-rejected',
                 'm2-3c-cover-calls', 'm2-3b-owners-held', 'm2-b2-win-entries', 'm2-b2-win-new-entries',
                 'm2-b2-win-raw-count', 'm2-b2-win-pre-backlog',
@@ -303,10 +333,10 @@ def properties():
                 'm2-3e-enter-last-inflight', 'm2-3e-enter-last-ring',
                 'm2-3e-exit-last-inflight', 'm2-3e-exit-last-ring'):
         p[key] = 0
-    p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': 22531,
-              'm2-3b-command-completed': 22531, 'm2-3b-command-wraps': 88,
-              'm2-3b-command-post-wrap-completed': 22276,
-              'm2-3b-completion-sequence': 22531,
+    p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': 22549,
+              'm2-3b-command-completed': 22549, 'm2-3b-command-wraps': 88,
+              'm2-3b-command-post-wrap-completed': 22294,
+              'm2-3b-completion-sequence': 22549,
               'm2-b2-window-valid': 'yes', 'm2-b2-win-raw-truncated': 'no',
               'm2-b2-win-status-start': 8, 'm2-b2-win-status-end': 8,
               'm2-3e-enter': 'gate-open-after-dte-and-invalidations',
@@ -321,7 +351,7 @@ def properties():
     leave = ('m2-3e-exit-gate-close', 'm2-3e-exit-submit-done',
              'm2-3e-exit-drain-done', 'm2-3e-t-translate-off',
              'm2-3e-t-detach', 'm2-3e-t-resume')
-    p.update(zip(enter, range(100, 160, 10)))
+    p.update(zip(enter, (100, 110, 120, 130, 140, 160)))
     p.update(zip(leave, range(9000, 9060, 10)))
     for key in enter + leave + ('m2-b2-t-recovery-start', 'm2-3i-tail-confirmed-time',
                                 'm2-3i-exit-retire-confirmed-time'):
@@ -504,7 +534,15 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual((history['historyTotal'], history['historyStart'], history['retained']), (10240, 10208, 32))
         self.assertTrue(all(req > 8192 for req in history['internalRequests']))
         self.assertEqual(history['nativeHandles'], [0])
-        self.assertEqual(history['peakRetainedLive'], 4)
+        self.assertEqual(history['peakRetainedLive'], 16)
+        self.assertEqual(history['domainHistoryTotal'], 10249)
+        self.assertEqual(by_id[COUNTER_CHECK]['capacityProbeMaps'], 9)
+        allocation = by_id[ALLOCATION_CHECK]
+        self.assertEqual((allocation['probeMaps'], allocation['probeUnmaps']), (9, 9))
+        self.assertEqual((allocation['probePeakOwners'], allocation['probePages']), (8, 8))
+        self.assertEqual(allocation['firstBasePage'], allocation['reusedBasePage'])
+        self.assertEqual((allocation['arenaPages'], allocation['recordCapacity'], allocation['livePages']),
+                         (256, 16, 0))
         self.assertEqual(by_id['ordinary-traffic-before-during-and-three-after'],
                          {'before': 20, 'during': 1024, 'after': 3})
         self.assertEqual((self.capture / 'r27-rx-raw.bin').stat().st_size, 311376)
@@ -512,7 +550,7 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(by_id[RX_MAP_CHECK]['mapped'], 1024)
         self.assertEqual(by_id[RX_MAP_CHECK]['unmapped'], 1024)
         self.assertEqual(by_id[RX_MAP_CHECK]['writablePages'], 1536)
-        self.assertEqual(by_id[RX_MAP_CHECK]['leafTables'], 5)
+        self.assertEqual(by_id[RX_MAP_CHECK]['leafTables'], 4)
         self.assertEqual(by_id[RX_DONE_CHECK]['sampledCompletions'], 4096)
         self.assertEqual(by_id[RX_DONE_CHECK]['restored'], 1024)
         self.assertEqual(by_id[RX_DONE_CHECK]['applicationRequests'], [1025])
@@ -542,7 +580,11 @@ class AnalyzerTests(unittest.TestCase):
                     analyzer.struct.pack_into('<' + fmt, blob, 64 + command + offset, value)
                     path.write_bytes(blob)
                     self.expect(False, RX_MAP_CHECK)
-        for command, sequence in ((120, 21508), (160, 22532), (120, 21443), (160, 21509)):
+        domain, records = analyzer.decode_domain((self.capture / 'r21-domain-raw.bin').read_bytes())
+        first_unmap = analyzer.struct.unpack_from('<Q', baseline, 64 + 160 + 16)[0]
+        for command, sequence in ((120, first_unmap), (160, domain['completionSequence'] + 1),
+                                  (120, records[0]['mapCommand']['expected']),
+                                  (160, first_unmap + 1)):
             with self.subTest(command=command, sequence=sequence):
                 blob = bytearray(baseline)
                 analyzer.struct.pack_into('<2Q', blob, 64 + command + 16, sequence, sequence)

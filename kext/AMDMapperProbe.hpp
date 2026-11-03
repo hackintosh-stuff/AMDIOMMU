@@ -144,6 +144,7 @@ private:
     // one physically contiguous page run per call (the layout a single-mbuf TX
     // packet has); everything else is refused before any PTE is written.
     bool r18StdReady() const;
+    bool r32CapacityProbe();
     // True only for an address inside the domain's own bounded IOVA window, so
     // an unrelated mapper call can never be routed into (or counted as) this
     // path.

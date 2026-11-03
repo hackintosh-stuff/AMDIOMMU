@@ -1,6 +1,47 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round31 / explicit-stop mapping session
+## Current Round32 / dynamic IOVA mappings
+
+Base: `561400ae756199035baa9b5593619835bd8471de`.
+Candidate: Lucy **1.1.217** / Probe **0.41.0**; domain4/native7/std5, RX4, pool2.
+
+Round31 completed its explicit-stop session and clean exit, but the unchanged
+strict analyzer returned **13/14** because one TX frame was rejected. Rechecking
+the raw capture found cover calls/rejects both zero. The source permits a
+gate refusal after dequeue without increasing mapAttempts; the previous
+legacy-cover diagnosis is therefore unsupported. Round32 acquires admission
+before dequeuing and retains queued traffic while admission is closed.
+
+The main new capability is variable-size DMA mapping:
+
+- Allocate TX IOVA pages on demand from a bounded 256-page (1 MiB) arena,
+  with 16 independent live mapping records and up to 32 pages per mapping.
+- Keep each record's allocation separate from its record index and retain
+  mapping-local PTE evidence. Backend physical layout supports up to 16 runs.
+- Place RX1024 at 64 GiB + 2 MiB, separate from the TX arena. Five L1 tables
+  cover the TX region and the four RX regions together.
+- Before opening TX admission, use real IODMACommands to keep eight mappings
+  live (one eight-page mapping and seven one-page mappings), retire them,
+  then map eight pages again to prove reuse. These nine mappings remain in
+  cumulative domain counters and have separate probe counts and retained
+  evidence; they are capacity checks, not NIC DMA transfers.
+- Reuse the Round31 explicit-stop session and its 4096 + 125 s idle + 4096
+  ordinary network workload, R28T/R29D and normal recovery.
+
+From this repository, use a fresh upstream tree at
+`639144d1f284a9fee222a518691b01494f5e265d` and the existing MacKernelSDK:
+
+```sh
+sh tools/r27/build.sh _scratch/r32-upstream
+```
+
+Generation selects `--tx 21 --rx 32`. Run defaults are `runs/r32` and
+`org.example.round32load`; the compatible control helper remains
+`tools/r31/session.py`, including the accepted registry-entry lookup fix.
+Normal load submits the single stop request and supplies the drain tail.
+Mac builds and hardware acceptance of Round32 are pending.
+
+## Historical Round31 / explicit-stop mapping session
 
 Base: `d826cd3093d18625097f03b6a988a98637d622b1`.
 Candidate: Lucy **1.1.216** / Probe **0.40.0**. The wire layouts stay
@@ -43,11 +84,15 @@ deployed source). The single valid measurement used token `0x31c0de31`:
 TX retired 10339, owners/pending/pinned/ring 0, and 3/3 post-exit probes.
 
 The failing check is the pre-existing cumulative TX rule: `driver.rejected=1`.
-`R26TxAttempts == R26TxMapped == 10339` proves the refused frame never entered
-the all-standard mapping entry; the consistent site is the legacy cover branch
-before session start or after detach. No application frame was lost. Next step
-is the minimal fix there (do not reject cover failures once translation is off)
-and one retest. Deployed source commit: `9461218491846fd5432b31b166e596c5ee597642`.
+Independent review found `R26TxAttempts == R26TxMapped == 10339`, but also
+`coverCalls == coverRejects == 0` in both raw block and driver properties.
+The earlier legacy-cover diagnosis was incorrect: the gate-refusal branch in
+`r17TxMap()` increments rejected before a mapping attempt, after the frame has
+already been dequeued. The counts identify this admission path; they do not
+identify the specific packet or which transition it met. Application replies,
+tails and final cleanup all completed. Keep the 13/14 result and incorporate
+the dequeue/admission fix into the dynamic IOVA round, with no separate
+cover-retest round. Deployed source: `9461218491846fd5432b31b166e596c5ee597642`.
 
 Round31 result and archive are outside this source repository:
 [Round31 result](<../../docs/m2-3l-round31-result.md>) and

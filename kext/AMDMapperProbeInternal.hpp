@@ -194,14 +194,14 @@ struct ProbeLayout {
     uint64_t totalBytes;
     bool     discontig;
     bool     error;
-    LayoutRun run[8];
+    LayoutRun run[16];
 };
 
 static inline ProbeLayout probeLayout(IOMemoryDescriptor *memory,
                                       uint64_t offset, uint64_t length,
                                       uint32_t maxRuns) {
     ProbeLayout L = {};
-    if (!memory || !length) { L.error = true; return L; }
+    if (!memory || !length || !maxRuns || maxRuns > 16) { L.error = true; return L; }
     // 与 r18 的 probeSegmentRun 一样用公开的 getPhysicalSegment(
     // kIOMemoryMapperNone) 走查：mapper 到达时描述符必须已 wiring。这要求驱动
     // 侧的描述符带 kIOMemoryAutoPrepare（withAddress 隐含携带、

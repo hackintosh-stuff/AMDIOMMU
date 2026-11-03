@@ -51,6 +51,12 @@ int main() {
     std::printf("  \"domain_records_offset\": %zu,\n", offsetof(r17domain::Snapshot, records));
     std::printf("  \"domain_tail_offset\": %zu,\n", offsetof(r17domain::Snapshot, historyTotal));
     std::printf("  \"domain_sequence_offset\": %zu,\n", offsetof(r17domain::Snapshot, completionSequence));
+    std::printf("  \"domain_record_segments\": %zu,\n", sizeof(r17domain::Record{}.segments) / sizeof(r17domain::Segment));
+    std::printf("  \"domain_record_pages\": %zu,\n", sizeof(r17domain::Record{}.physical) / sizeof(uint64_t));
+    std::printf("  \"domain_record_basepage_offset\": %zu,\n", offsetof(r17domain::Record, basePage));
+    std::printf("  \"domain_record_pte_offset\": %zu,\n", offsetof(r17domain::Record, mapPte));
+    std::printf("  \"domain_allocator_offset\": %zu,\n", offsetof(r17domain::Snapshot, livePages));
+    std::printf("  \"domain_probe_offset\": %zu,\n", offsetof(r17domain::Snapshot, probeFirst));
     std::printf("  \"native_history_start_offset\": %zu,\n", offsetof(r17tx::Snapshot, historyStart));
     std::printf("  \"std_history_total_offset\": %zu,\n", offsetof(r18std::Snapshot, historyTotal));
     std::printf("  \"request_limit\": %u, \"history_capacity\": %u, \"mapping_slots\": %u,\n", r17tx::kRequestLimit, r17tx::kMaxRequests, r17tx::kSlots);
@@ -152,6 +158,7 @@ def check():
     want = abi()
     round26 = want['native_version'] == 6
     round29 = want['native_version'] == 7
+    round32 = want['domain_version'] == 4
     decoder = (HERE.parent / 'r27/analyze.py' if round29 else
                HERE.parent / 'r26/analyze.py' if round26 else HERE / 'check-r25.py')
     current = runpy.run_path(str(decoder))
@@ -198,7 +205,7 @@ def check():
     # this list catches the other direction -- a deliberate ABI bump that left
     # the tooling behind. Changing either means updating both on purpose.
     pin = [('configure_bytes', 176), ('native_version', 7 if round29 else 6 if round26 else 5),
-           ('request_limit', 512), ('mapping_slots', 4),
+           ('request_limit', 512), ('mapping_slots', 16 if round32 else 4),
            ('configure_off_deadline', 24), ('configure_off_callback', 32),
            ('configure_off_mapper', 96), ('configure_off_quiesced', 112),
            ('configure_off_inFlight', 128), ('configure_off_ringOwn', 132),
@@ -252,6 +259,26 @@ def check_r26():
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == '--check-r32':
+        want = abi()
+        pins = {'domain_version': 4, 'domain_bytes': 44592,
+                'domain_record_bytes': 1304, 'domain_records_offset': 80,
+                'domain_tail_offset': 41808, 'domain_sequence_offset': 41920,
+                'domain_record_segments': 16, 'domain_record_pages': 32,
+                'domain_record_basepage_offset': 64, 'domain_record_pte_offset': 712,
+                'domain_allocator_offset': 41928, 'domain_probe_offset': 41984,
+                'native_version': 7, 'std_version': 5, 'configure_bytes': 176,
+                'retire_ack_op': 4, 'history_capacity': 32, 'mapping_slots': 16,
+                'rx_version': 4, 'rx_count': 1024, 'rx_snapshot_bytes': 311376,
+                'rx_request_bytes': 344192, 'rx_backend_bytes': 204864,
+                'rx_tail_seq_offset': 44, 'pool_version': 2, 'pool_spares': 1024,
+                'pool_snapshot_bytes': 114808, 'pool_request_bytes': 114856}
+        bad = {k: (want.get(k), v) for k, v in pins.items() if want.get(k) != v}
+        if bad:
+            print('round32 ABI MISMATCH: ' + repr(bad))
+            return 1
+        print('round32 ABI: %d header-derived pins passed' % len(pins))
+        return check()
     if len(sys.argv) > 1 and sys.argv[1] == '--check-r30':
         want = abi()
         pins = {'domain_version': 3, 'native_version': 7, 'std_version': 5,

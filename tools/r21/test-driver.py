@@ -29,11 +29,6 @@ PREFIX = r'''
 #include <cstdio>
 #include <functional>
 #include <map>
-struct TestNetif {
-    unsigned signals = 0;
-    std::function<void()> output;
-    void signalOutputThread() { signals++; if (output) output(); }
-};
 using UInt32=uint32_t; using UInt64=uint64_t; using SInt32=int32_t; using UInt8=uint8_t;
 using IOReturn=int;
 enum {kIOReturnSuccess=0,kIOReturnBadArgument=1,kIOReturnNoMemory=2,
@@ -71,15 +66,24 @@ struct IOService { int refs=1; void retain(){refs++;} void release(){refs--;}
 
 #include "RTL812xTxMapNative.hpp"
 #include "RTL812xTxMapStd.hpp"
-/* Round23: the harness checks the real window geometry (kBase, kSlots,
- * kPagesPerSlot), so it compiles the SAME header the backend uses instead of
- * restating the numbers. */
+/* Compile the production IOVA allocator used by the backend. */
 #include "amd_iommu_tx_core.hpp"
 static UInt64 ticks=100; static UInt64 mach_absolute_time(){return ++ticks;}
 struct Mbuf {UInt32 token=7,req=1,len=74; UInt32 pkthdr=0; UInt64 pa=0x35e41000ULL;
  bool parsed=true;
  Mbuf *next=nullptr; unsigned frees=0; UInt64 freedAt=0;};
 using mbuf_t=Mbuf*;
+struct TestNetif {
+    unsigned signals = 0, dequeues = 0;
+    mbuf_t queued = nullptr;
+    std::function<void()> output;
+    void signalOutputThread() { signals++; if (output) output(); }
+    IOReturn dequeueOutputPackets(unsigned, mbuf_t *packet, void *, void *, void *) {
+        if (!queued) return kIOReturnNoResources;
+        *packet = queued; queued = nullptr; dequeues++; return kIOReturnSuccess;
+    }
+};
+using IONetworkInterface = TestNetif;
 /* pkthdr_len is the WHOLE chain (0 = single mbuf, use len). */
 static UInt32 mbuf_pkthdr_len(mbuf_t m){return m->pkthdr ? m->pkthdr : m->len;}
 /* Round22: these two counters are the mechanical proof that the sampler does
@@ -164,13 +168,8 @@ struct IODMACommand {
     struct Segment64 {UInt64 fIOVMAddr, fLength;};
     enum { kMapped = 0 };
     IOMemoryDescriptor *md=nullptr; bool active=false; UInt64 iova=0, len=0, handle=0;
-    /* Round23: the stub backend hands out one FIXED STRIPE per live mapping,
-     * exactly like the real one (amdtx::plan uses `slot`). Round 22 gave every
-     * mapping the same window base, which is indistinguishable from an overlap
-     * bug -- so it could not have caught one. */
-    static UInt32 stubStripe;      /* next stripe to hand out */
-    static UInt32 stubLive;        /* bitmask of stripes in use by this stub */
-    UInt32 slot = 0;
+    static amdtx::Allocator arena;
+    unsigned basePage = 0, pages = 0;
     static IODMACommand *withSpecification(int, UInt8, UInt64, int, UInt64,
                                            UInt32, IOMapper*, void*)
     { if (stdCmdAllocFails) return nullptr;
@@ -179,21 +178,15 @@ struct IODMACommand {
     {
         stdPrepareCalls++; md = d; len = d->total();
         if (stdMode == kStdRefuseNoHandle) return kIOReturnIOError;
-        /* take the lowest free stripe, as the backend's slot allocator does */
-        slot = amdtx::kSlots;
-        for (UInt32 k = 0; k < amdtx::kSlots; k++)
-            if (!(stubLive & (1u << k))) { slot = k; break; }
         stdLastHandle = ++stdHandleSeq;      /* mapper published a mapping */
         handle = stdLastHandle;
         stdRecordSeq++;
-        /* A REFUSED prepare never becomes a live mapping, so it must not claim
-         * a stripe. The published-handle refusal is the pinned case: the driver
-         * keeps it and its stripe legitimately. */
+        /* Retain the existing refused-prepare fixture without allocating. */
         if (stdMode == kStdRefuseWithHandle) return kIOReturnIOError;
-        stubLive |= (1u << slot);
-        /* The real mapper returns window base + stripe offset + in-page offset;
-         * never the physical address. */
-        iova = amdtx::kBase + (UInt64)slot * amdtx::kPagesPerSlot * 4096ULL +
+        for (UInt32 i = 0; i < md->n; ++i)
+            pages += (unsigned)(((md->ranges[i].va & 4095ULL) + md->ranges[i].len + 4095ULL) / 4096ULL);
+        if (!amdtx::allocate(arena, pages, basePage)) return kIOReturnNoResources;
+        iova = amdtx::kBase + (UInt64)basePage * 4096ULL +
                (md->ranges[0].va & 4095ULL);
         active = true; return kIOReturnSuccess;
     }
@@ -226,7 +219,7 @@ struct IODMACommand {
     { stdCompleteCalls++;
       if (!active) return kIOReturnNotReady; active=false; stdUnmapCount++;
       if (!stdUnmapFails) {
-          stubLive &= ~(1u << slot);
+          assert(amdtx::release(arena, basePage, pages));
           stdConfirmedRetires[handle] = mach_absolute_time();
       }
       return stdUnmapFails ? kIOReturnIOError : kIOReturnSuccess; }
@@ -237,8 +230,7 @@ struct IODMACommand {
 };
 
 static UInt32 harvestHeldPolling = 0;
-/* Round23: the stub backend's stripe bookkeeping (see IODMACommand above). */
-UInt32 IODMACommand::stubLive = 0;
+amdtx::Allocator IODMACommand::arena{};
 class RTL8125 {public:
  TestNetif interface; TestNetif *netif = &interface;
  bool enableTSO4=false, enableTSO6=false;
@@ -297,8 +289,8 @@ def main():
     patched = T['patch_cpp'](fixture)
     for hook in T['HOOKS']:
         assert hook in patched, hook
-    assert 'r17TxOutputReady() && interface->dequeueOutputPackets(' in patched
-    assert patched.index('r17TxOutputReady() && interface->dequeue') < patched.index('r17TxMap(m, txSegments')
+    assert 'r32TxDequeue(interface, &m)' in patched
+    assert patched.index('r32TxDequeue(interface, &m)') < patched.index('R32TxAdmission admission(this);') < patched.index('r17TxMapAdmitted(m, txSegments')
     tail_result = 'result = (r17TxOutputReady() && (txNumFreeDesc > (kMaxSegs + 3))) ? kIOReturnSuccess : kIOReturnNoResources;'
     assert tail_result in patched
     assert patched.index(tail_result) > patched.index('r17TxPosted(m);')
@@ -312,13 +304,14 @@ def main():
         output = cpp[cpp.index('IOReturn RTL8125::outputStart('):
                      cpp.index('void RTL8125::txInterrupt()')]
         assert output.index('getPhysicalSegmentsWithCoalesce') < \
-            output.index('r17TxMap(m,') < output.index('OSAddAtomic(-numSegs') < \
+            output.index('r17TxMapAdmitted(m,') < output.index('OSAddAtomic(-numSegs') < \
             output.index('firstDesc->opts1 |= DescOwn') < \
             output.index('r17TxPosted(m)')
-        assert output.index('r17TxOutputReady() && interface->dequeue') < output.index('r17TxMap(m,')
+        assert output.index('r32TxDequeue(interface, &m)') < output.index('R32TxAdmission admission(this);') < output.index('r17TxMapAdmitted(m,')
+        assert output.index('firstDesc->opts1 |= DescOwn') < output.index('admission.handoff();') < output.index('r17TxPosted(m)')
         assert tail_result in output
         assert output.index(tail_result) > output.index('r17TxPosted(m)')
-        assert output.count('r17TxMap(m,') == 1
+        assert output.count('r17TxMapAdmitted(m,') == 1
         assert 'r17TxComplete(txDirtyDescIndex);' in cpp
         assert 'page-aligned-real-tx-staging' not in cpp
         current = g['body_is_current'](cpp)

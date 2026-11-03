@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round31 install, with exact disk checks and a recovery copy under 1 GiB.
+"""Round32 install, with exact disk checks and a recovery copy under 1 GiB.
 
 Run from the project on the Mac. --check-only performs the same read-only
 prechecks and prints the plan. Neither path reboots or changes network settings.
@@ -17,10 +17,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 BATCH = 512
-BASE_COMMIT = 'd826cd3093d18625097f03b6a988a98637d622b1'
+BASE_COMMIT = '561400ae756199035baa9b5593619835bd8471de'
 UPSTREAM_COMMIT = '639144d1f284a9fee222a518691b01494f5e265d'
-DRIVER_VERSION = '1.1.216'
-PROBE_VERSION = '0.40.0'
+DRIVER_VERSION = '1.1.217'
+PROBE_VERSION = '0.41.0'
 EFI_UUID = '7A8D47A3-44C8-47E7-B488-A4C24DB5AC82'
 EFI_VOLUME_UUID = '7029D646-AA46-3D16-950E-6C6AF4AB44B3'
 EFI_SIZE = 272629760
@@ -121,7 +121,7 @@ def source_identity():
     """Deploy a committed successor of the accepted source, as requested."""
     commit = output('git', 'rev-parse', 'HEAD').strip()
     if not re.fullmatch(r'[0-9a-f]{40}', commit) or commit == BASE_COMMIT:
-        raise ValueError('commit the applied and software-tested Round31 source before deployment')
+        raise ValueError('commit the applied and software-tested Round32 source before deployment')
     subprocess.run(['git', 'merge-base', '--is-ancestor', BASE_COMMIT, commit],
                    cwd=str(ROOT), check=True)
     dirty = output('git', 'status', '--porcelain=v1', '--untracked-files=normal',
@@ -135,7 +135,7 @@ def source_identity():
 
 def daemon_plist(out, peer, port):
     return {
-        'Label': 'org.example.round31load',
+        'Label': 'org.example.round32load',
         'ProgramArguments': ['/bin/sh', str(HERE / 'boot-load.sh'),
                              out.relative_to(ROOT).as_posix()],
         'WorkingDirectory': str(ROOT),
@@ -152,7 +152,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--efi', required=True, help='already mounted exact target EFI')
     parser.add_argument('--token', required=True, type=lambda value: int(value, 0))
-    parser.add_argument('--out', default='runs/r31')
+    parser.add_argument('--out', default='runs/r32')
     parser.add_argument('--backup', help='project-relative recovery directory')
     parser.add_argument('--peer', default='192.168.50.122')
     parser.add_argument('--port', type=int, default=9110)
@@ -163,7 +163,7 @@ def main():
     source_ref = source_identity()
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     out = project_path(args.out)
-    backup = project_path(args.backup or ('runs/recovery-r31-' + stamp))
+    backup = project_path(args.backup or ('runs/recovery-r32-' + stamp))
     if backup.exists() or backup == out:
         raise ValueError('recovery directory must be new and separate from load output')
     if any((out / name).exists() for name in ('load.txt', 'client.log')):
@@ -207,9 +207,11 @@ def main():
     tokenarg = 'amdiommu=pgt.batch%d.t0x%08x.std.alltx.rxstd.session' % (BATCH, args.token)
     bootargs = ' '.join([arg for arg in current_args.split()
                          if not arg.startswith('amdiommu=')] + [tokenarg])
-    plan = {'round': 31, 'driver_mode': 2, 'scope': 'explicit-stop-RX1024-session',
+    plan = {'round': 32, 'driver_mode': 2, 'scope': 'dynamic-TX-IOVA-RX1024-session',
             'kernel_batch': BATCH, 'application_requests': 8192, 'rx_maps': 1024,
             'session_mode': 'explicit-stop', 'idle_seconds': 125,
+            'tx_iova_pages': 256, 'tx_live_records': 16, 'tx_max_mapping_pages': 32,
+            'capacity_probe_maps': 9, 'capacity_probe_peak_owners': 8,
             'source_commit': source_ref['commit'], 'base_commit': BASE_COMMIT,
             'bootarg': tokenarg, 'mtu': 1500, 'tso4': False, 'tso6': False,
             'out': out.relative_to(ROOT).as_posix(),
@@ -254,13 +256,13 @@ def main():
     (out / 'deployment.json').write_text(json.dumps(plan, indent=2) + '\n', encoding='utf-8')
     (out / 'source-ref.json').write_text(json.dumps(source_ref, indent=2) + '\n', encoding='utf-8')
     daemon = daemon_plist(out, args.peer, args.port)
-    generated = out / 'org.example.round31load.plist'
+    generated = out / 'org.example.round32load.plist'
     generated.write_bytes(plistlib.dumps(daemon, sort_keys=False))
     run(['plutil', '-lint', generated])
     for job in jobs:
         subprocess.run(['sudo', 'launchctl', 'bootout', 'system', str(job)], check=False)
         run(['sudo', 'rm', '-f', job])
-    target = Path('/Library/LaunchDaemons/org.example.round31load.plist')
+    target = Path('/Library/LaunchDaemons/org.example.round32load.plist')
     run(['sudo', 'cp', generated, target])
     run(['sudo', 'chown', 'root:wheel', target])
     run(['sudo', 'chmod', '644', target])

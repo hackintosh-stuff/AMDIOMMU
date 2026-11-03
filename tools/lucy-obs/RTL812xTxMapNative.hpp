@@ -61,11 +61,9 @@ static const char kFunctionName[] = "RTL812xTxMapNative-v1";
  * report that as a number, so an old probe can read a new driver and simply see
  * a peak above 1 -- which is exactly the fact this round adds.
  *
- * ROUND 23 ADDS kSlots: the driver keeps this many mappings alive at once, each
- * in its own fixed stripe of the IOVA window (`amdtx::kPagesPerSlot` pages).
- * It lives here rather than in the driver because the probe's map side has to
- * size the same window, and a mismatch would show up as two generations
- * aliasing one IOVA range. */
+ * Round32 keeps sixteen live driver records. IOVA pages are allocated by the
+ * backend for each mapping; a driver record no longer names a fixed stripe.
+ * These capacity constants do not alter the native wire layout. */
 /* Round25: fixed history is circular and no longer an admission limit.
  * Round26: mode 2 maps ordinary TX; Request::reqId is then a driver-assigned
  * monotonic map-attempt sequence, and token identifies the installed run. The
@@ -73,14 +71,14 @@ static const char kFunctionName[] = "RTL812xTxMapNative-v1";
  * selection fields. */
 /* Round29: standard complete() requires per-handle backend retirement ack.
  * Quiesce reports both held mbufs and live generations; layout is unchanged. */
-static const uint32_t kVersion = 7, kMaxSegments = 8, kMaxPages = 16;
-static const uint32_t kSlots = 4;
+static const uint32_t kVersion = 7, kMaxSegments = 8, kMaxPages = 32;
+static const uint32_t kSlots = 16;
 /* Evidence and legacy packet-selection bounds. The live DMA-owner bound is
  * kSlots; all-standard mode does not use kRequestLimit for admission. */
 static const uint32_t kMaxRequests = 32; // fixed retained history
 static const uint32_t kRequestLimit = 512; // selected direct/standard modes only
-/* Protocol upper bound, not a promise that one four-page slot fits this much.
- * The mapper still rejects a layout beyond its per-slot page capacity. */
+/* Protocol byte bound; the backend allocates the pages needed by this layout
+ * within its explicit per-mapping and total-arena capacities. */
 static const uint64_t kMaxBytes = 65536;
 enum { kInstall = 1, kDisarm = 2, kQuery = 3, kDetach = 4 };
 /* kMap/kRetire are the owned mapping. kCover (round 20) asks the backend to

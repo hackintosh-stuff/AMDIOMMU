@@ -11,7 +11,9 @@ namespace r27rx {
 typedef unsigned int u32;
 typedef unsigned long long u64;
 static const char kFunctionName[] = "rtl812x-r27-rxmap";
-static const u64 kIovaBase = 0x1000010000ULL;
+// Round32 reserves the first L1 table for the dynamic TX arena. RX remains
+// 1024 independent two-page stripes in the following four L1 tables.
+static const u64 kIovaBase = 0x1000200000ULL;
 enum {
     kVersion = 4, kCount = 1024, kPagesPerSlot = 2, kCapacity = 4096,
     kTailMax = 4096,
