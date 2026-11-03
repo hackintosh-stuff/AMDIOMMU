@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round42 / publish the entire RX IOVA ring before hardware enable
+## Accepted Round42 / publish the entire RX IOVA ring before hardware enable
 
 Base: `8efddec6ca4280b59fe991b87516903f8628bf23`, the accepted Round41
 result-documentation successor (tree `4207a10f564eba051e0eeae197848566ac666317`).
@@ -33,8 +33,49 @@ and three ordinary probes after recovery. Strengthen the entry timing in the
 existing RX checks and update the existing normal fixture; retain 14 checks.
 Use the fixed checkout and upstream input, `--tx 21 --rx 34`, `--check-r42`,
 `runs/r42`, `org.example.round42load` and token `0x42c0de42`.
-Host validation, real Mac compilation and hardware acceptance remain separate;
-Round42 hardware acceptance is pending.
+Host validation, real Mac compilation and hardware acceptance remain separate.
+
+**Round42 hardware acceptance PASSED (14/14).** One planned boot and one valid
+measurement. All 1024 initial mappings were published with their real IOVA OWN
+while the NIC was stopped (`initialMappingsPosted=1024`,
+`unpostedInitialMappings=0`), the first post at 31,665,224,426 ns and the last
+at 31,665,883,905 ns, then the bootstrap identity was cleared at 31,666,835,365
+ns, its single INV/CW completed at 31,666,840,795 ns with expected = observed =
+1049, the driver callback returned at 31,667,346,005 ns, and only then did the
+hardware authorize at 32,111,651,558 ns, so
+`bootstrapRetiredBeforeNICEnable` is true and the first packet already used IOVA.
+
+The active page table holds **identity=0** with 1024 RX IOVA leaves mapping each
+slot's generation-1 physical buffer, and all three fixed spans stayed at their
+IOVA slots (txRing 879,222,784 / 32,768 B, rxRing 879,255,552 / 16,384 B, tally
+15,120,543,744 / 192 B; 13 pages). Because the initial mappings now carry real
+work, `maps = unmaps = posted = 10466` with no extra 1024 preparation term, and
+`posted 10466 = completed 9442 + stopRetired 1024`; 2627 real replacements
+occurred, 1006 of 1024 slots differed between first and final retained
+generation addresses and all 1024 slots were restored.
+
+RX invalidations were 10448 each over 9424 batch calls and 9442 batch slots
+(`max-batch=5`, 36 saved cycles). TX retired 9364 with rejected 0, domain maps
+9373 = 9364 + 9 capacity probes, the command ring completed 40676/40676 through
+158 wraps, business traffic completed 8192/8192 with 1047 ordinary probes and no
+peer tail packet across a 125.295904948 s idle in one service-owned domain whose
+two observations share root/DT/command `0x39aa0000`/`0x39c00000`/`0x39e00000`
+with `installs=1`. The local stop verified `ChipCmd` 12 -> 0 and `IMR0` 32821 ->
+0 with `stopRetired` 1024, stop re-added 1024 current pages so the final
+identity set is exactly 1024 pages (4,194,304 B), device page faults stayed
+zero, and 3/3 ordinary probes succeeded after the physical resume.
+
+Deployed implementation commit: `6931c8a6ee583482ce5bf373d1dfbee8f76cc954`.
+This documentation update is not a deployed revision.
+
+Round42 result and archive are outside this source repository:
+[Round42 result](<../../docs/m2-3w-round42-result.md>) and
+[evidence archive](<../../docs/evidence/r42-final-20261103.tgz>)
+(SHA256 `65306b4890c9b7fc7ca990d0ee3acdc0f27a950d640f2c9849021f0dadeff065`).
+
+The rearm observation ring remains capped at 4096 records, so
+`rtl812x-rxpost-state` reports `degraded` with a wrapped prefix while `dropped`
+stays zero; that is an observer capacity bound, not a traffic failure.
 
 ## Accepted Round41 / restore RX interrupt handling after fixed DMA entry
 
