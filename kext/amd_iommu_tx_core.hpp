@@ -9,13 +9,24 @@ static constexpr u64 kBase = 0x1000000000ULL; //64GiB, outside identity bootstra
 static constexpr unsigned kPages = 256, kSegments = 16;
 static constexpr unsigned kSlots = 16, kMapPages = 32;
 static constexpr unsigned kRxFirstPage = 512; // RX starts at the next L1 table
-struct Allocator {
-    u64 used[kPages / 64], ever[kPages / 64];
+template<unsigned PoolPages, unsigned MaxMapPages>
+struct BoundedAllocator {
+    static_assert(PoolPages && !(PoolPages % 64), "page bitmap must contain whole words");
+    static_assert(MaxMapPages && MaxMapPages <= PoolPages, "allocation bound must fit pool");
+    u64 used[PoolPages / 64], ever[PoolPages / 64];
     unsigned livePages, peakPages, reusedAllocations;
 };
-inline bool allocate(Allocator &a, unsigned pages, unsigned &basePage) {
-    if (!pages || pages > kMapPages) return false;
-    for (unsigned base = 0; base <= kPages - pages; ++base) {
+// The experiment keeps its original shape. The ordinary per-device mapper
+// uses the same bounded first-fit allocator with a larger compile-time pool.
+using Allocator = BoundedAllocator<kPages, kMapPages>;
+template<unsigned PoolPages, unsigned MaxMapPages>
+inline bool allocate(BoundedAllocator<PoolPages, MaxMapPages> &a,
+                     unsigned pages, unsigned &basePage,
+                     unsigned alignmentPages = 1) {
+    if (!pages || pages > MaxMapPages || !alignmentPages ||
+        (alignmentPages & (alignmentPages - 1))) return false;
+    for (unsigned base = 0; base <= PoolPages - pages; ++base) {
+        if (base & (alignmentPages - 1)) continue;
         bool free = true;
         for (unsigned j = 0; j < pages; ++j) {
             const unsigned p = base + j;
@@ -38,8 +49,10 @@ inline bool allocate(Allocator &a, unsigned pages, unsigned &basePage) {
     }
     return false;
 }
-inline bool release(Allocator &a, unsigned basePage, unsigned pages) {
-    if (!pages || pages > kMapPages || basePage > kPages - pages ||
+template<unsigned PoolPages, unsigned MaxMapPages>
+inline bool release(BoundedAllocator<PoolPages, MaxMapPages> &a,
+                    unsigned basePage, unsigned pages) {
+    if (!pages || pages > MaxMapPages || basePage > PoolPages - pages ||
         a.livePages < pages) return false;
     for (unsigned j = 0; j < pages; ++j) {
         const unsigned p = basePage + j;

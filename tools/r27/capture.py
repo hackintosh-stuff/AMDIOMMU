@@ -87,7 +87,8 @@ def write_text(path, text):
         stream.write(text)
 
 
-def collect_system(out, stamp):
+def collect_system(out, stamp, versions=None, scope='r43',
+                   abi='native7/std5/domain4/nativeRX5 physicalLayout1 stopRecord1 fixedDMA1 mode2'):
     lines = ['date_utc : ' + stamp]
     for label, args in (
             ('kernel_release', ['uname', '-r']), ('kernel_version', ['uname', '-v']),
@@ -96,11 +97,11 @@ def collect_system(out, stamp):
         rc, text = command(args)
         lines.append('%s : %s' % (label, text.strip() if rc == 0 else '(unavailable)'))
     loaded_rc, loaded = command(['kmutil', 'showloaded', '--list-only'])
-    identity = ['scope : r43', 'expected_abi : native7/std5/domain4/nativeRX5 physicalLayout1 stopRecord1 fixedDMA1 mode2',
+    identity = ['scope : ' + scope, 'expected_abi : ' + abi,
                 'captured_utc : ' + stamp, 'kmutil_returncode : %d' % loaded_rc,
                 '# loaded kext identity (read-only)', loaded]
     installed = {}
-    for name, expected in VERSIONS.items():
+    for name, expected in (versions or VERSIONS).items():
         bundle = Path('/Library/Extensions') / (name + '.kext')
         binary = bundle / 'Contents/MacOS' / name
         try:
@@ -128,7 +129,8 @@ def collect_system(out, stamp):
             lines.append('%s_version : unavailable' % name)
             identity.append('%s_error : %s' % (name, exc))
     write_text(out / 'system.txt', '\n'.join(lines) + '\n')
-    write_text(out / 'r27-version-confirmation.txt', '\n'.join(identity) + '\n')
+    write_text(out / ('r27-version-confirmation.txt' if scope == 'r43' else scope + '-version-confirmation.txt'),
+               '\n'.join(identity) + '\n')
     return installed
 
 

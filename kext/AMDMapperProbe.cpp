@@ -57,6 +57,9 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
     (void)provider;
     fTarget = nullptr;
     fNicDevice = nullptr;
+    fR44Auto = false;
+    fR44Controller = nullptr;
+    fR44Mapper = nullptr;
     fMapCalls = fUnmapCalls = fInsertCalls = fPhysAddrCalls = 0;
     fPublishedMapCalls = 0;
     fMapOkCalls = fMapRejectFragCalls = fMapRejectOtherCalls = 0;
@@ -143,6 +146,15 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
         return false;
     }
     setProperty("m1b-stage", "2-super-start-ok");
+
+    char mode[32] = {};
+    fR44Auto = PE_parse_boot_argn("amdiommu", mode, sizeof(mode) - 1)
+            && strcmp(mode, "auto") == 0;
+    if (fR44Auto) {
+        // Prepare at PCI publication, before Lucy asks for its device mapper.
+        // This service owns the domain across ordinary interface down/up.
+        return r44StartAuto();
+    }
 
     // ---- B2-b：先决定是否放行真实设备 ----
     fArmed = parseArmBootArg();
@@ -288,6 +300,12 @@ void org_example_AMDMapperProbe::r31RequestStop() {
 
 IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
     OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    OSObject *snapshot = dict ? dict->getObject("R44Snapshot") : nullptr;
+    if (fR44Auto && snapshot) {
+        if (snapshot != kOSBooleanTrue) return kIOReturnBadArgument;
+        r44PublishMappings();
+        return kIOReturnSuccess;
+    }
     OSObject *request = dict ? dict->getObject("R31Stop") : nullptr;
     if (!request) return super::setProperties(properties);
     if (request != kOSBooleanTrue) return kIOReturnBadArgument;
@@ -297,6 +315,21 @@ IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
 }
 
 void org_example_AMDMapperProbe::stop(IOService *provider) {
+    if (fR44Auto) {
+        if (fPublishNotifier) {
+            fPublishNotifier->disable();
+            fPublishNotifier->release();
+            fPublishNotifier = nullptr;
+        }
+        if (!r44StopAuto()) return;
+        if (fNicDevice) {
+            fNicDevice->removeProperty("iommu-parent");
+            fNicDevice->release();
+            fNicDevice = nullptr;
+        }
+        super::stop(provider);
+        return;
+    }
     // Cancel under the timer's gate so the once-only launch has either
     // completed or been cancelled. Keep the source installed until after the
     // join: openClientGate/closeClientGate need its workloop association.
@@ -378,6 +411,11 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     const IODMAMapPageList *pageList,
     uint64_t *mapAddress,
     uint64_t *mapLength) {
+
+    if (fR44Auto)
+        return r44MapMemory(memory, descriptorOffset, length, mapOptions,
+                            mapSpecification, dmaCommand, pageList,
+                            mapAddress, mapLength);
 
     fMapCalls++;
 
@@ -582,6 +620,8 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
 IOReturn org_example_AMDMapperProbe::iovmUnmapMemory(
     IOMemoryDescriptor *memory, IODMACommand *dmaCommand,
     uint64_t mapAddress, uint64_t mapLength) {
+    if (fR44Auto)
+        return r44UnmapMemory(memory, dmaCommand, mapAddress, mapLength);
     (void)memory;
 
     fUnmapCalls++;
@@ -635,6 +675,10 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
     (void)physicalAddress; (void)length;
 
     fInsertCalls++;
+    if (fR44Auto) {
+        setProperty("r44-insert-rejects", (unsigned long long)fInsertCalls, 32);
+        return kIOReturnUnsupported;
+    }
     // In the standard path this must stay ZERO: returning mapLength == length
     // makes IODMACommand take its single-range contract, which never calls
     // iovmInsert(). A nonzero count here would mean the round-18 layout bound
@@ -647,6 +691,10 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
 
 // ===== AMDMapperProbe.cpp (original lines 7985..8007) =====
 uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress) {
+    if (fR44Auto) {
+        uint64_t pa = 0;
+        return r44Translate(mappedAddress, &pa) ? pa : 0;
+    }
     fPhysAddrCalls++;
 
     if (r40FixedOwnsAddress(mappedAddress)) {
@@ -697,7 +745,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.52.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.53.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

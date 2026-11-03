@@ -30,6 +30,8 @@ plutil -lint "$KEXT/Contents/Info.plist"
 # MEMBERS 表中，否则链接时会缺少符号。
 SRCS="kext/AMDMapperProbe.cpp \
       kext/AMDMapperProbeNic.cpp \
+      kext/AMDMapperProbeAuto.cpp \
+      kext/AMDMapperProbeMapper.cpp \
       kext/AMDMapperProbeB1B2.cpp \
       kext/AMDMapperProbeMmio.cpp \
       kext/AMDMapperProbeTable.cpp \
@@ -86,11 +88,13 @@ echo "filetype=$FT OK"
 # 会因为缺符号而失败，但"多定义/被静态化"这类问题不会，所以显式点名检查。
 echo "== 模块符号检查 =="
 # Search by the readable name inside the mangled symbol. Each of these lives in
-# a different module, so together they prove all eight translation units were
+# a different module, so together they prove the registered translation units were
 # compiled AND linked in. A missing module fails the link anyway; this catches
 # the subtler case of a module whose functions were made static or dropped.
 for name in \
     initHardware \
+    r44AttachAuto \
+    r44MapMemory \
     findTarget \
     runB1SelfTest \
     runM20ConfigProbe \

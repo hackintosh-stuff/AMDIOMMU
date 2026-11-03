@@ -8,10 +8,11 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.52.0</string>
-    <key>CFBundleVersion</key><string>0.52.0</string>
+    <key>CFBundleShortVersionString</key><string>0.53.0</string>
+    <key>CFBundleVersion</key><string>0.53.0</string>
     <!--
       版本历史：
+        0.53.0 M2-3y 第44轮：普通设备IOMapper自动发现；常驻控制器与通用MD/IODMACommand映射；正常网卡关闭和开启保留设备域。
         0.52.0 M2-3x 第43轮：NIC停止前移至DTE切换之前；原生设备域全程只用IOVA，退出不再建立identity恢复映射。
         0.51.0 M2-3w 第42轮：网卡停止时直接发布全环初始RX IOVA，撤除bootstrap identity后再启动收发。
         0.50.0 M2-3v 第41轮：修复固定DMA入口的中断重新武装，并按已注册对象识别重建后的TX环。

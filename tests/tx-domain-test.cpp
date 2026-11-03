@@ -27,8 +27,8 @@ int main() {
     CHECK(amdtx::plan(p,s,1)); CHECK(p.segments[0].iova==amdtx::kBase+4095);
     CHECK(amdtx::publish(leaves,p)); CHECK(amdpte::decodePte(leaves[0],1).outPA==0x2234000);
     amdtx::clear(leaves);
-    CHECK(!amdtx::plan(p,s,0)); CHECK(!amdtx::plan(p,s,9));
-    s[0].bytes=65536; CHECK(!amdtx::plan(p,s,1));
+    CHECK(!amdtx::plan(p,s,0)); CHECK(!amdtx::plan(p,s,amdtx::kSegments+1));
+    s[0].bytes=amdtx::kMapPages*4096ULL; CHECK(!amdtx::plan(p,s,1));
     s[0].bytes=1; s[0].pa=(1ULL<<52); CHECK(!amdtx::plan(p,s,1));
     s[0].pa=(1ULL<<52)-1; s[0].bytes=2; CHECK(!amdtx::plan(p,s,1));
     s[0].pa=0; CHECK(!amdtx::plan(p,s,1));

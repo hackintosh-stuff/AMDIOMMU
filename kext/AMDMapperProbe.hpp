@@ -81,6 +81,29 @@ public:
 
 private:
     IOService *fTarget;          // B1 靶子（IOMA）
+    // Round44: a persistent per-device mapper. Ordinary IODMACommand calls
+    // use this backend without the experiment's registered object bindings.
+    bool fR44Auto = false;
+    struct R44Controller;
+    R44Controller *fR44Controller = nullptr;
+    struct R44MapperState;
+    R44MapperState *fR44Mapper = nullptr;
+    bool r44StartAuto();
+    bool r44AttachAuto(IOService *);
+    bool r44StopAuto();
+    bool r44Invalidate();
+    void r44PublishAuto();
+    bool r44PrepareMappings(volatile UInt64 *, UInt64, UInt32, UInt32);
+    bool r44QuiesceMappings();
+    bool r44ReleaseMappings();
+    UInt32 r44LiveMappings() const;
+    void r44PublishMappings();
+    IOReturn r44MapMemory(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r44UnmapMemory(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
+    bool r44Translate(uint64_t, uint64_t *) const;
+
     // Round17: native-mbuf TX mapping. One live owner, evidence and command
     // budget bounded separately (see kext/AMDMapperProbeTx.cpp).
     struct R17Domain;

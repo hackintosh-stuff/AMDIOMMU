@@ -45,8 +45,19 @@ struct IOService;
 #include "RTL812xRxPool.hpp"
 #include "RTL812xRxNative.hpp"
 #include "RTL812xFixedDma.hpp"
+#include "amd_iommu_mapper_abi.hpp"
 int main() {
     std::printf("{\n");
+    std::printf("  \"ordinary_version\": %u, \"ordinary_snapshot_bytes\": %zu, \"ordinary_record_bytes\": %zu,\n",
+                r44mapper::kVersion, sizeof(r44mapper::Snapshot), sizeof(r44mapper::Record));
+    std::printf("  \"ordinary_maps\": %u, \"ordinary_pages\": %u, \"ordinary_max_pages\": %u, \"ordinary_runs\": %u,\n",
+                r44mapper::kRecords, r44mapper::kPages, r44mapper::kMapPages, r44mapper::kRuns);
+    std::printf("  \"ordinary_counters_offset\": %zu, \"ordinary_times_offset\": %zu, \"ordinary_sequence_offset\": %zu,\n",
+                offsetof(r44mapper::Snapshot, mapCalls), offsetof(r44mapper::Snapshot, preparedAt),
+                offsetof(r44mapper::Snapshot, snapshotSequence));
+    std::printf("  \"ordinary_last_map_offset\": %zu, \"ordinary_last_unmap_offset\": %zu, \"ordinary_physical_offset\": %zu,\n",
+                offsetof(r44mapper::Snapshot, lastMap), offsetof(r44mapper::Snapshot, lastUnmap),
+                offsetof(r44mapper::Record, physical));
     std::printf("  \"domain_version\": %u,\n", r17domain::kVersion);
     std::printf("  \"domain_bytes\": %zu,\n", sizeof(r17domain::Snapshot));
     std::printf("  \"domain_record_bytes\": %zu,\n", sizeof(r17domain::Record));
@@ -179,6 +190,7 @@ def abi():
                 raise RuntimeError('C++ compiler required (CXX, clang++ or g++)')
             compiler = [found]
         subprocess.run(compiler + ['-std=c++17', '-Wno-enum-compare', '-I', str(ROOT / 'tools/lucy-obs'),
+                        '-I', str(ROOT / 'kext'),
                         str(src), '-o', str(exe)], check=True)
         out = subprocess.check_output([str(exe)], text=True)
     return json.loads(out)
@@ -313,6 +325,24 @@ def check_r26():
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == '--check-r44':
+        want = abi()
+        pins = {'ordinary_version': 1, 'ordinary_snapshot_bytes': 960, 'ordinary_record_bytes': 360,
+                'ordinary_maps': 1024, 'ordinary_pages': 4096, 'ordinary_max_pages': 32,
+                'ordinary_runs': 32, 'ordinary_counters_offset': 96, 'ordinary_times_offset': 192,
+                'ordinary_sequence_offset': 224, 'ordinary_last_map_offset': 240,
+                'ordinary_last_unmap_offset': 600, 'ordinary_physical_offset': 104,
+                'domain_version': 4, 'native_version': 7, 'std_version': 5, 'rx_native_version': 5}
+        bad = {key: (want.get(key), value) for key, value in pins.items() if want.get(key) != value}
+        if bad:
+            print('round44 ABI MISMATCH: %r' % bad)
+            return 1
+        decoded = runpy.run_path(str(ROOT / 'tools/r44/common.py'))
+        if (decoded['VERSION'], decoded['SNAPSHOT_BYTES'], decoded['RECORD_BYTES']) != (
+                want['ordinary_version'], want['ordinary_snapshot_bytes'], want['ordinary_record_bytes']):
+            raise ValueError('ordinary mapper decoder/header ABI differs')
+        print('round44 ABI: %d header-derived pins and decoder constants passed' % len(pins))
+        return 0
     if len(sys.argv) > 1 and sys.argv[1] in ('--check-r32', '--check-r34', '--check-r35', '--check-r36', '--check-r37', '--check-r38', '--check-r39', '--check-r40', '--check-r41', '--check-r42', '--check-r43'):
         want = abi()
         pins = {'domain_version': 4, 'domain_bytes': 44592,

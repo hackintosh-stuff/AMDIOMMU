@@ -82,14 +82,14 @@ def find_probe_entry(io):
         io.IOObjectRelease(root)
 
 
-def stop():
-    """Send one R31Stop=true property RPC; kernel work completes asynchronously.
+def set_boolean_property(name):
+    """Send one true-valued probe property RPC.
 
     Frameworks load only here, so importing the module and host-side protocol
     checks do not require macOS or any compiled Python extension.
     """
     if sys.platform != 'darwin':
-        raise RuntimeError('Round31 stop requires macOS')
+        raise RuntimeError('probe property RPC requires macOS')
     io = ctypes.CDLL('/System/Library/Frameworks/IOKit.framework/IOKit')
     cf = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
     ptr = ctypes.c_void_p
@@ -108,24 +108,29 @@ def stop():
     service = find_probe_entry(io)
     key = properties = None
     try:
-        key = cf.CFStringCreateWithCString(None, b'R31Stop', 0x08000100)
+        key = cf.CFStringCreateWithCString(None, name.encode('ascii'), 0x08000100)
         if not key:
-            raise RuntimeError('cannot create R31Stop property key')
+            raise RuntimeError('cannot create probe property key')
         true_value = ptr.in_dll(cf, 'kCFBooleanTrue')
         # The key and global boolean remain alive for this synchronous RPC.
         properties = cf.CFDictionaryCreate(None, (ptr * 1)(key),
                                            (ptr * 1)(true_value.value), 1, None, None)
         if not properties:
-            raise RuntimeError('cannot create R31Stop property dictionary')
+            raise RuntimeError('cannot create probe property dictionary')
         result = io.IORegistryEntrySetCFProperties(service, properties)
         if result:
-            raise RuntimeError('R31Stop failed: IOReturn=0x%08x' % result)
+            raise RuntimeError('%s failed: IOReturn=0x%08x' % (name, result))
     finally:
         if properties:
             cf.CFRelease(properties)
         if key:
             cf.CFRelease(key)
         io.IOObjectRelease(service)
+
+
+def stop():
+    """Request the legacy service-owned experiment's asynchronous stop."""
+    set_boolean_property('R31Stop')
 
 
 def main():

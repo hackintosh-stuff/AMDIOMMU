@@ -161,6 +161,10 @@ namespace r20tx { enum { kStageExit=3 }; }
 COMMAND_STRUCTS
 class org_example_AMDMapperProbe : public IOMapper {
 public:
+    // This existing fixture exercises the legacy session branch.
+    bool fR44Auto=false;
+    void r44PublishMappings() { assert(false); }
+    bool r44StopAuto() { assert(false); return false; }
     struct R33DeviceDomain;
     bool fR31Session=true, fR31SessionCompleted=false;
     volatile UInt32 fR31StopRequested=0, fR31WorkerActive=0;

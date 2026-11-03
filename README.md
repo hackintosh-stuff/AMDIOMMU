@@ -1,5 +1,58 @@
 # AMDIOMMU — authoritative source repository
 
+## Round44 candidate / ordinary per-device IOMapper
+
+Formal base: `102560a59bc448ddfd5600d5d958952e4875eb16`, the actual accepted
+Round43 documentation successor; tree `078a46e38a9a1f15e6f97f2f6d304448936f3a81`.
+The deployed Round43 implementation is `7d18caaa1ad5bcc9cae43cb85eb8761d6d05523a`,
+tree `cf21535fb58c2b6bd8ed52459e0e3e5ed8c9b62a`, exactly the delivered candidate.
+The actual analyzer rerun passed 14/14 and reproduced the archived JSON.
+An independent raw walk confirmed 1024 RX + 13 fixed IOVA leaves, no identity
+leaves, zero final leaves, and NIC stopped before the DTE write. The DTE write
+was 31,745,105,654 ns; invalidation completed at 31,745,126,384 ns.
+
+**Lucy 1.1.229 / Probe 0.53.0, `amdiommu=auto`.** This round connects the
+ordinary driver path to a per-device mapper from its normal startup. It does
+not install the legacy R17/R34 experimental session. `fIsSystem` remains false.
+
+`AMDMapperProbeAuto.cpp` prepares a resident controller, an initially empty
+IOVA domain and passthrough DTEs during the target PCI publication. It then
+sets `iommu-parent` before Lucy calls `IOMapper::copyMapperForDevice()`. Lucy
+selects its existing mapped DMA path on x86 as well as arm64. The target DTE
+becomes translated at its first ordinary map, after the existing NIC reset and
+before that map returns an IOVA. Each map/unmap completes INV/CW before an IOVA
+is exposed or its pages become reusable.
+
+`AMDMapperProbeMapper.cpp` accepts normal wired descriptors and DMA commands
+without private role registration. The shared allocator has 4096 IOVA pages
+(16 MiB), 1024 live records, and up to 32 pages/physical runs per mapping.
+The 16-page PT arena contains 11 reachable tables. Normal Lucy owns 64 RX
+groups of 16 pages, three fixed mappings and up to 512 packet TX commands.
+The existing allocator implementation is reused; its legacy alias stays intact.
+
+Normal `clearRxTxRings()` now clears an active TX command before completing its
+descriptor, matching normal TX retirement. Interface down/up keeps the RX and
+fixed resources: **67 live mappings after down is the correct result.** Only
+actual descriptor resource teardown can reach zero. The resident controller
+is not rebuilt across idle or interface transitions.
+
+Evidence uses ordinary mapper ABI1 (960-byte summary, 360-byte live records),
+the whole PT and minimal startup/enable/disable properties. `R44Snapshot=true`
+exports the live set under the mapper lock; it does not control DMA ownership.
+The normal workload remains 4096 requests, 125 s idle, another 4096 requests,
+then ordinary interface down/up and three recovery probes. The nine checks in
+`tools/r44/analyze.py` validate discovery/order, actual live PTEs, accounting,
+byte integrity, persistent identity, fixed bases, retained mappings and faults.
+
+Use the same Git checkout and pinned upstream input. Entry points:
+`tools/r44/build.sh`, `deploy.py`, `boot-load.sh`, `load.py`, `capture.py`,
+`analyze.py`, `disarm-next.py`; peer/protocol reuse `tools/r27/peer.py`.
+Use `runs/r44`, token `0x44c0de44` only in userspace, and
+`org.example.round44load`. Successful closure removes that finite job and sets
+the next boot to `amdiommu=off`, while the current ordinary mapper stays active.
+Host mainline validation, real Mac kext compilation and hardware acceptance
+are separate; the latter two remain pending for this candidate.
+
 ## Accepted Round43 / an IOVA-only device domain from entry through stop
 
 Base: `7af436acaad62a58acbdb4b788142145ec4c744f`, the accepted Round42
@@ -37,7 +90,8 @@ Host validation, real Mac compilation and hardware acceptance remain separate.
 **Round43 hardware acceptance PASSED (14/14).** One planned boot and one valid
 measurement. The entry stopped the NIC at 31,743,262,638 ns and read it back
 stopped at 31,743,867,276 ns with `ChipCmd` 12 -> 0 and `IMR0` 32821 -> 0, then
-wrote the device table at 31,745,126,384 ns, so the stop strictly precedes the
+wrote the device table at 31,745,105,654 ns and completed invalidation at
+31,745,126,384 ns, so the stop strictly precedes the
 DTE write and `stoppedBeforeDTE` is true. All 1024 initial IOVA OWN stores landed
 afterwards (31,756,479,818 and 31,757,085,827 ns), the active tree was captured at
 31,758,140,445 ns, driver active-ready followed at 31,758,140,595 ns, the fixed

@@ -151,7 +151,8 @@ bool org_example_AMDMapperProbe::publishHandler(
     // 但 kIOServiceSynchronous 下可能在同一实例上重复触发）
     if (self->fNicDevice == newService) return true;
 
-    self->armNic(newService);
+    if (self->fR44Auto) self->r44AttachAuto(newService);
+    else self->armNic(newService);
     return true;
 }
 

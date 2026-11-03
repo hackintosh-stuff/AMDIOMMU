@@ -200,6 +200,23 @@ MEMBERS = [
         'bool org_example_AMDMapperProbe::findNic(',
         'IOService *org_example_AMDMapperProbe::findNicServiceOnly',
     ]),
+    ('AMDMapperProbeAuto.cpp', 'persistent per-device hardware lifecycle', [
+        'bool org_example_AMDMapperProbe::r44StartAuto',
+        'bool org_example_AMDMapperProbe::r44AttachAuto',
+        'bool org_example_AMDMapperProbe::r44StopAuto',
+        'bool org_example_AMDMapperProbe::r44Invalidate',
+        'void org_example_AMDMapperProbe::r44PublishAuto',
+    ]),
+    ('AMDMapperProbeMapper.cpp', 'ordinary IOMapper allocation and translation', [
+        'bool org_example_AMDMapperProbe::r44PrepareMappings',
+        'bool org_example_AMDMapperProbe::r44QuiesceMappings',
+        'bool org_example_AMDMapperProbe::r44ReleaseMappings',
+        'UInt32 org_example_AMDMapperProbe::r44LiveMappings',
+        'IOReturn org_example_AMDMapperProbe::r44MapMemory',
+        'IOReturn org_example_AMDMapperProbe::r44UnmapMemory',
+        'bool org_example_AMDMapperProbe::r44Translate',
+        'void org_example_AMDMapperProbe::r44PublishMappings',
+    ]),
     ('AMDMapperProbeB1B2.cpp', 'M1 mapper self-tests (B1, B2, B2a, B2b)', [
         'void org_example_AMDMapperProbe::runB1SelfTest',
         'void org_example_AMDMapperProbe::runB2SelfTest',

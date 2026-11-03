@@ -241,19 +241,21 @@ def bind_local(s, local, emit, tries=60, delay=.5):
 
 
 def exchange(s, local, peer, token, emit, ord_state, client_deadline_ns=None,
-             persistent_session=False):
+             persistent_session=False, phase_observer=None, idle_handler=None):
+    observe = phase_observer or observe_domain
+    idle = idle_handler or session_idle
     bind_local(s, local, emit)
     s.settimeout(.5)
     emit('client_bound %s:%d' % s.getsockname())
     sent = acked = bad = 0
     if persistent_session:
-        domain_identity = observe_domain(emit, 1)
+        domain_identity = observe(emit, 1)
         emit('client_session_phase phase=1 first=1 last=4096 t_ns=%d' % now())
     # Each of the 512 groups sends all 16 before recv; no retransmission.
     for group in bursts():
         if persistent_session and group[0] == SESSION_SPLIT + 1:
-            session_idle(emit, client_deadline_ns)
-            observe_domain(emit, 2, domain_identity)
+            idle(emit, client_deadline_ns)
+            observe(emit, 2, domain_identity)
             emit('client_session_phase phase=2 first=4097 last=8192 t_ns=%d' % now())
         if client_deadline_ns is not None and now() >= client_deadline_ns:
             emit('client_budget_expired sent=%d acked=%d' % (sent, acked))

@@ -16,7 +16,11 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
+ROUND = 43
 BATCH = 512
+DEFAULT_TOKEN = None
+ENTRY_POINTS = ('boot-load.sh', 'load.py', 'protocol.py')
+REQUIRED_SYMBOLS = ('r17TxMap', 'r17Callback')
 # Accepted R42 initial RX IOVA; stop NIC before DTE and use an IOVA-only domain.
 BASE_COMMIT = '7af436acaad62a58acbdb4b788142145ec4c744f'
 UPSTREAM_COMMIT = '639144d1f284a9fee222a518691b01494f5e265d'
@@ -72,7 +76,7 @@ def require_tso_off(info):
     personalities = info.get('IOKitPersonalities', {})
     params = personalities.get('RTL8125', {}).get('Driver Parameters', {})
     if any(params.get(key) is not False for key in ('enableTSO4', 'enableTSO6')):
-        raise ValueError('mode 2 requires final Driver Parameters '
+        raise ValueError('mapped DMA requires final Driver Parameters '
                          'enableTSO4=false and enableTSO6=false; no automatic change')
 
 
@@ -122,7 +126,7 @@ def source_identity():
     """Deploy a committed successor of the recorded source baseline."""
     commit = output('git', 'rev-parse', 'HEAD').strip()
     if not re.fullmatch(r'[0-9a-f]{40}', commit) or commit == BASE_COMMIT:
-        raise ValueError('commit the applied and software-tested Round43 source before deployment')
+        raise ValueError('commit the applied and software-tested Round%d source before deployment' % ROUND)
     subprocess.run(['git', 'merge-base', '--is-ancestor', BASE_COMMIT, commit],
                    cwd=str(ROOT), check=True)
     dirty = output('git', 'status', '--porcelain=v1', '--untracked-files=normal',
@@ -136,7 +140,7 @@ def source_identity():
 
 def daemon_plist(out, peer, port):
     return {
-        'Label': 'org.example.round43load',
+        'Label': 'org.example.round%dload' % ROUND,
         'ProgramArguments': ['/bin/sh', str(HERE / 'boot-load.sh'),
                              out.relative_to(ROOT).as_posix()],
         'WorkingDirectory': str(ROOT),
@@ -149,11 +153,29 @@ def daemon_plist(out, peer, port):
         'StandardErrorPath': str(out / 'launchd.err')}
 
 
+def kernel_bootarg(token):
+    return 'amdiommu=pgt.batch%d.t0x%08x.std.alltx.rxstd.session' % (BATCH, token)
+
+
+def round_plan():
+    """Historical R43 defaults; later entry points replace this declaration."""
+    return {'round': 43, 'driver_mode': 2, 'scope': 'IOVA-only-domain-native-RX1024-batch16',
+            'kernel_batch': BATCH, 'application_requests': 8192, 'rx_slots': 1024,
+            'rx_lifetime': 'driver-owned-streaming', 'rx_batch_max': 16, 'rx_replacement': 'normal-mbuf',
+            'physical_mapping': 'iova-only', 'fixed_dma_iova': True, 'active_identity_pages': 0, 'nic_stop_before_dte': True, 'final_leaf_pages': 0, 'rx_source': 'lucy-normal-ring', 'experimental_pool': False, 'experimental_spares': 0,
+            'session_mode': 'explicit-stop', 'idle_seconds': 125,
+            'stop_mode': 'local-nic-reset', 'peer_tail_required': False,
+            'domain_lifetime': 'service-owned', 'setup_worker_returns': True,
+            'tx_iova_pages': 256, 'tx_live_records': 16, 'tx_max_mapping_pages': 32,
+            'capacity_probe_maps': 9, 'capacity_probe_peak_owners': 8}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--efi', required=True, help='already mounted exact target EFI')
-    parser.add_argument('--token', required=True, type=lambda value: int(value, 0))
-    parser.add_argument('--out', default='runs/r43')
+    parser.add_argument('--token', required=DEFAULT_TOKEN is None, default=DEFAULT_TOKEN,
+                        type=lambda value: int(value, 0))
+    parser.add_argument('--out', default='runs/r%d' % ROUND)
     parser.add_argument('--backup', help='project-relative recovery directory')
     parser.add_argument('--peer', default='192.168.50.122')
     parser.add_argument('--port', type=int, default=9110)
@@ -164,7 +186,7 @@ def main():
     source_ref = source_identity()
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     out = project_path(args.out)
-    backup = project_path(args.backup or ('runs/recovery-r43-' + stamp))
+    backup = project_path(args.backup or ('runs/recovery-r%d-' % ROUND + stamp))
     if backup.exists() or backup == out:
         raise ValueError('recovery directory must be new and separate from load output')
     if any((out / name).exists() for name in ('load.txt', 'client.log')):
@@ -183,13 +205,13 @@ def main():
     require_target_ready(output('ifconfig', TARGET_IFACE))
     if route_iface(output('route', '-n', 'get', args.peer)) != [TARGET_IFACE]:
         raise ValueError('peer route must already use en2')
-    for name in ('boot-load.sh', 'load.py', 'protocol.py'):
+    for name in ENTRY_POINTS:
         if not (HERE / name).is_file():
-            raise ValueError('missing r27 entry point: ' + name)
+            raise ValueError('missing Round%d entry point: %s' % (ROUND, name))
     bundles = [ROOT / 'build-lucy/RTL812xLucy.kext', ROOT / 'build-m1a/AMDMapperProbe.kext']
     expected = {}
     for bundle, version, symbol in zip(bundles, (DRIVER_VERSION, PROBE_VERSION),
-                                       ('r17TxMap', 'r17Callback')):
+                                       REQUIRED_SYMBOLS):
         expected[bundle.stem] = bundle_identity(bundle, version, symbol)
     aux = Path('/Library/KernelCollections/AuxiliaryKernelExtensions.kc')
     jobs = sorted(Path('/Library/LaunchDaemons').glob('org.example.round*load.plist'))
@@ -205,23 +227,15 @@ def main():
                 if path.is_file()) + len(old.encode('utf-8'))
     if total >= 1024 ** 3:
         raise ValueError('recovery copy must remain below 1 GiB')
-    tokenarg = 'amdiommu=pgt.batch%d.t0x%08x.std.alltx.rxstd.session' % (BATCH, args.token)
+    tokenarg = kernel_bootarg(args.token)
     bootargs = ' '.join([arg for arg in current_args.split()
                          if not arg.startswith('amdiommu=')] + [tokenarg])
-    plan = {'round': 43, 'driver_mode': 2, 'scope': 'IOVA-only-domain-native-RX1024-batch16',
-            'kernel_batch': BATCH, 'application_requests': 8192, 'rx_slots': 1024,
-            'rx_lifetime': 'driver-owned-streaming', 'rx_batch_max': 16, 'rx_replacement': 'normal-mbuf',
-            'physical_mapping': 'iova-only', 'fixed_dma_iova': True, 'active_identity_pages': 0, 'nic_stop_before_dte': True, 'final_leaf_pages': 0, 'rx_source': 'lucy-normal-ring', 'experimental_pool': False, 'experimental_spares': 0,
-            'session_mode': 'explicit-stop', 'idle_seconds': 125,
-            'stop_mode': 'local-nic-reset', 'peer_tail_required': False,
-            'domain_lifetime': 'service-owned', 'setup_worker_returns': True,
-            'tx_iova_pages': 256, 'tx_live_records': 16, 'tx_max_mapping_pages': 32,
-            'capacity_probe_maps': 9, 'capacity_probe_peak_owners': 8,
-            'source_commit': source_ref['commit'], 'base_commit': BASE_COMMIT,
+    plan = round_plan()
+    plan.update({'source_commit': source_ref['commit'], 'base_commit': BASE_COMMIT,
             'bootarg': tokenarg, 'mtu': 1500, 'tso4': False, 'tso6': False,
             'out': out.relative_to(ROOT).as_posix(),
             'backup': backup.relative_to(ROOT).as_posix(),
-            'recovery_bytes': total, 'expected': expected}
+            'recovery_bytes': total, 'expected': expected})
     print(json.dumps(plan, indent=2), flush=True)
     if args.check_only:
         return 0
@@ -231,14 +245,13 @@ def main():
         run(['sudo', 'cp', '-Rp', source, backup / source.name])
     (backup / 'boot-args.txt').write_text(old, encoding='utf-8')
     out.mkdir(parents=True, exist_ok=True)
-    for bundle, target in zip(bundles, targets):
+    for bundle, target, symbol in zip(bundles, targets, REQUIRED_SYMBOLS):
         print('Verified replacement target: ' + str(target), flush=True)
         run(['sudo', 'rm', '-rf', target])
         run(['sudo', 'cp', '-R', bundle, target])
         run(['sudo', 'chown', '-R', 'root:wheel', target])
         run(['sudo', 'chmod', '-R', 'go-w', target])
-        got = bundle_identity(target, expected[bundle.stem]['version'],
-                              'r17TxMap' if bundle.stem == 'RTL812xLucy' else 'r17Callback')
+        got = bundle_identity(target, expected[bundle.stem]['version'], symbol)
         if got != expected[bundle.stem]:
             raise ValueError('installed bundle identity differs from build')
     run(['sudo', 'kmutil', 'create', '-n', 'aux', '-R', '/',
@@ -253,21 +266,22 @@ def main():
     actual_args = output('nvram', 'boot-args').split(None, 1)[1].strip()
     actual_cfg = plistlib.loads(config.read_bytes())['NVRAM']['Add'][NVRAM_GUID]['boot-args']
     if actual_args != bootargs or actual_cfg != bootargs:
-        raise ValueError('EFI/NVRAM read-back differs from the r27 declaration')
+        raise ValueError('EFI/NVRAM read-back differs from the Round%d declaration' % ROUND)
     (out / 'token.txt').write_text('0x%08x\n' % args.token, encoding='utf-8')
-    (out / 'batch.txt').write_text('%d\n' % BATCH, encoding='utf-8')
+    if 'kernel_batch' in plan:
+        (out / 'batch.txt').write_text('%d\n' % BATCH, encoding='utf-8')
     (out / 'requests.txt').write_text('8192\n', encoding='utf-8')
     (out / 'expected-version.json').write_text(json.dumps(expected, indent=2) + '\n', encoding='utf-8')
     (out / 'deployment.json').write_text(json.dumps(plan, indent=2) + '\n', encoding='utf-8')
     (out / 'source-ref.json').write_text(json.dumps(source_ref, indent=2) + '\n', encoding='utf-8')
     daemon = daemon_plist(out, args.peer, args.port)
-    generated = out / 'org.example.round43load.plist'
+    generated = out / ('org.example.round%dload.plist' % ROUND)
     generated.write_bytes(plistlib.dumps(daemon, sort_keys=False))
     run(['plutil', '-lint', generated])
     for job in jobs:
         subprocess.run(['sudo', 'launchctl', 'bootout', 'system', str(job)], check=False)
         run(['sudo', 'rm', '-f', job])
-    target = Path('/Library/LaunchDaemons/org.example.round43load.plist')
+    target = Path('/Library/LaunchDaemons') / generated.name
     run(['sudo', 'cp', generated, target])
     run(['sudo', 'chown', 'root:wheel', target])
     run(['sudo', 'chmod', '644', target])

@@ -88,6 +88,9 @@ bootstrap identity mappings before the first hardware enable.
 Round43 stops NIC DMA before the DTE switch and uses an IOVA-only domain
 through entry, normal RX and local stop. Native RX ABI5 adds the pre-DTE stop
 control and pre-enable active snapshot callback with unchanged record sizes.
+Round44 selects Lucy's ordinary mapped TX/RX path from the actual per-device
+IOMapper on x86 as well as arm64. The auto mapper uses the existing 64 RX
+groups and three fixed commands; normal down/up retains these resources.
 Select --tx 21 --rx 34.
 
 Usage:
@@ -2116,6 +2119,7 @@ TX20 = runpy.run_path(os.path.join(HERE, 'r20', 'driver-template.py'))
 # behaviour, and leaving r20 selectable is what lets the archived round-20
 # evidence stay reproducible byte-for-byte.
 TX21 = runpy.run_path(os.path.join(HERE, 'r21', 'driver-template.py'))
+R44 = runpy.run_path(os.path.join(HERE, 'r44', 'driver-template.py'))
 # round -> (module, [headers written into the driver tree, in include order])
 TXR = {'16': (TX16, ['RTL812xTxMap.hpp']),
        '17': (TX17, ['RTL812xTxMapNative.hpp']),
@@ -2433,6 +2437,11 @@ def main():
                 print("      python3 tools/apply-lucy-obs2.py <dir>")
                 return 1
             fresh, stale = body_is_current(cpp_text)
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R44['is_current'](hpp_text, cpp_text,
+                    read(os.path.join(drv, 'RTL812xLucySetup.cpp')))
+                if not fresh:
+                    stale = 'round44 normal mapped DMA'
             if not fresh:
                 print("REFUSED: the tree is patched but its %s() body is STALE."
                       % stale)
@@ -2555,9 +2564,13 @@ def main():
     cpp_text = TX['patch_cpp'](cpp_text)
     if RX and 'pause_entries' in RX:
         cpp_text = RX['pause_entries'](cpp_text)
+    if TX_SELECT == '21' and RX_SELECT == '34':
+        hpp_text, cpp_text, setup_text = R44['patch'](hpp_text, cpp_text, setup_text)
+        write(hpp, hpp_text)
+        write(setup, setup_text)
     write(cpp, cpp_text)
     print("patched %s" % cpp)
-    rx_label = ('native RX batch16 / NIC stop before DTE / IOVA-only domain / entry IRQ rearm / local stop (ABI5)' if RX_SELECT == '34'
+    rx_label = ('normal device IOMapper path / legacy native RX ABI5' if RX_SELECT == '34'
                 else 'round-%s RX pool' % RX_SELECT)
     print("applied observation v2, RX post set, %s and round-%s explicit TX mapping"
           % (rx_label, TX_SELECT))
