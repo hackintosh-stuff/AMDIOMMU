@@ -27,7 +27,7 @@ def log_rows(path):
 def analyze(cap, *, round_id=45, base_commit=BASE_COMMIT, versions=None,
             protocol=None, tso_version=4, tcp_record_check=None,
             iova_base=0x1000000000, max_map_pages=32, max_runs=32,
-            rx_groups=64, rx_group_pages=16):
+            rx_groups=64, rx_group_pages=16, invalidation_check=None):
     # R46 reuses the accepted mapper/lifecycle checks and supplies only its
     # IPv6 transport, TSO counters and source/binary identity differences.
     versions = VERSIONS if versions is None else versions
@@ -122,8 +122,11 @@ def analyze(cap, *, round_id=45, base_commit=BASE_COMMIT, versions=None,
                  m['mapOk'] - m['unmapOk'] == m['liveCount'] and
                  m['mapRejected'] == m['unmapRejected'] == m['invalidateFailures'] == 0,
                  label + ': map/unmap accounting differs')
-            need(m['invalidates'] == m['mapOk'] + m['unmapOk'] == p['r44-inv-pages-completed'],
-                 label + ': INV/CW accounting differs')
+            if invalidation_check is None:
+                need(m['invalidates'] == m['mapOk'] + m['unmapOk'] == p['r44-inv-pages-completed'],
+                     label + ': INV/CW accounting differs')
+            else:
+                invalidation_check(label, value)
             row = m['lastUnmap']
             if m['unmapOk']:
                 need(row['state'] == 15 and 0 < row['tPublish'] <= row['tMapComplete'] <

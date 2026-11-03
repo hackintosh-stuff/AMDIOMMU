@@ -202,9 +202,9 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.235</string>
+	<string>1.1.236</string>
 	<key>CFBundleVersion</key>
-	<string>1.1.235</string>
+	<string>1.1.236</string>
 	<key>IOKitPersonalities</key>
 	<dict>
 		<key>RTL8125</key>
@@ -252,9 +252,9 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 		     The requested version must sit inside the provider's compatible
 		     range (OSBundleCompatibleVersion <= requested <= CFBundleVersion),
 		     otherwise kmutil cannot resolve the dependency at all.
-		     Round50 requires ordinary ranged IOVA invalidation in 0.57.0. -->
+		     Round51 requires NPCache-aware ordinary map invalidation in 0.58.0. -->
 		<key>org.example.AMDMapperProbe</key>
-		<string>0.57.0</string>
+		<string>0.58.0</string>
 	</dict>
 	<key>OSBundleRequired</key>
 	<string>Network-Root</string>

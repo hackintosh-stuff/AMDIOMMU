@@ -8,14 +8,15 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.57.0</string>
-    <key>CFBundleVersion</key><string>0.57.0</string>
+    <key>CFBundleShortVersionString</key><string>0.58.0</string>
+    <key>CFBundleVersion</key><string>0.58.0</string>
     <!-- Client requests must fit [OSBundleCompatibleVersion, CFBundleVersion].
          Existing mapper ABI1 clients remain compatible with 0.53.0;
-         Round50 Lucy requires 0.57.0 for ordinary ranged IOVA invalidation. -->
+         Round51 Lucy requires 0.58.0 for NPCache-aware ordinary map invalidation. -->
     <key>OSBundleCompatibleVersion</key><string>0.53.0</string>
     <!--
       版本历史：
+        0.58.0 第51轮：按PCI NPCache选择普通map失效；无NP缓存时省去新map的INV/CW，unmap同步回收不变。
         0.57.0 第50轮：普通map/unmap按实际IOVA页范围同步失效，首激活及PM仍全域；PM实机验证仍TODO。
         0.56.0 第49轮：普通map支持64页/64runs，RX改为16组每组64页；PM实机验证仍TODO。
         0.55.0 第48轮：普通mapper使用低4GiB IOVA池，支持32位DMA地址约束；PM实机验证仍TODO。

@@ -17,6 +17,8 @@ enum : uint32_t {
 };
 struct Record {
     uint64_t handle, firstPA, mapAddress, mapLength, descriptorOffset, length;
+    // tMapComplete is map-ready: NP-cache-free hardware may need no map CW.
+    // tUnmapComplete always follows the completed invalidation before reuse.
     uint64_t tPublish, tMapComplete, tClear, tUnmapComplete;
     uint32_t recordIndex, basePage, pages, runs, options, state;
     // Physical page base for every allocated IOVA page, including the first
@@ -30,6 +32,7 @@ struct Snapshot {
     uint32_t rootLevel, tablePages, livePages, peakPages;
     uint32_t peakMaps, maxObservedPages, maxObservedRuns, reserved;
     uint64_t mapCalls, mapOk, mapRejected, unmapCalls, unmapOk, unmapRejected;
+    // Actual invalidation attempts; map skips are separate registry counters.
     uint64_t invalidates, invalidateFailures, reusedAllocations;
     uint64_t offsetMaps, fragmentedMaps, walks;
     uint64_t preparedAt, firstMapAt, lastMapAt, lastUnmapAt;

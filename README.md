@@ -1,5 +1,49 @@
 # AMDIOMMU — authoritative source repository
 
+## Round51 candidate / omit map invalidation when NPCache is absent
+
+Base: `da99156d3e6b20694c88124afb75341f5f437545`, the accepted Round50 documentation successor.
+Round50 was independently re-analyzed from its original capture: all eleven
+ordinary checks passed and the result matched the saved analysis exactly.
+Its actual implementation is `f17507ca33ca2d1e25d656f99cb91c250b52438c`.
+This candidate has not been deployed or accepted on hardware.
+
+Use the discovered IOMMU PCI capability header's NPCache bit26. Preserve the
+first INV_DEV/full-domain activation, PTE publication barrier, synchronous
+unmap range invalidation and IOVA release order. After activation, a new map
+needs no INV/CW if the hardware cannot cache non-present entries: upper-level
+tables were prebuilt, new IOVA leaves are empty, and prior unmap completion
+precedes any reuse. NPCache-capable hardware retains the existing map fence.
+See the pinned Linux v6.6 `domain_flush_np_cache()`, `amd_iommu_iotlb_sync_map()`
+and `IOMMU_CAP_NPCACHE` definitions under `reference/linux-v6.6/`.
+
+The map-only opt-in leaves unmap and PM callers unchanged. Skips never update
+the last submitted range, command sequence or full/range completion counts.
+The raw ABI2 is unchanged; `invalidates` still counts actual attempts.
+`tMapComplete` records when the map is ready for the device, which need not
+include a CW on NP-cache-free hardware. Snapshot properties `r51-npcache`
+and `r51-map-invalidation-skipped` expose the policy and skipped map count.
+
+With no PM, the current header `0x190b640f` decodes to NPCache=0:
+`skip=mapOk-1`, `full=1`, `range=unmapOk`, and
+`commandsCompleted=unmapOk+2`. The last real range then matches lastUnmap.
+NPCache=1 retains the R50 relationship and zero skips. Capability is read at
+runtime, never assumed from this observed value. This eliminates one INV/CW
+per eligible map; throughput is recorded without an improvement threshold.
+
+Use `tools/r51`, `runs/r51`, TCP9117, token `0x51c0de51`,
+`org.example.round51load`, Lucy1.1.236 and Probe0.58.0.
+Keep the same 272 MiB ordinary IPv6 workload and one interface down/up,
+64-page maps, RX16x64, DMA32, ABI2, live/PT checks and eleven-check analyzer.
+The shared analyzer's old accounting remains the default for prior rounds.
+Do not add a workload matrix, emulate another controller, or trigger PM.
+Real sleep/wake stays `TODO(R47-PM-HARDWARE)`.
+
+Round50 report correction: its down-phase raw request is
+`[0x8028c000,0x802cc000)` (256 KiB), while command `0x802bf001` covers
+`[0x80280000,0x80300000)` (512 KiB). The original analysis is correct;
+the report's transcribed endpoints do not require another hardware run.
+
 ## Accepted Round50 / ranged ordinary IOVA invalidation, PM hardware TODO
 
 Formal base: `23973d1652091ba0a671a4442e7a0fd3b2f87146`, the accepted Round49

@@ -262,11 +262,14 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         if (s.liveCount > s.peakMaps) s.peakMaps = s.liveCount;
         if (layout.pages > s.maxObservedPages) s.maxObservedPages = layout.pages;
         if (layout.runs > s.maxObservedRuns) s.maxObservedRuns = layout.runs;
-        ++s.invalidates;
-        // The platform activates the target DTE on this first ordinary map,
-        // after Lucy reset and before any descriptor can receive this IOVA.
-        if (!r44Invalidate(false, r44mapper::kBase + record.basePage * 4096ULL,
-                           record.pages * 4096ULL)) {
+        // First map activates the DTE. Later maps need an INV/CW only when
+        // the actual controller can cache non-present translations.
+        bool skipped = false;
+        const bool synchronized = r44Invalidate(false,
+            r44mapper::kBase + record.basePage * 4096ULL,
+            record.pages * 4096ULL, true, &skipped);
+        if (!skipped) ++s.invalidates;
+        if (!synchronized) {
             ++s.invalidateFailures;
             d->accepting = false; s.flags |= r44mapper::kFailed;
             s.flags &= ~r44mapper::kAccepting;

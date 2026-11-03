@@ -7,6 +7,8 @@
 namespace {
 constexpr UInt32 kR44TablePages = 16;
 constexpr UInt32 kR44Domain = 1;
+// PCI IOMMU capability, not EFR: Linux v6.6 IOMMU_CAP_NPCACHE.
+constexpr UInt32 kR51NpCache = 1u << 26;
 constexpr UInt64 kR44Enabled = M2B2_CTRL_IOMMU_EN |
     M2B2_CTRL_CMDBUF_EN | M2B2_CTRL_EVT_LOG_EN;
 
@@ -35,6 +37,7 @@ struct org_example_AMDMapperProbe::R44Controller {
     UInt64 invDevCompleted, invPagesCompleted;
     // R50 counters describe successfully completed ordinary invalidations.
     UInt64 invFullCompleted, invRangeCompleted, invRangePages;
+    UInt64 mapInvalidationSkipped;
     UInt64 lastRangeAddress, lastRangeBytes, lastRangeSequence;
     UInt32 lastRangeCommand[4];
     UInt64 lastInvDevSequence, lastInvPagesSequence;
@@ -309,9 +312,11 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
 #pragma clang diagnostic pop
 
 bool org_example_AMDMapperProbe::r44Invalidate(
-    bool invalidateDevice, UInt64 address, UInt64 bytes) {
-    // The generic mapper's lock serializes PTE writes, command submission and
-    // this first-map DTE installation. Failed completion never returns an IOVA.
+    bool invalidateDevice, UInt64 address, UInt64 bytes,
+    bool newMapping, bool *skipped) {
+    // The mapper lock serializes PTE publication, invalidation and IOVA reuse.
+    // A map is usable only after the synchronization required by this IOMMU.
+    if (skipped) *skipped = false;
     R44Controller *c = fR44Controller;
     if (!c || !c->ready || c->command.failed) return false;
     const bool full = !c->active || invalidateDevice || !bytes;
@@ -321,6 +326,15 @@ bool org_example_AMDMapperProbe::r44Invalidate(
         bytes > r44mapper::kPages * 4096ULL - (address - r44mapper::kBase)))
         return false;
     OSSynchronizeIO();
+    // Upper-level tables are prebuilt and ordinary maps fill only empty leaves.
+    // Unmap still waits for invalidation before returning IOVA to the allocator.
+    // With no non-present cache, a new mapping therefore needs no INV/CW.
+    // First activation, explicit device flush and PM always retain their fence.
+    if (newMapping && !full && !(c->hardware.capabilityHeader & kR51NpCache)) {
+        ++c->mapInvalidationSkipped;
+        if (skipped) *skipped = true;
+        return true;
+    }
     if (!c->active || invalidateDevice) {
         volatile UInt64 *dte = (volatile UInt64 *)c->devices->getBytesNoCopy();
         dte[c->deviceID * 4 + 1] = kR44Domain;
@@ -504,6 +518,8 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     number("r44-dte-active-time", c->activeTime);
     number("r44-inv-dev-completed", c->invDevCompleted);
     number("r44-inv-pages-completed", c->invPagesCompleted);
+    number("r51-npcache", (c->hardware.capabilityHeader & kR51NpCache) ? 1 : 0);
+    number("r51-map-invalidation-skipped", c->mapInvalidationSkipped);
     number("r50-inv-full-completed", c->invFullCompleted);
     number("r50-inv-range-completed", c->invRangeCompleted);
     number("r50-inv-range-pages", c->invRangePages);
