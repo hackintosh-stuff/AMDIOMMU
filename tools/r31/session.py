@@ -44,12 +44,17 @@ def find_probe_entry(io):
 
     The probe is an unregistered IOService nub: it publishes properties but is
     not a published service, so IOServiceMatching/IOServiceGetMatchingService
-    and IORegistryEntryIDMatching all return no match. Walk the IOService plane
-    and match the entry name, which is what ioreg -c reports as well.
+    and IORegistryEntryIDMatching all return no match. It is a child of
+    IOResources, so those children are walked first. The recursive walk from
+    the root covers the whole IOService plane and can end early while other
+    entries are published or terminated in parallel, which reported the probe
+    as missing while it was in fact still attached and active.
     """
     ptr = ctypes.c_void_p
     io.IORegistryGetRootEntry.argtypes = [ctypes.c_uint32]
     io.IORegistryGetRootEntry.restype = ctypes.c_uint32
+    io.IORegistryEntryFromPath.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
+    io.IORegistryEntryFromPath.restype = ctypes.c_uint32
     io.IORegistryEntryCreateIterator.argtypes = [ctypes.c_uint32, ctypes.c_char_p,
                                                  ctypes.c_uint32, ctypes.POINTER(ptr)]
     io.IORegistryEntryCreateIterator.restype = ctypes.c_int
@@ -58,28 +63,45 @@ def find_probe_entry(io):
     io.IORegistryEntryGetName.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
     io.IORegistryEntryGetName.restype = ctypes.c_int
     io.IOObjectRelease.argtypes = [ctypes.c_uint32]
+
+    def search(start):
+        iterator = ptr()
+        if io.IORegistryEntryCreateIterator(start, b'IOService', 1,
+                                            ctypes.byref(iterator)):
+            return 0
+        buffer = ctypes.create_string_buffer(256)
+        try:
+            while True:
+                entry = io.IOIteratorNext(iterator)
+                if not entry:
+                    break
+                if (io.IORegistryEntryGetName(entry, buffer) == 0 and
+                        buffer.value.decode('utf-8', 'replace') == SERVICE):
+                    return entry
+                io.IOObjectRelease(entry)
+        finally:
+            if iterator.value:
+                io.IOObjectRelease(iterator.value)
+        return 0
+
+    resources = io.IORegistryEntryFromPath(0, b'IOService:/IOResources')
+    if resources:
+        try:
+            entry = search(resources)
+        finally:
+            io.IOObjectRelease(resources)
+        if entry:
+            return entry
     root = io.IORegistryGetRootEntry(0)
     if not root:
         raise RuntimeError('cannot get IORegistry root')
-    iterator = ptr()
     try:
-        if io.IORegistryEntryCreateIterator(root, b'IOService', 1,
-                                            ctypes.byref(iterator)):
-            raise RuntimeError('cannot iterate IOService plane')
-        buffer = ctypes.create_string_buffer(256)
-        while True:
-            entry = io.IOIteratorNext(iterator)
-            if not entry:
-                break
-            if (io.IORegistryEntryGetName(entry, buffer) == 0 and
-                    buffer.value.decode('utf-8', 'replace') == SERVICE):
-                return entry
-            io.IOObjectRelease(entry)
-        raise RuntimeError('Round31 probe service not found')
+        entry = search(root)
     finally:
-        if iterator:
-            io.IOObjectRelease(iterator.value)
         io.IOObjectRelease(root)
+    if not entry:
+        raise RuntimeError('Round31 probe service not found')
+    return entry
 
 
 def set_boolean_property(name):
