@@ -1,5 +1,40 @@
 # AMDIOMMU — authoritative source repository
 
+## Current Round43 / an IOVA-only device domain from entry through stop
+
+Base: `7af436acaad62a58acbdb4b788142145ec4c744f`, the accepted Round42
+result-documentation successor (tree `a5f7f4a3aec7ad7b774c0f14e8e48f6e8700069f`).
+The deployed implementation is `6931c8a6ee583482ce5bf373d1dfbee8f76cc954`,
+whose tree exactly matches the delivered Round42 candidate. The original
+capture was reanalyzed on the actual source: 14/14 passed, one planned boot
+and one valid measurement, with JSON identical to the archived analysis.
+
+Candidate: Lucy **1.1.228** / Probe **0.52.0**. TX native7/std5/domain4,
+PhysicalLayout1, StopRecord1 and FixedDMA1 remain. Native RX advances to ABI5
+with unchanged record sizes and explicit pre-DTE stop/active-snapshot ops.
+
+Round42 already posts all initial RX IOVAs before enabling DMA. The remaining
+physical bootstrap bridges the interval from the DTE switch to NIC stop.
+Move that same verified NIC stop/reset to immediately after the existing TX
+drain and before writing the DTE. The native root can then start without any
+identity leaves; fixed and RX mappings are installed while the NIC is stopped.
+
+Before enable, capture the real active IOVA tree after all initial OWN stores.
+There is no bootstrap unmap or synthetic retirement command. Keep the accepted
+IRQ handoff, first generation 1 and maps=posted. During exit, Disarm performs
+the real NIC stop within its existing command gate; Drain confirms that state.
+RX/fixed unmap and current-PA OWN preparation happen with DMA stopped. Restore
+the original IOMMU state before enabling physical DMA again. No physical cover
+mapping is needed, and the final experimental page table has no present leaf.
+
+Keep the same normal 4096 + 125-second idle + 4096 workload, one explicit stop
+and three ordinary probes after recovery. Update the existing 14 checks and
+normal fixture for the new entry order, active IOVA snapshot and empty final
+tree. Use the fixed checkout/upstream, `--tx 21 --rx 34`, `--check-r43`,
+`runs/r43`, `org.example.round43load` and token `0x43c0de43`.
+Host validation, real Mac compilation and hardware acceptance remain separate;
+Round43 hardware acceptance is pending.
+
 ## Accepted Round42 / publish the entire RX IOVA ring before hardware enable
 
 Base: `8efddec6ca4280b59fe991b87516903f8628bf23`, the accepted Round41

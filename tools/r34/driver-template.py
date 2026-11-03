@@ -15,6 +15,9 @@ Round40 also maps Lucy's existing descriptor rings and tally buffer through
 three persistent standard DMA commands, using the same stopped-NIC transition.
 Round42 posts every initial RX mapping while the NIC is stopped and retires
 the bootstrap identity aliases before enabling any IOVA receive traffic.
+Round43 stops before changing the DTE and resumes physical DMA only after
+restoring the original IOMMU state. The translated lifetime needs no identity
+aliases; Authorize captures the fully mapped IOVA table before enabling DMA.
 The older RX4 path remains selectable from its original template.
 """
 from pathlib import Path
@@ -37,13 +40,14 @@ MEMBERS = BASE['MEMBERS'] + r'''
     bool r36RxBatchCall(UInt32, UInt32, UInt32);
     bool r36RxBeginBatch(UInt32, UInt32);
     bool r36RxPublish(UInt32, UInt64, UInt64, UInt64);
-    bool r38RxRetireBootstrap();
+    bool r43RxCaptureActive();
     bool r42RxPostInitial();
     bool r39RxPaused() const;
     bool r39RxStop();
     IOReturn r39RxResume();
     UInt64 r40FixedRegister(UInt32);
     bool r40FixedBinding(UInt32, UInt32, r34rx::MapRecord * = nullptr, UInt64 = 0);
+    bool r43StopBeforeDte();
     bool r40FixedInstall();
     IOReturn r40FixedActivate();
     bool r40FixedRetire();
@@ -70,7 +74,6 @@ struct RTL8125::R34RxState {
     IODMACommand *command[r34rx::kCount];
     IOAddressRange ranges[r34rx::kCount];
     bool bound[r34rx::kCount], wired[r34rx::kCount], mapped[r34rx::kCount];
-    bool restorePending[r34rx::kCount];
     r34rx::Witness current[r34rx::kCount];
     UInt32 generation;
     UInt32 keepTx[kNumTxDesc], filtered[5];
@@ -80,8 +83,8 @@ struct RTL8125::R34RxState {
     UInt32 batches, batchSlots, maxBatch;
     UInt64 batchOld[r34rx::kBatchSize], batchWord[r34rx::kBatchSize];
     UInt32 firstIovaSlots;
-    UInt64 tLastFirstIovaPost, tBootstrapRetired;
-    bool bootstrapRetireAttempted, bootstrapRetired;
+    UInt64 tLastFirstIovaPost, tActiveReady;
+    bool activeCaptureAttempted, activeCaptured;
     r34rx::StopRecord stop;
     bool hardwarePaused;
     r40fixed::DriverSnapshot fixed;
@@ -318,7 +321,7 @@ bool RTL8125::r36RxPublish(UInt32 slot, UInt64 addr, UInt64 oldAddr, UInt64 word
         rxDescArray[slot].buf.blen = OSSwapHostToLittleInt64(word1);
         r34RxPosted(slot, addr);
         rxpostRecordRearm(slot, addr, oldAddr, word1);
-        return r38RxRetireBootstrap();
+        return true;
     }
     const UInt32 n = p->batchQueued;
     if (n >= p->batchCount || slot != (p->batchFirst + n) % r34rx::kCount) {
@@ -347,34 +350,33 @@ bool RTL8125::r36RxPublish(UInt32 slot, UInt64 addr, UInt64 oldAddr, UInt64 word
     ++p->batches; p->batchSlots += p->batchCount;
     if (p->batchCount > p->maxBatch) p->maxBatch = p->batchCount;
     p->batchCount = p->batchQueued = 0;
-    return r38RxRetireBootstrap();
+    return true;
 }
 
-bool RTL8125::r38RxRetireBootstrap()
+bool RTL8125::r43RxCaptureActive()
 {
     R34RxState *p = r34Rx;
-    if (p->physicalResumed || p->snapshot.state != r34rx::kInstalled ||
-        p->firstIovaSlots != r34rx::kCount) return true;
-    if (p->bootstrapRetireAttempted) return p->bootstrapRetired;
+    if (p->activeCaptureAttempted) return p->activeCaptured;
     // Every initial IOVA OWN is already published, but hardware is still
     // stopped. The entry reset ended the old physical DMA before these
     // descriptors changed. No packet completion is inferred from that reset.
-    if (!p->hardwarePaused || !p->fixed.resetVerified || p->authorized ||
-        p->batchCount) {
+    if (p->physicalResumed || p->snapshot.state != r34rx::kInstalled ||
+        p->firstIovaSlots != r34rx::kCount || !p->hardwarePaused ||
+        !p->fixed.resetVerified || p->authorized || p->batchCount) {
         p->snapshot.flags |= r34rx::kFlagMapFailed;
         return false;
     }
-    p->bootstrapRetireAttempted = true;
+    p->activeCaptureAttempted = true;
     r34rx::Binding b = {};
     b.version = r34rx::kVersion; b.bytes = sizeof(b);
-    b.op = r34rx::kRetireBootstrap; b.slot = 0;
+    b.op = r34rx::kCaptureActive; b.slot = 0;
     b.pa = p->tLastFirstIovaPost; b.length = r34rx::kCount;
     if (p->callback(p->context, &b) != kIOReturnSuccess) {
         p->snapshot.flags |= r34rx::kFlagMapFailed;
         return false;
     }
-    p->bootstrapRetired = true;
-    p->tBootstrapRetired = mach_absolute_time();
+    p->activeCaptured = true;
+    p->tActiveReady = mach_absolute_time();
     return true;
 }
 
@@ -398,7 +400,7 @@ bool RTL8125::r42RxPostInitial()
         rxpostRecordRearm(slot, w.iova, oldAddr, word);
     }
     // The backend marks Install complete only after this RPC returns.
-    // Authorize retires bootstrap aliases before rtl812xEnable is called.
+    // Authorize captures the active IOVA table before rtl812xEnable is called.
     return p->firstIovaSlots == r34rx::kCount;
 }
 
@@ -438,7 +440,7 @@ bool RTL8125::r40FixedBinding(UInt32 op, UInt32 kind,
     return true;
 }
 
-bool RTL8125::r40FixedInstall()
+bool RTL8125::r43StopBeforeDte()
 {
     R34RxState *p = r34Rx;
     auto &f = p->fixed;
@@ -476,6 +478,19 @@ bool RTL8125::r40FixedInstall()
     f.generationAfter = rxpostHdr ? rxpostHdr->ringGen : p->generation;
     rxpostCaptureBaseline();
     rxpostPublish();
+    return true;
+}
+
+bool RTL8125::r40FixedInstall()
+{
+    R34RxState *p = r34Rx;
+    auto &f = p->fixed;
+    auto &s = p->snapshot;
+    struct rtl8125_private *tp = &linuxData;
+    if (s.state != r34rx::kPrepared || s.maps || !f.entryCalls ||
+        !f.resetVerified || !p->hardwarePaused ||
+        (RTL_R8(tp, ChipCmd) & (CmdReset | CmdTxEnb | CmdRxEnb)) ||
+        RTL_R32(tp, IMR0_8125)) return false;
 
     // Mark ownership before allocating any pair. These virtual descriptors
     // describe the existing driver buffers; their original MD/Cmd stay owned
@@ -530,7 +545,7 @@ IOReturn RTL8125::r40FixedActivate()
         if (!p->hardwarePaused || !f.resetVerified ||
             p->firstIovaSlots != r34rx::kCount ||
             (RTL_R8(tp, ChipCmd) & (CmdReset | CmdTxEnb | CmdRxEnb)) ||
-            RTL_R32(tp, IMR0_8125) || !r38RxRetireBootstrap())
+            RTL_R32(tp, IMR0_8125) || !r43RxCaptureActive())
             return kIOReturnIOError;
         txPhyAddr = f.objects[r40fixed::kTxRing].iova;
         rxPhyAddr = f.objects[r40fixed::kRxRing].iova;
@@ -661,10 +676,12 @@ bool RTL8125::r39RxStop()
         }
         if (w.tPost) { d.last = w; w.reserved = 1; }
         const UInt64 pa = mbuf_data_to_physical(mbuf_datastart(rxBufArray[slot].mbuf));
-        if (!pa || !r34RxBinding(r34rx::kCover, slot, nullptr, pa)) {
-            s.flags |= r34rx::kFlagCoverFailed;
+        if (!pa) {
+            s.flags |= r34rx::kFlagAddressMismatch;
             return false;
         }
+        // DMA stays off until the original IOMMU state is restored. Preparing
+        // the physical descriptors here does not need an experimental alias.
         d.currentPA = pa;
         rxBufArray[slot].phyAddr = pa;
         rxDescArray[slot].buf.addr = OSSwapHostToLittleInt64(pa);
@@ -673,7 +690,6 @@ bool RTL8125::r39RxStop()
         wmb();
         rxDescArray[slot].buf.blen = OSSwapHostToLittleInt64(word1);
         if (!d.tPhysicalOwn) ++s.restored;
-        p->restorePending[slot] = false;
         d.tPhysicalOwn = mach_absolute_time();
         s.tLastRestore = d.tPhysicalOwn;
         rxpostRecordRearm(slot, pa, oldAddr, word1);
@@ -698,17 +714,19 @@ IOReturn RTL8125::r39RxResume()
     auto &stop = p->stop;
     if (p->physicalResumed) return kIOReturnSuccess;
     // A Prepare-only cancellation never stopped the NIC or owned mappings.
-    if (!stop.stopCalls) {
+    if (!stop.stopCalls && !p->fixed.entryCalls) {
         p->physicalResumed = true;
         p->tPhysicalResumed = mach_absolute_time();
         return kIOReturnSuccess;
     }
-    if (!stop.resetVerified) return kIOReturnNotReady;
+    if (stop.stopCalls ? !stop.resetVerified : !p->fixed.resetVerified)
+        return kIOReturnNotReady;
     struct rtl8125_private *tp = &linuxData;
     if (!stop.tResumeBegin) {
         stop.tResumeBegin = mach_absolute_time();
-        // Release has removed all native owners, and the probe has confirmed
-        // the original IOMMU state. Use Lucy's existing rebuild/restart path.
+        // The probe has confirmed the original IOMMU state. This also handles
+        // an entry stop followed by cancellation before Install owns any DMA.
+        // Use Lucy's existing rebuild/restart path after all owners are gone.
         clearRxTxRings();
         stop.rxNextAfter = rxNextDescIndex;
         txDescDoneCount = txDescDoneLast = 0;
@@ -745,6 +763,7 @@ bool RTL8125::r34RxRearm(UInt32 slot, UInt32 token, UInt32 reqId,
     if (p->physicalResumed || s.state == r34rx::kReleased) return true;
     if (s.state == r34rx::kPrepared ||
         (s.state == r34rx::kInstalled && !p->authorized)) return true;
+    if (s.state != r34rx::kInstalled) return false;
     if (replaced) { s.replaced++; d.replaceCount++; }
     if (w.tPost && w.tDone && !w.reserved) {
         w.token = token; w.reqId = reqId; w.replaced = replaced ? 1u : 0u;
@@ -752,22 +771,10 @@ bool RTL8125::r34RxRearm(UInt32 slot, UInt32 token, UInt32 reqId,
         if (!d.sampleCount) { d.samples[0] = w; d.sampleCount = 1; }
         w.reserved = 1; // do not relabel this DMA with later physical tail packets
     }
-    if (s.state == r34rx::kInstalled) {
-        if (p->batchCount) return r34RxPrepareSlot(slot);
-        if (!r34RxMapSlot(slot)) return false;
-        *addr = p->current[slot].iova;
-        rxBufArray[slot].phyAddr = *addr;
-    } else if (!d.tPhysicalOwn) {
-        // Replacement mbufs need not belong to the ring captured at Prepare.
-        // Add their current physical span before publishing physical OWN.
-        const UInt64 pa = mbuf_data_to_physical(mbuf_datastart(rxBufArray[slot].mbuf));
-        if (!pa || !r34RxBinding(r34rx::kCover, slot, nullptr, pa)) {
-            s.flags |= r34rx::kFlagCoverFailed;
-            return false;
-        }
-        d.currentPA = pa; *addr = pa; rxBufArray[slot].phyAddr = pa;
-        p->restorePending[slot] = true;
-    }
+    if (p->batchCount) return r34RxPrepareSlot(slot);
+    if (!r34RxMapSlot(slot)) return false;
+    *addr = p->current[slot].iova;
+    rxBufArray[slot].phyAddr = *addr;
     return true;
 }
 
@@ -784,10 +791,6 @@ void RTL8125::r34RxPosted(UInt32 slot, UInt64 addr)
             p->tLastFirstIovaPost = w.tPost;
         }
         s.posted++; d.postCount++; s.pendingPosted++;
-    } else if (p->restorePending[slot] && addr == d.currentPA) {
-        p->restorePending[slot] = false;
-        d.tPhysicalOwn = mach_absolute_time();
-        s.tLastRestore = d.tPhysicalOwn; s.restored++;
     }
 }
 
@@ -806,7 +809,7 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
 {
     if (!request || request->version != r34rx::kVersion ||
         request->bytes != sizeof(*request) || request->op < r34rx::kInstall ||
-        request->op > r34rx::kResumePhysical) return kIOReturnBadArgument;
+        request->op > r34rx::kStopBeforeDte) return kIOReturnBadArgument;
     if (!rxBufArray || !rxDescArray || !rxPool) return kIOReturnNotReady;
     if (request->op == r34rx::kPrepare) {
         if (r34Rx || r15Pool) return kIOReturnBusy;
@@ -887,7 +890,14 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
     auto *p = r34Rx;
     auto &s = p->snapshot;
     IOReturn controlResult = kIOReturnSuccess;
-    if (request->op == r34rx::kInstall) {
+    if (request->op == r34rx::kStopBeforeDte) {
+        if (s.state != r34rx::kPrepared || s.flags || request->deadline)
+            return kIOReturnBadArgument;
+        if (!r43StopBeforeDte()) {
+            s.flags |= r34rx::kFlagStopped;
+            controlResult = kIOReturnIOError;
+        }
+    } else if (request->op == r34rx::kInstall) {
         if (s.state != r34rx::kPrepared || s.flags || !request->mapper ||
             !request->context || !request->callback || request->deadline)
             return kIOReturnBadArgument;
@@ -935,7 +945,9 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
         if (!s.tDisarmed) s.tDisarmed = mach_absolute_time();
         if (s.state != r34rx::kReleased && s.state != r34rx::kDrained) {
             s.state = r34rx::kDisarmed;
-            if (request->op == r34rx::kDrain && !r39RxStop())
+            // Disarm closes the callback window and stops DMA in this same
+            // serialized RPC. A following Drain observes the drained state.
+            if (!r39RxStop())
                 controlResult = kIOReturnIOError;
         }
     } else if (request->op == r34rx::kRelease) {
@@ -997,8 +1009,7 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
     setProperty("rtl812x-r36-rx-pending-batch", p->batchCount, 32);
     setProperty("rtl812x-r38-rx-first-iova-slots", p->firstIovaSlots, 32);
     setProperty("rtl812x-r38-rx-last-first-iova-time", p->tLastFirstIovaPost, 64);
-    setProperty("rtl812x-r38-rx-bootstrap-retired", p->bootstrapRetired ? 1u : 0u, 32);
-    setProperty("rtl812x-r38-rx-bootstrap-retire-time", p->tBootstrapRetired, 64);
+    setProperty("rtl812x-r43-rx-active-ready-time", p->tActiveReady, 64);
     return controlResult;
 }
 

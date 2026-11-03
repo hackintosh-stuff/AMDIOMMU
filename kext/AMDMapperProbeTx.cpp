@@ -113,14 +113,11 @@ struct org_example_AMDMapperProbe::R34RxDomain {
     bool preMapped[r34rx::kCount], preUnmapped[r34rx::kCount];
     UInt32 mapInvalidations, unmapInvalidations;
     UInt32 mapBatchCalls, unmapBatchCalls, mapBatchSlots, unmapBatchSlots, maxBatch;
-    // One sparse arena serves bootstrap, IOVA tables and physical restore.
-    // All bootstrap identity leaves retire after the stopped NIC's RX ring
-    // receives its initial IOVA OWN entries, before any DMA is enabled again.
-    // Stop adds only the current RX buffers back.
-    UInt32 physicalNext, bootstrapPages, fixedPages, removedPages, restoreAddedPages;
-    bool bootstrapRetired;
-    UInt64 tBootstrapClear;
-    r17domain::Command bootstrapRetireCommand;
+    // The NIC stops before DTE entry and again before restoring physical OWN.
+    // Only IOVA mappings ever occupy this native session's page table.
+    UInt32 physicalNext;
+    bool entryStopped, activeCaptured;
+    UInt64 tActiveCapture;
     void *activePt;
     UInt32 activePtBytes;
     r34rx::PhysicalLayout physical;
@@ -140,8 +137,8 @@ static_assert(r40fixed::kIovaBase >= amdtx::kBase + amdtx::kPages * 4096ULL &&
 bool org_example_AMDMapperProbe::r17Prepare(volatile UInt64 *pt, UInt64 base,
                                            UInt32 pages) {
     if (fR17 || pages <= M2B2_IOVA_RESERVED_PAGES) return false;
-    if (fR31Session && (!fR34Rx || fR34Rx->physicalNext < 2 ||
-                       !fR34Rx->bootstrapPages)) return false;
+    if (fR31Session && (!fR34Rx || !fR34Rx->prepared ||
+                       fR34Rx->physicalNext < 2)) return false;
     R17Domain *d = (R17Domain *)IOMalloc(sizeof(R17Domain));
     if (!d) return false;
     bzero(d, sizeof(*d));
@@ -150,9 +147,8 @@ bool org_example_AMDMapperProbe::r17Prepare(volatile UInt64 *pt, UInt64 base,
     fR17 = d;
     d->pt=pt; d->ptBase=base; d->ptBytes=pages*4096ULL;
     // Command space is checked against hardware HEAD on each submission.
-    // Native sessions continue from the actual sparse bootstrap cursor. The
-    // remaining arena is shared with physical restore instead of leaving most
-    // free pages behind a fixed IOVA/cover partition. Legacy keeps its tail.
+    // Native sessions start after the root and empty reserve page. Legacy
+    // sessions retain their existing identity table and reserved IOVA tail.
     static_assert(R17Domain::kIovaL1Count + 3 <= M2B2_IOVA_RESERVED_PAGES,
                   "IOVA arena includes L2, all L1s and two cover pages");
     amdsparse::Arena a={pt,base,pages,
@@ -2042,27 +2038,26 @@ IOReturn org_example_AMDMapperProbe::r34RxOperation(r34rx::Binding *b) {
                          __ATOMIC_RELEASE);
         --s.boundPairs;
         result = kIOReturnSuccess;
-    } else if (b->op == r34rx::kRetireBootstrap) {
-        // Lucy calls during Authorize while the entry reset still holds DMA
-        // stopped. Install has mapped the three fixed objects and published
-        // the initial IOVA OWN for all 1024 RX slots. Retire their physical
-        // aliases before the hardware enable path can start using the ring.
+    } else if (b->op == r34rx::kCaptureActive) {
+        // Lucy calls during Authorize with the NIC still stopped. Install has
+        // mapped the fixed objects and published all 1024 initial IOVA OWN.
+        // Capture that actual table before hardware starts using the ring.
         if (b->slot || b->length != r34rx::kCount || !b->pa ||
-            !r->installed || r->released || r->bootstrapRetired ||
+            !r->installed || !r->entryStopped || r->released || r->activeCaptured ||
             !r->activePt || r->activePtBytes != d->ptBytes ||
-            !d->installed || !d->commandOwned || s.coverCalls ||
+            !d->installed || !d->commandOwned || s.flags || s.coverCalls ||
             s.boundPairs != r34rx::kCount || s.liveOwners != r34rx::kCount ||
             s.mapOk != r34rx::kCount || s.unmapOk ||
             r->fixed.entered || r->fixed.tEntered || r->fixed.flags ||
             r->fixed.liveOwners != r40fixed::kCount ||
             r->fixed.boundPairs != r40fixed::kCount)
-            goto retireFailed;
+            goto captureFailed;
         for (UInt32 i = 0; i < r40fixed::kCount; ++i) {
             const auto &object = r->fixed.objects[i];
             if (object.flags !=
                     (r40fixed::kMapPublished | r40fixed::kMapInvalidated) ||
                 !object.tMapInv || object.tMapInv > b->pa)
-                goto retireFailed;
+                goto captureFailed;
         }
         for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
             const auto &entry = s.slots[slot];
@@ -2072,82 +2067,19 @@ IOReturn org_example_AMDMapperProbe::r34RxOperation(r34rx::Binding *b) {
                 mapping.flags != (r34rx::kMapPublished | r34rx::kMapInvalidated) ||
                 !mapping.tMapInv || mapping.tMapInv > b->pa ||
                 r->preMapped[slot] || r->preUnmapped[slot])
-                goto retireFailed;
+                goto captureFailed;
         }
-        {
-            amdsparse::Arena a = {d->pt, d->ptBase,
-                (unsigned)(d->ptBytes / 4096ULL), d->coverNext,
-                d->rootLevel, d->ptBase, 0, 0, nullptr};
-            auto keepNone = [](UInt64) -> bool { return false; };
-            unsigned removed = 0;
-            for (UInt32 i = 0; i < r34rx::kPhysicalSpanCount; ++i) {
-                const auto &span = r->physical.spans[i];
-                if (!amdsparse::unmapOwnedRange(a, span.pa, span.bytes,
-                                               keepNone, removed)) {
-                    d->accepting = false;
-                    goto retireFailed;
-                }
-            }
-            for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
-                if (!amdsparse::unmapOwnedRange(a,
-                        r->control.out.slots[slot].originalPA,
-                        r34rx::kCapacity, keepNone, removed)) {
-                    d->accepting = false;
-                    goto retireFailed;
-                }
-            }
-            OSSynchronizeIO();
-            r->tBootstrapClear = mach_absolute_time();
-            if (r->tBootstrapClear < b->pa ||
-                removed != r->bootstrapPages ||
-                !r17Invalidate(d->mmio, d->command, r->bootstrapRetireCommand,
-                               "r38-rx-bootstrap-retire")) {
-                d->accepting = false;
-                goto retireFailed;
-            }
-            // Preallocated during Prepare; take the active image before any
-            // other mapper operation can modify the table under the same lock.
-            for (UInt32 i = 0; i < r->activePtBytes / sizeof(UInt64); ++i)
-                static_cast<UInt64 *>(r->activePt)[i] = d->pt[i];
-            r->removedPages = removed;
-            r->bootstrapRetired = true;
-            result = kIOReturnSuccess;
-            goto done;
-        }
-retireFailed:
-        s.flags |= r34rx::kFlagUnmapFailed;
-        result = kIOReturnIOError;
-    } else if (b->op == r34rx::kCover) {
-        ++s.coverCalls;
-        if (live || !b->pa || b->length != r34rx::kCapacity ||
-            !d->installed || !d->commandOwned) goto coverFailed;
-        {
-            // Stop returns the CURRENT native mbuf to physical DMA, which can
-            // differ from the initial ring. Confirm its identity mapping
-            // before Lucy writes physical OWN. Keep RX accounting separate.
-            amdsparse::Arena a = {d->pt, d->ptBase,
-                (unsigned)(d->ptBytes / 4096ULL), d->coverNext,
-                d->rootLevel, d->ptBase, 0, 0, nullptr};
-            const bool mapped = amdsparse::mapOwnedRange(a, b->pa, b->length);
-            d->coverNext = a.next;
-            if (!mapped) { d->accepting = false; goto coverFailed; }
-            if (a.addedPages || a.addedLeaves) {
-                r17domain::Command rec = {};
-                OSSynchronizeIO();
-                if (!r17Invalidate(d->mmio, d->command, rec,
-                                   "r34-rx-physical-restore")) {
-                    d->accepting = false;
-                    goto coverFailed;
-                }
-            }
-            r->restoreAddedPages += a.addedLeaves;
-            ++s.coverOk;
-            result = kIOReturnSuccess;
-            goto done;
-        }
-coverFailed:
-        ++s.coverFailed;
-        s.flags |= r34rx::kFlagCoverFailed;
+        // Preallocated during Prepare; no leaf is changed by this capture and
+        // no extra invalidation is needed. The domain lock excludes mappings.
+        for (UInt32 i = 0; i < r->activePtBytes / sizeof(UInt64); ++i)
+            static_cast<UInt64 *>(r->activePt)[i] = d->pt[i];
+        r->tActiveCapture = mach_absolute_time();
+        if (r->tActiveCapture < b->pa) goto captureFailed;
+        r->activeCaptured = true;
+        result = kIOReturnSuccess;
+        goto done;
+captureFailed:
+        s.flags |= r34rx::kFlagMapFailed;
         result = kIOReturnIOError;
     }
 done:
@@ -2442,7 +2374,9 @@ IOReturn org_example_AMDMapperProbe::r34RxControl(UInt32 op) {
 
 bool org_example_AMDMapperProbe::r34RxPrepareMap(
         volatile UInt64 *pt, UInt64 ptBase, UInt32 totalPages, UInt32 basePages) {
-    if (!fR31Session || fR34Rx || fR27Rx || !fR15Service || !fR15Request.reserved)
+    if (!fR31Session || fR34Rx || fR27Rx || !fR15Service || !fR15Request.reserved ||
+        !pt || !ptBase || (ptBase & 4095ULL) || basePages < 2 ||
+        totalPages <= basePages)
         return false;
     R27ClientContext client(this, nullptr);
     R34RxDomain *r = (R34RxDomain *)IOMalloc(sizeof(R34RxDomain));
@@ -2494,87 +2428,81 @@ bool org_example_AMDMapperProbe::r34RxPrepareMap(
         r->physical.count != r34rx::kPhysicalSpanCount) {
         setProperty("m2-3h-rx-state", "FAIL-native-physical-layout"); return false;
     }
-    // Prepare holds the existing physical ring copy-only. It does not take
-    // mbuf ownership, allocate spare buffers, or alter any NIC-owned address.
-    // The root starts empty: fixed NIC DMA objects and the current RX buffers
-    // receive only the 4 KiB leaves intersecting their actual spans.
-    amdsparse::Arena arena = {pt, ptBase, totalPages, basePages,
-        fM22b2Use3L ? 3u : 4u, ptBase, 0, 0, nullptr};
-    auto read = [&](UInt64 pa, unsigned ix) -> UInt64 {
-        volatile amdsparse::u64 *table = amdsparse::table(arena, pa);
-        return table ? table[ix] : 0;
-    };
-    UInt32 mapped = 0, walked = 0;
-    UInt64 maxEnd = 0;
-    auto mapAndWalk = [&](UInt64 pa, UInt64 bytes) -> bool {
-        if (!amdsparse::mapOwnedRange(arena, pa, bytes)) return false;
-        // A descriptor ring exceeds the bounded business-range witness.
-        // Walk every intersecting page directly, including both permissions.
-        for (UInt64 page = pa & ~4095ULL; page < pa + bytes; page += 4096ULL) {
-            amdbw::Path path;
-            if (!amdbw::walkOne(read, arena.rootLevel, ptBase, page, path) ||
-                path.leafSize != 4096 || path.leafPA != page ||
-                !amdbw::pathPermOk(path, false) || !amdbw::pathPermOk(path, true)) {
-                arena.why = "native-identity-not-4k-rw";
-                return false;
-            }
-            ++walked;
-        }
-        return true;
+    // Prepare freezes the ordinary ring manifest without changing its DMA
+    // addresses. The later pre-DTE stop makes physical aliases unnecessary.
+    // Validate the retained objects, then leave the new root entirely empty.
+    auto validSpan = [](UInt64 pa, UInt64 bytes) -> bool {
+        const UInt64 top = 1ULL << 52;
+        return pa && bytes && pa < top && bytes <= top - pa;
     };
     for (UInt32 i = 0; i < r34rx::kPhysicalSpanCount; ++i) {
         const auto &span = r->physical.spans[i];
-        if (!mapAndWalk(span.pa, span.bytes)) {
-            setProperty("m2-3h-rx-state", "FAIL-native-fixed-dma-map");
-            setProperty("m2-3p-rx-map-why", arena.why ? arena.why : "fixed-dma-span");
+        if (!validSpan(span.pa, span.bytes)) {
+            setProperty("m2-3h-rx-state", "FAIL-native-fixed-dma-span");
             setHexProperty(this, "m2-3r-physical-bad-span", i);
             return false;
         }
     }
-    r->fixedPages = arena.addedLeaves;
     for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
-        const UInt64 pa = s.slots[slot].originalPA;
-        if (!mapAndWalk(pa, r34rx::kCapacity)) {
-            setProperty("m2-3h-rx-state", "FAIL-native-bootstrap-map");
-            setProperty("m2-3p-rx-map-why", arena.why ? arena.why : "invalid-ring-span");
+        if (!validSpan(s.slots[slot].originalPA, r34rx::kCapacity)) {
+            setProperty("m2-3h-rx-state", "FAIL-native-ring-span");
             setHexProperty(this, "m2-3p-rx-map-bad-slot", slot);
             return false;
         }
-        ++mapped;
-        if (pa + r34rx::kCapacity > maxEnd) maxEnd = pa + r34rx::kCapacity;
     }
-    r->physicalNext = arena.next;
-    r->bootstrapPages = arena.addedLeaves;
-    OSSynchronizeIO();
+    for (UInt32 i = 0; i < 512; ++i) {
+        if (pt[i]) {
+            setProperty("m2-3h-rx-state", "FAIL-native-root-not-empty");
+            return false;
+        }
+    }
+    r->physicalNext = basePages;
     fR15MapTicks = mach_absolute_time();
-    setHexProperty(this, "m2-3p-rx-bootstrap-map-time", fR15MapTicks);
-    setHexProperty(this, "m2-3p-rx-bootstrap-ranges", mapped);
-    setHexProperty(this, "m2-3p-rx-bootstrap-max-end", maxEnd);
-    setHexProperty(this, "m2-3p-rx-sparse-pages", arena.addedPages);
-    setHexProperty(this, "m2-3p-rx-sparse-leaves", arena.addedLeaves);
-    setHexProperty(this, "m2-3p-rx-pt-used-pages", arena.next);
-    // This is the native software self-check. The legacy Pgt sample list
-    // assumes a flat RAM aperture and cannot describe an owned sparse table.
+    setHexProperty(this, "m2-3x-rx-manifest-time", fR15MapTicks);
+    setHexProperty(this, "m2-3x-rx-manifest-ranges", r34rx::kCount);
+    setHexProperty(this, "m2-3p-rx-bootstrap-map-time", 0);
+    setHexProperty(this, "m2-3p-rx-bootstrap-ranges", 0);
+    setHexProperty(this, "m2-3p-rx-bootstrap-max-end", 0);
+    setHexProperty(this, "m2-3p-rx-sparse-pages", 0);
+    setHexProperty(this, "m2-3p-rx-sparse-leaves", 0);
+    setHexProperty(this, "m2-3p-rx-pt-used-pages", basePages);
+    // Native preparation verifies the empty root. Actual map witnesses later
+    // check each fixed/RX IOVA; the legacy RAM-aperture walk does not apply.
     setProperty("m2-b2-walk", "ok");
-    setProperty("m2-b2-walk-basis", "owned-sparse-4k");
-    setHexProperty(this, "m2-b2-walk-samples", walked);
-    setHexProperty(this, "m2-b2-walk-checked", walked);
+    setProperty("m2-b2-walk-basis", "iova-only-empty-root");
+    setHexProperty(this, "m2-b2-walk-samples", 512);
+    setHexProperty(this, "m2-b2-walk-checked", 512);
     setHexProperty(this, "m2-b2-walk-bad", 0);
     UInt64 oneSecondNS = 0;
     absolutetime_to_nanoseconds(1000000000ULL, &oneSecondNS);
     if (oneSecondNS != 1000000000ULL) {
         setProperty("m2-3h-rx-state", "FAIL-native-timebase"); return false;
     }
-    setProperty("m2-b2-map-limit-kind", "owned-ranges-no-aperture");
-    setProperty("m2-3h-rx-state", "native-ring-mapped-before-dte");
+    setProperty("m2-b2-map-limit-kind", "iova-only");
+    setProperty("m2-3h-rx-state", "native-ring-prepared-before-dte");
     r34RxExport();
     return true;
+}
+
+bool org_example_AMDMapperProbe::r34RxStopBeforeDte() {
+    R34RxDomain *r = fR34Rx;
+    if (!r || !r->prepared || r->installed || r->entryStopped ||
+        r->control.out.state != r34rx::kPrepared || r->control.out.flags ||
+        r->control.out.maps || r->control.out.nativeActive)
+        return false;
+    R27ClientContext client(this, nullptr);
+    const bool ok = r34RxControl(r34rx::kStopBeforeDte) == kIOReturnSuccess &&
+        r->control.out.state == r34rx::kPrepared && !r->control.out.flags &&
+        !r->control.out.maps && !r->control.out.nativeActive;
+    r->entryStopped = ok;
+    setProperty("m2-3x-rx-stop-before-dte", ok ? "done" : "FAIL");
+    return ok;
 }
 
 bool org_example_AMDMapperProbe::r34RxBegin() {
     R34RxDomain *r = fR34Rx;
     if (!r || r->installed || fR27Rx || !r18StdReady() || !fR17->commandOwned ||
-        r->control.out.state != r34rx::kPrepared || !fR15MapTicks)
+        !r->entryStopped || r->control.out.state != r34rx::kPrepared || !fR15MapTicks)
         return false;
     R27ClientContext client(this, nullptr);
     if (r34RxControl(r34rx::kInstall) != kIOReturnSuccess) {
@@ -2657,13 +2585,15 @@ void org_example_AMDMapperProbe::r34RxReady() {
 bool org_example_AMDMapperProbe::r34RxFinish(UInt32 budgetMs) {
     R34RxDomain *r = fR34Rx;
     if (!r || r->released) return true;
-    // Before Install the unchanged physical ring is already safe for restore;
-    // ResumePhysical will unfreeze it after the hardware state is restored.
+    // Before Install there are no IOVA owners. ResumePhysical restarts an
+    // entry-stopped ring only after the original IOMMU state is restored.
     if (!r->installed && !r->snapshot.liveOwners && !r->snapshot.boundPairs &&
         !r->fixed.liveOwners && !r->fixed.boundPairs)
         return true;
     R27ClientContext client(this, fR31Session ? nullptr : fM22b2Timer);
     setProperty("m2-3h-rx-ready", "no");
+    // Disarm stops the actual NIC and retires its owners in the same gate
+    // before callbacks can restore physical descriptors. Drain confirms it.
     if (r34RxControl(r34rx::kDisarm) != kIOReturnSuccess) goto failed;
     setProperty("m2-3h-rx-state", "draining");
     setHexProperty(this, "m2-3h-rx-drain-budget-ms", budgetMs);
@@ -2725,15 +2655,13 @@ bool org_example_AMDMapperProbe::r34RxTailDone(UInt32 budgetMs) {
 void org_example_AMDMapperProbe::r34RxExport() {
     R34RxDomain *r = fR34Rx;
     if (!r) return;
-    // Native bootstrap exists before the TX/page-table backend is prepared.
-    OSData *activeRaw = nullptr, *retireRaw = nullptr;
+    // The native manifest exists before the TX/page-table backend is ready.
+    OSData *activeRaw = nullptr;
     if (fR17) IOLockLock(fR17->lock);
     OSData *raw = OSData::withBytes(&r->snapshot, sizeof(r->snapshot));
     OSData *fixedRaw = OSData::withBytes(&r->fixed, sizeof(r->fixed));
-    if (r->bootstrapRetired) {
+    if (r->activeCaptured) {
         activeRaw = OSData::withBytes(r->activePt, r->activePtBytes);
-        retireRaw = OSData::withBytes(&r->bootstrapRetireCommand,
-                                     sizeof(r->bootstrapRetireCommand));
     }
     if (fR17) IOLockUnlock(fR17->lock);
     if (raw) { setProperty("m2-3o-rx-backend-raw", raw); raw->release(); }
@@ -2768,19 +2696,18 @@ void org_example_AMDMapperProbe::r34RxExport() {
     setHexProperty(this, "m2-3q-rx-max-batch", r->maxBatch);
     raw = OSData::withBytes(&r->physical, sizeof(r->physical));
     if (raw) { setProperty("m2-3r-physical-layout", raw); raw->release(); }
-    setProperty("m2-3r-physical-mode", "owned-sparse-4k");
-    setHexProperty(this, "m2-3r-bootstrap-pages", r->bootstrapPages);
-    setHexProperty(this, "m2-3r-restore-added-pages", r->restoreAddedPages);
-    setHexProperty(this, "m2-3r-identity-pages",
-                   r->bootstrapPages - r->removedPages + r->restoreAddedPages);
+    setProperty("m2-3r-physical-mode", "iova-only");
+    setHexProperty(this, "m2-3r-bootstrap-pages", 0);
+    setHexProperty(this, "m2-3r-restore-added-pages", 0);
+    setHexProperty(this, "m2-3r-identity-pages", 0);
     if (fR17) setHexProperty(this, "m2-3r-pt-used-pages", fR17->coverNext);
-    setProperty("m2-3s-rx-bootstrap-retired", r->bootstrapRetired ? "yes" : "no");
-    setHexProperty(this, "m2-3s-fixed-pages", r->fixedPages);
-    setHexProperty(this, "m2-3s-bootstrap-removed-pages", r->removedPages);
-    setHexProperty(this, "m2-3s-bootstrap-clear-time", r->tBootstrapClear);
-    setHexProperty(this, "m2-3s-bootstrap-retire-time", r->bootstrapRetireCommand.tComplete);
-    if (activeRaw) { setProperty("m2-3s-rx-active-pt-raw", activeRaw); activeRaw->release(); }
-    if (retireRaw) { setProperty("m2-3s-rx-bootstrap-retire-command", retireRaw); retireRaw->release(); }
+    setProperty("m2-3s-rx-bootstrap-retired", "no");
+    setHexProperty(this, "m2-3s-fixed-pages", 0);
+    setHexProperty(this, "m2-3s-bootstrap-removed-pages", 0);
+    setHexProperty(this, "m2-3s-bootstrap-clear-time", 0);
+    setHexProperty(this, "m2-3s-bootstrap-retire-time", 0);
+    setHexProperty(this, "m2-3x-active-capture-time", r->tActiveCapture);
+    if (activeRaw) { setProperty("m2-3x-active-pt-raw", activeRaw); activeRaw->release(); }
 }
 
 void org_example_AMDMapperProbe::r34RxRelease() {

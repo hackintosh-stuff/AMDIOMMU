@@ -7,6 +7,8 @@
  * its first IOVA OWN; fixed DMA objects stay mapped until domain teardown.
  * Round39 stops the NIC locally before retiring the final RX mappings.
  * Stop-retired descriptors remain distinct from observed RX completions.
+ * Round43 also stops before the DTE switch, so the entire translated
+ * lifetime uses IOVA mappings without bootstrap or physical-return aliases.
  * Kernel-only control pointers stay in Request/Binding. Exported snapshots
  * contain numeric identities, mapping evidence and completed DMA witnesses.
  * Each slot keeps its first IOVA DMA lifecycle and its latest lifecycle.
@@ -20,16 +22,18 @@ typedef unsigned long long u64;
 static const char kFunctionName[] = "rtl812x-r34-rx-native";
 static const u64 kIovaBase = 0x1000200000ULL;
 enum {
-    kVersion = 4, kCount = 1024, kCapacity = 4096, kPagesPerSlot = 2,
+    kVersion = 5, kCount = 1024, kCapacity = 4096, kPagesPerSlot = 2,
     kPhysicalLayoutVersion = 1, kPhysicalSpanCount = 3,
     kStopVersion = 1,
     kSamples = 1, kTailMax = 4096, kBatchSize = 16,
     kInstall = 1, kSnapshot = 2, kDisarm = 3, kDrain = 4, kRelease = 5,
-    kPrepare = 6, kAuthorize = 7, kResumePhysical = 8,
+    kPrepare = 6, kAuthorize = 7, kResumePhysical = 8, kStopBeforeDte = 9,
     kAbsent = 0, kInstalled = 1, kDisarmed = 2, kDrained = 3, kReleased = 4,
     kPrepared = 5,
     kBind = 1, kRead = 2, kCover = 3, kUnbind = 4,
     kBatchMap = 5, kBatchUnmap = 6, kRetireBootstrap = 7,
+    // Binding operations 8..11 belong to r40fixed. Operation 7 is legacy.
+    kCaptureActive = 12,
     kMapPublished = 1, kMapInvalidated = 2, kMapUnmapped = 4,
     kWitnessPosted = 1, kWitnessDone = 2, kWitnessUnmapped = 4,
     kWitnessError = 8, kWitnessStopRetired = 16,
@@ -98,7 +102,8 @@ struct Snapshot {
 struct Binding {
     u32 version, bytes, op, slot;
     void *memory, *command;
-    // kRetireBootstrap: slot=0, pa=last first-IOVA-OWN time, length=kCount.
+    // kCaptureActive (legacy kRetireBootstrap has the same arguments):
+    // slot=0, pa=last first-IOVA-OWN time, length=kCount.
     u64 pa, length;
     MapRecord out;
 };

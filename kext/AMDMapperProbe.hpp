@@ -202,6 +202,7 @@ private:
         uint64_t *, uint64_t *);
     IOReturn r40FixedUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
     bool r34RxPrepareMap(volatile UInt64 *, UInt64, UInt32, UInt32);
+    bool r34RxStopBeforeDte();
     bool r34RxBegin();
     bool r34RxAuthorize();
     bool r34RxResumePhysical();

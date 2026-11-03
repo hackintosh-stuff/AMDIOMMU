@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Focused Round42 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round43 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
 The positive fixture covers all 1024 RX map/post/done/restore/unmap lifecycles,
-including remapping, batch16, bootstrap retirement and local NIC stop without peer tail traffic.
+including remapping, batch16 and local NIC stop without peer tail traffic.
 Final uncompleted OWN records are explicitly stop-retired, never counted as DMA completions.
 The same fixture maps the three fixed DMA objects through their actual headers,
-with active IOVA readbacks, no active identity leaves and physical restart readbacks.
+with entry stop before DTE write, active IOVA readbacks, an empty final tree and physical restart readbacks.
 Entry IRQ readbacks accompany the existing window result without a new check.
 Rejection cases cover missing restoration and corrupted RX command evidence.
 """
@@ -39,7 +39,7 @@ legacy = analyzer.A
 
 TOKEN = 7
 PEER = ('127.0.0.2', 9110)
-ABI_CHECK = 'capture-ABI-domain4-native7-std5-nativeRX4'
+ABI_CHECK = 'capture-ABI-domain4-native7-std5-nativeRX5'
 COUNTER_CHECK = 'all-TX-standard-mode2-cumulative-and-unmarked-no-cover'
 LOG_CHECK = 'full8192-bytes-no-retry-no-duplicate-credit'
 CMD_CHECK = 'original8192-command-ring-wraps-and-postwrap-completion'
@@ -71,7 +71,6 @@ struct IOService;
 #include "AMDAliveTxDomainNative.hpp"
 #include "RTL812xRxNative.hpp"
 #include "RTL812xFixedDma.hpp"
-#include "amd_iommu_sparse_core.hpp"
 #include <cstddef>
 static_assert(sizeof(r34rx::Snapshot) == 270432, "native RX driver snapshot");
 static_assert(sizeof(r34rx::BackendSnapshot) == 475216, "native RX backend snapshot");
@@ -98,7 +97,7 @@ int main(int argc, char **argv) {
     r20tx::Block b{};
     constexpr uint64_t base = 0x1000000000ULL, ptBase = 0x100000ULL;
     constexpr uint64_t perm = 1ULL | (1ULL << 61) | (1ULL << 62);
-    amdsparse::u64 pt[32 * 512]{};
+    uint64_t pt[32 * 512]{};
     pt[(base >> 30) & 511] = (ptBase + 4096) | perm | (2 << 9);
     for (uint32_t i = 0; i < 5; ++i)
         pt[512 + ((base >> 21) & 511) + i] = (ptBase + (2 + i) * 4096) | perm | (1 << 9);
@@ -113,7 +112,7 @@ int main(int argc, char **argv) {
     constexpr uint32_t batchGroups = 3 * 65;
     constexpr uint32_t rxInvalidations = r34rx::kCount + batchGroups;
     d.commandSubmits = d.commandCompleted = d.completionSequence =
-        2 * (10240 + 9) + 2 * rxInvalidations + r34rx::kCount + 1 + 2 * r40fixed::kCount;
+        2 * (10240 + 9) + 2 * rxInvalidations + 2 * r40fixed::kCount;
     d.commandWraps = d.commandSubmits * 2 / d.commandCapacity;
     d.commandPostWrapCompleted = d.commandCompleted - (d.commandCapacity / 2 - 1);
     d.slotsUsed = 65535; d.maxLiveOwners = 16;
@@ -171,7 +170,7 @@ int main(int argc, char **argv) {
         nextPage += n;
         // Sixteen variable-sized allocations coexist, retire, then are reused.
         const uint64_t t = 3000 + (i / 16) * 100 + i % 16;
-        const uint64_t commandBase = 20419 + r34rx::kCount + 18 + (i / 16) * 32;
+        const uint64_t commandBase = 20419 + 18 + (i / 16) * 32;
         auto &w = d.records[i];
         // Each history may have its own physical ring permutation. Handles
         // must perform the join; equal array indices must not be assumed.
@@ -236,7 +235,6 @@ int main(int argc, char **argv) {
     rx.tInstalled = 400; rx.tDisarmed = 8800; rx.tLastRestore = 8868;
     rb.version = r34rx::kVersion; rb.bytes = sizeof(rb); rb.count = r34rx::kCount;
     rb.mapCalls = rb.mapOk = rb.unmapCalls = rb.unmapOk = rx.maps;
-    rb.coverCalls = rb.coverOk = r34rx::kCount;
     rb.ready = 1; rb.tReady = 410; rb.tDrained = 8880;
     stop.version = r34rx::kStopVersion; stop.bytes = sizeof(stop);
     stop.stopCalls = stop.resetVerified = 1;
@@ -273,8 +271,8 @@ int main(int argc, char **argv) {
             w.tDone = first ? 1290 + i : 0;
             r.tUnmapPublish = first ? 1290 + firstSlot + width : 8803 + i / 16;
             r.tUnmapInv = r.tUnmapPublish + 1;
-            const uint64_t mapSequence = first ? 30 + i : 21700 + group;
-            const uint64_t unmapSequence = first ? 1201 + 2 * group : 22000 + i;
+            const uint64_t mapSequence = first ? 30 + i : 20700 + group;
+            const uint64_t unmapSequence = first ? 1201 + 2 * group : 21900 + i;
             r.mapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
                             mapSequence, mapSequence, r.tMapInv};
             r.unmapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
@@ -291,8 +289,9 @@ int main(int argc, char **argv) {
         }
         ds.currentPA = ds.last.pa;
     }
-    // Build and retire bootstrap with the production sparse helpers. Preserve
-    // one active copy alongside the final current-RX physical tree.
+    // The fixed and RX physical manifests identify the actual DMA buffers.
+    // No physical identity leaf exists at entry or exit; the final IOVA tables
+    // are empty after all standard mappings have retired.
     r34rx::PhysicalLayout physical{};
     physical.version = r34rx::kPhysicalLayoutVersion;
     physical.bytes = sizeof(physical); physical.generation = 2;
@@ -300,22 +299,7 @@ int main(int argc, char **argv) {
     physical.spans[0] = {0x800000, b.ringBytes};
     physical.spans[1] = {0x810000, 1024 * 16};
     physical.spans[2] = {0x820000, 64};
-    amdsparse::Arena identity = {pt, ptBase, 32, 7, d.rootLevel, ptBase, 0, 0, nullptr};
-    for (const auto &span : physical.spans)
-        if (!amdsparse::mapOwnedRange(identity, span.pa, span.bytes)) std::abort();
-    for (const auto &slot : rx.slots)
-        if (!amdsparse::mapOwnedRange(identity, slot.originalPA, r34rx::kCapacity)) std::abort();
-    if (identity.addedLeaves != 1545) std::abort();
-    auto keepNone = [](amdsparse::u64) { return false; };
-    unsigned removed = 0;
-    for (const auto &span : physical.spans)
-        if (!amdsparse::unmapOwnedRange(identity, span.pa, span.bytes,
-                                       keepNone, removed)) std::abort();
-    for (const auto &slot : rx.slots)
-        if (!amdsparse::unmapOwnedRange(identity, slot.originalPA, r34rx::kCapacity,
-                                       keepNone, removed)) std::abort();
-    if (removed != 1545) std::abort();
-    amdsparse::u64 activePt[32 * 512];
+    uint64_t activePt[32 * 512];
     std::memcpy(activePt, pt, sizeof(pt));
     r40fixed::DriverSnapshot fixedDriver{};
     r40fixed::BackendSnapshot fixedBackend{};
@@ -326,7 +310,7 @@ int main(int argc, char **argv) {
     fixedDriver.commandBefore = 0x0c; fixedDriver.interruptMaskBefore = 0xff;
     fixedDriver.generationBefore = physical.generation;
     fixedDriver.generationAfter = physical.generation + 1;
-    fixedDriver.tStopBegin = 160; fixedDriver.tStopped = 161;
+    fixedDriver.tStopBegin = 125; fixedDriver.tStopped = 126;
     fixedDriver.tProgrammed = 404;
     fixedDriver.tActive = fixedBackend.tEntered = 405;
     fixedBackend.mapCalls = fixedBackend.mapOk = fixedBackend.unmapCalls = fixedBackend.unmapOk = 3;
@@ -346,7 +330,7 @@ int main(int argc, char **argv) {
         w.tMapReady = r.tMapInv + 1;
         r.tUnmapPublish = 8871 + 2 * i; r.tUnmapInv = r.tUnmapPublish + 1;
         w.tUnmapReady = r.tUnmapInv + 1;
-        const uint64_t mapSequence = 19 + i, unmapSequence = 23030 + i;
+        const uint64_t mapSequence = 19 + i, unmapSequence = 22930 + i;
         r.mapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
                         mapSequence, mapSequence, r.tMapInv};
         r.unmapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
@@ -364,12 +348,6 @@ int main(int argc, char **argv) {
             activePt[(3 + i / 256) * 512 + (i % 256) * 2 + j] =
                 ((w.pa & ~4095ULL) + j * 4096) | perm;
     }
-    r17domain::Command retire = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
-                                1100, 1100, 402};
-    identity.addedLeaves = 0;
-    for (const auto &slot : rx.slots)
-        if (!amdsparse::mapOwnedRange(identity, slot.currentPA, r34rx::kCapacity)) std::abort();
-    if (identity.addedLeaves != 1536) std::abort();
     // Shift timestamp fields only; ABI, addresses, counters and protocol stay
     // identical. Both snapshots and real client logs include the idle gap.
 #define SESSION_TIME(field) field = sessionTime(field)
@@ -403,7 +381,6 @@ int main(int argc, char **argv) {
         SESSION_TIME(r.tUnmapPublish); SESSION_TIME(r.tUnmapInv);
         SESSION_TIME(r.mapCommand.tComplete); SESSION_TIME(r.unmapCommand.tComplete);
     }
-    SESSION_TIME(retire.tComplete);
     for (uint32_t i = 0; i < r34rx::kCount; ++i) {
         auto &ds = rx.slots[i]; auto &bs = rb.slots[i];
         SESSION_TIME(ds.tPhysicalOwn);
@@ -425,8 +402,7 @@ int main(int argc, char **argv) {
     save(dir, "r40-fixed-driver.bin", &fixedDriver, sizeof(fixedDriver));
     save(dir, "r40-fixed-backend.bin", &fixedBackend, sizeof(fixedBackend));
     save(dir, "r37-physical-layout.bin", &physical, sizeof(physical));
-    save(dir, "r38-active-pt-raw.bin", activePt, sizeof(activePt));
-    save(dir, "r38-bootstrap-retire-command.bin", &retire, sizeof(retire));
+    save(dir, "r43-active-pt-raw.bin", activePt, sizeof(activePt));
     save(dir, "r21-domain-raw.bin", &d, sizeof(d));
     save(dir, "r21-driver-raw.bin", &g, sizeof(g));
     save(dir, "r21-std-raw.bin", &s, sizeof(s));
@@ -449,16 +425,15 @@ def properties():
          'm2-3n-teardown-end': session_time(9055),
          'm2-3l-tx-deadline': 0,
          'm2-3h-rx-mode': 'native-ring-batch16', 'm2-3o-rx-ready-time': 410,
-         'm2-3p-rx-source': 'lucy-normal-ring', 'm2-3p-rx-bootstrap-ranges': 1024,
+         'm2-3p-rx-source': 'lucy-normal-ring', 'm2-3p-rx-bootstrap-ranges': 0,
+         'm2-3x-rx-manifest-ranges': 1024, 'm2-3x-rx-manifest-time': 80,
          'm2-3p-rx-ring-generation': 2,
          'm2-3p-rx-pool-rpcs': 0, 'm2-3p-rx-spares': 0, 'm2-3p-rx-ring-id': 0x355200,
          'm2-3p-rx-physical-resume': 'done',
-         'm2-3r-physical-mode': 'owned-sparse-4k', 'm2-3r-bootstrap-pages': 1545,
-         'm2-3r-restore-added-pages': 1536, 'm2-3r-identity-pages': 1536,
-         'm2-3s-rx-bootstrap-retired': 'yes', 'm2-3s-fixed-pages': 9,
-         'm2-3s-bootstrap-removed-pages': 1545,
-         'm2-3s-bootstrap-clear-time': 401,
-         'm2-3s-bootstrap-retire-time': 402,
+         'm2-3r-physical-mode': 'iova-only', 'm2-3r-bootstrap-pages': 0,
+         'm2-3r-restore-added-pages': 0, 'm2-3r-identity-pages': 0,
+         'm2-3s-fixed-pages': 0, 'm2-3s-bootstrap-removed-pages': 0,
+         'm2-3x-active-capture-time': 401,
          'm2-3q-rx-map-invalidations': 1219, 'm2-3q-rx-unmap-invalidations': 1219,
          'm2-3q-rx-map-batch-calls': 195, 'm2-3q-rx-unmap-batch-calls': 195,
          'm2-3q-rx-map-batch-slots': 3072, 'm2-3q-rx-unmap-batch-slots': 3072,
@@ -481,7 +456,7 @@ def properties():
                 'm2-3e-enter-last-inflight', 'm2-3e-enter-last-ring',
                 'm2-3e-exit-last-inflight', 'm2-3e-exit-last-ring'):
         p[key] = 0
-    command_total = 2 * 10249 + 2 * 1219 + 1024 + 1 + 2 * 3
+    command_total = 2 * 10249 + 2 * 1219 + 2 * 3
     p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': command_total,
               'm2-3b-command-completed': command_total, 'm2-3b-command-wraps': command_total * 2 // 512,
               'm2-3b-command-post-wrap-completed': command_total - 255,
@@ -640,8 +615,7 @@ class AnalyzerTests(unittest.TestCase):
             '"rtl812x-r35-rx-ring-id" = 0x355200\n'
             '"rtl812x-r38-rx-first-iova-slots" = 1024\n'
             '"rtl812x-r38-rx-last-first-iova-time" = 399\n'
-            '"rtl812x-r38-rx-bootstrap-retired" = 1\n'
-            '"rtl812x-r38-rx-bootstrap-retire-time" = 403\n'
+            '"rtl812x-r43-rx-active-ready-time" = 403\n'
             '"rtl812x-r35-rx-authorize-time" = 405\n'
             '"rtl812x-r41-irq-pending" = 1\n'
             '"rtl812x-r41-irq-masked" = 0\n'
@@ -705,7 +679,8 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(by_id[RX_MAP_CHECK]['unmapped'], 4096)
         self.assertEqual(by_id[RX_MAP_CHECK]['initialMappingsPosted'], 1024)
         self.assertEqual(by_id[RX_MAP_CHECK]['unpostedInitialMappings'], 0)
-        self.assertTrue(by_id[RX_MAP_CHECK]['bootstrapRetiredBeforeNICEnable'])
+        self.assertTrue(by_id[RX_MAP_CHECK]['stoppedBeforeDTE'])
+        self.assertTrue(by_id[RX_MAP_CHECK]['initialIOVABeforeNICEnable'])
         self.assertEqual((by_id[RX_MAP_CHECK]['mapBatchCalls'],
                           by_id[RX_MAP_CHECK]['unmapBatchCalls'],
                           by_id[RX_MAP_CHECK]['maxBatch']), (195, 195, 16))
@@ -715,17 +690,22 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual((self.capture / 'r37-physical-layout.bin').stat().st_size,
                          analyzer.PHYSICAL_LAYOUT_BYTES)
         self.assertEqual((by_id[RX_MAP_CHECK]['physicalMode'],
-                          by_id[RX_MAP_CHECK]['physicalLayoutGeneration']), ('owned-sparse-4k', 2))
+                          by_id[RX_MAP_CHECK]['physicalLayoutGeneration']), ('iova-only', 2))
         self.assertEqual((by_id[RX_MAP_CHECK]['fixedPhysicalPages'],
                           by_id[RX_MAP_CHECK]['bootstrapPages'],
                           by_id[RX_MAP_CHECK]['restoreAddedPages'],
-                          by_id[RX_MAP_CHECK]['identityPages']), (9, 1545, 1536, 1536))
+                          by_id[RX_MAP_CHECK]['identityPages']), (9, 0, 0, 0))
         self.assertEqual((by_id[RX_MAP_CHECK]['bootstrapRemovedPages'],
                           by_id[RX_MAP_CHECK]['activeIdentityPages'],
-                          by_id[RX_MAP_CHECK]['activeRxIovaPages']), (1545, 0, 1536))
-        self.assertEqual(by_id[RX_MAP_CHECK]['bootstrapRetireCommand']['expected'], 1100)
-        self.assertEqual(by_id[RX_MAP_CHECK]['bootstrapDriverDone'], 403)
-        self.assertEqual(by_id[RX_MAP_CHECK]['identityBytes'], 1536 * 4096)
+                          by_id[RX_MAP_CHECK]['activeRxIovaPages']), (0, 0, 1536))
+        self.assertEqual((by_id[RX_MAP_CHECK]['activeCaptureTime'],
+                          by_id[RX_MAP_CHECK]['activeReadyTime']), (401, 403))
+        self.assertEqual((by_id[RX_MAP_CHECK]['finalPresentLeaves'],
+                          by_id[RX_MAP_CHECK]['identityBytes'],
+                          by_id[RX_MAP_CHECK]['physicalCoverCalls']), (0, 0, 0))
+        self.assertEqual(by_id[RX_MAP_CHECK]['currentBufferPages'], 1536)
+        self.assertEqual((by_id[RX_MAP_CHECK]['manifestRanges'],
+                          by_id[RX_MAP_CHECK]['bootstrapRanges']), (1024, 0))
         fixed = by_id[RX_MAP_CHECK]['fixedDMA']
         self.assertEqual((fixed['mapped'], fixed['unmapped'], fixed['liveOwners'],
                           fixed['boundPairs'], fixed['iovaPages']), (3, 3, 0, 0, 9))

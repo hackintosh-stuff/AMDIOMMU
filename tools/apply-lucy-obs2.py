@@ -85,7 +85,10 @@ MD/command pairs and removes their bootstrap identity aliases after takeover.
 Round41 masks/acks pending NIC status before rearming the entry MSI source.
 Round42 publishes all initial RX IOVAs while the NIC is stopped, then retires
 bootstrap identity mappings before the first hardware enable.
-Native RX ABI4 keeps its existing sizes. Select --tx 21 --rx 34.
+Round43 stops NIC DMA before the DTE switch and uses an IOVA-only domain
+through entry, normal RX and local stop. Native RX ABI5 adds the pre-DTE stop
+control and pre-enable active snapshot callback with unchanged record sizes.
+Select --tx 21 --rx 34.
 
 Usage:
     py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33|34]
@@ -2554,7 +2557,7 @@ def main():
         cpp_text = RX['pause_entries'](cpp_text)
     write(cpp, cpp_text)
     print("patched %s" % cpp)
-    rx_label = ('native RX batch16 / initial RX IOVA before enable / fixed DMA IOVA / entry IRQ rearm / local stop (ABI4)' if RX_SELECT == '34'
+    rx_label = ('native RX batch16 / NIC stop before DTE / IOVA-only domain / entry IRQ rearm / local stop (ABI5)' if RX_SELECT == '34'
                 else 'round-%s RX pool' % RX_SELECT)
     print("applied observation v2, RX post set, %s and round-%s explicit TX mapping"
           % (rx_label, TX_SELECT))

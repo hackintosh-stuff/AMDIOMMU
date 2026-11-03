@@ -411,8 +411,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         fM22b2Use4K ? M2B2_4K_TOTAL_PAGES
                     : (fM22b2Use3L ? M2B2_3L_TOTAL_PAGES : M2B2_TOTAL_PAGES);
     // Native starts with only the root and an independent empty reserve page.
-    // Keep the existing allocation capacity, but share all remaining pages
-    // between the actual bootstrap ranges, IOVA tables and physical restore.
+    // Keep the existing allocation capacity for the native IOVA tables.
     const UInt32 basePtPageCount = nativeSparse ? 2u : legacyBasePtPageCount;
     const UInt32 ptPageCount = legacyBasePtPageCount + 256u + M2B2_IOVA_RESERVED_PAGES;
     const UInt64 ptBytes = (UInt64)ptPageCount * M2B2_PAGE_SIZE;
@@ -539,8 +538,8 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     }
 
     if (nativeSparse) {
-        // r34RxPrepareMap adds only Lucy's fixed DMA objects and current RX
-        // buffers. No RAM-wide leaf is installed for a native session.
+        // The native root stays empty until standard IOVA maps are requested.
+        // r34RxPrepareMap validates the unchanged physical ring manifest.
     } else if (fM22b2Use3L) {
         // ---- 3 级 + 2 MiB 大页：root(2) → 叶子(1)，覆盖 16 GiB ----
         //
@@ -622,7 +621,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
 
     // Freeze the current RX ring BEFORE the DTE can switch. Native sessions
     // borrow Lucy's existing buffers; the historical finite path uses R15.
-    // Both stay copy-only until their initial mappings are confirmed.
+    // Native preparation stays copy-only; the NIC stops before DTE entry.
     if (!fM22b2SleepOnly &&
         (!m2b2R15PrepareMap(pt, (UInt64)ptPA,
                            nativeSparse ? ptPageCount : ptPageCount - M2B2_IOVA_RESERVED_PAGES,
@@ -636,14 +635,14 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         return;
     }
     if (nativeSparse) {
-        // The sparse helper allocated the actual child after the empty page.
+        // The IOVA helper allocated the actual child after the empty page.
         // Carry that address into the service-owned domain and later dumps.
         l2PA = fM22b2Use3L ? rootPA : root[0] & M2B2_PTE_ADDR_MASK;
         l2 = pt + (l2PA - (UInt64)ptPA) / sizeof(UInt64);
     }
-    setProperty("m2-b2-pt", nativeSparse ? "built-owned-sparse-4k" : "built-4level-identity");
+    setProperty("m2-b2-pt", nativeSparse ? "built-iova-only" : "built-4level-identity");
     setProperty("m2-b2-leaf-mode", (nativeSparse || fM22b2Use4K) ? "4KiB" : "2MiB");
-    if (nativeSparse) setProperty("m2-b2-leaf-mode-src", "native-owned-ranges");
+    if (nativeSparse) setProperty("m2-b2-leaf-mode-src", "native-iova-only");
     setHexProperty(this, "m2-b2-map-limit",
                    nativeSparse ? 0 : (fM22b2Use4K ? M2B2_4K_MAP_LIMIT : M2B2_IDENTITY_LIMIT));
     setHexProperty(this, "m2-b2-pt-root-pa", rootPA);
@@ -1259,6 +1258,14 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
             setProperty("m2-3e-enter", "FAIL-not-stopped-dte-not-flipped");
             goto recover;
         }
+        // Native physical descriptors remain unchanged during preparation.
+        // Stop and verify the actual NIC before switching to an IOVA-only
+        // table; no physical bootstrap mapping is needed while DMA is off.
+        if (fR31Session && !r34RxStopBeforeDte()) {
+            firstFailStage = "14b-abort-native-nic-stop";
+            firstFailReason = "native NIC did not stop before the DTE flip";
+            goto recover;
+        }
         setProperty("m2-3e-enter", "stopped-before-dte");
 
         dte[tgt * 4 + 0] = dteRoot;
@@ -1434,9 +1441,9 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         firstFailReason = "admission refused to reopen after the DTE flip";
         goto recover;
     }
-    // Native Install stops the NIC and maps its three fixed objects plus RX.
-    // Authorize restarts it with fixed IOVA bases and confirms real link/DMA
-    // recovery. Packet TX stays closed throughout this entry transition.
+    // Native Install maps the fixed objects and RX while the NIC is stopped.
+    // Authorize captures the initial IOVA table, then restarts with fixed IOVA
+    // bases and confirms link/DMA recovery. Packet TX remains closed here.
     if (!r27RxBegin()) {
         firstFailStage = "15e-abort-rx-standard-map";
         firstFailReason = "standard RX mappings or ring binding failed";

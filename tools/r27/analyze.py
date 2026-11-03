@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round42: publish the full RX IOVA ring before enabling NIC DMA.
+"""Round43: stop NIC DMA before DTE entry and keep the translated window IOVA-only.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,11 +29,11 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round42-initial-RX-IOVA; zero-identity-before-NIC-enable; local-NIC-stop; no-peer-drain-tail; owned-sparse-4k; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
+SCOPE = 'round43-stop-before-DTE; IOVA-only-lifecycle; empty-final-leaves; local-NIC-stop; no-peer-drain-tail; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
-RX_VERSION, RX_COUNT = 4, 1024
+RX_VERSION, RX_COUNT = 5, 1024
 RX_BATCH_MAX = 16
 RX_DRIVER_BYTES, RX_BACKEND_BYTES = 270432, 475216
 RX_DRIVER_HEADER, RX_DRIVER_SLOT_BYTES = 96, 264
@@ -41,7 +41,7 @@ RX_BACKEND_HEADER, RX_BACKEND_SLOT_BYTES = 80, 464
 RX_WITNESS_BYTES, RX_MAP_RECORD_BYTES = 104, 224
 PHYSICAL_LAYOUT_VERSION, PHYSICAL_LAYOUT_BYTES = 1, 64
 PHYSICAL_LAYOUT_HEADER, PHYSICAL_SPAN_BYTES, PHYSICAL_SPAN_COUNT = 16, 16, 3
-BOOTSTRAP_COMMAND_BYTES = 40
+RX_STOP_BEFORE_DTE_OP, RX_CAPTURE_ACTIVE_OP = 9, 12
 STOP_VERSION, STOP_BYTES, STOP_TIME_OFFSET = 1, 96, 48
 WITNESS_STOP_RETIRED = 16
 FIXED_VERSION, FIXED_COUNT, FIXED_PAGES = 1, 3, 16
@@ -333,9 +333,9 @@ def check(cap):
         A.need(0 < token < 0x80000000 and sh['token'] == bh['token'] == token,
                'inconsistent/non-low-half token')
         A.need(dh['devid'] == gh['bdf'] == sh['bdf'] == bh['bdf'], 'capture device association differs')
-        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX4', 'state': 'ok'})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX5', 'state': 'ok'})
     except (A.Refused, OSError, ValueError, KeyError, IndexError, struct.error) as exc:
-        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX4', 'state': 'FAIL', 'detail': str(exc)})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX5', 'state': 'FAIL', 'detail': str(exc)})
         return result()
 
     def driver_property(key, numeric=False):
@@ -808,9 +808,9 @@ def check(cap):
             A.need(P[key] == val, 'window phase missing: ' + key)
         for key in ('m2-3e-enter-last-inflight', 'm2-3e-enter-last-ring', 'm2-3e-exit-last-inflight', 'm2-3e-exit-last-ring'):
             A.need(P[key] == 0, 'boundary not drained: ' + key)
-        enter = [P[k] for k in ('m2-3e-enter-gate-close', 'm2-3e-enter-submit-done', 'm2-3e-enter-drain-done',
-                                'm2-b2-dma-t-dte-written', 'm2-3e-t-translate-on')]
-        enter += [fh['tStopBegin'], fh['tStopped'], fh['tProgrammed'], fh['tActive'],
+        enter = [P[k] for k in ('m2-3e-enter-gate-close', 'm2-3e-enter-submit-done', 'm2-3e-enter-drain-done')]
+        enter += [fh['tStopBegin'], fh['tStopped'], P['m2-b2-dma-t-dte-written'],
+                  P['m2-3e-t-translate-on'], fh['tProgrammed'], fh['tActive'],
                   P['m2-3e-t-gate-open']]
         leave = [P[k] for k in ('m2-3e-exit-gate-close', 'm2-3e-exit-submit-done', 'm2-3e-exit-drain-done',
                                 'm2-3i-exit-retire-confirmed-time')]
@@ -847,7 +847,7 @@ def check(cap):
         return {'before': len(before), 'during': len(during), 'after': len(after)}
     run('ordinary-traffic-before-during-and-three-after', ordinary)
 
-    def fixed_mappings(layout, spans, active_pt, active_leaves, tx_sequences, bootstrap_command):
+    def fixed_mappings(layout, spans, active_pt, active_leaves, tx_sequences):
         A.need(fh['flags'] == fb['flags'] == fb['boundPairs'] == fb['liveOwners'] == 0 and
                fh['entryCalls'] == fh['resetVerified'] == fb['entered'] == 1 and
                fb['mapCalls'] == fb['mapOk'] == fb['unmapCalls'] == fb['unmapOk'] == FIXED_COUNT,
@@ -857,10 +857,11 @@ def check(cap):
                fh['generationBefore'] == layout['generation'] and
                fh['generationAfter'] > fh['generationBefore'],
                'fixed DMA entry reset/readback or ring generation differs')
-        A.need(P['m2-3e-t-translate-on'] <= fh['tStopBegin'] <= fh['tStopped'] <=
+        A.need(P['m2-3e-enter-drain-done'] <= fh['tStopBegin'] <= fh['tStopped'] <
+               P['m2-b2-dma-t-dte-written'] <= P['m2-3e-t-translate-on'] <
                rh['tInstalled'] <= fh['tProgrammed'] <= fh['tActive'] == fb['tEntered'] <=
                P['m2-3e-t-gate-open'] <= rb['tReady'],
-               'fixed DMA was not programmed and active before ordinary admission')
+               'NIC was not stopped before DTE entry or fixed DMA was not active before admission')
         sequences, expected_pages, pairs = set(), {}, set()
         for i, (span, driver_object, r) in enumerate(zip(spans, fixed_driver, fixed_backend)):
             label = 'fixed DMA %s: ' % span['name']
@@ -882,7 +883,7 @@ def check(cap):
                    driver_object['registerBefore'] == driver_object['registerPhysical'] == r['pa'] and
                    driver_object['registerActive'] == r['iova'],
                    label + 'IOVA geometry or actual NIC address readback differs')
-            A.need(fh['tStopped'] <= r['tMapPublish'] <= r['tMapInv'] <=
+            A.need(P['m2-3e-t-translate-on'] <= r['tMapPublish'] <= r['tMapInv'] <=
                    driver_object['tMapReady'] <= fh['tProgrammed'] and
                    stop['tStopped'] <= r['tUnmapPublish'] <= r['tUnmapInv'] <=
                    driver_object['tUnmapReady'] <= rb['tDrained'] <= P['m2-b2-t-recovery-start'],
@@ -890,7 +891,7 @@ def check(cap):
             for phase in ('map', 'unmap'):
                 c = r[phase + 'Command']
                 A.need(0 < c['expected'] == c['observed'] <= dh['completionSequence'] and
-                       c['expected'] not in sequences | tx_sequences | {bootstrap_command['expected']} and
+                       c['expected'] not in sequences | tx_sequences and
                        c['words'] == [0, dh['domid'] | (3 << 28), 0xfffff003, 0x7fffffff] and
                        c['tComplete'] == r['tMapInv' if phase == 'map' else 'tUnmapInv'],
                        label + 'confirmed standard invalidation command differs')
@@ -927,25 +928,24 @@ def check(cap):
                P['m2-3h-rx-ready'] == 'no', 'native RX did not reach its released final state')
         A.need(P['m2-3p-rx-source'] ==
                driver_property('rtl812x-r35-rx-source') == 'lucy-normal-ring' and
-               P['m2-3p-rx-bootstrap-ranges'] == RX_COUNT and
+               P['m2-3x-rx-manifest-ranges'] == RX_COUNT and
+               0 < P['m2-3x-rx-manifest-time'] <= P['m2-3e-enter-gate-close'] and
+               P['m2-3p-rx-bootstrap-ranges'] == 0 and
                P['m2-3p-rx-pool-rpcs'] == P['m2-3p-rx-spares'] ==
                driver_property('rtl812x-r35-rx-experimental-pool', True) ==
                driver_property('rtl812x-r35-rx-spares', True) == 0 and
                P['m2-3p-rx-ring-id'] ==
                driver_property('rtl812x-r35-rx-ring-id', True) == rh['ringId'] > 0,
-               'RX bootstrap did not use the same ordinary Lucy ring without an experimental pool')
+               'RX manifest did not describe the same ordinary Lucy ring without an experimental pool')
         layout, fixed_spans = decode_physical_layout(
             blob('rtl812x-r37-physical-layout', 'r37-physical-layout.bin'))
-        A.need(P['m2-3r-physical-mode'] == 'owned-sparse-4k' and
+        A.need(P['m2-3r-physical-mode'] == 'iova-only' and
                layout['generation'] == P['m2-3p-rx-ring-generation'] and
                fixed_spans[0]['bytes'] == bh['ringBytes'],
                'physical layout mode, ring generation or TX ring identity differs')
         fixed_pages = physical_pages((s['pa'], s['bytes']) for s in fixed_spans)
-        bootstrap_pages = fixed_pages | physical_pages((s['originalPA'], RX_CAPACITY) for s in rxslots)
-        restored_pages = physical_pages((s['currentPA'], RX_CAPACITY) for s in rxslots)
-        removed_pages = bootstrap_pages
-        expected_pages = restored_pages
-        active_pt = blob('m2-3s-rx-active-pt-raw', 'r38-active-pt-raw.bin')
+        current_pages = physical_pages((s['currentPA'], RX_CAPACITY) for s in rxslots)
+        active_pt = blob('m2-3x-active-pt-raw', 'r43-active-pt-raw.bin')
         A.need(len(active_pt) == len(pt) == dh['ptBytes'],
                'active and final page-table arena sizes differ')
         active_leaves = page_leaves(active_pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'],
@@ -958,35 +958,26 @@ def check(cap):
                    RX_BASE <= address < rx_end for address, target in active_leaves.items()) and
                all(RX_BASE + i * RX_STRIDE in active_leaves for i in range(RX_COUNT)),
                'active tree retains identity pages or leaves outside fixed/TX/RX IOVA windows')
-        retire_raw = blob('m2-3s-rx-bootstrap-retire-command', 'r38-bootstrap-retire-command.bin')
-        A.need(len(retire_raw) == BOOTSTRAP_COMMAND_BYTES, 'bootstrap retirement command size differs')
-        bootstrap_command = A.cmdrec(retire_raw, 0)
         first_post = min(s['first']['tPost'] for s in rxslots)
         last_first_post = max(s['first']['tPost'] for s in rxslots)
         authorized = driver_property('rtl812x-r35-rx-authorize-time', True)
-        bootstrap_clear = P['m2-3s-bootstrap-clear-time']
-        bootstrap_done = driver_property('rtl812x-r38-rx-bootstrap-retire-time', True)
-        A.need(P['m2-3s-rx-bootstrap-retired'] == 'yes' and
-               driver_property('rtl812x-r38-rx-bootstrap-retired', True) == 1 and
-               driver_property('rtl812x-r38-rx-first-iova-slots', True) == RX_COUNT and
+        active_capture = P['m2-3x-active-capture-time']
+        active_ready = driver_property('rtl812x-r43-rx-active-ready-time', True)
+        A.need(driver_property('rtl812x-r38-rx-first-iova-slots', True) == RX_COUNT and
                driver_property('rtl812x-r38-rx-last-first-iova-time', True) == last_first_post and
-               fh['tStopped'] <= first_post <= last_first_post <= rh['tInstalled'] <=
-               bootstrap_clear <= bootstrap_command['tComplete'] ==
-               P['m2-3s-bootstrap-retire-time'] <= bootstrap_done <
+               fh['tStopped'] < P['m2-b2-dma-t-dte-written'] <=
+               P['m2-3e-t-translate-on'] < first_post <= last_first_post <= rh['tInstalled'] <=
+               active_capture <= active_ready <
                fh['tProgrammed'] <= fh['tActive'] <= authorized <=
-               P['m2-3e-t-gate-open'] <= P['m2-3l-stop-request-time'] <= rh['tDisarmed'] and
-               0 < bootstrap_command['expected'] == bootstrap_command['observed'] <= dh['completionSequence'] and
-               bootstrap_command['words'] == [0, dh['domid'] | (3 << 28), 0xfffff003, 0x7fffffff],
-               'initial RX IOVA publication and bootstrap invalidation did not precede NIC enable')
-        actual_pages = identity_leaf_pages(pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'])
-        A.need(actual_pages == expected_pages and
-               P['m2-3r-bootstrap-pages'] == len(bootstrap_pages) and
-               P['m2-3s-fixed-pages'] == len(fixed_pages) and
-               P['m2-3s-bootstrap-removed-pages'] == len(removed_pages) > 0 and
-               P['m2-3r-restore-added-pages'] == len(restored_pages) and
-               len(actual_pages) == len(bootstrap_pages) - len(removed_pages) + len(restored_pages) and
-               P['m2-3r-identity-pages'] == len(actual_pages),
-               'final 4KiB identity leaves differ from current RX spans')
+               P['m2-3e-t-gate-open'] <= P['m2-3l-stop-request-time'] <= rh['tDisarmed'],
+               'NIC stop, DTE entry, initial IOVA publication and active snapshot order differs')
+        final_leaves = page_leaves(pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'],
+                                   (dh['iovaBase'], dh['iovaBase'] + dh['iovaBytes']))
+        A.need(not final_leaves and
+               P['m2-3s-fixed-pages'] == P['m2-3r-bootstrap-pages'] ==
+               P['m2-3s-bootstrap-removed-pages'] ==
+               P['m2-3r-restore-added-pages'] == P['m2-3r-identity-pages'] == 0,
+               'IOVA-only lifecycle created identity mappings or retained final present leaves')
         resumed = driver_property('rtl812x-r35-rx-resume-time', True)
         A.need(P['m2-3p-rx-physical-resume'] == 'done' and
                P['m2-3e-t-translate-off'] <= resumed <= P['m2-3e-t-resume'],
@@ -995,19 +986,16 @@ def check(cap):
                rb['unmapCalls'] == rb['unmapOk'] == rh['maps'] == rh['unmaps'] and
                rb['mapOk'] == rh['posted'] and
                rb['flags'] == rb['mapRejects'] == rb['liveOwners'] == rb['boundPairs'] ==
-               rb['coverFailed'] == 0 and rb['ready'] == 1 and
-               rb['coverCalls'] == rb['coverOk'] >= RX_COUNT,
-               'driver-owned RX map/unmap totals, physical cover or final ownership differs')
+               rb['coverCalls'] == rb['coverOk'] == rb['coverFailed'] == 0 and rb['ready'] == 1,
+               'driver-owned RX map/unmap totals, zero physical cover or final ownership differs')
         A.need(0 < rb['tReady'] == P['m2-3o-rx-ready-time'] <=
                P['m2-3e-exit-gate-close'] <= stop['tStopped'] <= rb['tDrained'] and
                P['m2-3h-rx-live-owners'] == P['m2-3h-rx-pending'] == 0,
                'native RX readiness/drain or raw/property ownership differs')
         tx_sequences = {d[key]['expected'] for d in dom + [dh['probeFirst'], dh['probeReuse']]
                         for key in ('mapCommand', 'retireCommand')}
-        A.need(bootstrap_command['expected'] not in tx_sequences,
-               'bootstrap retirement reuses a TX invalidation sequence')
         fixed_detail, fixed_sequences = fixed_mappings(
-            layout, fixed_spans, active_pt, active_leaves, tx_sequences, bootstrap_command)
+            layout, fixed_spans, active_pt, active_leaves, tx_sequences)
         rx_sequences = {}
         batch_stats = {key: P['m2-3q-rx-' + key] for key in
                        ('map-invalidations', 'unmap-invalidations', 'map-batch-calls',
@@ -1050,7 +1038,7 @@ def check(cap):
                        label + 'driver DMA witness is not the registered mapping')
                 if kind == 'first':
                     A.need(r['pa'] == driver_slot['originalPA'] and r['mapBatch'] == 0 and
-                           fh['tStopped'] <= r['tMapPublish'] <= r['tMapInv'] <=
+                           P['m2-3e-t-translate-on'] < r['tMapPublish'] <= r['tMapInv'] <=
                            w['tPost'] <= rh['tInstalled'] and
                            fh['tActive'] < w['tDone'],
                            label + 'install mapping was not posted directly before NIC enable')
@@ -1076,9 +1064,8 @@ def check(cap):
                     first, width = packed & 0xffff, packed >> 16
                     A.need(c['expected'] > 0 and c['expected'] == c['observed'] and
                            c['words'] == [0, dh['domid'] | (3 << 28), 0xfffff003, 0x7fffffff] and
-                           c['expected'] not in tx_sequences and
-                           c['expected'] != bootstrap_command['expected'] and c['expected'] not in fixed_sequences,
-                           label + 'invalidation command/completion or TX/bootstrap/fixed sequence differs')
+                           c['expected'] not in tx_sequences and c['expected'] not in fixed_sequences,
+                           label + 'invalidation command/completion or TX/fixed sequence differs')
                     if packed:
                         A.need(first < RX_COUNT and 1 <= width <= RX_BATCH_MAX and
                                (i - first) % RX_COUNT < width,
@@ -1116,31 +1103,33 @@ def check(cap):
                            label + 'RX PTE walk differs from the mapped receive buffer')
         active_rx_pages = {address: target for address, target in active_leaves.items()
                            if RX_BASE <= address < rx_end}
-        A.need(active_rx_pages == initial_rx_pages,
-               'pre-enable active RX leaves differ from the 1024 initial mapped buffers')
+        A.need(active_rx_pages == initial_rx_pages and
+               len(active_leaves) == len(initial_rx_pages) + fixed_detail['iovaPages'],
+               'pre-enable active leaves differ from initial RX and fixed IOVA mappings')
         A.need(sum(s['mapCount'] for s in rxbackend) == rb['mapOk'] and
                sum(s['unmapCount'] for s in rxbackend) == rb['unmapOk'] and
-               dh['commandCompleted'] >= 2 * dh['mapsTotal'] + invalidations + 1 + 2 * FIXED_COUNT,
-               'shared command totals do not cover TX/probe, RX, fixed DMA and bootstrap retirement')
+               dh['commandCompleted'] >= 2 * dh['mapsTotal'] + invalidations + 2 * FIXED_COUNT,
+               'shared command totals do not cover TX/probe, RX and fixed DMA')
         return {'mapped': rb['mapOk'], 'unmapped': rb['unmapOk'], 'initialMappings': RX_COUNT,
                 'initialMappingsPosted': RX_COUNT, 'unpostedInitialMappings': 0,
-                'bootstrapRetiredBeforeNICEnable': True,
+                'stoppedBeforeDTE': True, 'initialIOVABeforeNICEnable': True,
                 'driverOwnedPairs': len(memory_ids), 'liveOwners': 0,
                 'source': 'lucy-normal-ring', 'ringId': rh['ringId'],
-                'bootstrapRanges': RX_COUNT, 'experimentalPoolRPCs': 0, 'experimentalSpares': 0,
-                'physicalMode': 'owned-sparse-4k', 'physicalLayoutGeneration': layout['generation'],
+                'manifestRanges': RX_COUNT, 'bootstrapRanges': 0,
+                'experimentalPoolRPCs': 0, 'experimentalSpares': 0,
+                'physicalMode': 'iova-only', 'physicalLayoutGeneration': layout['generation'],
                 'fixedPhysicalSpans': fixed_spans, 'fixedPhysicalPages': len(fixed_pages),
                 'fixedDMA': fixed_detail,
-                'bootstrapPages': len(bootstrap_pages),
-                'bootstrapRemovedPages': len(removed_pages),
+                'bootstrapPages': 0, 'bootstrapRemovedPages': 0,
                 'activeIdentityPages': len(active_identity),
                 'activeRxIovaPages': sum(RX_BASE <= address < rx_end for address in active_leaves),
-                'bootstrapFirstPost': first_post, 'bootstrapLastFirstPost': last_first_post,
-                'bootstrapClearTime': bootstrap_clear, 'authorizedTime': authorized,
-                'bootstrapRetireCommand': bootstrap_command, 'bootstrapDriverDone': bootstrap_done,
-                'restoreAddedPages': len(restored_pages),
-                'identityPages': len(actual_pages), 'identityBytes': len(actual_pages) * 4096,
-                'physicalEvidence': 'identity is empty before NIC enable; initial RX and fixed DMA use IOVA; final identity equals current RX',
+                'initialFirstPost': first_post, 'initialLastPost': last_first_post,
+                'activeCaptureTime': active_capture, 'activeReadyTime': active_ready,
+                'authorizedTime': authorized, 'restoreAddedPages': 0,
+                'finalPresentLeaves': len(final_leaves), 'identityPages': 0, 'identityBytes': 0,
+                'currentBufferPages': len(current_pages),
+                'physicalCoverCalls': rb['coverCalls'],
+                'physicalEvidence': 'NIC stopped before DTE entry; active initial RX and fixed DMA use IOVA; final tree has no present leaves; current physical buffers resume after original IOMMU restoration',
                 'normalReplacementResumedAt': resumed,
                 'mapInvalidations': batch_stats['map-invalidations'],
                 'unmapInvalidations': batch_stats['unmap-invalidations'],
