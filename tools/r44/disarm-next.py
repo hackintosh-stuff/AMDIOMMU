@@ -31,6 +31,9 @@ def require_accepted_capture(capture, analysis):
     analyzer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(analyzer)
     fresh = analyzer.analyze(capture)
+    # analyze() reports the domain identity as a tuple, so the in-memory result
+    # is compared in the same JSON form the saved file was written in.
+    fresh = json.loads(json.dumps(fresh))
     if not fresh.get('ok') or saved != fresh:
         raise ValueError('Round44 analysis must pass and match recomputation of this capture')
     return fresh
