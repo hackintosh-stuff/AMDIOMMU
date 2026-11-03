@@ -29,17 +29,35 @@ The main new capability is variable-size DMA mapping:
   ordinary network workload, R28T/R29D and normal recovery.
 
 From this repository, use a fresh upstream tree at
-`639144d1f284a9fee222a518691b01494f5e265d` and the existing MacKernelSDK:
+`639144d1f284a9fee222a518691b01494f5e265d` and the existing MacKernelSDK,
+prepared in the fixed `_scratch/lucy-upstream` directory:
 
 ```sh
-sh tools/r27/build.sh _scratch/r32-upstream
+sh tools/r27/build.sh _scratch/lucy-upstream
 ```
 
 Generation selects `--tx 21 --rx 32`. Run defaults are `runs/r32` and
 `org.example.round32load`; the compatible control helper remains
 `tools/r31/session.py`, including the accepted registry-entry lookup fix.
 Normal load submits the single stop request and supplies the drain tail.
-Mac builds and hardware acceptance of Round32 are pending.
+
+**Round32 hardware acceptance PASSED (14/14).** One planned boot and one valid
+measurement used token `0x32c0de32`. The capacity probe ran before gate-open:
+9 maps and 9 confirmed unmaps, eight simultaneous owners, an eight-page mapping,
+and an eight-page remap that reused base page 0. Domain maps were 10346 =
+10337 network TX + 9 probe mappings; TX retired 10337 with rejected 0, RX1024
+mapped/unmapped 1024/1024 with 9419 completions in four L1 tables at 64 GiB +
+2 MiB, owners/pending/pinned/ring zero, no device page fault, 8192/8192 replies,
+125.114 s idle, one explicit stop, R28T 1024/1024, R29D seq 1024 and 3/3
+post-exit probes.
+
+Deployed source commit: `d2ffc777b6b23b72fd5c1bfacd2519e5a67bca71`. This
+documentation update is not a deployed revision.
+
+Round32 result and archive are outside this source repository:
+[Round32 result](<../../docs/m2-3m-round32-result.md>) and
+[evidence archive](<../../docs/evidence/r32-final-20261103.tgz>)
+(SHA256 `b1e69f05a51ea85f6cde96a6a76f00c2218debc8107d77607a8a465f46e388cd`).
 
 ## Historical Round31 / explicit-stop mapping session
 
