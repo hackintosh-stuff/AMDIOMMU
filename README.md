@@ -1,12 +1,27 @@
 # AMDIOMMU — authoritative source repository
 
-## Candidate Round52 / two device domains on one controller
+## Accepted Round52 / two device domains on one controller, PM hardware TODO
 
 Base: `a75864596ba0e371685f029e7978d795fce1d39f`, the accepted Round51
 result-documentation successor. The original R51 capture was re-analyzed:
 all eleven checks passed and the complete result matched the saved analysis.
-R52 is a source candidate; its macOS build and two-device hardware result
-must be recorded after execution, not inferred from source review.
+**Accepted: all four mainline groups passed on the real Mac with Lucy 1.1.237 /
+Probe 0.59.0.** The deployed implementation is
+`e69504d7d1e5a3e5bc2a897e4250905386891aa9`: the delivered patch committed
+unchanged as `703d6a5`, plus one real tool fix because `tools/r52/common.py`
+matched `IOBSDName` while `ioreg -a` publishes `BSD Name` (the first off
+baseline failed on that selection before any traffic). The Mac build succeeded
+on the first attempt and the deployment build log is `runs/r52-build.log`.
+Two RTL8127 instances share one controller (single `r52-role=controller` entry,
+identical shared command count 246 → 5975 → 8853): A/en2 requester 9472 domain
+2 root PA 763428864, B/en4 requester 8704 domain 1 root PA 759562240. Both
+domains held 19 maps/1037 leaves/11 tables with identity zero, and the same
+IOVA `0x80000000` translated to A PA 763494400 and B PA 764108800 (1028 of
+1037 live IOVA pages overlapping). The short off baseline moved 32 MiB and
+passed 4/4; the single auto boot moved 64 MiB in eight streams with real
+parallel payload overlap of 130.1 ms, B completing traffic while A was down and
+A recovering after up, all with zero target faults. Dual-device PM is
+Unsupported and real sleep/resume stays TODO(R47-PM-HARDWARE).
 
 The controller owns the device table, command/event rings and completion
 semaphore once. Each discovered RTL8127 has its own IOMapper instance,
