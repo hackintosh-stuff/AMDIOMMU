@@ -95,8 +95,14 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
     if (!fNicDevice && !fR44Controller) {
         IOService *nic = findNicServiceOnly();
         if (nic) {
+            setProperty("r44-start-nic", "found");
+            setProperty("r44-start-nic-open", nic->isOpen() ? "yes" : "no");
+            setProperty("r44-start-nic-client",
+                        nic->getChildEntry(gIOServicePlane) ? "yes" : "no");
             r44AttachAuto(nic);
             nic->release();
+        } else {
+            setProperty("r44-start-nic", "absent");
         }
     }
     return true;

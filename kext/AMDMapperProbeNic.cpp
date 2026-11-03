@@ -146,6 +146,7 @@ bool org_example_AMDMapperProbe::publishHandler(
     if (!isTarget) return true;     // 不是网卡，继续等
 
     self->fPublishHits++;
+    self->setProperty("r44-notify-hits", (unsigned long long)self->fPublishHits, 64);
 
     // 已经挂过就不再重复（gIOFirstPublishNotification 每实例只投一次，
     // 但 kIOServiceSynchronous 下可能在同一实例上重复触发）
@@ -315,5 +316,27 @@ IOService *org_example_AMDMapperProbe::findNicServiceOnly() {
         }
         e->release();
     }
-    return nullptr;
+    // The path list only resolves once the entry is attached in that plane.
+    // The nub itself already exists and is published by the time this kext
+    // starts, so enumerating IOPCIDevice and checking the config IDs finds it
+    // without depending on either plane's spelling: on this machine the nub is
+    // named "ethernet", not "pci10ec,8127", so a name match would miss it.
+    OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
+    if (!matching) return nullptr;
+    OSIterator *it = IOService::getMatchingServices(matching);
+    matching->release();
+    if (!it) return nullptr;
+    IOService *result = nullptr;
+    OSObject *obj;
+    while ((obj = it->getNextObject())) {
+        IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, obj);
+        if (!pci) continue;
+        if (pci->configRead16(kIOPCIConfigVendorID) != 0x10ec ||
+            pci->configRead16(kIOPCIConfigDeviceID) != 0x8127) continue;
+        pci->retain();
+        result = pci;
+        break;
+    }
+    it->release();
+    return result;
 }
