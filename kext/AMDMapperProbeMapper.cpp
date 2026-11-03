@@ -20,7 +20,7 @@ struct org_example_AMDMapperProbe::R44MapperState {
     r44mapper::Snapshot snapshot;
     OSData *suspendLive, *suspendPT, *resumeLive, *resumePT;
     UInt64 nextHandle;
-    // R48 observes successful caller address constraints without changing ABI1.
+    // R48 observes successful caller address constraints outside the raw ABI.
     // Only snapshot publication writes registry properties, never the hot path.
     UInt64 map32Ok, mapHighPAOk, mappedHighPAPages;
     UInt32 minMapBits, maxMapBits;
@@ -193,8 +193,8 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         // Use the public wired-descriptor walk; the SDK deliberately makes
         // upl_page_info opaque. A pageList provides the first-offset check.
         ++s.walks;
-        const ProbeLayout layout = probeLayout(memory, descriptorOffset, length,
-                                               r44mapper::kRuns);
+        const auto layout = probeLayout<r44mapper::kRuns>(
+            memory, descriptorOffset, length, r44mapper::kRuns);
         if (layout.error || !layout.runs || layout.totalBytes != length ||
             !layout.pages || layout.pages > r44mapper::kMapPages) break;
         if ((pageList && pageList->pageOffset != layout.firstOffset) ||

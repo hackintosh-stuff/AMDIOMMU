@@ -41,10 +41,10 @@ def leaves(value):
     return found, len(seen)
 
 
-def mapping_tree(value, *, iova_base=0x1000000000):
+def mapping_tree(value, *, iova_base=0x1000000000, max_map_pages=32, max_runs=32):
     m, rows = value['mapper'], value['live']
     need((m['capacityMaps'], m['capacityPages'], m['maxMapPages'], m['maxRuns']) ==
-         (1024, 4096, 32, 32), 'ordinary mapper capacity differs')
+         (1024, 4096, max_map_pages, max_runs), 'ordinary mapper capacity differs')
     need(m['rootLevel'] == 4 and m['iovaBase'] == iova_base and
          m['iovaBytes'] == 4096 * 4096, 'ordinary IOVA domain geometry differs')
     expected, handles, slots = {}, set(), set()
@@ -53,8 +53,8 @@ def mapping_tree(value, *, iova_base=0x1000000000):
              row['recordIndex'] not in slots, 'duplicate live handle/record slot')
         handles.add(row['handle'])
         slots.add(row['recordIndex'])
-        need(row['recordIndex'] < 1024 and 0 < row['pages'] <= 32 and
-             0 < row['runs'] <= 32 and row['basePage'] + row['pages'] <= 4096,
+        need(row['recordIndex'] < 1024 and 0 < row['pages'] <= max_map_pages and
+             0 < row['runs'] <= max_runs and row['basePage'] + row['pages'] <= 4096,
              'live allocation exceeds normal pool')
         need(row['state'] == 3 and 0 < row['tPublish'] <= row['tMapComplete'] <= m['snapshotTime'] and
              row['tClear'] == row['tUnmapComplete'] == 0, 'live record lifecycle is not confirmed')

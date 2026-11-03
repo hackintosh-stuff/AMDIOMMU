@@ -187,23 +187,28 @@ struct LayoutRun {
     uint32_t pageBytes; // 该 run 占用的页对齐长度
 };
 
-struct ProbeLayout {
+template<unsigned RunCapacity>
+struct BoundedProbeLayout {
     uint32_t runs;
     uint32_t pages;      // 整个窗口的页数
     uint32_t firstOffset;
     uint64_t totalBytes;
     bool     discontig;
     bool     error;
-    // Ordinary Lucy maps up to 32 TX page ranges; legacy callers retain their
-    // explicit 16-run budget and exported experiment ABIs stay unchanged.
-    LayoutRun run[32];
+    LayoutRun run[RunCapacity];
 };
+// Legacy callers keep the same 32-run storage and their explicit budgets.
+// Only the ordinary mapper instantiates 64 runs for its 256 KiB RX groups.
+using ProbeLayout = BoundedProbeLayout<32>;
 
-static inline ProbeLayout probeLayout(IOMemoryDescriptor *memory,
-                                      uint64_t offset, uint64_t length,
-                                      uint32_t maxRuns) {
-    ProbeLayout L = {};
-    if (!memory || !length || !maxRuns || maxRuns > 32) { L.error = true; return L; }
+template<unsigned RunCapacity = 32>
+static inline BoundedProbeLayout<RunCapacity> probeLayout(
+    IOMemoryDescriptor *memory, uint64_t offset, uint64_t length,
+    uint32_t maxRuns) {
+    BoundedProbeLayout<RunCapacity> L = {};
+    if (!memory || !length || !maxRuns || maxRuns > RunCapacity) {
+        L.error = true; return L;
+    }
     // 与 r18 的 probeSegmentRun 一样用公开的 getPhysicalSegment(
     // kIOMemoryMapperNone) 走查：mapper 到达时描述符必须已 wiring。这要求驱动
     // 侧的描述符带 kIOMemoryAutoPrepare（withAddress 隐含携带、

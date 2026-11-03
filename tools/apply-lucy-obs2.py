@@ -2124,6 +2124,7 @@ R45 = runpy.run_path(os.path.join(HERE, 'r45', 'driver-template.py'))
 R46 = runpy.run_path(os.path.join(HERE, 'r46', 'driver-template.py'))
 R47 = runpy.run_path(os.path.join(HERE, 'r47', 'driver-template.py'))
 R48 = runpy.run_path(os.path.join(HERE, 'r48', 'driver-template.py'))
+R49 = runpy.run_path(os.path.join(HERE, 'r49', 'driver-template.py'))
 # round -> (module, [headers written into the driver tree, in include order])
 TXR = {'16': (TX16, ['RTL812xTxMap.hpp']),
        '17': (TX17, ['RTL812xTxMapNative.hpp']),
@@ -2476,6 +2477,10 @@ def main():
                     read(os.path.join(drv, 'RTL812xLucyVTD.cpp')))
                 if not fresh:
                     stale = 'round48 normal 32-bit DMA addresses'
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R49['is_current'](hpp_text)
+                if not fresh:
+                    stale = 'round49 ordinary 64-page RX mappings'
             if not fresh:
                 print("REFUSED: the tree is patched but its %s() body is STALE."
                       % stale)
@@ -2608,6 +2613,7 @@ def main():
             hpp_text, cpp_text, read(hardware))
         cpp_text, setup_text, vtd_text = R48['patch'](
             cpp_text, setup_text, vtd_text)
+        hpp_text = R49['patch'](hpp_text)
         write(hardware, hardware_text)
         write(hpp, hpp_text)
         write(setup, setup_text)

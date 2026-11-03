@@ -16,6 +16,7 @@ rather than the machine.
 Usage:
     python3 tools/r21/abi.py            # print JSON
     python3 tools/r21/abi.py --check    # check current round25/26 decoder/header agreement
+    python3 tools/r21/abi.py --check-r49 # ordinary mapper ABI2 / 64-page decoder agreement
 """
 import json
 import os
@@ -325,6 +326,26 @@ def check_r26():
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == '--check-r49':
+        want = abi()
+        pins = {'ordinary_version': 2, 'ordinary_snapshot_bytes': 1472, 'ordinary_record_bytes': 616,
+                'ordinary_maps': 1024, 'ordinary_pages': 4096, 'ordinary_max_pages': 64,
+                'ordinary_runs': 64, 'ordinary_counters_offset': 96, 'ordinary_times_offset': 192,
+                'ordinary_sequence_offset': 224, 'ordinary_last_map_offset': 240,
+                'ordinary_last_unmap_offset': 856, 'ordinary_physical_offset': 104,
+                'domain_version': 4, 'native_version': 7, 'std_version': 5, 'rx_native_version': 5}
+        bad = {key: (want.get(key), value) for key, value in pins.items() if want.get(key) != value}
+        if bad:
+            print('round49 ABI MISMATCH: %r' % bad)
+            return 1
+        decoded = runpy.run_path(str(ROOT / 'tools/r49/common.py'))
+        if (decoded['VERSION'], decoded['SNAPSHOT_BYTES'], decoded['RECORD_BYTES'],
+                decoded['MAX_MAP_PAGES'], decoded['MAX_RUNS']) != (
+                want['ordinary_version'], want['ordinary_snapshot_bytes'], want['ordinary_record_bytes'],
+                want['ordinary_max_pages'], want['ordinary_runs']):
+            raise ValueError('ordinary mapper ABI2 decoder/header differs')
+        print('round49 ABI: %d header-derived pins and decoder constants passed' % len(pins))
+        return 0
     if len(sys.argv) > 1 and sys.argv[1] == '--check-r44':
         want = abi()
         pins = {'ordinary_version': 1, 'ordinary_snapshot_bytes': 960, 'ordinary_record_bytes': 360,

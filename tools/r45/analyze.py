@@ -26,7 +26,8 @@ def log_rows(path):
 
 def analyze(cap, *, round_id=45, base_commit=BASE_COMMIT, versions=None,
             protocol=None, tso_version=4, tcp_record_check=None,
-            iova_base=0x1000000000):
+            iova_base=0x1000000000, max_map_pages=32, max_runs=32,
+            rx_groups=64, rx_group_pages=16):
     # R46 reuses the accepted mapper/lifecycle checks and supplies only its
     # IPv6 transport, TSO counters and source/binary identity differences.
     versions = VERSIONS if versions is None else versions
@@ -49,7 +50,7 @@ def analyze(cap, *, round_id=45, base_commit=BASE_COMMIT, versions=None,
                 'checks': checks, 'limitations': [
                     'One target NIC, MTU1500, IPv%d TSO and one ordinary interface down/up.' % tso_version,
                     'Throughput is observed without a line-rate threshold; normal TCP retransmission is allowed.',
-                    'The domain remains active with 64 RX groups and 3 fixed mappings while the interface is down.',
+                    'The domain remains active with %d RX groups and 3 fixed mappings while the interface is down.' % rx_groups,
                     ('This run does not establish IPv6 TSO, system-wide IOMapper, full PM or multi-device support.'
                      if tso_version == 4 else
                      'This run does not establish system-wide IOMapper, full PM or multi-device support.')]}
@@ -104,13 +105,14 @@ def analyze(cap, *, round_id=45, base_commit=BASE_COMMIT, versions=None,
         need(d['rtl812x-r44-reset-command'] & 12 == 0 and
              d['rtl812x-r44-enable-command'] & 12 == 12, 'DMA command readback differs')
         need((d['rtl812x-r44-rx-groups'], d['rtl812x-r44-rx-slots'], d['rtl812x-r44-fixed-mappings']) ==
-             (64, 1024, 3), 'normal Lucy resource shape differs')
+             (rx_groups, 1024, 3), 'normal Lucy resource shape differs')
         return {'reset': reset, 'firstPrepare': prepare, 'dteActive': p['r44-dte-active-time'],
                 'firstMapComplete': m['firstMapAt'], 'resourcesReady': ready, 'dmaEnabled': enabled}
     check('automatic-device-mapper-and-startup-order', startup)
 
     check('complete-live-records-match-whole-iova-tree',
-          lambda: {label: R44.mapping_tree(states[label], iova_base=iova_base) for label in PHASES})
+          lambda: {label: R44.mapping_tree(states[label], iova_base=iova_base,
+                       max_map_pages=max_map_pages, max_runs=max_runs) for label in PHASES})
 
     def lifecycle():
         detail = {}
@@ -250,8 +252,10 @@ def analyze(cap, *, round_id=45, base_commit=BASE_COMMIT, versions=None,
              down['mapper']['snapshotTime'] < ad['rtl812x-r44-enable-time'] < after['mapper']['snapshotTime'] and
              dd['rtl812x-r44-disable-command'] & 12 == 0 and ad['rtl812x-r44-enable-command'] & 12 == 12,
              'ordinary DMA stop/re-enable order/readback differs')
-        need(down['mapper']['liveCount'] == 67, 'interface down must retain 67 resource mappings')
-        fixed_handles = {}
+        retained_maps = rx_groups + 3
+        need(down['mapper']['liveCount'] == retained_maps,
+             'interface down must retain %d resource mappings' % retained_maps)
+        fixed_handles, rx_handles = {}, {}
         for label, value in states.items():
             d, rows = value['driver'], value['live']
             fixed = []
@@ -265,14 +269,34 @@ def analyze(cap, *, round_id=45, base_commit=BASE_COMMIT, versions=None,
                          label + ': hardware DMA base is not its mapped address')
                 fixed.append(matches[0]['handle'])
             fixed_handles[label] = fixed
-            if label == 'down':
+            if label == 'down' or rx_group_pages > 32:
                 rx = [row for row in rows if row['handle'] not in fixed]
-                need(len(rx) == 64 and all(row['length'] == 65536 and row['pages'] == 16 for row in rx),
-                     'down does not retain exactly 64 ordinary RX groups')
+                need(len(rx) == rx_groups and all(row['length'] == rx_group_pages * 4096 and
+                     row['pages'] == rx_group_pages for row in rx),
+                     label + ': does not retain exactly %d ordinary RX groups of %d pages' %
+                     (rx_groups, rx_group_pages))
+                rx_handles[label] = {row['handle'] for row in rx}
+            if rx_group_pages > 32:
+                # R49's real RX commands exceed the old 128 KiB limit. The
+                # complete live records/PT already prove every backing page.
+                need((d['rtl812x-r44-rx-groups'], d['rtl812x-r44-rx-slots'],
+                      d['rtl812x-r44-fixed-mappings']) == (rx_groups, 1024, 3) and
+                     rx_groups * rx_group_pages == 1024 and
+                     value['mapper']['liveCount'] == retained_maps and
+                     value['mapper']['livePages'] == 1024 + 13 and
+                     value['mapper']['maxObservedPages'] >= rx_group_pages,
+                     label + ': actual large RX mapping geometry differs')
         need(all(v == fixed_handles['before'] for v in fixed_handles.values()),
              'persistent fixed resources were recreated')
-        return {'downLiveMaps': 67, 'rxGroups': 64, 'fixedMappings': 3,
-                'enableCount': ad['rtl812x-r44-enable-count'], 'disableCount': dd['rtl812x-r44-disable-count']}
+        detail = {'downLiveMaps': retained_maps, 'rxGroups': rx_groups, 'fixedMappings': 3,
+                  'enableCount': ad['rtl812x-r44-enable-count'], 'disableCount': dd['rtl812x-r44-disable-count']}
+        if rx_group_pages > 32:
+            for begin, end in (('before', 'pre-down'), ('down', 'after-up')):
+                need(rx_handles[begin] != rx_handles[end],
+                     begin + ' -> ' + end + ': large RX commands were not remapped during traffic')
+            detail.update(rxGroupPages=rx_group_pages, rxGroupBytes=rx_group_pages * 4096,
+                          largeRxRemappedInBothPhases=True, livePages=1037)
+        return detail
     check('ordinary-interface-down-up-with-retained-resources', normal_lifecycle)
 
     def hardware():

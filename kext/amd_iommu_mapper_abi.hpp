@@ -4,12 +4,12 @@
 #include <stdint.h>
 
 namespace r44mapper {
-static constexpr uint32_t kVersion = 1;
+static constexpr uint32_t kVersion = 2;
 // Ordinary DMA addresses must satisfy a 32-bit IODMACommand as well as 64-bit
 // clients. Keep this independent of the legacy experiment's 64 GiB window.
 static constexpr uint64_t kBase = 0x80000000ULL; // 2 GiB, 16 MiB pool below 4 GiB
 static constexpr uint32_t kPages = 4096, kRecords = 1024;
-static constexpr uint32_t kMapPages = 32, kRuns = 32;
+static constexpr uint32_t kMapPages = 64, kRuns = 64;
 enum : uint32_t {
     kPrepared = 1, kAccepting = 2, kFailed = 4,
     kMapPublished = 1, kMapConfirmed = 2,
@@ -38,6 +38,6 @@ struct Snapshot {
     // active mappings are exported separately in r44-live-raw.
     Record lastMap, lastUnmap;
 };
-static_assert(sizeof(Record) == 360, "R44 ordinary mapper record ABI1");
-static_assert(sizeof(Snapshot) == 960, "R44 ordinary mapper snapshot ABI1");
+static_assert(sizeof(Record) == 616, "R49 ordinary mapper record ABI2");
+static_assert(sizeof(Snapshot) == 1472, "R49 ordinary mapper snapshot ABI2");
 } // namespace r44mapper

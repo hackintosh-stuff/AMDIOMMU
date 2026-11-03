@@ -202,9 +202,9 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.233</string>
+	<string>1.1.234</string>
 	<key>CFBundleVersion</key>
-	<string>1.1.233</string>
+	<string>1.1.234</string>
 	<key>IOKitPersonalities</key>
 	<dict>
 		<key>RTL8125</key>
@@ -252,9 +252,9 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 		     The requested version must sit inside the provider's compatible
 		     range (OSBundleCompatibleVersion <= requested <= CFBundleVersion),
 		     otherwise kmutil cannot resolve the dependency at all.
-		     Round48 requires ordinary 32-bit DMA address support in 0.55.0. -->
+		     Round49 requires ordinary 64-page DMA mapping support in 0.56.0. -->
 		<key>org.example.AMDMapperProbe</key>
-		<string>0.55.0</string>
+		<string>0.56.0</string>
 	</dict>
 	<key>OSBundleRequired</key>
 	<string>Network-Root</string>

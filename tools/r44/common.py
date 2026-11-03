@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ordinary per-device mapper capture and ABI1 decoding (Python 3.9+)."""
+"""Ordinary per-device mapper capture; archived ABI1 remains the default."""
 import hashlib
 import importlib.util
 import json
@@ -12,6 +12,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 VERSION, SNAPSHOT_BYTES, RECORD_BYTES = 1, 960, 360
+ABI_LAYOUTS = {1: (960, 360, 32), 2: (1472, 616, 64)}
 VERSIONS = {'RTL812xLucy': '1.1.229', 'AMDMapperProbe': '0.53.0'}
 PHASES = ('phase1', 'phase2', 'pre-down', 'down', 'after-up')
 EXPORTS = {'r44-mapper-raw': 'mapper.bin', 'r44-live-raw': 'live.bin',
@@ -52,20 +53,21 @@ def unpack(names, fmt, data, offset=0):
     return dict(zip(names.split(), struct.unpack_from('<' + fmt, data, offset)))
 
 
-def record(data, offset=0):
+def record(data, offset=0, *, map_pages=32):
     row = unpack('handle firstPA mapAddress mapLength descriptorOffset length '
                  'tPublish tMapComplete tClear tUnmapComplete', '10Q', data, offset)
     row.update(unpack('recordIndex basePage pages runs options state', '6I', data, offset + 80))
-    row['physical'] = list(struct.unpack_from('<32Q', data, offset + 104))
+    row['physical'] = list(struct.unpack_from('<%dQ' % map_pages, data, offset + 104))
     return row
 
 
-def decode(data):
-    if len(data) != SNAPSHOT_BYTES:
-        raise ValueError('ordinary mapper snapshot must be 960 bytes')
+def decode(data, *, abi=1):
+    snapshot_bytes, record_bytes, map_pages = ABI_LAYOUTS[abi]
+    if len(data) != snapshot_bytes:
+        raise ValueError('ordinary mapper snapshot must be %d bytes' % snapshot_bytes)
     result = unpack('version bytes flags capacityMaps capacityPages maxMapPages maxRuns liveCount', '8I', data)
-    if (result['version'], result['bytes']) != (VERSION, SNAPSHOT_BYTES):
-        raise ValueError('ordinary mapper ABI1 required')
+    if (result['version'], result['bytes']) != (abi, snapshot_bytes):
+        raise ValueError('ordinary mapper ABI%d required' % abi)
     result.update(unpack('iovaBase iovaBytes rootPA ptBytes', '4Q', data, 32))
     result.update(unpack('rootLevel tablePages livePages peakPages peakMaps maxObservedPages '
                          'maxObservedRuns reserved', '8I', data, 64))
@@ -74,7 +76,8 @@ def decode(data):
                          '12Q', data, 96))
     result.update(unpack('preparedAt firstMapAt lastMapAt lastUnmapAt snapshotSequence snapshotTime',
                          '6Q', data, 192))
-    result['lastMap'], result['lastUnmap'] = record(data, 240), record(data, 600)
+    result['lastMap'] = record(data, 240, map_pages=map_pages)
+    result['lastUnmap'] = record(data, 240 + record_bytes, map_pages=map_pages)
     return result
 
 
@@ -98,7 +101,7 @@ def registry(class_name, marker):
 
 
 def snapshot(parent, label, driver_prefixes=('rtl812x-r44-',),
-             probe_prefixes=('r44-',), extra_exports=None):
+             probe_prefixes=('r44-',), extra_exports=None, *, abi=1):
     """One explicit read-only export; production mapping has no capture limit."""
     out = parent / label
     out.mkdir(parents=True, exist_ok=False)
@@ -121,21 +124,22 @@ def snapshot(parent, label, driver_prefixes=('rtl812x-r44-',),
     value = {'label': label, 'captured_ns': load_helpers.now(), 'exports': exports,
              'probe': scalars(probe, probe_prefixes), 'driver': scalars(driver, driver_prefixes)}
     write_json(out / 'snapshot.json', value)
-    value['mapper'] = decode(probe['r44-mapper-raw'])
+    value['mapper'] = decode(probe['r44-mapper-raw'], abi=abi)
     return value
 
 
-def read_snapshot(path):
+def read_snapshot(path, *, abi=1):
     value = json.loads((path / 'snapshot.json').read_text())
     for name in EXPORTS.values():
         data = (path / name).read_bytes()
         if value['exports'].get(name) != {'bytes': len(data), 'sha256': sha(data)}:
             raise ValueError('snapshot digest mismatch: ' + str(path / name))
-    value['mapper'] = decode((path / 'mapper.bin').read_bytes())
+    value['mapper'] = decode((path / 'mapper.bin').read_bytes(), abi=abi)
+    _, record_bytes, map_pages = ABI_LAYOUTS[abi]
     live = (path / 'live.bin').read_bytes()
-    if len(live) != value['mapper']['liveCount'] * RECORD_BYTES:
+    if len(live) != value['mapper']['liveCount'] * record_bytes:
         raise ValueError('live record count/size mismatch')
-    value['live'] = [record(live, i) for i in range(0, len(live), RECORD_BYTES)]
+    value['live'] = [record(live, i, map_pages=map_pages) for i in range(0, len(live), record_bytes)]
     value['pt'] = (path / 'pt.bin').read_bytes()
     return value
 
@@ -147,9 +151,9 @@ def identity(value):
                                     'r44-controller-ready-time', 'r44-dte-active-time'))
 
 
-def active(value):
+def active(value, *, min_maps=67):
     p, d, m = value['probe'], value['driver'], value['mapper']
     return (p.get('r44-mode') == 'auto' and p.get('r44-state') == 'active' and
             p.get('r44-controller-ready') == p.get('r44-dte-active') == 'yes' and
             d.get('rtl812x-r44-mapper-found') == d.get('rtl812x-r44-mapped-dma') == 1 and
-            m['flags'] == 3 and m['liveCount'] >= 67 and not m['invalidateFailures'])
+            m['flags'] == 3 and m['liveCount'] >= min_maps and not m['invalidateFailures'])

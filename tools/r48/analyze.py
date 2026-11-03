@@ -16,7 +16,7 @@ R47 = module('_r48_ivrs_analyzer', 'tools/r47/analyze.py')
 need = R47.need
 
 
-def dma32(cap):
+def dma32(cap, *, max_map_pages=32):
     phases, observed_high_pages, previous = {}, 0, None
     for label in PHASES:
         value = read_snapshot(cap / 'snapshots' / label)
@@ -30,7 +30,7 @@ def dma32(cap):
         need(count == m['mapOk'] > 0 and
              p['r48-map-min-bits'] == p['r48-map-max-bits'] == 32,
              label + ': successful mapper calls did not all request 32-bit addresses')
-        need(0 <= high_count <= count and high_count <= high_pages <= high_count * 32,
+        need(0 <= high_count <= count and high_count <= high_pages <= high_count * max_map_pages,
              label + ': high physical-page mapping counters differ')
         current = count, high_count, high_pages
         need(previous is None or all(a <= b for a, b in zip(previous, current)),

@@ -1,5 +1,64 @@
 # AMDIOMMU — authoritative source repository
 
+## Round49 candidate / larger ordinary DMA mappings and RX batches
+
+Formal base: `e7074605b7077304d638f63440fe4467da918c8d`, the accepted Round48
+result-documentation successor; tree `3adb7278e1250c2d95f258d90ebecf227c65f5b5`.
+The deployed Round48 implementation is
+`b98e74511073eb1eb487af12341b20c9d332d0e0`, with exactly the delivered
+candidate tree. Its actual analyzer rerun passed 11/11 and reproduced both
+archived analysis files. The driver and every successful mapper request used
+32 bits; all captured IOVA spans stayed in the low pool. Each phase contained
+1025 high physical pages among 1037 live pages. The four IPv6 streams carried
+272 MiB, TSO6 added 2051/133 hardware completions, and the same domain retained
+67 maps/1037 leaves/11 tables. Commands completed 72186 times over 281 wraps,
+with zero target faults. The report records one build, one deployment, one
+planned boot, one load and one valid measurement, with no implementation fix.
+
+**Candidate: Lucy 1.1.234 / Probe 0.56.0, ordinary `amdiommu=auto`, MTU1500,
+TSO4 and TSO6 enabled.** Continue in this Git checkout. Real Mac build, boot
+and the eleven Round49 hardware checks remain pending.
+
+The ordinary mapper now accepts up to 64 mapped pages and 64 physical runs
+per request, covering an aligned 256 KiB buffer instead of the previous
+32-page/128 KiB limit. Keep the low 16 MiB IOVA pool, 1024 mapping records,
+32-bit ordinary driver requests and existing synchronous invalidation.
+Legacy layout storage and explicit per-call budgets remain unchanged; only
+the ordinary mapper uses the larger fixed-capacity layout.
+
+Lucy's existing mapped RX path groups 64 pages per command, using 16 RX
+groups for the same 1024 RX slots/4 MiB buffer total. Its existing setup,
+remap, receive, clear and free methods derive their sizes from the same batch
+macros. Normal RX traffic and interface down/up therefore exercise real
+256 KiB IODMACommand maps. Fixed3 mappings remain 13 pages: steady and down
+snapshots contain 19 live mappings and 1037 leaves in the same domain and
+11 reachable tables. No extra test DMA path or snapshot RPC is added.
+
+Ordinary raw observation moves to ABI2: 616-byte records and a 1472-byte
+snapshot with complete 64-page physical lists. Historical ABI1 evidence is
+still decoded for prior archives. Legacy experiment ABIs remain unchanged.
+The R49 build uses --check-r49 for the new header layout; earlier check modes
+retain their original meaning.
+
+Use tools/r49, runs/r49, TCP9115, token 0x49c0de49 and
+org.example.round49load. Keep the eleven IVRS/DMA32/TCP/TSO checks, with
+whole-PT and lifecycle checks confirming 16 groups of 64 pages, 19 retained
+mappings and RX remapping in both traffic windows. The four IPv6 streams
+remain 128/128/8/8 MiB with one ordinary down/up. Physical run count depends
+on actual page placement; hardware evidence need not contain exactly 64 runs.
+Report actual high-PA coverage and throughput without allocation or speed gates.
+
+R47 public IOACPIPlatformDevice discovery and PM implementation are retained.
+Real sleep/resume stays TODO(R47-PM-HARDWARE), outside acceptance. Do not
+trigger system sleep or an artificial awake controller stop/replay cycle.
+After successful acceptance, remove the finite job, set only the next boot
+to off, unmount EFI and confirm peer exit without a cleanup reboot.
+
+Previous result and evidence are outside this source repository:
+[Round48 result](<../../docs/m2-3ac-round48-result.md>) and
+[evidence archive](<../../docs/evidence/r48-final-20261103.tgz>)
+(SHA256 `0894e10c14c933b1079435d940cab6396adec2a15bdaa3134ba13cf33c31a283`).
+
 ## Accepted Round48 / ordinary 32-bit DMA constraints, PM hardware TODO
 
 Formal base: `123dea9ddb5f159535f1be5e42f01168203a0850`, the accepted Round47

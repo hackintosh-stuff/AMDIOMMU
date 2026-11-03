@@ -8,14 +8,15 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.55.0</string>
-    <key>CFBundleVersion</key><string>0.55.0</string>
+    <key>CFBundleShortVersionString</key><string>0.56.0</string>
+    <key>CFBundleVersion</key><string>0.56.0</string>
     <!-- Client requests must fit [OSBundleCompatibleVersion, CFBundleVersion].
          Existing mapper ABI1 clients remain compatible with 0.53.0;
-         Round48 Lucy requires 0.55.0 for ordinary 32-bit DMA addresses. -->
+         Round49 Lucy requires 0.56.0 for ordinary 64-page DMA mappings. -->
     <key>OSBundleCompatibleVersion</key><string>0.53.0</string>
     <!--
       版本历史：
+        0.56.0 第49轮：普通map支持64页/64runs，RX改为16组每组64页；PM实机验证仍TODO。
         0.55.0 第48轮：普通mapper使用低4GiB IOVA池，支持32位DMA地址约束；PM实机验证仍TODO。
         0.54.0 第47轮：普通auto路径接入运行时IVRS/PCI发现；加入IOMMU暂停/恢复处理，实机PM验证TODO。
         0.53.0 M2-3y 第44轮：普通设备IOMapper自动发现；常驻控制器与通用MD/IODMACommand映射；正常网卡关闭和开启保留设备域。

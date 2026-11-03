@@ -161,11 +161,14 @@ def discovery(cap):
 
 
 def analyze(cap, *, round_id=47, base_commit=BASE_COMMIT, versions=None,
-            protocol=None, iova_base=0x1000000000):
+            protocol=None, iova_base=0x1000000000, max_map_pages=32, max_runs=32,
+            rx_groups=64, rx_group_pages=16):
     result = R46.R45.analyze(cap, round_id=round_id, base_commit=base_commit,
                              versions=VERSIONS if versions is None else versions,
                              protocol=P if protocol is None else protocol, tso_version=6,
-                             tcp_record_check=R46.ipv6_transport, iova_base=iova_base)
+                             tcp_record_check=R46.ipv6_transport, iova_base=iova_base,
+                             max_map_pages=max_map_pages, max_runs=max_runs,
+                             rx_groups=rx_groups, rx_group_pages=rx_group_pages)
     try:
         check = {'id': 'ivrs-pci-controller-discovery-and-requester-ownership',
                  'state': 'ok', 'detail': discovery(cap)}
