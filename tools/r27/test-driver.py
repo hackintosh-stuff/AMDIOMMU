@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile and exercise the actual generated Round33 full-ring cyclic RX methods.
+"""Compile and exercise the actual generated Round34 RX call sites and the retained RX4 methods.
 
 This is one RX ownership/lifecycle check, not a replay of previous rounds.
 --source additionally checks the newly generated Lucy call sites, and uses its
@@ -87,6 +87,8 @@ public:
     void r15PoolPosted(UInt32, UInt64);
     mbuf_t r15PoolCopy(mbuf_t, UInt32);
     void r15PoolFree();
+    bool r34RxOwnsRing() const { return false; }
+    bool r34RxFree() { return true; }
     void setProperty(const char *, UInt64, unsigned int) {}
     void setProperty(const char *, const char *) {}
 };
@@ -294,7 +296,7 @@ def main():
     spec = importlib.util.spec_from_file_location('r27_lucy_generator', ROOT / 'tools/apply-lucy-obs2.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    module.select_tx('21'); module.select_rx('33')
+    module.select_tx('21'); module.select_rx('34')
     template = module.POOL_METHODS
     text = template
     names = ('r27RxControl', 'r27RxRearm', 'r27RxPosted', 'r27RxActive', 'r27RxParse',
@@ -326,7 +328,7 @@ def main():
             '-I', str(ROOT / 'tools/lucy-obs'), str(source), '-o', str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
     if args.source:
-        print('R33 actual generated RX call sites and methods: PASS')
+        print('R34 actual generated RX call sites and retained RX4 methods: PASS')
 
 
 if __name__ == '__main__':

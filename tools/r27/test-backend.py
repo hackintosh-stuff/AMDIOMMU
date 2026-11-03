@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Compile actual RX1024 mapper methods against the existing R25 host stubs.
 
-This executes the production layout/identity/stripe/unmap code and real command
-ring helpers and the inactive five-L1 preparation. Lifecycle bodies also compile
-against API placeholders.
+This executes the established production layout/identity/stripe/unmap checks
+and real command ring helpers. Round34 callbacks and lifecycle bodies also
+compile against the same API placeholders; no additional test matrix is added.
 It does not emulate IOKit command lifetime, Lucy, or NIC DMA.
 """
 import argparse
@@ -119,7 +119,7 @@ struct Fixture {
     org_example_AMDMapperProbe::R17Domain *domain=nullptr;
     org_example_AMDMapperProbe::R27RxDomain rx{};
     static constexpr UInt64 tableBase=0x80000000ULL;
-    UInt64 tables[16*512]={};
+    UInt64 tables[(M2B2_IOVA_RESERVED_PAGES+8)*512]={};
     UInt8 fakeMMIO=0;
     IOMemoryDescriptor memory[r27rx::kCount];
     IODMACommand command[r27rx::kCount];
@@ -130,9 +130,9 @@ struct Fixture {
         const UInt64 rw=amdpte::PTE_IR|amdpte::PTE_IW;
         tables[0]=amdpte::makeTablePde(3,tableBase+4096,rw);
         tables[512]=amdpte::makeDefaultLeaf(3,0,rw);
-        assert(self.r17Prepare(tables,tableBase,16));
+        assert(self.r17Prepare(tables,tableBase,sizeof(tables)/4096));
         domain=self.fR17;
-        assert(domain->coverNext==14 && domain->coverEnd==16);
+        assert(domain->coverNext==14 && domain->coverEnd==sizeof(tables)/4096);
         assert(domain->kIovaL1Count==5 && domain->leaves==domain->iovaL1[0]);
         domain->mmio=&fakeMMIO;
         domain->installed=domain->accepting=domain->stdMode=domain->commandOwned=true;
@@ -309,11 +309,16 @@ public:
     prefix += 'using IOPhysicalAddress=UInt64;\n'
     prefix += base.section(header, 'static inline UInt64 m2b2NowNS()', '// ---- m2b2WallSecs')
     text = prefix + '#include "tools/lucy-obs/RTL812xRxMap.hpp"\n'
+    text += '#include "tools/lucy-obs/RTL812xRxNative.hpp"\n'
     text += '#include "tools/lucy-obs/RTL812xRxPool.hpp"\n' + constants
     text += '\n#define M2B1_LOOP_TIMEOUT 32\n'
     text += base.section(header, 'struct LayoutRun {', '// ---- kNicPaths')
     text += base.section(header, 'struct M2B2CmdRecord {', '// ---- m2b2ResetEventLog')
-    mmio = base.MMIO.replace('    struct R17Domain;', DECLARATIONS + '    struct R17Domain;')
+    public_header = (ROOT / 'kext/AMDMapperProbe.hpp').read_text()
+    native_declarations = base.section(public_header, '    struct R34RxDomain;',
+                                      '    // ---- B2 观测计数器')
+    mmio = base.MMIO.replace('    struct R17Domain;',
+                            DECLARATIONS + native_declarations + '    struct R17Domain;')
     mmio = mmio.replace('class org_example_AMDMapperProbe {',
                         'class org_example_AMDMapperProbe : public IOService {')
     mmio = mmio.replace('struct { UInt32 reserved=0; } fR15Request;',

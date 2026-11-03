@@ -43,6 +43,7 @@ struct IOService;
 #include "AMDAliveTxDomainNative.hpp"
 #include "RTL812xRxMap.hpp"
 #include "RTL812xRxPool.hpp"
+#include "RTL812xRxNative.hpp"
 int main() {
     std::printf("{\n");
     std::printf("  \"domain_version\": %u,\n", r17domain::kVersion);
@@ -69,6 +70,16 @@ int main() {
     std::printf("  \"rx_tail_seq_offset\": %zu,\n", offsetof(r27rx::Snapshot, tailSeq));
     std::printf("  \"rx_count\": %u, \"rx_backend_bytes\": %zu,\n",
                 r27rx::kCount, sizeof(r27rx::BackendSnapshot));
+    std::printf("  \"rx_native_version\": %u, \"rx_native_count\": %u,\n",
+                r34rx::kVersion, r34rx::kCount);
+    std::printf("  \"rx_native_driver_bytes\": %zu, \"rx_native_backend_bytes\": %zu,\n",
+                sizeof(r34rx::Snapshot), sizeof(r34rx::BackendSnapshot));
+    std::printf("  \"rx_native_driver_header\": %zu, \"rx_native_driver_slot_bytes\": %zu,\n",
+                offsetof(r34rx::Snapshot, slots), sizeof(r34rx::DriverSlot));
+    std::printf("  \"rx_native_backend_header\": %zu, \"rx_native_backend_slot_bytes\": %zu,\n",
+                offsetof(r34rx::BackendSnapshot, slots), sizeof(r34rx::BackendSlot));
+    std::printf("  \"rx_native_witness_bytes\": %zu, \"rx_native_map_record_bytes\": %zu,\n",
+                sizeof(r34rx::Witness), sizeof(r34rx::MapRecord));
     std::printf("  \"pool_version\": %u, \"pool_spares\": %u,\n",
                 r15pool::kVersion, r15pool::kSpareCount);
     std::printf("  \"pool_snapshot_bytes\": %zu, \"pool_request_bytes\": %zu,\n",
@@ -192,10 +203,16 @@ def check():
         ('HISTORY_CAPACITY', want['history_capacity']),
     ]
     if round29:
-        current_pairs += [('RX_VERSION', want['rx_version']),
-                          ('RX_COUNT', want['rx_count']),
-                          ('RX_DRIVER_BYTES', want['rx_snapshot_bytes']),
-                          ('RX_BACKEND_BYTES', want['rx_backend_bytes'])]
+        current_pairs += [('RX_VERSION', want['rx_native_version']),
+                          ('RX_COUNT', want['rx_native_count']),
+                          ('RX_DRIVER_BYTES', want['rx_native_driver_bytes']),
+                          ('RX_BACKEND_BYTES', want['rx_native_backend_bytes']),
+                          ('RX_DRIVER_HEADER', want['rx_native_driver_header']),
+                          ('RX_DRIVER_SLOT_BYTES', want['rx_native_driver_slot_bytes']),
+                          ('RX_BACKEND_HEADER', want['rx_native_backend_header']),
+                          ('RX_BACKEND_SLOT_BYTES', want['rx_native_backend_slot_bytes']),
+                          ('RX_WITNESS_BYTES', want['rx_native_witness_bytes']),
+                          ('RX_MAP_RECORD_BYTES', want['rx_native_map_record_bytes'])]
     for name, expect in current_pairs:
         if current.get(name) != expect:
             bad.append('%s: %s=%r headers=%r' %
@@ -259,7 +276,7 @@ def check_r26():
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == '--check-r32':
+    if len(sys.argv) > 1 and sys.argv[1] in ('--check-r32', '--check-r34'):
         want = abi()
         pins = {'domain_version': 4, 'domain_bytes': 44592,
                 'domain_record_bytes': 1304, 'domain_records_offset': 80,
@@ -273,11 +290,17 @@ def main():
                 'rx_request_bytes': 344192, 'rx_backend_bytes': 204864,
                 'rx_tail_seq_offset': 44, 'pool_version': 2, 'pool_spares': 1024,
                 'pool_snapshot_bytes': 114808, 'pool_request_bytes': 114856}
+        if sys.argv[1] == '--check-r34':
+            pins.update({'rx_native_version': 1, 'rx_native_count': 1024,
+                         'rx_native_driver_bytes': 270432, 'rx_native_backend_bytes': 475216,
+                         'rx_native_driver_header': 96, 'rx_native_driver_slot_bytes': 264,
+                         'rx_native_backend_header': 80, 'rx_native_backend_slot_bytes': 464,
+                         'rx_native_witness_bytes': 104, 'rx_native_map_record_bytes': 224})
         bad = {k: (want.get(k), v) for k, v in pins.items() if want.get(k) != v}
         if bad:
-            print('round32 ABI MISMATCH: ' + repr(bad))
+            print('%s ABI MISMATCH: %r' % (sys.argv[1][8:], bad))
             return 1
-        print('round32 ABI: %d header-derived pins passed' % len(pins))
+        print('%s ABI: %d header-derived pins passed' % (sys.argv[1][8:], len(pins)))
         return check()
     if len(sys.argv) > 1 and sys.argv[1] == '--check-r30':
         want = abi()

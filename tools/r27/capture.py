@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture Round33 evidence after the finite load; no live peer or old ABI verifier.
+"""Capture Round34 evidence after the finite load; no live peer or old ABI verifier.
 
 All workspace paths are relative to the project. Missing evidence is recorded
 in the manifest and returns 1 after saving the available failure diagnostics.
@@ -17,17 +17,17 @@ import struct
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSIONS = {'RTL812xLucy': '1.1.218', 'AMDMapperProbe': '0.42.0'}
+VERSIONS = {'RTL812xLucy': '1.1.219', 'AMDMapperProbe': '0.43.0'}
 ABI = {'native': 7, 'standard': 5, 'domain': 4, 'driver_mode': 2,
-       'rx_driver': 4, 'rx_backend': 4}
+       'rx_driver': 1, 'rx_backend': 1}
 EXPORTS = (
     ('probe', 'm2-3b-domain-raw', 'r21-domain-raw.bin'),
     ('probe', 'm2-3b-pt-raw', 'r21-pt-raw.bin'),
     ('probe', 'm2-3b-driver-raw', 'r21-driver-raw.bin'),
     ('driver', 'rtl812x-txmap-std-raw', 'r21-std-raw.bin'),
     ('driver', 'rtl812x-txmap-block-raw', 'r21-block-raw.bin'),
-    ('probe', 'm2-3h-rx-raw', 'r27-rx-raw.bin'),
-    ('probe', 'm2-3h-rx-map-raw', 'r27-rx-map-raw.bin'))
+    ('driver', 'rtl812x-r34-rx-native-raw', 'r34-rx-driver.bin'),
+    ('probe', 'm2-3o-rx-backend-raw', 'r34-rx-backend.bin'))
 OPTIONAL_EXPORTS = (
     ('probe', 'm2-b2-obs-snapshot-used', 'obs-snapshot-used.bin', 'm2-b2-obs-used-sha256'),
     ('probe', 'm2-b2-rxset-raw', 'rxset-raw.bin', 'm2-b2-rxset-raw-sha256'),
@@ -93,7 +93,7 @@ def collect_system(out, stamp):
         rc, text = command(args)
         lines.append('%s : %s' % (label, text.strip() if rc == 0 else '(unavailable)'))
     loaded_rc, loaded = command(['kmutil', 'showloaded', '--list-only'])
-    identity = ['scope : r33', 'expected_abi : native7/std5/domain4 mode2',
+    identity = ['scope : r34', 'expected_abi : native7/std5/domain4 mode2',
                 'captured_utc : ' + stamp, 'kmutil_returncode : %d' % loaded_rc,
                 '# loaded kext identity (read-only)', loaded]
     installed = {}
@@ -132,8 +132,8 @@ def collect_system(out, stamp):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('out', help='new or empty project-relative capture directory')
-    parser.add_argument('--load', default='runs/r33')
-    parser.add_argument('--peer-log', default='runs/r33/peer.log')
+    parser.add_argument('--load', default='runs/r34')
+    parser.add_argument('--peer-log', default='runs/r34/peer.log')
     parser.add_argument('--iface', default='en2')
     args = parser.parse_args()
     out, load, peer_log = (project_path(value) for value in (args.out, args.load, args.peer_log))
@@ -198,9 +198,9 @@ def main():
                     errors.append('missing required raw export: ' + key)
                 continue
             expected_bytes = {'r21-domain-raw.bin': 44592,
-                              'r27-rx-raw.bin': 311376, 'r27-rx-map-raw.bin': 204864}.get(name)
+                              'r34-rx-driver.bin': 270432, 'r34-rx-backend.bin': 475216}.get(name)
             if expected_bytes is not None and len(data) != expected_bytes:
-                errors.append('Round33 export size mismatch: %s: %d != %d' %
+                errors.append('Round34 export size mismatch: %s: %d != %d' %
                               (name, len(data), expected_bytes))
             (out / name).write_bytes(data)
             digest = sha(data)
@@ -234,14 +234,14 @@ def main():
     for name, label, offset in (('r21-domain-raw.bin', 'domain', 0),
                                  ('r21-driver-raw.bin', 'native', 4),
                                  ('r21-std-raw.bin', 'standard', 4),
-                                 ('r27-rx-raw.bin', 'rx_driver', 0),
-                                 ('r27-rx-map-raw.bin', 'rx_backend', 0)):
+                                 ('r34-rx-driver.bin', 'rx_driver', 0),
+                                 ('r34-rx-backend.bin', 'rx_backend', 0)):
         path = out / name
         if path.exists():
             data = path.read_bytes()
             observed[label] = struct.unpack_from('<I', data, offset)[0] if len(data) >= offset + 4 else None
     report = {
-        'scope': 'r33', 'captured_utc': stamp, 'interface': args.iface,
+        'scope': 'r34', 'captured_utc': stamp, 'interface': args.iface,
         'load_source': args.load, 'peer_source': args.peer_log,
         'declared_token': token, 'token_scope': 'userspace-integrity-and-rx-observation-only',
         'batch': batch, 'application_requests': requests,
@@ -256,11 +256,11 @@ def main():
         'cleanup': property_text(texts['probe'], 'm2-3b-cleanup'),
         'exports': exports, 'errors': errors, 'warnings': warnings,
         'capture_status': 'incomplete' if errors else 'complete',
-        'note': 'archive only; native7/std5/domain4/rx4; internal TX map sequence is not '
+        'note': 'archive only; native7/std5/domain4/nativeRX1; internal TX map sequence is not '
                 'the client request id; no old ABI verifier or OBS-ring-completeness '
-                'requirement; later driver publications are cross-checks only'}
+                'requirement; optional R15 exports describe bootstrap only, not native RX; later TX publications are cross-checks only'}
     write_text(out / 'R27-EXPORTS.json', json.dumps(report, indent=2) + '\n')
-    lines = ['scope : r33', 'captured_utc : ' + stamp,
+    lines = ['scope : r34', 'captured_utc : ' + stamp,
              'interface : ' + args.iface, 'expected_abi : native7/std5/domain4 mode2',
              'capture_status : ' + report['capture_status'],
              'No correctness verdict; hashes are computed from archived bytes.',
@@ -270,7 +270,7 @@ def main():
             data = path.read_bytes()
             lines.append('  %s  %10d  %s' % (sha(data), len(data), path.relative_to(out).as_posix()))
     write_text(out / 'MANIFEST.txt', '\n'.join(lines) + '\n')
-    print('Round33 capture %s: %s' % (report['capture_status'], args.out))
+    print('Round34 capture %s: %s' % (report['capture_status'], args.out))
     for error in errors:
         print('  INCOMPLETE: ' + error)
     return int(bool(errors))

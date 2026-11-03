@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round33: service-owned device domain after setup worker exit.
+"""Round34: driver-owned RX mappings and normal buffer replacement.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,12 +29,15 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round33-service-owned-domain; setup-worker-exited; dynamic-IOVA; RX1024; 4096+4096-after-125s-idle'
+SCOPE = 'round34-driver-owned-RX; normal-replacement-remap; service-owned-domain; 4096+4096-after-125s-idle'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
-RX_VERSION, RX_COUNT = 4, 1024
-RX_DRIVER_BYTES, RX_BACKEND_BYTES = 311376, 204864
+RX_VERSION, RX_COUNT = 1, 1024
+RX_DRIVER_BYTES, RX_BACKEND_BYTES = 270432, 475216
+RX_DRIVER_HEADER, RX_DRIVER_SLOT_BYTES = 96, 264
+RX_BACKEND_HEADER, RX_BACKEND_SLOT_BYTES = 80, 464
+RX_WITNESS_BYTES, RX_MAP_RECORD_BYTES = 104, 224
 RX_BASE, RX_STRIDE, RX_CAPACITY = 0x1000200000, 8192, 4096
 ALL_STANDARD_MODE = 2
 DOMAIN_VERSION, DOMAIN_HEADER, DOMAIN_RECORD_BYTES = 4, 80, 1304
@@ -102,43 +105,48 @@ def retained(h, rows, total_key, expected_total):
 
 def decode_rx(blob):
     A.need(len(blob) == RX_DRIVER_BYTES, 'RX driver snapshot must be %d bytes' % RX_DRIVER_BYTES)
-    h = A.unpack('version bytes state flags generation mapCount posted completed '
-                 'restored pendingPosted businessToken tailSeq poolId tInstalled '
-                 'tDisarmed tLastRestore', '12I4Q', blob)
+    h = A.unpack('version bytes state flags businessToken slotCount maps unmaps '
+                 'posted completed replaced restored pendingPosted tailSeq nativeActive reserved '
+                 'poolId tInstalled tDisarmed tLastRestore', '16I4Q', blob)
     A.need(h['version'] == RX_VERSION and h['bytes'] == len(blob), 'RX driver ABI differs')
-    maps = [A.unpack('pa iova tMapInv entryId capacity', '3Q2I', blob, 80 + i * 32)
-            for i in range(RX_COUNT)]
     rows = []
     for i in range(RX_COUNT):
-        at = 80 + RX_COUNT * 32 + i * 272
-        w = A.unpack('originalPA sparePA iova tPost tDone tRestoreOwn '
-                     'slot entryId flags token reqId doneLength doneStatus reserved',
-                     '6Q8I', blob, at)
-        w.update(A.unpack('tLastPost tLastDone postCount doneCount reuseCount sampleCount',
-                          '2Q4I', blob, at + 80))
-        w['samples'] = [A.unpack('tPost tDone cycle token reqId doneLength doneStatus flags',
-                                 '2Q6I', blob, at + 112 + j * 40) for j in range(4)]
-        rows.append(w)
-    return h, maps, rows
+        at = RX_DRIVER_HEADER + i * RX_DRIVER_SLOT_BYTES
+        slot = A.unpack('originalPA currentPA tPhysicalOwn mapCount unmapCount postCount doneCount '
+                        'replaceCount sampleCount flags reserved', '3Q8I', blob, at)
+        def witness(offset):
+            return A.unpack('generation memory command pa iova tMapInv tPost tDone tUnmapInv '
+                            'slot flags token reqId doneLength doneStatus replaced reserved',
+                            '9Q8I', blob, offset)
+        slot['first'] = witness(at + RX_DRIVER_SLOT_BYTES - 2 * RX_WITNESS_BYTES)
+        slot['last'] = witness(at + RX_DRIVER_SLOT_BYTES - RX_WITNESS_BYTES)
+        rows.append(slot)
+    return h, rows
 
 
 def decode_rx_backend(blob):
     A.need(len(blob) == RX_BACKEND_BYTES, 'RX backend snapshot must be %d bytes' % RX_BACKEND_BYTES)
     h = A.unpack('version bytes flags count mapCalls mapOk mapRejects unmapCalls '
-                 'unmapOk liveOwners ready reserved tReady tDrained', '12I2Q', blob)
+                 'unmapOk liveOwners ready coverCalls coverOk coverFailed boundPairs reserved '
+                 'tReady tDrained', '16I2Q', blob)
     A.need(h['version'] == RX_VERSION and h['bytes'] == len(blob), 'RX backend ABI differs')
     rows = []
     for i in range(RX_COUNT):
-        at = 64 + i * 200
-        r = A.unpack('pa iova mapLength tMapPublish tMapInv tUnmapPublish tUnmapInv',
-                     '7Q', blob, at)
-        r['mapPte'] = struct.unpack_from('<2Q', blob, at + 56)
-        r['clearPte'] = struct.unpack_from('<2Q', blob, at + 72)
-        r.update(A.unpack('entryId capacity pages mapOptions mapResult unmapResult flags reserved',
-                          '8I', blob, at + 88))
-        r['mapCommand'] = A.cmdrec(blob, at + 120)
-        r['unmapCommand'] = A.cmdrec(blob, at + 160)
-        rows.append(r)
+        at = RX_BACKEND_HEADER + i * RX_BACKEND_SLOT_BYTES
+        slot = A.unpack('mapCount unmapCount sampleCount flags', '4I', blob, at)
+        def mapping(offset):
+            r = A.unpack('generation memory command pa iova mapLength '
+                         'tMapPublish tMapInv tUnmapPublish tUnmapInv', '10Q', blob, offset)
+            r['mapPte'] = struct.unpack_from('<2Q', blob, offset + 80)
+            r['clearPte'] = struct.unpack_from('<2Q', blob, offset + 96)
+            r.update(A.unpack('slot pages mapOptions flags mapResult unmapResult reserved0 reserved1',
+                              '8I', blob, offset + 112))
+            r['mapCommand'] = A.cmdrec(blob, offset + 144)
+            r['unmapCommand'] = A.cmdrec(blob, offset + 184)
+            return r
+        slot['first'] = mapping(at + RX_BACKEND_SLOT_BYTES - 2 * RX_MAP_RECORD_BYTES)
+        slot['last'] = mapping(at + RX_BACKEND_SLOT_BYTES - RX_MAP_RECORD_BYTES)
+        rows.append(slot)
     return h, rows
 
 
@@ -181,7 +189,7 @@ def check(cap):
                  mapped_total >= HISTORY_CAPACITY else 'earlier'),
                 'Application IDs 1..8192 are userspace integrity IDs, not TX mapping-attempt IDs; RX business correlation uses observed R27P headers.',
                 'Application logs prove bytes; cumulative counters prove all-TX standard-path totals; '
-                'retained 32 prove PTE/lifecycle relations.']}
+                'retained 32 prove TX PTE/lifecycle relations; RX retains each slot’s first and final IOVA generation.']}
     try:
         _, _, P, blob = A.read_capture(cap)
         dh, dom = decode_domain(blob('m2-3b-domain-raw', 'r21-domain-raw.bin'))
@@ -195,8 +203,9 @@ def check(cap):
         sh, std = decode_std(blob('rtl812x-txmap-std-raw', 'r21-std-raw.bin'))
         bh = A.decode_block(blob('rtl812x-txmap-block-raw', 'r21-block-raw.bin'))
         pt = blob('m2-3b-pt-raw', 'r21-pt-raw.bin')
-        rh, rxmaps, rxwitnesses = decode_rx(blob('m2-3h-rx-raw', 'r27-rx-raw.bin'))
-        rb, rxrecords = decode_rx_backend(blob('m2-3h-rx-map-raw', 'r27-rx-map-raw.bin'))
+        rh, rxslots = decode_rx(blob('rtl812x-r34-rx-native-raw', 'r34-rx-driver.bin'))
+        rb, rxbackend = decode_rx_backend(blob('m2-3o-rx-backend-raw', 'r34-rx-backend.bin'))
+        rxrecords = [slot['last'] for slot in rxbackend]
         client = (cap / 'client.log').read_text(encoding='utf-8')
         peer = (cap / 'peer.log').read_text(encoding='utf-8')
         driver = (cap / 'driver-obs.txt').read_text(encoding='utf-8')
@@ -204,9 +213,9 @@ def check(cap):
         A.need(0 < token < 0x80000000 and sh['token'] == bh['token'] == token,
                'inconsistent/non-low-half token')
         A.need(dh['devid'] == gh['bdf'] == sh['bdf'] == bh['bdf'], 'capture device association differs')
-        checks.append({'id': 'capture-ABI-domain4-native7-std5-rx4', 'state': 'ok'})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX1', 'state': 'ok'})
     except (A.Refused, OSError, ValueError, KeyError, IndexError, struct.error) as exc:
-        checks.append({'id': 'capture-ABI-domain4-native7-std5-rx4', 'state': 'FAIL', 'detail': str(exc)})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX1', 'state': 'FAIL', 'detail': str(exc)})
         return result()
 
     def driver_property(key, numeric=False):
@@ -283,9 +292,8 @@ def check(cap):
         A.need(P.get('m2-3l-session-mode') == 'explicit-stop' and
                P.get('m2-3l-session-state') == 'stopped',
                'explicit-stop session did not finish stopped')
-        A.need(P.get('m2-3l-tx-deadline') == 0 and
-               P.get('m2-b2-r15-authorize-deadline') == 0,
-               'TX/RX authorization still has a timed deadline')
+        A.need(P.get('m2-3l-tx-deadline') == 0,
+               'TX authorization still has a timed deadline')
         start = P['m2-3l-session-start']
         stopped = P['m2-3l-stop-request-time']
         end = P['m2-3l-session-end']
@@ -753,96 +761,100 @@ def check(cap):
         return {'before': len(before), 'during': len(during), 'after': len(after)}
     run('ordinary-traffic-before-during-and-three-after', ordinary)
     def rx_mappings():
-        A.need(P['m2-3h-rx-mode'] == 'standard-nonidentity-cyclic1024' and
+        A.need(P['m2-3h-rx-mode'] == 'driver-owned-native-remap1024' and
                P['m2-3h-rx-state'] == 'drained-and-unmapped' and
-               P['m2-3h-rx-ready'] == 'no', 'RX run did not reach its released final state')
-        A.need(rb['count'] == rb['mapCalls'] == rb['mapOk'] == rb['unmapCalls'] ==
-               rb['unmapOk'] == RX_COUNT and rb['flags'] == rb['mapRejects'] ==
-               rb['liveOwners'] == 0 and rb['ready'] == 1,
-               'RX1024 map/unmap totals or final backend owners differ')
-        A.need(0 < rb['tReady'] <= rb['tDrained'] <= P['m2-3e-exit-gate-close'],
-               'RX ready/drained timestamps differ from the active window')
-        A.need(P['m2-3h-rx-live-owners'] == P['m2-3h-rx-pending'] == 0,
-               'RX raw/property final ownership differs')
-        A.need(rh['mapCount'] == RX_COUNT and rh['businessToken'] == token,
-               'RX mapping declaration has the wrong count/run token')
-        by_id = {m['entryId']: m for m in rxmaps}
-        A.need(len(by_id) == RX_COUNT and set(by_id) == {r['entryId'] for r in rxrecords},
-               'RX driver/backend entry IDs differ or repeat')
-        iovas, leaf_tables = set(), set()
+               P['m2-3h-rx-ready'] == 'no', 'native RX did not reach its released final state')
+        A.need(rb['count'] == RX_COUNT and rb['mapCalls'] == rb['mapOk'] ==
+               rb['unmapCalls'] == rb['unmapOk'] == rh['maps'] == rh['unmaps'] and
+               rb['mapOk'] == rh['posted'] + RX_COUNT and
+               rb['flags'] == rb['mapRejects'] == rb['liveOwners'] == rb['boundPairs'] ==
+               rb['coverFailed'] == 0 and rb['ready'] == 1 and
+               rb['coverCalls'] == rb['coverOk'] >= RX_COUNT,
+               'driver-owned RX map/unmap totals, physical cover or final ownership differs')
+        A.need(0 < rb['tReady'] == P['m2-3o-rx-ready-time'] <= rb['tDrained'] <=
+               P['m2-3e-exit-gate-close'] and
+               P['m2-3h-rx-live-owners'] == P['m2-3h-rx-pending'] == 0,
+               'native RX readiness/drain or raw/property ownership differs')
         sequences = {d[key]['expected'] for d in dom + [dh['probeFirst'], dh['probeReuse']]
                      for key in ('mapCommand', 'retireCommand')}
-        for i, r in enumerate(rxrecords):
-            m = by_id[r['entryId']]
-            label = 'RX map entry %d: ' % r['entryId']
-            pages = ((r['pa'] & 4095) + RX_CAPACITY + 4095) // 4096
-            expected = RX_BASE + i * RX_STRIDE + (r['pa'] & 4095)
-            A.need(r['entryId'] == 1024 + i and r['pa'] > 0 and r['iova'] == expected and
-                   r['iova'] != r['pa'] and r['capacity'] == RX_CAPACITY and
-                   r['mapLength'] == RX_CAPACITY and r['pages'] == pages and 1 <= pages <= 2 and
-                   (r['mapOptions'] & 0x2),
-                   label + 'unexpected nonidentity stripe or buffer geometry')
-            A.need((m['pa'], m['iova'], m['capacity'], m['tMapInv']) ==
-                   (r['pa'], r['iova'], r['capacity'], r['tMapInv']),
-                   label + 'driver mapping was not the completed backend mapping')
-            A.need(r['flags'] == 31 and r['mapResult'] == r['unmapResult'] == 0 and
-                   0 < P['m2-3e-t-translate-on'] <= r['tMapPublish'] <= r['tMapInv'] <= rb['tReady'] and
-                   rb['tDrained'] <= r['tUnmapPublish'] <= r['tUnmapInv'] <=
-                   P['m2-3e-t-translate-off'] and r['tUnmapInv'] < P['m2-b2-t-recovery-start'],
-                    label + 'map/unmap confirmation or order differs')
-            for key in ('mapCommand', 'unmapCommand'):
-                c = r[key]
-                A.need(c['expected'] > 0 and c['expected'] == c['observed'] and
-                       c['tComplete'] > 0, label + 'CompletionWait mismatch')
-                A.need(c['words'] == [0, dh['domid'] | (3 << 28), 0xfffff003, 0x7fffffff],
-                       label + 'not full-domain PDE-inclusive invalidation')
-                A.need(c['expected'] not in sequences,
-                       label + 'repeated shared command completion sequence')
-                sequences.add(c['expected'])
-            A.need(r['mapCommand']['expected'] < r['unmapCommand']['expected'] <= dh['completionSequence'] and
-                   r['mapCommand']['tComplete'] == r['tMapInv'] and
-                   r['unmapCommand']['tComplete'] == r['tUnmapInv'],
-                   label + 'completion order/timestamps differ')
-            for j in range(2):
-                if j >= pages:
-                    A.need(r['mapPte'][j] == r['clearPte'][j] == 0,
-                           label + 'unused page carries a mapping')
-                    continue
-                pa = (r['pa'] & ~4095) + j * 4096
-                iova = (r['iova'] & ~4095) + j * 4096
-                A.need(iova not in iovas and r['mapPte'][j] & A.PTE_IW and
-                       r['clearPte'][j] == 0, label + 'RX page repeated, not writable, or not cleared')
-                iovas.add(iova)
-                leaf_pa = rx_leaf_address(pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'], iova)
-                leaf_tables.add(leaf_pa)
-                got, pte = A.walk_with_leaf(pt, dh['rootPA'], dh['ptBase'], leaf_pa,
-                                            dh['rootLevel'], iova, r['mapPte'][j])
-                A.need(got == pa and pte == r['mapPte'][j], label + 'RX PTE does not map the spare PA')
-        A.need(dh['commandCompleted'] >= 2 * (dh['mapsTotal'] + RX_COUNT),
-               'shared command ring total cannot cover TX, capacity probe and RX invalidations')
-        return {'mapped': RX_COUNT, 'unmapped': RX_COUNT, 'liveOwners': 0,
-                'writablePages': len(iovas), 'leafTables': len(leaf_tables),
-                'iovaBase': RX_BASE, 'slotBytes': RX_STRIDE,
-                'mapBeforePost': True, 'unmapAfterDrain': True}
-    run('rx1024-standard-mapping-PTE-and-confirmed-unmap', rx_mappings)
+        memory_ids, command_ids, leaf_tables, iovas = set(), set(), set(), set()
+        for i, (slot, driver_slot) in enumerate(zip(rxbackend, rxslots)):
+            A.need(slot['flags'] == 0 and slot['sampleCount'] == 1 and
+                   slot['mapCount'] == slot['unmapCount'] == driver_slot['mapCount'] ==
+                   driver_slot['unmapCount'] == driver_slot['postCount'] + 1,
+                   'RX slot %d mapping generations or retained sample differs' % i)
+            pair = tuple(slot['first'][k] for k in ('memory', 'command'))
+            A.need(all(pair) and pair[0] not in memory_ids and pair[1] not in command_ids,
+                   'RX slot %d has missing or shared driver MD/Cmd identity' % i)
+            memory_ids.add(pair[0]); command_ids.add(pair[1])
+            for kind in ('first', 'last'):
+                r, w = slot[kind], driver_slot[kind]
+                label = 'RX slot %d %s: ' % (i, kind)
+                generation = 2 if kind == 'first' else slot['mapCount']
+                pages = ((r['pa'] & 4095) + RX_CAPACITY + 4095) // 4096
+                A.need(r['slot'] == i and r['generation'] == generation and
+                       tuple(r[k] for k in ('memory', 'command')) == pair and
+                       r['pa'] > 0 and r['iova'] == RX_BASE + i * RX_STRIDE + (r['pa'] & 4095) and
+                       r['iova'] != r['pa'] and r['mapLength'] == RX_CAPACITY and
+                       r['pages'] == pages and 1 <= pages <= 2 and (r['mapOptions'] & 2),
+                       label + 'unexpected driver-owned mapping geometry or generation')
+                A.need(all(r[k] == w[k] for k in
+                           ('generation', 'memory', 'command', 'pa', 'iova', 'tMapInv', 'tUnmapInv', 'slot')),
+                       label + 'driver DMA witness is not the registered mapping')
+                A.need(r['flags'] == 7 and r['mapResult'] == r['unmapResult'] == 0 and
+                       P['m2-3e-t-translate-on'] <= r['tMapPublish'] <= r['tMapInv'] <=
+                       w['tPost'] < w['tDone'] <= r['tUnmapPublish'] <= r['tUnmapInv'] <=
+                       rb['tDrained'] < P['m2-b2-t-recovery-start'],
+                       label + 'map/OWN/DMA/unmap completion order differs')
+                for key in ('mapCommand', 'unmapCommand'):
+                    c = r[key]
+                    A.need(c['expected'] > 0 and c['expected'] == c['observed'] and
+                           c['words'] == [0, dh['domid'] | (3 << 28), 0xfffff003, 0x7fffffff] and
+                           c['expected'] not in sequences,
+                           label + 'invalidation command/completion or shared sequence differs')
+                    sequences.add(c['expected'])
+                A.need(r['mapCommand']['expected'] < r['unmapCommand']['expected'] <= dh['completionSequence'] and
+                       r['mapCommand']['tComplete'] == r['tMapInv'] and
+                       r['unmapCommand']['tComplete'] == r['tUnmapInv'],
+                       label + 'command confirmation timestamps differ')
+                for j in range(2):
+                    if j >= pages:
+                        A.need(r['mapPte'][j] == r['clearPte'][j] == 0, label + 'unused PTE is not empty')
+                        continue
+                    iova = (r['iova'] & ~4095) + j * 4096
+                    A.need(r['mapPte'][j] & A.PTE_IW and r['clearPte'][j] == 0,
+                           label + 'RX PTE not writable or not cleared')
+                    iovas.add(iova)
+                    leaf_pa = rx_leaf_address(pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'], iova)
+                    leaf_tables.add(leaf_pa)
+                    got, pte = A.walk_with_leaf(pt, dh['rootPA'], dh['ptBase'], leaf_pa,
+                                                dh['rootLevel'], iova, r['mapPte'][j])
+                    A.need(pte == r['mapPte'][j] and
+                           (j != 0 or got == (r['pa'] & ~4095)),
+                           label + 'RX PTE walk differs from the mapped receive buffer')
+        A.need(sum(s['mapCount'] for s in rxbackend) == rb['mapOk'] and
+               sum(s['unmapCount'] for s in rxbackend) == rb['unmapOk'] and
+               dh['commandCompleted'] >= 2 * dh['mapsTotal'] + rb['mapOk'] + rb['unmapOk'],
+               'shared command totals do not cover TX/probe and native RX mapping generations')
+        return {'mapped': rb['mapOk'], 'unmapped': rb['unmapOk'], 'initialMappings': RX_COUNT,
+                'driverOwnedPairs': len(memory_ids), 'liveOwners': 0,
+                'retainedGenerations': RX_COUNT * 2, 'writablePages': len(iovas),
+                'leafTables': len(leaf_tables), 'iovaBase': RX_BASE, 'slotBytes': RX_STRIDE,
+                'mapBeforeOwn': True, 'unmapAfterCompletion': True}
+    run('rx1024-driver-owned-MD-Cmd-repeated-mapping-and-unmap', rx_mappings)
 
     def rx_completions():
-        A.need(rh['state'] == 4 and rh['flags'] == 0 and rh['generation'] > 0 and rh['poolId'] > 0 and
-               rh['mapCount'] == rh['restored'] == RX_COUNT and
-               rh['posted'] == rh['completed'] >= 4 * RX_COUNT and
-               rh['posted'] == sum(w['postCount'] for w in rxwitnesses) and
-               rh['completed'] == sum(w['doneCount'] for w in rxwitnesses) and
-               rh['pendingPosted'] == 0, 'RX1024 cumulative DMA counts or association restoration differs')
+        A.need(rh['state'] == 4 and rh['flags'] == rh['nativeActive'] == rh['pendingPosted'] == 0 and
+               rh['slotCount'] == rh['restored'] == RX_COUNT and rh['poolId'] > 0 and
+               rh['businessToken'] == token and rh['posted'] == rh['completed'] >= 2 * RX_COUNT and
+               rh['posted'] == sum(s['postCount'] for s in rxslots) and
+               rh['completed'] == sum(s['doneCount'] for s in rxslots) and
+               rh['replaced'] == sum(s['replaceCount'] for s in rxslots) > 0,
+               'native RX cumulative DMA, normal replacement or restoration differs')
         A.need(0 < rh['tInstalled'] <= rb['tReady'] <= rh['tDisarmed'] <= rb['tDrained'] and
-               rh['tLastRestore'] == max(w['tRestoreOwn'] for w in rxwitnesses) <= rb['tDrained'],
-               'RX driver installation/drain/last-restore timestamps differ')
-        records = {r['entryId']: r for r in rxrecords}
-        A.need(len({w['entryId'] for w in rxwitnesses}) == RX_COUNT and
-               {w['entryId'] for w in rxwitnesses} == set(records) and
-               len({w['slot'] for w in rxwitnesses}) == RX_COUNT,
-               'RX cyclic entry IDs or ring slots repeat')
-        replies, sends = {}, {}
-        peer_ids = set()
+               rh['tLastRestore'] == max(s['tPhysicalOwn'] for s in rxslots) <= rb['tDrained'],
+               'native RX install/disarm/physical restore order differs')
+        replies, sends, peer_ids = {}, {}, set()
         for line in client.splitlines():
             match = re.match(r'client_(sent|recv) token=(0x[0-9a-fA-F]+) req=(\d+) len=(\d+) '
                              r'sha256=([0-9a-f]{64}) payload=([0-9a-f]+).* t_ns=(\d+)$', line)
@@ -861,66 +873,42 @@ def check(cap):
                 A.need(tok == token and data == payload(token, req) and len(data) == int(match[3]) and
                        hashlib.sha256(data).hexdigest() == match[4], 'RX-correlated peer reply bytes differ')
                 peer_ids.add(req)
-        business, final_business = [], []
-        for w in rxwitnesses:
-            r = records[w['entryId']]
-            label = 'RX completion entry %d: ' % w['entryId']
-            A.need(w['flags'] == 7 and 0 <= w['slot'] < 1024 and
-                   w['sparePA'] == r['pa'] and w['iova'] == r['iova'] and
-                   w['originalPA'] > 0 and w['originalPA'] not in (w['sparePA'], w['iova']),
-                   label + 'posted/done/restored addresses or witness flags differ')
-            A.need(0 < r['tMapInv'] <= rh['tInstalled'] <= w['tPost'] <= w['tDone'] <=
-                   w['tRestoreOwn'] <= rb['tDrained'] <= r['tUnmapPublish'] <= r['tUnmapInv'] and
-                   P['m2-3e-t-gate-open'] <= w['tPost'],
-                   label + 'map/post/DMA/restore/drain/unmap order differs')
-            A.need(w['postCount'] == w['doneCount'] >= 4 and
-                   w['reuseCount'] == w['postCount'] - 1 and w['sampleCount'] == 4,
-                   label + 'cyclic counts differ')
-            A.need(w['tPost'] == w['samples'][0]['tPost'] and
-                   w['samples'][-1]['tDone'] <= w['tLastDone'] == w['tDone'] and
-                   w['tLastPost'] <= rh['tDisarmed'] < w['tRestoreOwn'] and
-                   w['tLastPost'] < w['tLastDone'] < w['tRestoreOwn'],
-                   label + 'first/final cycle or disarm/restore order differs')
-            previous = r['tMapInv']
-            for cycle, sample in enumerate(w['samples'], 1):
-                A.need(sample['cycle'] == cycle and sample['flags'] == 3 and
-                       previous < sample['tPost'] < sample['tDone'],
-                       label + 'sample identity/flags/time order differs')
-                previous = sample['tDone']
-            if w['postCount'] == 4:
-                last = w['samples'][-1]
-                A.need(w['tLastPost'] == last['tPost'] and all(w[k] == last[k] for k in
-                       ('tDone', 'token', 'reqId', 'doneLength', 'doneStatus')),
-                       label + 'final witness is inconsistent with fourth sample')
-            else:
-                A.need(previous < w['tLastPost'], label + 'final reuse precedes retained cycles')
-            for sample in w['samples'] + [w]:
-                A.need(not sample['doneStatus'] & 0x80000000 and
-                       (sample['doneStatus'] & 0x1fff) == sample['doneLength'] and
-                       0 < sample['doneLength'] <= RX_CAPACITY,
-                       label + 'hardware completion status/length differs')
-                if sample['token'] or sample['reqId']:
-                    req = sample['reqId']
-                    A.need(sample['token'] == token and req in REQUESTS and req in sends and
-                           req in replies and req in peer_ids,
-                           label + 'observed R27P reply is absent from application logs')
-                    A.need(sample['doneLength'] == len(payload(token, req)) + 46 and
-                           sends[req] <= sample['tDone'] <= replies[req],
-                           label + 'R27P frame/FCS length or delivery order differs')
-                    if sample is not w:
-                        business.append(req)
-                    elif w['postCount'] > 4:
-                        final_business.append(req)
-        A.need(business and len(set(business + final_business)) == len(business + final_business),
-               'no unique sampled R27P completions correlate to userspace logs')
-        return {'posted': rh['posted'], 'completed': rh['completed'], 'restored': RX_COUNT, 'pending': 0,
-                'sampledCompletions': RX_COUNT * 4,
-                'businessCompletions': len(business), 'nonBusinessSamples': RX_COUNT * 4 - len(business),
-                'additionalFinalBusinessCompletions': len(final_business),
-                'applicationRequests': sorted(business),
-                'correlation': 'first four cycles per association and final completion; R27P token+ID and FCS length',
-                'scope': '1024 cyclic spare associations; first four cycles retained, cumulative DMA totals'}
-    run('rx1024-real-DMA-restoration-and-application-correlation', rx_completions)
+        business, replacements, changed = [], 0, 0
+        for i, slot in enumerate(rxslots):
+            first, last = slot['first'], slot['last']
+            label = 'native RX slot %d: ' % i
+            A.need(slot['flags'] == 0 and slot['sampleCount'] == 1 and
+                   slot['postCount'] == slot['doneCount'] >= 2 and
+                   first['generation'] == 2 < last['generation'] == slot['mapCount'] and
+                   first['tUnmapInv'] < last['tMapInv'] and
+                   0 < slot['originalPA'] and 0 < slot['currentPA'] != last['iova'] and
+                   rh['tDisarmed'] <= last['tDone'] <= last['tUnmapInv'] <= slot['tPhysicalOwn'],
+                   label + 'first/final generation or current-buffer physical restoration differs')
+            changed += first['pa'] != last['pa']
+            for w in (first, last):
+                A.need(w['slot'] == i and w['flags'] == 7 and w['replaced'] in (0, 1) and
+                       not w['doneStatus'] & 0x80000000 and
+                       (w['doneStatus'] & 0x1fff) == w['doneLength'] and
+                       0 < w['doneLength'] <= RX_CAPACITY,
+                       label + 'DMA completion status/length or witness flags differ')
+                replacements += w['replaced']
+                if w['token'] or w['reqId']:
+                    req = w['reqId']
+                    A.need(w['token'] == token and req in REQUESTS and req in sends and
+                           req in replies and req in peer_ids and
+                           w['doneLength'] == len(payload(token, req)) + 46 and
+                           sends[req] <= w['tDone'] <= replies[req],
+                           label + 'R27P completion does not match actual application reply')
+                    business.append(req)
+        A.need(business and len(set(business)) == len(business),
+               'unique business DMA sample is missing from native RX')
+        return {'posted': rh['posted'], 'completed': rh['completed'], 'restored': RX_COUNT,
+                'pending': 0, 'replacements': rh['replaced'], 'retainedReplacementSamples': replacements,
+                'slotsWithChangedPA': changed, 'sampledCompletions': RX_COUNT * 2,
+                'businessCompletions': len(business), 'applicationRequests': sorted(business),
+                'correlation': 'first and final IOVA generation per slot; R27P token+ID and FCS length',
+                'scope': 'driver-owned MD/Cmd pairs; normal mbuf replacement and remap; cumulative totals'}
+    run('rx1024-native-replacement-DMA-and-current-buffer-restore', rx_completions)
     return result()
 
 

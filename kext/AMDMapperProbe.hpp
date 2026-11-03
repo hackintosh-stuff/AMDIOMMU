@@ -14,6 +14,7 @@
 #include "amd_iommu_rxset_core.hpp"
 #include "../tools/lucy-obs/RTL812xRxPool.hpp"
 #include "../tools/lucy-obs/RTL812xRxMap.hpp"
+#include "../tools/lucy-obs/RTL812xRxNative.hpp"
 // Round17: native-mbuf TX mapping ABI (round16's RTL812xTxMap.hpp is kept as
 // the archived staging ABI and is no longer included by the probe).
 #include "../tools/lucy-obs/RTL812xTxMapNative.hpp"
@@ -185,6 +186,25 @@ private:
         const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
         uint64_t *, uint64_t *);
     IOReturn r27RxUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
+
+    // Round34: Lucy owns the standard objects and replaces the real RX mbufs.
+    // This service owns only routing identities, PTEs and mapping evidence.
+    struct R34RxDomain;
+    R34RxDomain *fR34Rx = nullptr;
+    bool r34RxBegin();
+    bool r34RxFinish(UInt32 budgetMs);
+    bool r34RxTailDone(UInt32 budgetMs);
+    void r34RxReady();
+    void r34RxExport();
+    void r34RxRelease();
+    IOReturn r34RxControl(UInt32 op);
+    static int r34RxCallback(void *, r34rx::Binding *);
+    IOReturn r34RxOperation(r34rx::Binding *);
+    bool r34RxCandidate(IOMemoryDescriptor *, IODMACommand *) const;
+    IOReturn r34RxMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r34RxUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
 
     // ---- B2 观测计数器 ----
     // iovmMapMemory 可能被高频调用，不能每次都 setProperty（会持续分配内存）。

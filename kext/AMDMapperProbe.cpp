@@ -90,6 +90,7 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
     fR33Domain = nullptr;
     fR33TeardownState = 0;
     fR33InstallCount = 0;
+    fR34Rx = nullptr;
     for (int i = 0; i < kMaxActiveMaps; i++) {
         fMaps[i].pa = 0;
         fMaps[i].len = 0;
@@ -419,6 +420,11 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     // 而那正是 B2-0 的 16 KiB buffer，不是网卡。
     bool isProbeCall = fProbeCallActive;
 
+    if (r34RxCandidate(memory, dmaCommand))
+        return r34RxMap(memory, descriptorOffset, length, mapOptions,
+                       mapSpecification, dmaCommand, pageList,
+                       mapAddress, mapLength);
+
     // The RX commands describe the driver's retained spare mbufs. Dispatch
     // before TX/self-test handling, using registered MD/command identities.
     if (r27RxCandidate(memory, dmaCommand))
@@ -573,6 +579,9 @@ IOReturn org_example_AMDMapperProbe::iovmUnmapMemory(
 
     fUnmapCalls++;
 
+    if (r34RxCandidate(memory, dmaCommand) ||
+        (fR34Rx && r27RxOwnsAddress(mapAddress)))
+        return r34RxUnmap(memory, dmaCommand, mapAddress, mapLength);
     if (r27RxCandidate(memory, dmaCommand) || r27RxOwnsAddress(mapAddress))
         return r27RxUnmap(memory, dmaCommand, mapAddress, mapLength);
 
@@ -673,7 +682,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.42.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.43.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

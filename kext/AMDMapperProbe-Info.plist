@@ -8,10 +8,11 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.42.0</string>
-    <key>CFBundleVersion</key><string>0.42.0</string>
+    <key>CFBundleShortVersionString</key><string>0.43.0</string>
+    <key>CFBundleVersion</key><string>0.43.0</string>
     <!--
       版本历史：
+        0.43.0 M2-3o 第34轮：Lucy持有RX映射对象，正常缓冲替换驱动逐槽unmap/remap；停止后恢复当前缓冲的物理RX路径。
         0.42.0 M2-3n 第33轮：服务对象持有设备域资源；初始化线程返回后持续DMA，显式停止另起收尾线程。
         0.41.0 M2-3m 第32轮：动态TX IOVA区域、独立活动映射记录、标准DMA容量与复用验证。
         0.40.0 M2-3l 第31轮：独立内核线程维持RX1024/TX标准映射会话；.session取消计时退出，

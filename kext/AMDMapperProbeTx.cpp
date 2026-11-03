@@ -98,6 +98,15 @@ struct org_example_AMDMapperProbe::R27RxDomain {
     r27rx::Request control;
     r27rx::BackendSnapshot snapshot;
 };
+struct org_example_AMDMapperProbe::R34RxDomain {
+    IOService *driver;
+    // Borrowed from Lucy between Bind and Unbind; Lucy releases the objects.
+    IOMemoryDescriptor *memory[r34rx::kCount];
+    IODMACommand *command[r34rx::kCount];
+    bool installed, released;
+    r34rx::Request control;
+    r34rx::BackendSnapshot snapshot;
+};
 static_assert(r27rx::kIovaBase == amdtx::kBase + amdtx::kRxFirstPage * 4096ULL,
               "RX starts after the separate dynamic TX L1 table");
 static_assert(amdtx::kPages <= amdtx::kRxFirstPage &&
@@ -116,7 +125,7 @@ bool org_example_AMDMapperProbe::r17Prepare(volatile UInt64 *pt, UInt64 base,
     d->pt=pt; d->ptBase=base; d->ptBytes=pages*4096ULL;
     // Command space is checked against hardware HEAD on each submission.
     // Owned physical ranges exclude this tail. Initialize the complete IOVA
-    // subtree while root is inactive: one L2 + five L1 pages, then cover space.
+    // subtree while root is inactive: one L2 + five L1 pages, then RX physical-restore cover space.
     static_assert(R17Domain::kIovaL1Count + 3 <= M2B2_IOVA_RESERVED_PAGES,
                   "IOVA arena includes L2, all L1s and two cover pages");
     amdsparse::Arena a={pt,base,pages,pages-M2B2_IOVA_RESERVED_PAGES,
@@ -826,7 +835,7 @@ void org_example_AMDMapperProbe::r17Export(void *command) {
 void org_example_AMDMapperProbe::r17Release() {
     if (!fR17 || fR17->installed) return;
     r27RxRelease();
-    if (fR27Rx) return; // A retained RX owner must never outlive this page table.
+    if (fR27Rx || fR34Rx) return; // RX owners cannot outlive this page table.
     IOLockFree(fR17->lock); IOFree(fR17,sizeof(*fR17)); fR17=nullptr;
 }
 
@@ -1268,7 +1277,8 @@ bool org_example_AMDMapperProbe::r27RxCandidate(
 }
 
 bool org_example_AMDMapperProbe::r27RxOwnsAddress(uint64_t iova) const {
-    return __atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE) && iova >= r27rx::kIovaBase &&
+    return (__atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE) ||
+            __atomic_load_n(&fR34Rx, __ATOMIC_ACQUIRE)) && iova >= r27rx::kIovaBase &&
         iova - r27rx::kIovaBase < r27rx::kCount * r27rx::kPagesPerSlot * 4096ULL;
 }
 
@@ -1457,6 +1467,7 @@ IOReturn org_example_AMDMapperProbe::r27RxControl(UInt32 op) {
 
 bool org_example_AMDMapperProbe::r27RxBegin() {
     if (!r27RxRequested()) return true;
+    if (fR31Session) return r34RxBegin();
     if (__atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE) ||
         !r18StdReady() || !fR17->commandOwned || !fR15Service)
         return false;
@@ -1531,6 +1542,7 @@ failed:
 }
 
 void org_example_AMDMapperProbe::r27RxReady() {
+    if (fR34Rx) { r34RxReady(); return; }
     R27RxDomain *r = __atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE);
     if (!r || !r->installed) return;
     r->snapshot.ready = 1;
@@ -1541,6 +1553,7 @@ void org_example_AMDMapperProbe::r27RxReady() {
 }
 
 bool org_example_AMDMapperProbe::r27RxFinish(UInt32 budgetMs) {
+    if (fR34Rx) return r34RxFinish(budgetMs);
     R27RxDomain *r = __atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE);
     if (!r || r->released) return true;
     R27ClientContext client(this, fR31Session ? nullptr : fM22b2Timer);
@@ -1646,6 +1659,7 @@ unmapFailed:
 // After RX retirement, keep TX open until the peer echoes the R29D marker
 // that userspace sends after receiving every tail reply.
 bool org_example_AMDMapperProbe::r29WaitTailDone(UInt32 budgetMs) {
+    if (fR34Rx) return r34RxTailDone(budgetMs);
     R27RxDomain *r = __atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE);
     if (!r || !r->snapshot.ready) return true;
     R27ClientContext client(this, fR31Session ? nullptr : fM22b2Timer);
@@ -1676,6 +1690,7 @@ bool org_example_AMDMapperProbe::r29WaitTailDone(UInt32 budgetMs) {
 }
 
 void org_example_AMDMapperProbe::r27RxExport() {
+    if (fR34Rx) { r34RxExport(); return; }
     R27RxDomain *r = __atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE);
     if (!r) return;
     OSData *raw = OSData::withBytes(&r->snapshot, sizeof(r->snapshot));
@@ -1707,6 +1722,7 @@ void org_example_AMDMapperProbe::r27RxExport() {
 }
 
 void org_example_AMDMapperProbe::r27RxRelease() {
+    if (fR34Rx) { r34RxRelease(); return; }
     R27RxDomain *r = __atomic_load_n(&fR27Rx, __ATOMIC_ACQUIRE);
     if (!r || !r->released || r->held || r->snapshot.liveOwners) return;
     // Called only after the TX backend detached and the original DTE was
@@ -1715,5 +1731,376 @@ void org_example_AMDMapperProbe::r27RxRelease() {
         if (r->command[i] || r->memory[i]) return;
     r->driver->release();
     __atomic_store_n(&fR27Rx, (R27RxDomain *)nullptr, __ATOMIC_RELEASE);
+    IOFree(r, sizeof(*r));
+}
+
+// ================= Round34: ordinary driver-owned receive mappings ================
+// The fixed RX stripes are independent of the dynamic TX allocator. Lucy owns
+// each MD/Cmd and mbuf; Bind routes its standard IOKit calls here. A completed
+// slot can retire/remap while other slots keep processing DMA.
+bool org_example_AMDMapperProbe::r34RxCandidate(
+    IOMemoryDescriptor *memory, IODMACommand *command) const {
+    const R34RxDomain *r = __atomic_load_n(&fR34Rx, __ATOMIC_ACQUIRE);
+    if (!r) return false;
+    for (UInt32 i = 0; i < r34rx::kCount; ++i)
+        if ((memory && memory == __atomic_load_n(&r->memory[i], __ATOMIC_ACQUIRE)) ||
+            (command && command == __atomic_load_n(&r->command[i], __ATOMIC_ACQUIRE)))
+            return true;
+    return false;
+}
+
+int org_example_AMDMapperProbe::r34RxCallback(void *context, r34rx::Binding *b) {
+    if (!context) return kIOReturnBadArgument;
+    return static_cast<org_example_AMDMapperProbe *>(context)->r34RxOperation(b);
+}
+
+IOReturn org_example_AMDMapperProbe::r34RxOperation(r34rx::Binding *b) {
+    R17Domain *d = fR17;
+    R34RxDomain *r = __atomic_load_n(&fR34Rx, __ATOMIC_ACQUIRE);
+    if (!d || !r || !b || b->version != r34rx::kVersion ||
+        b->bytes != sizeof(*b) || b->slot >= r34rx::kCount)
+        return kIOReturnBadArgument;
+    IOLockLock(d->lock);
+    auto &s = r->snapshot;
+    auto &w = s.slots[b->slot].last;
+    const bool live = (w.flags & r34rx::kMapPublished) &&
+                      !(w.flags & r34rx::kMapUnmapped);
+    IOReturn result = kIOReturnBadArgument;
+    if (b->op == r34rx::kBind) {
+        if (!b->memory || !b->command || r->memory[b->slot] ||
+            r->command[b->slot] || r->released) goto done;
+        __atomic_store_n(&r->memory[b->slot],
+            static_cast<IOMemoryDescriptor *>(b->memory), __ATOMIC_RELEASE);
+        __atomic_store_n(&r->command[b->slot],
+            static_cast<IODMACommand *>(b->command), __ATOMIC_RELEASE);
+        ++s.boundPairs;
+        result = kIOReturnSuccess;
+    } else if (b->op == r34rx::kRead) {
+        b->out = w;
+        result = kIOReturnSuccess;
+    } else if (b->op == r34rx::kUnbind) {
+        if (live || !r->memory[b->slot] || !r->command[b->slot]) goto done;
+        __atomic_store_n(&r->memory[b->slot], (IOMemoryDescriptor *)nullptr,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&r->command[b->slot], (IODMACommand *)nullptr,
+                         __ATOMIC_RELEASE);
+        --s.boundPairs;
+        result = kIOReturnSuccess;
+    } else if (b->op == r34rx::kCover) {
+        ++s.coverCalls;
+        if (live || !b->pa || b->length != r34rx::kCapacity ||
+            !d->installed || !d->commandOwned) goto coverFailed;
+        {
+            // Stop returns the CURRENT native mbuf to physical DMA, which can
+            // differ from the bootstrap pool. Confirm its identity mapping
+            // before Lucy writes physical OWN. Keep RX accounting separate.
+            amdtx::Segment input = {b->pa, b->length, 0};
+            amdsparse::Arena a = {d->pt, d->ptBase,
+                (unsigned)(d->ptBytes / 4096ULL), d->coverNext,
+                d->rootLevel, d->ptBase, 0, 0, nullptr};
+            amdtx::CoverResult cr;
+            if (!amdtx::coverIdentity(a, M2B2_IDENTITY_LIMIT, &input, 1, cr))
+                goto coverFailed;
+            d->coverNext = a.next;
+            if (cr.pages || cr.chunks || cr.leaves) {
+                r17domain::Command rec = {};
+                OSSynchronizeIO();
+                if (!r17Invalidate(d->mmio, d->command, rec,
+                                   "r34-rx-physical-restore")) {
+                    d->accepting = false;
+                    goto coverFailed;
+                }
+            }
+            ++s.coverOk;
+            result = kIOReturnSuccess;
+            goto done;
+        }
+coverFailed:
+        ++s.coverFailed;
+        s.flags |= r34rx::kFlagCoverFailed;
+        result = kIOReturnIOError;
+    }
+done:
+    IOLockUnlock(d->lock);
+    return result;
+}
+
+IOReturn org_example_AMDMapperProbe::r34RxMap(
+    IOMemoryDescriptor *memory, uint64_t descriptorOffset, uint64_t length,
+    uint32_t mapOptions, const IODMAMapSpecification *mapSpecification,
+    IODMACommand *dmaCommand, const IODMAMapPageList *pageList,
+    uint64_t *mapAddress, uint64_t *mapLength) {
+    (void)mapSpecification;
+    if (mapAddress) *mapAddress = 0;
+    if (mapLength) *mapLength = 0;
+    R17Domain *d = fR17;
+    R34RxDomain *r = __atomic_load_n(&fR34Rx, __ATOMIC_ACQUIRE);
+    if (!d || !r) return kIOReturnNotReady;
+    IOLockLock(d->lock);
+    auto &s = r->snapshot;
+    ++s.mapCalls;
+    UInt32 slot = r34rx::kCount;
+    IOReturn result = kIOReturnBadArgument;
+    for (UInt32 i = 0; i < r34rx::kCount; ++i)
+        if (memory && dmaCommand && memory == r->memory[i] &&
+            dmaCommand == r->command[i]) { slot = i; break; }
+    if (slot == r34rx::kCount || !mapAddress || !mapLength || descriptorOffset ||
+        length != r34rx::kCapacity || !(mapOptions & kIODMAMapWriteAccess) ||
+        (mapOptions & (kIODMAMapFixedAddress | kIODMAMapPhysicallyContiguous)))
+        goto done;
+    if (!d->installed || !d->stdMode || !d->commandOwned || !d->accepting ||
+        d->stdMapper != (void *)this || r->released) {
+        result = kIOReturnNotReady; goto done;
+    }
+    {
+        auto &entry = s.slots[slot];
+        auto &w = entry.last;
+        if ((w.flags & r34rx::kMapPublished) && !(w.flags & r34rx::kMapUnmapped))
+            goto done;
+        const ProbeLayout L = probeLayout(memory, 0, length, 1);
+        if (L.error || L.runs != 1 || L.totalBytes != length ||
+            !L.pages || L.pages > r34rx::kPagesPerSlot ||
+            (pageList && pageList->pageOffset != L.firstOffset)) goto done;
+        const UInt32 first = amdtx::kRxFirstPage + slot * r34rx::kPagesPerSlot;
+        volatile UInt64 *table = d->iovaL1[first / 512];
+        if (!table) { result = kIOReturnNotReady; goto done; }
+        volatile UInt64 *leaves = table + first % 512;
+        for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j)
+            if (leaves[j]) { result = kIOReturnBusy; goto done; }
+        bzero(&w, sizeof(w));
+        w.generation = (UInt64)entry.mapCount + 1;
+        w.memory = (UInt64)(uintptr_t)memory;
+        w.command = (UInt64)(uintptr_t)dmaCommand;
+        w.pa = L.run[0].pa;
+        w.iova = r34rx::kIovaBase + slot * r34rx::kPagesPerSlot * 4096ULL + L.firstOffset;
+        w.mapLength = length; w.slot = slot; w.pages = L.pages;
+        w.mapOptions = mapOptions;
+        w.unmapResult = (UInt32)kIOReturnNotReady;
+        for (UInt32 j = 0; j < w.pages; ++j)
+            leaves[j] = amdpte::makeDefaultLeaf(1,
+                (w.pa & ~4095ULL) + j * 4096ULL, amdpte::PTE_IR | amdpte::PTE_IW);
+        OSSynchronizeIO();
+        w.tMapPublish = mach_absolute_time();
+        w.flags = r34rx::kMapPublished;
+        ++s.liveOwners;
+        for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j) w.mapPte[j] = leaves[j];
+        if (!r17Invalidate(d->mmio, d->command, w.mapCommand, "r34-rx-map")) {
+            d->accepting = false; result = kIOReturnIOError; goto done;
+        }
+        w.tMapInv = w.mapCommand.tComplete;
+        w.flags |= r34rx::kMapInvalidated;
+        *mapAddress = w.iova; *mapLength = w.mapLength;
+        ++entry.mapCount; ++s.mapOk;
+        result = kIOReturnSuccess;
+    }
+done:
+    if (slot < r34rx::kCount) s.slots[slot].last.mapResult = (UInt32)result;
+    if (result != kIOReturnSuccess) { ++s.mapRejects; s.flags |= r34rx::kFlagMapFailed; }
+    IOLockUnlock(d->lock);
+    return result;
+}
+
+IOReturn org_example_AMDMapperProbe::r34RxUnmap(
+    IOMemoryDescriptor *memory, IODMACommand *dmaCommand,
+    uint64_t mapAddress, uint64_t mapLength) {
+    R17Domain *d = fR17;
+    R34RxDomain *r = __atomic_load_n(&fR34Rx, __ATOMIC_ACQUIRE);
+    if (!d || !r) return kIOReturnNotReady;
+    IOLockLock(d->lock);
+    auto &s = r->snapshot;
+    ++s.unmapCalls;
+    UInt32 slot = r34rx::kCount;
+    IOReturn result = kIOReturnBadArgument;
+    for (UInt32 i = 0; i < r34rx::kCount; ++i)
+        if (memory && dmaCommand && memory == r->memory[i] &&
+            dmaCommand == r->command[i]) { slot = i; break; }
+    if (slot == r34rx::kCount || !d->installed || !d->commandOwned) goto done;
+    {
+        auto &entry = s.slots[slot];
+        auto &w = entry.last;
+        if ((w.flags & (r34rx::kMapInvalidated | r34rx::kMapUnmapped)) !=
+            r34rx::kMapInvalidated || mapAddress != w.iova || mapLength != w.mapLength)
+            goto done;
+        const UInt32 first = amdtx::kRxFirstPage + slot * r34rx::kPagesPerSlot;
+        volatile UInt64 *table = d->iovaL1[first / 512];
+        if (!table) { result = kIOReturnNotReady; goto done; }
+        volatile UInt64 *leaves = table + first % 512;
+        for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j) leaves[j] = 0;
+        OSSynchronizeIO();
+        w.tUnmapPublish = mach_absolute_time();
+        for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j) w.clearPte[j] = leaves[j];
+        if (!r17Invalidate(d->mmio, d->command, w.unmapCommand, "r34-rx-unmap")) {
+            d->accepting = false; result = kIOReturnIOError; goto done;
+        }
+        w.tUnmapInv = w.unmapCommand.tComplete;
+        w.flags |= r34rx::kMapUnmapped;
+        w.unmapResult = kIOReturnSuccess;
+        --s.liveOwners; ++s.unmapOk; ++entry.unmapCount;
+        // Generation one was prepared before replacing physical ring entries.
+        // Retain the first actual IOVA generation, then keep last authoritative.
+        if (w.generation > 1 && entry.sampleCount < r34rx::kSamples)
+            entry.samples[entry.sampleCount++] = w;
+        result = kIOReturnSuccess;
+    }
+done:
+    if (slot < r34rx::kCount) s.slots[slot].last.unmapResult = (UInt32)result;
+    if (result != kIOReturnSuccess) s.flags |= r34rx::kFlagUnmapFailed;
+    IOLockUnlock(d->lock);
+    return result;
+}
+
+IOReturn org_example_AMDMapperProbe::r34RxControl(UInt32 op) {
+    R34RxDomain *r = fR34Rx;
+    if (!r || !r->driver) return kIOReturnNotReady;
+    auto &c = r->control;
+    c.version = r34rx::kVersion; c.bytes = sizeof(c); c.op = op;
+    const OSSymbol *sym = OSSymbol::withCString(r34rx::kFunctionName);
+    if (!sym) return kIOReturnNoMemory;
+    IOReturn result = kIOReturnBusy;
+    for (UInt32 attempt = 0; attempt < 100; ++attempt) {
+        result = r->driver->callPlatformFunction(sym, false, &c, nullptr, nullptr, nullptr);
+        if (result != kIOReturnBusy || op == r34rx::kDrain) break;
+        IOSleep(1);
+    }
+    sym->release();
+    setHexProperty(this, "m2-3h-rx-last-op", op);
+    setHexProperty(this, "m2-3h-rx-last-kr", (UInt32)result);
+    return result;
+}
+
+bool org_example_AMDMapperProbe::r34RxBegin() {
+    if (fR34Rx || fR27Rx || !r18StdReady() || !fR17->commandOwned || !fR15Service)
+        return false;
+    R27ClientContext client(this, fR31Session ? nullptr : fM22b2Timer);
+    R34RxDomain *r = (R34RxDomain *)IOMalloc(sizeof(R34RxDomain));
+    if (!r) return false;
+    bzero(r, sizeof(*r));
+    r->driver = fR15Service; r->driver->retain();
+    r->snapshot.version = r34rx::kVersion;
+    r->snapshot.bytes = sizeof(r->snapshot);
+    r->snapshot.count = r34rx::kCount;
+    r->control.poolId = fR15Request.poolId;
+    r->control.expectedGeneration = fR15Request.expectedGeneration;
+    r->control.businessToken = fR15Request.reserved;
+    r->control.mapper = this; r->control.context = this;
+    r->control.callback = &org_example_AMDMapperProbe::r34RxCallback;
+    __atomic_store_n(&fR34Rx, r, __ATOMIC_RELEASE);
+    setProperty("m2-3h-rx-mode", "driver-owned-native-remap1024");
+    setProperty("m2-3h-rx-ready", "no");
+    setProperty("m2-3h-rx-state", "preparing");
+    if (r34RxControl(r34rx::kInstall) != kIOReturnSuccess) {
+        r->snapshot.flags |= r34rx::kFlagMapFailed;
+        setProperty("m2-3h-rx-state", "FAIL-native-install");
+        r34RxExport(); return false;
+    }
+    r->installed = true;
+    // Install stamps this after the driver's 1024 initial prepares complete.
+    fR15InvTicks = r->control.out.tInstalled;
+    setProperty("m2-3h-rx-state", "installed-awaiting-authorize");
+    r34RxExport();
+    return true;
+}
+
+void org_example_AMDMapperProbe::r34RxReady() {
+    R34RxDomain *r = fR34Rx;
+    if (!r || !r->installed) return;
+    r->snapshot.ready = 1;
+    r->snapshot.tReady = mach_absolute_time();
+    setHexProperty(this, "m2-3o-rx-ready-time", r->snapshot.tReady);
+    setProperty("m2-3h-rx-state", "ready");
+    setProperty("m2-3h-rx-ready", "yes");
+    r34RxExport();
+}
+
+bool org_example_AMDMapperProbe::r34RxFinish(UInt32 budgetMs) {
+    R34RxDomain *r = fR34Rx;
+    if (!r || r->released) return true;
+    R27ClientContext client(this, fR31Session ? nullptr : fM22b2Timer);
+    setProperty("m2-3h-rx-ready", "no");
+    if (r34RxControl(r34rx::kDisarm) != kIOReturnSuccess) goto failed;
+    setProperty("m2-3h-rx-state", "draining");
+    setHexProperty(this, "m2-3h-rx-drain-budget-ms", budgetMs);
+    {
+        const UInt64 start = m2b2NowNS();
+        bool drained = false;
+        do {
+            const IOReturn kr = r34RxControl(r34rx::kDrain);
+            const auto &s = r->control.out;
+            if (kr == kIOReturnSuccess && s.version == r34rx::kVersion &&
+                s.bytes == sizeof(s) && s.state == r34rx::kDrained && !s.flags &&
+                !s.pendingPosted && s.posted == s.completed &&
+                s.restored == r34rx::kCount && s.maps == s.unmaps &&
+                !r->snapshot.liveOwners) { drained = true; break; }
+            if (kr != kIOReturnSuccess && kr != kIOReturnBusy) break;
+            IOSleep(10);
+        } while (m2b2ToMS(m2b2NowNS() - start) < budgetMs);
+        if (!drained) goto failed;
+    }
+    r->snapshot.tDrained = mach_absolute_time();
+    if (r34RxControl(r34rx::kRelease) != kIOReturnSuccess ||
+        r->snapshot.boundPairs || r->snapshot.liveOwners) goto failed;
+    r->released = true;
+    setProperty("m2-3h-rx-state", "drained-and-unmapped");
+    r34RxExport();
+    return true;
+failed:
+    setProperty("m2-3h-rx-state", "PINNED-native-RX-not-drained");
+    r34RxExport();
+    return false;
+}
+
+bool org_example_AMDMapperProbe::r34RxTailDone(UInt32 budgetMs) {
+    R34RxDomain *r = fR34Rx;
+    if (!r || !r->snapshot.ready) return true;
+    R27ClientContext client(this, fR31Session ? nullptr : fM22b2Timer);
+    setProperty("m2-3i-tail-state", "waiting");
+    const UInt64 start = m2b2NowNS();
+    do {
+        const IOReturn kr = r34RxControl(r34rx::kSnapshot);
+        const auto &s = r->control.out;
+        if (kr != kIOReturnSuccess || s.state != r34rx::kReleased || s.flags ||
+            s.pendingPosted || s.businessToken != fR15Request.reserved) break;
+        if (s.tailSeq && s.tailSeq <= r34rx::kTailMax) {
+            setHexProperty(this, "m2-3i-tail-seq", s.tailSeq);
+            setHexProperty(this, "m2-3i-tail-confirmed-time", m2b2NowNS());
+            setProperty("m2-3i-tail-state", "confirmed");
+            r34RxExport(); return true;
+        }
+        IOSleep(10);
+    } while (m2b2ToMS(m2b2NowNS() - start) < budgetMs);
+    setProperty("m2-3i-tail-state", "PINNED-tail-timeout");
+    r34RxExport(); return false;
+}
+
+void org_example_AMDMapperProbe::r34RxExport() {
+    R34RxDomain *r = fR34Rx;
+    if (!r) return;
+    IOLockLock(fR17->lock);
+    OSData *raw = OSData::withBytes(&r->snapshot, sizeof(r->snapshot));
+    IOLockUnlock(fR17->lock);
+    if (raw) { setProperty("m2-3o-rx-backend-raw", raw); raw->release(); }
+    raw = OSData::withBytes(&r->control.out, sizeof(r->control.out));
+    if (raw) { setProperty("m2-3o-rx-driver-raw", raw); raw->release(); }
+    setHexProperty(this, "m2-3o-rx-version", r34rx::kVersion);
+    setHexProperty(this, "m2-3h-rx-map-ok", r->snapshot.mapOk);
+    setHexProperty(this, "m2-3h-rx-unmap-ok", r->snapshot.unmapOk);
+    setHexProperty(this, "m2-3h-rx-live-owners", r->snapshot.liveOwners);
+    setHexProperty(this, "m2-3h-rx-backend-flags", r->snapshot.flags);
+    setHexProperty(this, "m2-3h-rx-posted", r->control.out.posted);
+    setHexProperty(this, "m2-3h-rx-completed", r->control.out.completed);
+    setHexProperty(this, "m2-3h-rx-restored", r->control.out.restored);
+    setHexProperty(this, "m2-3h-rx-pending", r->control.out.pendingPosted);
+    setHexProperty(this, "m2-3h-rx-flags", r->control.out.flags);
+    setHexProperty(this, "m2-3o-rx-replacements", r->control.out.replaced);
+    setHexProperty(this, "m2-3o-rx-bound-pairs", r->snapshot.boundPairs);
+    setHexProperty(this, "m2-3o-rx-physical-cover-ok", r->snapshot.coverOk);
+}
+
+void org_example_AMDMapperProbe::r34RxRelease() {
+    R34RxDomain *r = fR34Rx;
+    if (!r || !r->released || r->snapshot.liveOwners || r->snapshot.boundPairs) return;
+    // Lucy has completed/unbound its objects; final OSData copies own evidence.
+    r->driver->release();
+    __atomic_store_n(&fR34Rx, (R34RxDomain *)nullptr, __ATOMIC_RELEASE);
     IOFree(r, sizeof(*r));
 }

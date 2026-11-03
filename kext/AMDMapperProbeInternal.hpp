@@ -526,7 +526,8 @@ static inline const char *kNicPaths[] = {
 
 // Round30: the 64GiB subtree needs one L2 and five L1 tables for TX16 +
 // RX1024*2 pages. Keep two more pages for the existing identity cover path.
-#define M2B2_IOVA_RESERVED_PAGES 8u
+// Six IOVA tree pages plus a small RX physical-restore coverage budget.
+#define M2B2_IOVA_RESERVED_PAGES 70u
 
 // PTE 位定义（amd_iommu_types.h:376-380）
 #define M2B2_PTE_PR             (1ULL << 0)

@@ -1,6 +1,47 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round33 / service-owned device domain
+## Current Round34 / driver-owned RX streaming mappings
+
+Base: `648e729c73a345cdee3899ca634ee32f057c8d78`.
+Candidate: Lucy **1.1.219** / Probe **0.43.0**. TX retains domain4/native7/std5.
+
+Round33 passed the normal hardware run and all 14 checks: setup returned before
+both traffic phases, the same service-owned domain survived 125.159 s idle,
+8192 replies completed, and a separate teardown worker restored all resources.
+Round34 advances the receive-buffer data path:
+
+- Lucy owns one reusable memory-descriptor/DMA-command pair per RX ring slot.
+- Completion ends the old mapping before normal `replaceOrCopyPacket` processing.
+  The current mbuf is then mapped again, and confirmed invalidation precedes OWN.
+- Native replacement uses the driver's normal RX pool. The experimental R15
+  object remains only for bootstrap; its ring mbuf ownership is transferred to
+  Lucy and its spare-buffer cycling is no longer the active receive path.
+- Stop restores each slot to its current mbuf's physical address, after ensuring
+  identity coverage. The existing R28T/R29D, TX drain and register restore remain.
+- The same normal 4096 + 125 s idle + 4096 run proves real replacement/remapping
+  and final release. The protocol already carries full-MTU packets; no artificial
+  replacement trigger or additional traffic matrix is required.
+
+Keep the source in the fixed `repos/AMDIOMMU` checkout and use Git branches and
+commits for rounds. On the Mac, reuse its existing checkout and MacKernelSDK.
+Prepare pristine upstream files from `639144d1f284a9fee222a518691b01494f5e265d`
+in the reusable `_scratch/lucy-upstream` directory, then run:
+
+```sh
+sh tools/r27/build.sh _scratch/lucy-upstream
+```
+
+Generation selects `--tx 21 --rx 34`. Run defaults are `runs/r34` and
+`org.example.round34load`. The `R31Stop` RPC and service-owned domain continue.
+The build uses focused existing checks; this round does not add unit tests or
+expand failure-injection coverage.
+
+**Round34 hardware acceptance is pending.** The patch's host checks do not
+replace a complete Mac SDK build or actual NIC/DMA measurement. This step uses
+per-slot streaming mappings, not upstream's 64-by-16 RX batch optimization;
+bootstrap identity mappings still remain.
+
+## Historical Round33 / service-owned device domain
 
 Base: `fc0da752550e08c497fe8c105f4056655b68b8b9`.
 Candidate: Lucy **1.1.218** / Probe **0.42.0**; domain4/native7/std5, RX4, pool2.

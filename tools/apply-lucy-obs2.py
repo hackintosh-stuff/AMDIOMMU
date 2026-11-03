@@ -72,8 +72,14 @@ setup worker. Select --tx 21 --rx 33 (--rx33 also works);
 --rx 27..32 alias the same canonical cyclic template. The original physical
 RX15 path remains the default.
 
+Round 34 uses driver-owned virtual MD/command pairs for the normal RX
+replaceOrCopyPacket path. Each completed slot unmaps before mbuf delivery and
+remaps its current buffer before the next OWN store. Stop restores the current
+physical ring before release. R15 remains a bootstrap allocation snapshot; its
+spares do not participate in this receive path. Select --tx 21 --rx 34.
+
 Usage:
-    py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33]
+    py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33|34]
 Exit 0 = applied (or already applied). Non-zero = refused, with the reason.
 """
 import os
@@ -2119,6 +2125,7 @@ _RX_BIZ_BASE = RX_BIZ_NEW
 _RX_REARM_BASE = RX_NEW
 _RX_DECL_BASE = RX_DECL_NEW
 _RX_CAPTURE_BASE = RX_CAPTURE_NEW
+_POOL_RX_BASE = POOL_RX_NEW
 HPP_INCLUDE_NEW += ''.join('#include "%s"\n' % n for n in TXMAP_NAMES)
 HPP_MEMBERS_NEW += TX['MEMBERS']
 
@@ -2142,11 +2149,12 @@ def select_tx(round_no):
 def select_rx(round_no):
     """Opt in to standard-mapped RX without rewriting historical TX."""
     global RX_SELECT, RX, RXMAP_NAMES, POOL_METHODS, RX_BIZ_NEW
-    global RX_NEW, RX_DECL_NEW, RX_CAPTURE_NEW
-    if round_no not in ('15', '27', '28', '29', '30', '31', '32', '33'):
+    global RX_NEW, RX_DECL_NEW, RX_CAPTURE_NEW, POOL_RX_NEW
+    if round_no not in ('15', '27', '28', '29', '30', '31', '32', '33', '34'):
         raise SystemExit('unsupported RX module round: %r' % (round_no,))
     RX_SELECT = round_no
-    RX = runpy.run_path(os.path.join(HERE, 'r27', 'driver-template.py')) if round_no in ('27', '28', '29', '30', '31', '32', '33') else None
+    RX = runpy.run_path(os.path.join(HERE, 'r34' if round_no == '34' else 'r27',
+                                   'driver-template.py')) if round_no != '15' else None
     RXMAP_NAMES = RX['HEADERS'] if RX else []
     POOL_METHODS = RX['pool_methods'](_POOL_METHODS_BASE) if RX else _POOL_METHODS_BASE
     if RX:
@@ -2163,6 +2171,7 @@ def select_rx(round_no):
     RX_NEW = RX['rx_rearm'](_RX_REARM_BASE) if RX else _RX_REARM_BASE
     RX_DECL_NEW = RX['rx_decl'](_RX_DECL_BASE) if RX else _RX_DECL_BASE
     RX_CAPTURE_NEW = RX['rx_capture'](_RX_CAPTURE_BASE) if RX else _RX_CAPTURE_BASE
+    POOL_RX_NEW = RX['pool_receive'](_POOL_RX_BASE) if RX and 'pool_receive' in RX else _POOL_RX_BASE
     select_tx(TX_SELECT)
     return RX
 
@@ -2267,7 +2276,9 @@ def body_is_current(cpp_text):
                  'r15PoolCopy', 'r15PoolRearm', 'r15PoolPosted',
                  'r15PoolInvalidate', 'r15PoolFree', 'r15PoolAction',
                  'r15PoolObserve') + (('r27RxAction', 'r27RxControl',
-                 'r27RxRearm', 'r27RxPosted', 'r27RxActive', 'r27RxParse') if RX else ()):
+                 'r27RxRearm', 'r27RxPosted', 'r27RxActive', 'r27RxParse') if RX else ()) + (('r34RxBinding', 'r34RxMapSlot',
+                 'r34RxUnmapSlot', 'r34RxComplete', 'r34RxRearm', 'r34RxPosted',
+                 'r34RxControl', 'r34RxAction', 'r34RxFree', 'r34RxParse') if RX_SELECT == '34' else ()):
         m = re.search(r'^(?:void|bool|IOReturn|mbuf_t) RTL8125::%s\(.*?\)\s*\{' % name,
                       OBS_METHODS + RXPOST_METHODS + POOL_METHODS, re.M | re.S)
         if not m:
@@ -2340,14 +2351,14 @@ def main():
         if a.startswith('--rx'):
             rx = a[4:]; i += 1; continue
         positional.append(a); i += 1
-    if len(positional) != 1 or (tx is not None and tx not in TXR) or (rx is not None and rx not in ('15', '27', '28', '29', '30', '31', '32', '33')):
-        print("usage: apply-lucy-obs2.py <RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33]")
+    if len(positional) != 1 or (tx is not None and tx not in TXR) or (rx is not None and rx not in ('15', '27', '28', '29', '30', '31', '32', '33', '34')):
+        print("usage: apply-lucy-obs2.py <RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33|34]")
         return 2
     if tx is not None:
         select_tx(tx)
     if rx is not None:
         select_rx(rx)
-    if RX_SELECT in ('27', '28', '29', '30', '31', '32', '33') and TX_SELECT != '21':
+    if RX_SELECT in ('27', '28', '29', '30', '31', '32', '33', '34') and TX_SELECT != '21':
         print("refused: cyclic RX requires the current --tx 21 module")
         return 2
     root = positional[0]

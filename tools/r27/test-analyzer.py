@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Focused Round33 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round34 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
 The positive fixture covers all 1024 RX map/post/done/restore/unmap lifecycles,
-including one matched business receive, and both aligned/unaligned RX pages.
+including normal remapping, one matched business receive, and aligned/unaligned RX pages.
 Rejection cases cover missing restoration and corrupted RX command evidence.
 """
 import importlib.util
@@ -35,14 +35,14 @@ legacy = analyzer.A
 
 TOKEN = 7
 PEER = ('127.0.0.2', 9110)
-ABI_CHECK = 'capture-ABI-domain4-native7-std5-rx4'
+ABI_CHECK = 'capture-ABI-domain4-native7-std5-nativeRX1'
 COUNTER_CHECK = 'all-TX-standard-mode2-cumulative-and-unmarked-no-cover'
 LOG_CHECK = 'full8192-bytes-no-retry-no-duplicate-credit'
 CMD_CHECK = 'original8192-command-ring-wraps-and-postwrap-completion'
 HISTORY_CHECK = 'retained32-standard-handles-PTE-and-retirement-lifecycles'
 EXIT_CHECK = 'zero-pending-owners-pins-ring-and-no-device-page-fault'
-RX_MAP_CHECK = 'rx1024-standard-mapping-PTE-and-confirmed-unmap'
-RX_DONE_CHECK = 'rx1024-real-DMA-restoration-and-application-correlation'
+RX_MAP_CHECK = 'rx1024-driver-owned-MD-Cmd-repeated-mapping-and-unmap'
+RX_DONE_CHECK = 'rx1024-native-replacement-DMA-and-current-buffer-restore'
 SESSION_CHECK = 'service-owned-domain-after-setup-exit-125s-idle-stop-and-restore'
 ALLOCATION_CHECK = 'dynamic-IOVA-wide-map-eight-live-and-confirmed-reuse'
 IDLE_NS = 125_000_000_000
@@ -63,22 +63,12 @@ struct IOService;
 #include "RTL812xTxMapNative.hpp"
 #include "RTL812xTxMapStd.hpp"
 #include "AMDAliveTxDomainNative.hpp"
-#include "RTL812xRxMap.hpp"
+#include "RTL812xRxNative.hpp"
 #include <cstddef>
-static_assert(sizeof(r27rx::Cycle) == 40, "Cycle ABI2 size");
-static_assert(sizeof(r27rx::Witness) == 272, "Witness ABI2 size");
-static_assert(sizeof(r27rx::Snapshot) == 311376, "Snapshot ABI4 size");
-static_assert(sizeof(r27rx::Request) == 344192, "Request ABI4 size");
-static_assert(offsetof(r27rx::Witness, tLastPost) == 80, "final timestamps offset");
-static_assert(offsetof(r27rx::Witness, samples) == 112, "cycle samples offset");
-static_assert(offsetof(r27rx::Snapshot, maps) == 80, "RX maps offset");
-static_assert(offsetof(r27rx::Snapshot, witnesses) == 32848, "RX witnesses offset");
-static_assert(offsetof(r27rx::BackendSnapshot, records) == 64, "RX backend records offset");
-static_assert(offsetof(r27rx::MapRecord, mapPte) == 56, "RX map PTE offset");
-static_assert(offsetof(r27rx::MapRecord, clearPte) == 72, "RX clear PTE offset");
-static_assert(offsetof(r27rx::MapRecord, entryId) == 88, "RX scalar offset");
-static_assert(offsetof(r27rx::MapRecord, mapCommand) == 120, "RX map command offset");
-static_assert(offsetof(r27rx::MapRecord, unmapCommand) == 160, "RX unmap command offset");
+static_assert(sizeof(r34rx::Snapshot) == 270432, "native RX driver snapshot");
+static_assert(sizeof(r34rx::BackendSnapshot) == 475216, "native RX backend snapshot");
+static_assert(offsetof(r34rx::Snapshot, slots) == 96, "native RX driver prefix");
+static_assert(offsetof(r34rx::BackendSnapshot, slots) == 80, "native RX backend prefix");
 
 static uint64_t sessionTime(uint64_t value) {
     return value >= 2152 ? value + 125000000000ULL : value;
@@ -106,7 +96,7 @@ int main(int argc, char **argv) {
     d.ptBytes = sizeof(pt); d.rootLevel = 3; d.devid = 0x0200; d.domid = 7;
     d.historyTotal = d.mapsTotal = d.retiresTotal = 10249; d.historyStart = 10217;
     d.commandCapacity = _COMMAND_RING_BYTES_ / 16;
-    d.commandSubmits = d.commandCompleted = d.completionSequence = 2 * (10240 + r27rx::kCount + 9) + 3;
+    d.commandSubmits = d.commandCompleted = d.completionSequence = 2 * (10240 + 5 * r34rx::kCount + 9) + 3;
     d.commandWraps = d.commandSubmits * 2 / d.commandCapacity;
     d.commandPostWrapCompleted = d.commandCompleted - (d.commandCapacity / 2 - 1);
     d.slotsUsed = 65535; d.maxLiveOwners = 16;
@@ -164,7 +154,7 @@ int main(int argc, char **argv) {
         nextPage += n;
         // Sixteen variable-sized allocations coexist, retire, then are reused.
         const uint64_t t = 3000 + (i / 16) * 100 + i % 16;
-        const uint64_t commandBase = 20419 + r27rx::kCount + 18 + (i / 16) * 32;
+        const uint64_t commandBase = 20419 + r34rx::kCount + 18 + (i / 16) * 32;
         auto &w = d.records[i];
         // Each history may have its own physical ring permutation. Handles
         // must perform the join; equal array indices must not be assumed.
@@ -215,53 +205,58 @@ int main(int argc, char **argv) {
         }
         u.mapAddress = u.segments[0].address;
     }
-    r27rx::Snapshot rx{};
-    r27rx::BackendSnapshot rb{};
-    rx.version = r27rx::kVersion; rx.bytes = sizeof(rx);
-    rx.state = r27rx::kReleased; rx.generation = 1; rx.poolId = 0x275200;
-    rx.mapCount = rx.restored = r27rx::kCount;
-    rx.posted = rx.completed = 4 * r27rx::kCount;
-    rx.businessToken = 7; rx.tailSeq = r27rx::kCount; rx.tInstalled = 400; rx.tDisarmed = 8800;
-    rx.tLastRestore = 8865;
-    rb.version = r27rx::kVersion; rb.bytes = sizeof(rb);
-    rb.count = rb.mapCalls = rb.mapOk = rb.unmapCalls = rb.unmapOk = r27rx::kCount;
+    r34rx::Snapshot rx{};
+    r34rx::BackendSnapshot rb{};
+    rx.version = r34rx::kVersion; rx.bytes = sizeof(rx);
+    rx.state = r34rx::kReleased; rx.poolId = 0x345200;
+    rx.slotCount = rx.restored = r34rx::kCount;
+    rx.maps = rx.unmaps = 5 * r34rx::kCount;
+    rx.posted = rx.completed = 4 * r34rx::kCount;
+    rx.replaced = 2 * r34rx::kCount;
+    rx.businessToken = 7; rx.tailSeq = r34rx::kCount;
+    rx.tInstalled = 400; rx.tDisarmed = 8800; rx.tLastRestore = 8866;
+    rb.version = r34rx::kVersion; rb.bytes = sizeof(rb); rb.count = r34rx::kCount;
+    rb.mapCalls = rb.mapOk = rb.unmapCalls = rb.unmapOk = rx.maps;
+    rb.coverCalls = rb.coverOk = r34rx::kCount;
     rb.ready = 1; rb.tReady = 410; rb.tDrained = 8870;
-    for (uint32_t i = 0; i < r27rx::kCount; ++i) {
-        auto &r = rb.records[i];
-        r.pa = 0x90000000ULL + i * 0x3000 + (i % 2 ? 128 : 0);
-        r.iova = r27rx::kIovaBase + i * 8192 + (r.pa & 4095);
-        r.entryId = 1024 + i; r.capacity = r.mapLength = r27rx::kCapacity;
-        r.mapOptions = 0x2; // reference/IOMemoryDescriptor.sdk.h: kIODMAMapWriteAccess
-        r.pages = (r.pa & 4095) ? 2 : 1;
-        r.tMapPublish = 200 + i / 16; r.tMapInv = 201 + i / 16;
-        r.tUnmapPublish = 8880 + i / 16; r.tUnmapInv = 8900 + i / 16;
-        r.mapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
-                        19 + i, 19 + i, r.tMapInv};
-        r.unmapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
-                          20502 + r27rx::kCount + i, 20502 + r27rx::kCount + i, r.tUnmapInv};
-        r.flags = r27rx::kMapRegistered | r27rx::kMapPublished |
-                  r27rx::kMapInvalidated | r27rx::kMapUnmapped | r27rx::kMapReleased;
-        for (uint32_t j = 0; j < r.pages; ++j)
-            r.mapPte[j] = ((r.pa & ~4095ULL) + j * 4096) | perm;
-        rx.maps[i] = {r.pa, r.iova, r.tMapInv, r.entryId, r.capacity};
-        auto &w = rx.witnesses[i];
-        w.originalPA = 0xa0000000ULL + i * 8192;
-        w.sparePA = r.pa; w.iova = r.iova; w.slot = i; w.entryId = r.entryId;
-        w.flags = r27rx::kWitnessPosted | r27rx::kWitnessDone | r27rx::kWitnessRestored;
-        w.tPost = 1200 + i; w.tDone = w.tLastDone = 4500 + i;
-        w.tLastPost = 4200 + i; w.tRestoreOwn = 8802 + i / 16;
-        w.postCount = w.doneCount = w.sampleCount = 4; w.reuseCount = 3;
-        w.doneLength = 246; w.doneStatus = w.doneLength;
-        for (uint32_t j = 0; j < 4; ++j) {
-            auto &c = w.samples[j];
-            c.tPost = 1200 + j * 1000 + i;
-            c.tDone = j == 0 ? 1290 + i : 1500 + j * 1000 + i;
-            c.cycle = j + 1; c.flags = 3;
-            c.token = i == 0 && j == 0 ? 7 : 0;
-            c.reqId = i == 0 && j == 0 ? 1025 : 0;
-            c.doneLength = i == 0 && j == 0 ? 78 : 246;
-            c.doneStatus = c.doneLength;
+    for (uint32_t i = 0; i < r34rx::kCount; ++i) {
+        auto &bs = rb.slots[i]; auto &ds = rx.slots[i];
+        bs.mapCount = bs.unmapCount = ds.mapCount = ds.unmapCount = 5;
+        bs.sampleCount = ds.sampleCount = 1;
+        ds.postCount = ds.doneCount = 4; ds.replaceCount = 2;
+        ds.originalPA = 0x80000000ULL + i * 8192;
+        ds.tPhysicalOwn = 8803 + i / 16;
+        for (uint32_t sample = 0; sample < 2; ++sample) {
+            const bool first = sample == 0;
+            auto &r = first ? bs.samples[0] : bs.last;
+            auto &w = first ? ds.samples[0] : ds.last;
+            r.generation = first ? 2 : 5;
+            r.memory = 0xc00000 + i * 256; r.command = 0xd00000 + i * 256;
+            r.pa = (first ? 0x90000000ULL : 0xa0000000ULL) + i * 0x3000 + (i % 2 ? 128 : 0);
+            r.iova = r34rx::kIovaBase + i * 8192 + (r.pa & 4095);
+            r.slot = i; r.mapLength = r34rx::kCapacity; r.mapOptions = 2;
+            r.pages = (r.pa & 4095) ? 2 : 1;
+            r.tMapPublish = first ? 1190 + i : 7000 + i;
+            r.tMapInv = r.tMapPublish + 1;
+            w.tPost = first ? 1200 + i : 7020 + i;
+            w.tDone = first ? 1290 + i : 8801 + i / 16;
+            r.tUnmapPublish = w.tDone; r.tUnmapInv = w.tDone + 1;
+            const uint64_t sequence = (first ? 1000 : 24000) + 2 * i;
+            r.mapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
+                            sequence, sequence, r.tMapInv};
+            r.unmapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
+                              sequence + 1, sequence + 1, r.tUnmapInv};
+            r.flags = 7;
+            for (uint32_t j = 0; j < r.pages; ++j)
+                r.mapPte[j] = ((r.pa & ~4095ULL) + j * 4096) | perm;
+            w.generation = r.generation; w.memory = r.memory; w.command = r.command;
+            w.pa = r.pa; w.iova = r.iova; w.tMapInv = r.tMapInv; w.tUnmapInv = r.tUnmapInv;
+            w.slot = i; w.flags = 7;
+            w.token = first && i == 0 ? 7 : 0; w.reqId = first && i == 0 ? 1025 : 0;
+            w.doneLength = first ? (i == 0 ? 78 : 1518) : 246;
+            w.doneStatus = w.doneLength; w.replaced = first && i != 0;
         }
+        ds.currentPA = ds.last.pa;
     }
     // Shift timestamp fields only; ABI, addresses, counters and protocol stay
     // identical. Both snapshots and real client logs include the idle gap.
@@ -283,21 +278,23 @@ int main(int argc, char **argv) {
     }
     SESSION_TIME(rx.tInstalled); SESSION_TIME(rx.tDisarmed); SESSION_TIME(rx.tLastRestore);
     SESSION_TIME(rb.tReady); SESSION_TIME(rb.tDrained);
-    for (uint32_t i = 0; i < r27rx::kCount; ++i) {
-        SESSION_TIME(rx.maps[i].tMapInv);
-        auto &w = rx.witnesses[i];
-        SESSION_TIME(w.tPost); SESSION_TIME(w.tDone); SESSION_TIME(w.tRestoreOwn);
-        SESSION_TIME(w.tLastPost); SESSION_TIME(w.tLastDone);
-        for (auto &c : w.samples) { SESSION_TIME(c.tPost); SESSION_TIME(c.tDone); }
-        auto &r = rb.records[i];
-        SESSION_TIME(r.tMapPublish); SESSION_TIME(r.tMapInv);
-        SESSION_TIME(r.tUnmapPublish); SESSION_TIME(r.tUnmapInv);
-        SESSION_TIME(r.mapCommand.tComplete); SESSION_TIME(r.unmapCommand.tComplete);
+    for (uint32_t i = 0; i < r34rx::kCount; ++i) {
+        auto &ds = rx.slots[i]; auto &bs = rb.slots[i];
+        SESSION_TIME(ds.tPhysicalOwn);
+        for (uint32_t sample = 0; sample < 2; ++sample) {
+            auto &w = sample ? ds.last : ds.samples[0];
+            auto &r = sample ? bs.last : bs.samples[0];
+            SESSION_TIME(w.tMapInv); SESSION_TIME(w.tPost);
+            SESSION_TIME(w.tDone); SESSION_TIME(w.tUnmapInv);
+            SESSION_TIME(r.tMapPublish); SESSION_TIME(r.tMapInv);
+            SESSION_TIME(r.tUnmapPublish); SESSION_TIME(r.tUnmapInv);
+            SESSION_TIME(r.mapCommand.tComplete); SESSION_TIME(r.unmapCommand.tComplete);
+        }
     }
 #undef SESSION_TIME
-    if (damage == "unrestored") rx.witnesses[r27rx::kCount - 1].flags &= ~r27rx::kWitnessRestored;
-    save(dir, "r27-rx-raw.bin", &rx, sizeof(rx));
-    save(dir, "r27-rx-map-raw.bin", &rb, sizeof(rb));
+    if (damage == "unrestored") rx.slots[r34rx::kCount - 1].tPhysicalOwn = 0;
+    save(dir, "r34-rx-driver.bin", &rx, sizeof(rx));
+    save(dir, "r34-rx-backend.bin", &rb, sizeof(rb));
     save(dir, "r21-domain-raw.bin", &d, sizeof(d));
     save(dir, "r21-driver-raw.bin", &g, sizeof(g));
     save(dir, "r21-std-raw.bin", &s, sizeof(s));
@@ -319,7 +316,7 @@ def properties():
          'm2-3n-teardown-start': session_time(8790),
          'm2-3n-teardown-end': session_time(9055),
          'm2-3l-tx-deadline': 0, 'm2-b2-r15-authorize-deadline': 0,
-         'm2-3h-rx-mode': 'standard-nonidentity-cyclic1024',
+         'm2-3h-rx-mode': 'driver-owned-native-remap1024', 'm2-3o-rx-ready-time': 410,
          'm2-3h-rx-state': 'drained-and-unmapped', 'm2-3h-rx-ready': 'no',
          'm2-b2-t-recovery-start': 9023, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0,
          'm2-3i-tail-state': 'confirmed', 'm2-3i-tail-seq': analyzer.RX_COUNT,
@@ -339,10 +336,10 @@ def properties():
                 'm2-3e-enter-last-inflight', 'm2-3e-enter-last-ring',
                 'm2-3e-exit-last-inflight', 'm2-3e-exit-last-ring'):
         p[key] = 0
-    p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': 22549,
-              'm2-3b-command-completed': 22549, 'm2-3b-command-wraps': 88,
-              'm2-3b-command-post-wrap-completed': 22294,
-              'm2-3b-completion-sequence': 22549,
+    p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': 30741,
+              'm2-3b-command-completed': 30741, 'm2-3b-command-wraps': 120,
+              'm2-3b-command-post-wrap-completed': 30486,
+              'm2-3b-completion-sequence': 30741,
               'm2-b2-window-valid': 'yes', 'm2-b2-win-raw-truncated': 'no',
               'm2-b2-win-status-start': 8, 'm2-b2-win-status-end': 8,
               'm2-3e-enter': 'gate-open-after-dte-and-invalidations',
@@ -559,13 +556,13 @@ class AnalyzerTests(unittest.TestCase):
                          (256, 16, 0))
         self.assertEqual(by_id['ordinary-traffic-before-during-and-three-after'],
                          {'before': 20, 'during': 1024, 'after': 3})
-        self.assertEqual((self.capture / 'r27-rx-raw.bin').stat().st_size, 311376)
-        self.assertEqual((self.capture / 'r27-rx-map-raw.bin').stat().st_size, 204864)
-        self.assertEqual(by_id[RX_MAP_CHECK]['mapped'], 1024)
-        self.assertEqual(by_id[RX_MAP_CHECK]['unmapped'], 1024)
+        self.assertEqual((self.capture / 'r34-rx-driver.bin').stat().st_size, analyzer.RX_DRIVER_BYTES)
+        self.assertEqual((self.capture / 'r34-rx-backend.bin').stat().st_size, analyzer.RX_BACKEND_BYTES)
+        self.assertEqual(by_id[RX_MAP_CHECK]['mapped'], 5120)
+        self.assertEqual(by_id[RX_MAP_CHECK]['unmapped'], 5120)
         self.assertEqual(by_id[RX_MAP_CHECK]['writablePages'], 1536)
         self.assertEqual(by_id[RX_MAP_CHECK]['leafTables'], 4)
-        self.assertEqual(by_id[RX_DONE_CHECK]['sampledCompletions'], 4096)
+        self.assertEqual(by_id[RX_DONE_CHECK]['sampledCompletions'], 2048)
         self.assertEqual(by_id[RX_DONE_CHECK]['restored'], 1024)
         self.assertEqual(by_id[RX_DONE_CHECK]['applicationRequests'], [1025])
         self.assertEqual(by_id[SESSION_CHECK]['stopRequests'], 1)
@@ -576,11 +573,11 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual((legacy.STD_VERSION, legacy.DRIVER_VERSION), (3, 4))
 
     def test_corrupted_rx_command_evidence_is_rejected(self):
-        path = self.capture / 'r27-rx-map-raw.bin'
+        path = self.capture / 'r34-rx-backend.bin'
         baseline = path.read_bytes()
         # Both directions: each word (including PDE), missing/mismatched CW,
         # zero/reversed/out-of-range/shared IDs and timestamp substitution.
-        for command in (120, 160):
+        for command in (144, 184):
             for offset, fmt, value in (
                     (0, 'I', 1), (4, 'I', 7 | (3 << 28)),
                     (8, 'I', 0xfffff001), (12, 'I', 0),
@@ -591,32 +588,19 @@ class AnalyzerTests(unittest.TestCase):
                     value ^= 1
                 with self.subTest(command=command, offset=offset, value=value):
                     blob = bytearray(baseline)
-                    analyzer.struct.pack_into('<' + fmt, blob, 64 + command + offset, value)
+                    analyzer.struct.pack_into('<' + fmt, blob, 96 + command + offset, value)
                     path.write_bytes(blob)
                     self.expect(False, RX_MAP_CHECK)
         domain, records = analyzer.decode_domain((self.capture / 'r21-domain-raw.bin').read_bytes())
-        first_unmap = analyzer.struct.unpack_from('<Q', baseline, 64 + 160 + 16)[0]
-        for command, sequence in ((120, first_unmap), (160, domain['completionSequence'] + 1),
-                                  (120, records[0]['mapCommand']['expected']),
-                                  (160, first_unmap + 1)):
+        first_unmap = analyzer.struct.unpack_from('<Q', baseline, 96 + 184 + 16)[0]
+        for command, sequence in ((144, first_unmap), (184, domain['completionSequence'] + 1),
+                                  (144, records[0]['mapCommand']['expected']),
+                                  (184, first_unmap + 1)):
             with self.subTest(command=command, sequence=sequence):
                 blob = bytearray(baseline)
-                analyzer.struct.pack_into('<2Q', blob, 64 + command + 16, sequence, sequence)
+                analyzer.struct.pack_into('<2Q', blob, 96 + command + 16, sequence, sequence)
                 path.write_bytes(blob)
                 self.expect(False, RX_MAP_CHECK)
-
-    def test_more_than_four_cycles_retains_first_four(self):
-        path = self.capture / 'r27-rx-raw.bin'
-        blob = bytearray(path.read_bytes())
-        for offset, fmt, value in ((24, 'I', 4097), (28, 'I', 4097),
-                                   (32848 + 32, 'Q', session_time(5200)),
-                                   (32848 + 80, 'Q', session_time(5000)),
-                                   (32848 + 88, 'Q', session_time(5200)),
-                                   (32848 + 96, 'I', 5), (32848 + 100, 'I', 5),
-                                   (32848 + 104, 'I', 4)):
-            analyzer.struct.pack_into('<' + fmt, blob, offset, value)
-        path.write_bytes(blob)
-        self.expect(True)
 
     def test_unmaps_must_complete_before_recovery(self):
         path = self.capture / 'props.txt'
@@ -624,22 +608,22 @@ class AnalyzerTests(unittest.TestCase):
         self.expect(False, RX_MAP_CHECK)
 
     def test_cyclic_identity_counts_flags_and_order_corruption(self):
-        path = self.capture / 'r27-rx-raw.bin'
+        path = self.capture / 'r34-rx-driver.bin'
         baseline = path.read_bytes()
-        # Witness original80 + final times/counts32 + four Cycle40 records.
-        for offset, fmt, value in ((80, 'Q', 8801), (88, 'Q', 1),
-                                   (96, 'I', 5), (100, 'I', 3), (104, 'I', 4),
-                                   (108, 'I', 3), (112, 'Q', 201),
-                                   (120, 'Q', 1200), (128, 'I', 2),
-                                   (132, 'I', 8), (136, 'I', 8193),
-                                   (148, 'I', 1), (152, 'Q', 1289),
-                                   (48, 'I', 1), (52, 'I', 1025)):
+        slot = analyzer.RX_DRIVER_HEADER
+        first = slot + analyzer.RX_DRIVER_SLOT_BYTES - 2 * analyzer.RX_WITNESS_BYTES
+        for offset, fmt, value in ((slot + 16, 'Q', 1), (slot + 32, 'I', 5),
+                                   (slot + 36, 'I', 3), (slot + 44, 'I', 2),
+                                   (slot + 48, 'I', 1), (first, 'Q', 1),
+                                   (first + 48, 'Q', 1), (first + 56, 'Q', 1),
+                                   (first + 76, 'I', 3), (first + 80, 'I', 8),
+                                   (first + 84, 'I', 8193), (first + 96, 'I', 2)):
             with self.subTest(offset=offset):
                 blob = bytearray(baseline)
-                analyzer.struct.pack_into('<' + fmt, blob, 32848 + offset, value)
+                analyzer.struct.pack_into('<' + fmt, blob, offset, value)
                 path.write_bytes(blob)
-                self.expect(False, RX_DONE_CHECK)
-        for offset, value in ((20, 256), (24, 64), (28, 64), (32, 1023)):
+                self.expect(False)
+        for offset, value in ((20, 256), (32, 64), (36, 64), (44, 1023)):
             with self.subTest(header=offset):
                 blob = bytearray(baseline)
                 analyzer.struct.pack_into('<I', blob, offset, value)

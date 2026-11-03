@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused Round33 software checks; no device, install or reboot actions.
+"""Focused Round34 software checks; no device, install or reboot actions.
 
 The C++ harnesses compile real driver/backend bodies with host plumbing.
 They do not replace a macOS kext build or the one required hardware run.
@@ -43,13 +43,14 @@ def main():
     for path in sorted(list((ROOT / 'tools/r27').glob('*.py')) +
                        list((ROOT / 'tools/r31').glob('*.py')) +
                        list((ROOT / 'tools/r32').glob('*.py')) +
-                       list((ROOT / 'tools/r33').glob('*.py'))):
+                       list((ROOT / 'tools/r33').glob('*.py')) +
+                       list((ROOT / 'tools/r34').glob('*.py'))):
         data = path.read_bytes()
         if b'\r' in data:
             raise ValueError('Mac source must use LF: ' + path.name)
         ast.parse(data.decode('utf-8'), filename=path.name, feature_version=(3, 9))
     py = [sys.executable, '-B']
-    run(py + ['tools/r21/abi.py', '--check-r32'], env)
+    run(py + ['tools/r21/abi.py', '--check-r34'], env)
     run(py + ['tools/r15/test-pool.py', '--mainline'], env)
     run(py + ['tools/r31/test-session.py'], env)
     # Main traffic, persistent idle/stop, and the final-batch/done handshake.
@@ -78,7 +79,7 @@ def main():
         run([exe], env)
     run(py + ['tools/r27/test-analyzer.py',
               'AnalyzerTests.test_rx1024_full_lifecycle_with_actual_headers_and_real_logs'], env)
-    print('Round33 focused software checks passed; macOS build and hardware acceptance remain separate.')
+    print('Round34 focused software checks passed; macOS build and hardware acceptance remain separate.')
 
 
 if __name__ == '__main__':
