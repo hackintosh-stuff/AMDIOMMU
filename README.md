@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Candidate Round46 / ordinary IPv6 TCP and hardware TSO
+## Accepted Round46 / ordinary IPv6 TCP and hardware TSO
 
 Formal base: `b7869df730b33107f16d277f4974b826df667c53`, the accepted Round45
 result-documentation successor; tree `95d6528fb704c7bdcc67b511f4e264f21ef6dabe`.
@@ -12,10 +12,19 @@ increments 2071 and 132, four snapshots with 67 mappings/1037 IOVA leaves,
 attempts produced one valid measurement. The actual bounded pre-open mapper
 wait and matching-boundary repair are included in this baseline.
 
-**Candidate: Lucy 1.1.231 / Probe 0.53.0, `amdiommu=auto`, MTU1500,
-both IPv4 and IPv6 TSO enabled.** Exercise the ordinary IPv6 TCP path using
-the existing mapper, command pool, descriptors and interface lifecycle.
-Keep the ordinary mapper ABI1 and accepted resource capacities.
+**Accepted: nine ordinary mainline checks passed on the real Mac with Lucy
+1.1.231 / Probe 0.53.0, `amdiommu=auto`, MTU1500 and both IPv4 and IPv6 TSO
+enabled.** The deployed implementation is
+`9915c0f908bac8f2df2660fbace0fab80bf09c12`; the delivered candidate applied
+and built without any further fix. Real Mac compilation, strict codesign,
+boot and hardware acceptance all passed in one planned boot, one load run and
+one valid measurement. The two traffic windows added 2057 and 136 real TSO6
+hardware completions over explicit AF_INET6 endpoints carrying 272 MiB,
+while the enabled TSO4 path stayed closed without another IPv4 workload.
+
+Exercise the ordinary IPv6 TCP path using the existing mapper, command pool,
+descriptors and interface lifecycle. Keep the ordinary mapper ABI1 and
+accepted resource capacities.
 
 R46 reuses the actual TX post/retire methods and selects separate counters
 from the descriptor's GiantSendv4/GiantSendv6 bits. Hardware close-pointer
@@ -53,9 +62,15 @@ and sets the next boot to off while the current ordinary mapper stays active.
 
 Host validation covers actual generated dual-family TX methods, actual IPv6
 header preparation, four real localhost IPv6 streams and analyzer contracts.
-The default R45 analysis still exactly reproduces its accepted archive.
-R46 real Mac build and hardware acceptance remain pending. The result belongs
-in `../../docs/m2-3aa-round46-result.md` with the actual evidence archive.
+The default R45 analysis still exactly reproduces its accepted archive; real
+Mac build, boot and hardware acceptance are now complete.
+
+Result and archive are outside this source repository:
+[Round46 result](<../../docs/m2-3aa-round46-result.md>) and
+[evidence archive](<../../docs/evidence/r46-final-20261103.tgz>)
+(SHA256 `939a82ca2f256ca13862d11b5352a7685348e855d84e2de0c908bc02125d7dfc`).
+The finite job is removed, EFI is unmounted, the current mapper stays active
+and the next boot is `amdiommu=off`; no extra reboot was issued.
 
 ## Accepted Round45 / ordinary IPv4 TCP and hardware TSO
 
