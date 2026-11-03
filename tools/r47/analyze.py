@@ -160,16 +160,19 @@ def discovery(cap):
     return dict(evidence[0], phases=list(PHASES), mmioSourcesAgree=True)
 
 
-def analyze(cap):
-    result = R46.R45.analyze(cap, round_id=47, base_commit=BASE_COMMIT, versions=VERSIONS,
-                             protocol=P, tso_version=6, tcp_record_check=R46.ipv6_transport)
+def analyze(cap, *, round_id=47, base_commit=BASE_COMMIT, versions=None,
+            protocol=None, iova_base=0x1000000000):
+    result = R46.R45.analyze(cap, round_id=round_id, base_commit=base_commit,
+                             versions=VERSIONS if versions is None else versions,
+                             protocol=P if protocol is None else protocol, tso_version=6,
+                             tcp_record_check=R46.ipv6_transport, iova_base=iova_base)
     try:
         check = {'id': 'ivrs-pci-controller-discovery-and-requester-ownership',
                  'state': 'ok', 'detail': discovery(cap)}
     except (OSError, ValueError, KeyError, IndexError, TypeError, struct.error) as exc:
         check = {'id': 'ivrs-pci-controller-discovery-and-requester-ownership',
                  'state': 'FAIL', 'detail': str(exc)}
-    result['scope'] = 'r47-ivrs-pci-ordinary-ipv6-tcp-tso'
+    result['scope'] = 'r%d-ivrs-pci-ordinary-ipv6-tcp-tso' % round_id
     result['checks'].append(check)
     result['ok'] = result['ok'] and check['state'] == 'ok'
     result['todo'] = [{'area': 'ordinary-system-sleep-wake', 'status': 'not-tested',

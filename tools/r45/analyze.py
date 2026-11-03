@@ -25,7 +25,8 @@ def log_rows(path):
 
 
 def analyze(cap, *, round_id=45, base_commit=BASE_COMMIT, versions=None,
-            protocol=None, tso_version=4, tcp_record_check=None):
+            protocol=None, tso_version=4, tcp_record_check=None,
+            iova_base=0x1000000000):
     # R46 reuses the accepted mapper/lifecycle checks and supplies only its
     # IPv6 transport, TSO counters and source/binary identity differences.
     versions = VERSIONS if versions is None else versions
@@ -109,7 +110,7 @@ def analyze(cap, *, round_id=45, base_commit=BASE_COMMIT, versions=None,
     check('automatic-device-mapper-and-startup-order', startup)
 
     check('complete-live-records-match-whole-iova-tree',
-          lambda: {label: R44.mapping_tree(states[label]) for label in PHASES})
+          lambda: {label: R44.mapping_tree(states[label], iova_base=iova_base) for label in PHASES})
 
     def lifecycle():
         detail = {}

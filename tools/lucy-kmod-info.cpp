@@ -20,7 +20,7 @@ extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
 
-KMOD_EXPLICIT_DECL(com.insanelymac.RTL812xLucy, "1.1.232", _start, _stop);
+KMOD_EXPLICIT_DECL(com.insanelymac.RTL812xLucy, "1.1.233", _start, _stop);
 
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t  *_antimain = nullptr;

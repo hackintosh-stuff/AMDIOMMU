@@ -20,6 +20,10 @@ struct org_example_AMDMapperProbe::R44MapperState {
     r44mapper::Snapshot snapshot;
     OSData *suspendLive, *suspendPT, *resumeLive, *resumePT;
     UInt64 nextHandle;
+    // R48 observes successful caller address constraints without changing ABI1.
+    // Only snapshot publication writes registry properties, never the hot path.
+    UInt64 map32Ok, mapHighPAOk, mappedHighPAPages;
+    UInt32 minMapBits, maxMapBits;
     bool accepting;
 
     volatile UInt64 &leaf(unsigned page) { return leaves[page / 512][page % 512]; }
@@ -55,7 +59,7 @@ bool org_example_AMDMapperProbe::r44PrepareMappings(
     amdsparse::Arena arena = {tables, tablePA, tablePages, 1, rootLevel,
                               tablePA, 0, 0, nullptr};
     for (unsigned i = 0; i < r44mapper::kPages / 512; ++i) {
-        d->leaves[i] = amdtx::prepareAt(arena, amdtx::kBase + i * 0x200000ULL, 512);
+        d->leaves[i] = amdtx::prepareAt(arena, r44mapper::kBase + i * 0x200000ULL, 512);
         if (!d->leaves[i]) {
             IOLockFree(d->lock); IOFree(d, sizeof(*d)); return false;
         }
@@ -65,7 +69,7 @@ bool org_example_AMDMapperProbe::r44PrepareMappings(
     s.flags = r44mapper::kPrepared | r44mapper::kAccepting;
     s.capacityMaps = r44mapper::kRecords; s.capacityPages = r44mapper::kPages;
     s.maxMapPages = r44mapper::kMapPages; s.maxRuns = r44mapper::kRuns;
-    s.iovaBase = amdtx::kBase; s.iovaBytes = r44mapper::kPages * 4096ULL;
+    s.iovaBase = r44mapper::kBase; s.iovaBytes = r44mapper::kPages * 4096ULL;
     s.rootPA = tablePA; s.ptBytes = tablePages * 4096ULL;
     s.rootLevel = rootLevel; s.tablePages = tablePages;
     s.preparedAt = mach_absolute_time();
@@ -183,8 +187,8 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
             ? mapSpecification->alignment : 1;
         const unsigned bits = (mapSpecification && mapSpecification->numAddressBits)
             ? mapSpecification->numAddressBits : 64;
-        if ((alignment & (alignment - 1)) || alignment > amdtx::kBase ||
-            bits > 64 || bits < 37) break;
+        if ((alignment & (alignment - 1)) || alignment > r44mapper::kBase ||
+            bits > 64 || bits < 32) break;
 
         // Use the public wired-descriptor walk; the SDK deliberately makes
         // upl_page_info opaque. A pageList provides the first-offset check.
@@ -212,11 +216,12 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         if (!amdtx::allocate(d->allocator, layout.pages, basePage, alignmentPages)) {
             result = kIOReturnNoResources; break;
         }
-        const UInt64 address = amdtx::kBase + basePage * 4096ULL + layout.firstOffset;
+        const UInt64 address = r44mapper::kBase + basePage * 4096ULL + layout.firstOffset;
         const UInt64 returnedLength = layout.discontig
             ? layout.pages * 4096ULL - layout.firstOffset : length;
-        // The returned span must fit the caller's address width. The pool's
-        // base is 64 GiB, so the current per-device target needs at least 37 bits.
+        // Check the complete returned IOVA span against this caller's actual
+        // address width. Physical pages can remain anywhere below the PA limit;
+        // a 32-bit DMA constraint applies to IOVA, not backing RAM.
         if (bits < 64 && (address >= (1ULL << bits) ||
                          returnedLength > (1ULL << bits) - address)) {
             amdtx::release(d->allocator, basePage, layout.pages); break;
@@ -240,12 +245,14 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         record.descriptorOffset = descriptorOffset; record.length = length;
         record.recordIndex = slot; record.basePage = basePage;
         record.pages = layout.pages; record.runs = layout.runs; record.options = mapOptions;
+        UInt32 highPages = 0;
         for (unsigned i = 0; i < layout.runs; ++i) {
             const auto &run = layout.run[i];
             for (unsigned j = 0; j < run.pageBytes / 4096U; ++j) {
                 const unsigned localPage = (unsigned)(run.slot / 4096ULL) + j;
                 const UInt64 physical = (run.pa & ~4095ULL) + j * 4096ULL;
                 record.physical[localPage] = physical;
+                if (physical >= (1ULL << 32)) ++highPages;
                 d->leaf(basePage + localPage) = amdpte::makeDefaultLeaf(1, physical, permissions);
             }
         }
@@ -267,6 +274,11 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         }
         record.tMapComplete = mach_absolute_time(); record.state |= r44mapper::kMapConfirmed;
         ++s.mapOk;
+        if (bits == 32) ++d->map32Ok;
+        if (highPages) ++d->mapHighPAOk;
+        d->mappedHighPAPages += highPages;
+        if (!d->minMapBits || bits < d->minMapBits) d->minMapBits = bits;
+        if (bits > d->maxMapBits) d->maxMapBits = bits;
         if (descriptorOffset) ++s.offsetMaps;
         if (layout.discontig) ++s.fragmentedMaps;
         if (!s.firstMapAt) s.firstMapAt = record.tMapComplete;
@@ -330,10 +342,10 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
 
 bool org_example_AMDMapperProbe::r44Translate(uint64_t address, uint64_t *physical) const {
     auto *d = fR44Mapper;
-    if (!d || !physical || address < amdtx::kBase ||
-        address - amdtx::kBase >= r44mapper::kPages * 4096ULL) return false;
+    if (!d || !physical || address < r44mapper::kBase ||
+        address - r44mapper::kBase >= r44mapper::kPages * 4096ULL) return false;
     IOLockLock(d->lock);
-    const auto decoded = amdpte::decodePte(d->leaf((unsigned)((address - amdtx::kBase) / 4096)), 1);
+    const auto decoded = amdpte::decodePte(d->leaf((unsigned)((address - r44mapper::kBase) / 4096)), 1);
     const bool present = decoded.kind == amdpte::PTE_LEAF_DEFAULT;
     if (present) *physical = decoded.outPA + (address & 4095ULL);
     IOLockUnlock(d->lock);
@@ -368,6 +380,11 @@ void org_example_AMDMapperProbe::r44PublishMappings() {
         setProperty("r44-map-rejected", s.mapRejected, 64);
         setProperty("r44-unmap-rejected", s.unmapRejected, 64);
         setProperty("r44-snapshot-sequence", s.snapshotSequence, 64);
+        setProperty("r48-map32-ok", d->map32Ok, 64);
+        setProperty("r48-map-high-pa-ok", d->mapHighPAOk, 64);
+        setProperty("r48-mapped-high-pa-pages", d->mappedHighPAPages, 64);
+        setProperty("r48-map-min-bits", d->minMapBits, 32);
+        setProperty("r48-map-max-bits", d->maxMapBits, 32);
     }
     if (summary) summary->release();
     if (active) active->release();

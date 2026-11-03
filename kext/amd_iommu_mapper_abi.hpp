@@ -5,6 +5,9 @@
 
 namespace r44mapper {
 static constexpr uint32_t kVersion = 1;
+// Ordinary DMA addresses must satisfy a 32-bit IODMACommand as well as 64-bit
+// clients. Keep this independent of the legacy experiment's 64 GiB window.
+static constexpr uint64_t kBase = 0x80000000ULL; // 2 GiB, 16 MiB pool below 4 GiB
 static constexpr uint32_t kPages = 4096, kRecords = 1024;
 static constexpr uint32_t kMapPages = 32, kRuns = 32;
 enum : uint32_t {

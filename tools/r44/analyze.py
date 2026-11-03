@@ -41,11 +41,11 @@ def leaves(value):
     return found, len(seen)
 
 
-def mapping_tree(value):
+def mapping_tree(value, *, iova_base=0x1000000000):
     m, rows = value['mapper'], value['live']
     need((m['capacityMaps'], m['capacityPages'], m['maxMapPages'], m['maxRuns']) ==
          (1024, 4096, 32, 32), 'ordinary mapper capacity differs')
-    need(m['rootLevel'] == 4 and m['iovaBase'] == 0x1000000000 and
+    need(m['rootLevel'] == 4 and m['iovaBase'] == iova_base and
          m['iovaBytes'] == 4096 * 4096, 'ordinary IOVA domain geometry differs')
     expected, handles, slots = {}, set(), set()
     for row in rows:

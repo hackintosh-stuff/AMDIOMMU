@@ -1,5 +1,63 @@
 # AMDIOMMU — authoritative source repository
 
+## Round48 candidate / ordinary 32-bit DMA address constraints
+
+Formal base: `123dea9ddb5f159535f1be5e42f01168203a0850`, the accepted Round47
+result-documentation successor; tree `08c7c25a982c47769d66bebd4db67d59d077a9dc`.
+The deployed Round47 implementation is
+`0754d47b245ba2f641b0da194cdb6b1a11c03fb9`. The actual analyzer rerun passed
+10/10 and exactly reproduced the archived JSON. Independent raw/PT/IVRS/TCP
+verification confirmed 36 manifest hashes, four phases with 67 maps/1037
+leaves/11 reachable tables, 272 MiB, TSO6 completion increments 2053 and 135,
+67684 completed commands, 264 wraps and zero target faults. Preserve the
+actual public `IOACPIPlatformDevice::getACPITableData` implementation that
+fixed Round47's real SDK access and AuxKC symbol-binding failures.
+
+**Candidate: Lucy 1.1.233 / Probe 0.55.0, ordinary `amdiommu=auto`, MTU1500,
+TSO4 and TSO6 enabled.** Continue in this Git checkout. Real Mac build, boot
+and the eleven Round48 hardware checks remain pending.
+
+The ordinary mapper uses an independent 16 MiB IOVA pool at 0x80000000,
+entirely below 4 GiB. Standard IODMACommand requests with 32 through 64 address
+bits can use it; the whole returned span must fit the actual request. The
+historical experimental allocator keeps its existing 64 GiB base. Physical
+pages may remain above 4 GiB; this constrains device-visible IOVA, not RAM.
+
+Lucy's ordinary TX-ring, RX-ring, tally, RX-group and packet-TX commands now
+request 32 address bits in normal AMDIOMMU mode. Host64 output, gen64 segments,
+NIC descriptors, physical allocation masks and DMA ownership remain intact.
+Other mapper modes retain the original 64-bit request. ABI1 stays at 960-byte
+snapshot/360-byte record, with 4096 IOVA pages, 1024 records and the existing
+32-page/32-run per-map limits, fixed3 and RX64 resources.
+
+Use tools/r48, runs/r48, TCP9114, token 0x48c0de48 and
+org.example.round48load. The existing R47Snapshot publishes the new successful
+request-width and high-PA counters; no new snapshot RPC is introduced. The
+four IPv6 TCP streams remain 128/128/8/8 MiB, with one ordinary interface
+down/up and complete before/pre-down/down/after-up mapper/live/PT captures.
+Retain the ten existing checks and add a DMA32 check: every successful request
+uses 32 bits, every live and last-map/unmap span fits the low pool, and the
+complete page table maps those IOVAs to the recorded physical pages. Record
+actual high-PA coverage; it is an observation, not a new allocation or rerun
+gate. This validates constrained commands on the current RTL8127, without
+claiming a separate 32-bit-only device has been tested.
+
+R47 IVRS/PCI discovery and its PM implementation are retained. Real system
+sleep/resume stays TODO(R47-PM-HARDWARE), outside the ordinary acceptance
+gate. Do not trigger system sleep or an artificial awake controller cycle.
+The normal interface down/up is not power-management evidence.
+
+Build with `sh tools/r48/build.sh _scratch/lucy-upstream` using the same pinned
+inputs and flags. Lucy requests Probe 0.55.0; Probe compatible version 0.53.0
+and its IOACPIFamily dependency stay intact. After acceptance, remove the
+finite job, set only the next boot to off, unmount EFI and confirm peer exit;
+leave the current mapper active without a cleanup reboot.
+
+The accepted previous result and archive are outside this source repository:
+[Round47 result](<../../docs/m2-3ab-round47-result.md>) and
+[evidence archive](<../../docs/evidence/r47-final-20261103.tgz>)
+(SHA256 `27cb04f408d6a5c832dbdd3d0afaf663554b5ea9315e1b30737cff78f0bbe285`).
+
 ## Accepted Round47 / IVRS controller discovery, PM hardware TODO
 
 Formal base: `576c11adf03ce024bcf019d88cdc8b30781a19cc`, the accepted Round46
