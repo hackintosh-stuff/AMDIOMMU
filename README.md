@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round41 / restore RX interrupt handling after fixed DMA entry
+## Accepted Round41 / restore RX interrupt handling after fixed DMA entry
 
 Base: `223ac39a05cbcc74d91bce2f98bfbd186ac315a7`, the recorded Round40 failure
 successor (tree `971608bdda97ffd0bcf9af0cbfb265c061567431`). The deployed
@@ -28,8 +28,47 @@ then one local stop and three ordinary probes after physical recovery.
 The same 14 checks remain; there are no new test files or methods. Use the
 fixed checkout/upstream directory, `--tx 21 --rx 34`, `--check-r41`, `runs/r41`,
 `org.example.round41load` and token `0x41c0de41`.
-Host candidate validation, real Mac compilation and hardware acceptance must
-be reported separately; the Round41 hardware result is still pending.
+
+**Round41 hardware acceptance PASSED (14/14).** One planned boot and one valid
+measurement. The entry diagnostics read a pending `ISR` bit of 32, IMR 0 after
+`rtl8125_irq_mask_and_ack`, and an armed mask of 32821 equal to the driver's
+`intrMask`, so the first completion is no longer delivered only as a stale
+level; software RX advanced for the whole run. Business traffic completed
+8192/8192 with 1047 ordinary probes and no peer tail packet, across a
+125.177099894 s idle in a single `service-owned` domain whose two observations
+share root/DT/command `0x2d0a3000`/`0x2d200000`/`0x2d400000` with `installs=1`.
+
+RX maps and unmaps were 10479 each (posted 9455 plus 1024 install-time
+preparations) with `posted 9455 = completed 8431 + stopRetired 1024`, 2635 real
+replacements, 1011 of 1024 slots differing between first and final retained
+generation addresses and restored 1024. The fixed TX ring, RX ring and tally
+kept their IOVA slots through three standard MD/command pairs each (13 physical
+pages), all 1037 bootstrap pages including every initial RX alias were retired
+after the last first-IOVA publication, so the active page table holds
+**identity=0** plus 1024 RX IOVA leaves; the retirement command completed with
+expected = observed = 5214, and stop re-added 1024 current-buffer pages so the
+final identity set is exactly 1024 pages (4,194,304 B).
+
+RX invalidations were 10457 each over 9433 batch calls and 9455 batch slots
+(`max-batch=5`, 44 saved INV/CW cycles). TX retired 9378 with rejected 0, domain
+maps 9387 = 9378 + 9 capacity probes, the command ring completed 40722/40722
+through 159 wraps, the local stop verified `ChipCmd` 12 -> 0 and `IMR0` 32821 ->
+0 with `stopRetired` 1024, and 3/3 ordinary probes succeeded after the physical
+resume. Device page faults stayed zero.
+
+Deployed implementation commit: `ac436c3e8e3dbb625f71545b4ee913bd5d273f7e`. This
+documentation update is not a deployed revision.
+
+Round41 result and archive are outside this source repository:
+[Round41 result](<../../docs/m2-3v-round41-result.md>) and
+[evidence archive](<../../docs/evidence/r41-final-20261103.tgz>)
+(SHA256 `8e7497896b8b004a648c241dbcbdb6e367905716b38f41f0cea9cadbbb63a93b`).
+
+One observability limit is recorded honestly: the rearm observation ring holds
+4096 records while this run logged 10653, so `rtl812x-rxpost-state` reports
+`degraded` with `wrapped=6557`, `dropped=0` and a truncated prefix. That is a
+capacity bound of the observer, not a traffic failure; the published baseline
+still covers all 1024 slots.
 
 ## Round40 (attempt failed) / fixed DMA descriptors via standard IOVA
 
