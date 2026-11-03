@@ -327,6 +327,8 @@ IOService *org_example_AMDMapperProbe::findNicServiceOnly() {
     matching->release();
     if (!it) return nullptr;
     IOService *result = nullptr;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     OSObject *obj;
     while ((obj = it->getNextObject())) {
         IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, obj);
@@ -337,6 +339,7 @@ IOService *org_example_AMDMapperProbe::findNicServiceOnly() {
         result = pci;
         break;
     }
+#pragma clang diagnostic pop
     it->release();
     return result;
 }
