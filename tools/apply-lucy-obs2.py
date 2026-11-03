@@ -2280,7 +2280,9 @@ def body_is_current(cpp_text):
                  'r34RxUnmapSlot', 'r34RxComplete', 'r34RxRearm', 'r34RxPosted',
                  'r34RxControl', 'r34RxAction', 'r34RxFree', 'r34RxParse',
                  'r34RxCanReplace', 'r34RxCopy', 'r34RxObserve',
-                 'r34RxInvalidate') if RX_SELECT == '34' else ()):
+                 'r34RxInvalidate', 'r34RxPrepareSlot', 'r34RxFinishMapSlot',
+                 'r34RxRecordDone', 'r36RxBatchCall', 'r36RxBeginBatch',
+                 'r36RxPublish') if RX_SELECT == '34' else ()):
         m = re.search(r'^(?:void|bool|IOReturn|mbuf_t) RTL8125::%s\(.*?\)\s*(?:const\s*)?\{' % name,
                       OBS_METHODS + RXPOST_METHODS + POOL_METHODS, re.M | re.S)
         if not m:
@@ -2541,7 +2543,7 @@ def main():
     cpp_text = TX['patch_cpp'](cpp_text)
     write(cpp, cpp_text)
     print("patched %s" % cpp)
-    rx_label = ('native RX normal ring (ABI2)' if RX_SELECT == '34'
+    rx_label = ('native RX normal ring batch16 (ABI3)' if RX_SELECT == '34'
                 else 'round-%s RX pool' % RX_SELECT)
     print("applied observation v2, RX post set, %s and round-%s explicit TX mapping"
           % (rx_label, TX_SELECT))

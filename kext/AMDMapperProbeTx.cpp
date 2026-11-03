@@ -105,6 +105,11 @@ struct org_example_AMDMapperProbe::R34RxDomain {
     IOMemoryDescriptor *memory[r34rx::kCount];
     IODMACommand *command[r34rx::kCount];
     bool prepared, installed, released, physicalResumed;
+    // Private batch commits finish the hardware work before a standard
+    // IOMapper callback consumes the confirmed result for its registered pair.
+    bool preMapped[r34rx::kCount], preUnmapped[r34rx::kCount];
+    UInt32 mapInvalidations, unmapInvalidations;
+    UInt32 mapBatchCalls, unmapBatchCalls, mapBatchSlots, unmapBatchSlots, maxBatch;
     r34rx::Request control;
     r34rx::BackendSnapshot snapshot;
 };
@@ -1761,6 +1766,8 @@ IOReturn org_example_AMDMapperProbe::r34RxOperation(r34rx::Binding *b) {
     if (!d || !r || !b || b->version != r34rx::kVersion ||
         b->bytes != sizeof(*b) || b->slot >= r34rx::kCount)
         return kIOReturnBadArgument;
+    if (b->op == r34rx::kBatchMap || b->op == r34rx::kBatchUnmap)
+        return r34RxBatch(b);
     IOLockLock(d->lock);
     auto &s = r->snapshot;
     auto &w = s.slots[b->slot].last;
@@ -1826,6 +1833,123 @@ done:
     return result;
 }
 
+// Only the native receive loop uses this private precommit operation. A
+// successful standard map/unmap still returns after hardware invalidation;
+// it merely consumes the result already confirmed for its own MD/Cmd pair.
+IOReturn org_example_AMDMapperProbe::r34RxBatch(r34rx::Binding *b) {
+    R17Domain *d = fR17;
+    R34RxDomain *r = __atomic_load_n(&fR34Rx, __ATOMIC_ACQUIRE);
+    if (!d || !r || !b || b->version != r34rx::kVersion ||
+        b->bytes != sizeof(*b) || b->slot >= r34rx::kCount ||
+        !b->length || b->length > r34rx::kBatchSize ||
+        (b->op != r34rx::kBatchMap && b->op != r34rx::kBatchUnmap))
+        return kIOReturnBadArgument;
+    const bool mapping = b->op == r34rx::kBatchMap;
+    const UInt32 count = (UInt32)b->length;
+    const UInt32 batch = b->slot | (count << 16);
+    // Cache only the compact physical layout, not sixteen ProbeLayout objects
+    // on the kernel stack. The driver has already prepared these descriptors.
+    UInt64 physical[r34rx::kBatchSize] = {};
+    UInt32 pages[r34rx::kBatchSize] = {};
+    UInt64 published = 0;
+    r17domain::Command command = {};
+    IOReturn result = kIOReturnBadArgument;
+    IOLockLock(d->lock);
+    auto &s = r->snapshot;
+    if (!r->installed || r->released || !d->installed || !d->stdMode ||
+        !d->commandOwned || !d->accepting || d->stdMapper != (void *)this) {
+        result = kIOReturnNotReady; goto done;
+    }
+    // Validate the complete group before changing any leaf. Every member is
+    // still owned by the driver and none has been re-published with OWN.
+    for (UInt32 n = 0; n < count; ++n) {
+        const UInt32 slot = (b->slot + n) & (r34rx::kCount - 1);
+        const auto &w = s.slots[slot].last;
+        if (!r->memory[slot] || !r->command[slot] ||
+            r->preMapped[slot] || r->preUnmapped[slot]) goto done;
+        const UInt32 first = amdtx::kRxFirstPage + slot * r34rx::kPagesPerSlot;
+        volatile UInt64 *table = d->iovaL1[first / 512];
+        if (!table) { result = kIOReturnNotReady; goto done; }
+        volatile UInt64 *leaves = table + first % 512;
+        if (mapping) {
+            if ((w.flags & r34rx::kMapPublished) && !(w.flags & r34rx::kMapUnmapped))
+                goto done;
+            const ProbeLayout layout = probeLayout(r->memory[slot], 0, r34rx::kCapacity, 1);
+            if (layout.error || layout.runs != 1 || layout.totalBytes != r34rx::kCapacity ||
+                !layout.pages || layout.pages > r34rx::kPagesPerSlot) goto done;
+            for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j)
+                if (leaves[j]) { result = kIOReturnBusy; goto done; }
+            physical[n] = layout.run[0].pa;
+            pages[n] = layout.pages;
+        } else if ((w.flags & (r34rx::kMapInvalidated | r34rx::kMapUnmapped)) !=
+                   r34rx::kMapInvalidated) goto done;
+    }
+    for (UInt32 n = 0; n < count; ++n) {
+        const UInt32 slot = (b->slot + n) & (r34rx::kCount - 1);
+        auto &entry = s.slots[slot];
+        auto &w = entry.last;
+        const UInt32 first = amdtx::kRxFirstPage + slot * r34rx::kPagesPerSlot;
+        volatile UInt64 *leaves = d->iovaL1[first / 512] + first % 512;
+        if (mapping) {
+            bzero(&w, sizeof(w));
+            w.generation = (UInt64)entry.mapCount + 1;
+            w.memory = (UInt64)(uintptr_t)r->memory[slot];
+            w.command = (UInt64)(uintptr_t)r->command[slot];
+            w.pa = physical[n];
+            w.iova = r34rx::kIovaBase + slot * r34rx::kPagesPerSlot * 4096ULL +
+                     (w.pa & 4095ULL);
+            w.mapLength = r34rx::kCapacity; w.slot = slot; w.pages = pages[n];
+            w.mapOptions = kIODMAMapWriteAccess;
+            w.mapResult = w.unmapResult = (UInt32)kIOReturnNotReady;
+            w.mapBatch = batch;
+            for (UInt32 j = 0; j < w.pages; ++j)
+                leaves[j] = amdpte::makeDefaultLeaf(1,
+                    (w.pa & ~4095ULL) + j * 4096ULL, amdpte::PTE_IR | amdpte::PTE_IW);
+            w.flags = r34rx::kMapPublished;
+            ++s.liveOwners;
+            for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j) w.mapPte[j] = leaves[j];
+        } else {
+            for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j) leaves[j] = 0;
+            for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j) w.clearPte[j] = leaves[j];
+            w.unmapBatch = batch;
+        }
+    }
+    OSSynchronizeIO();
+    published = mach_absolute_time();
+    for (UInt32 n = 0; n < count; ++n) {
+        auto &w = s.slots[(b->slot + n) & (r34rx::kCount - 1)].last;
+        if (mapping) w.tMapPublish = published;
+        else w.tUnmapPublish = published;
+    }
+    if (mapping) ++r->mapBatchCalls;
+    else ++r->unmapBatchCalls;
+    if (!r17Invalidate(d->mmio, d->command, command,
+                      mapping ? "r36-rx-batch-map" : "r36-rx-batch-unmap")) {
+        d->accepting = false; result = kIOReturnIOError; goto done;
+    }
+    for (UInt32 n = 0; n < count; ++n) {
+        const UInt32 slot = (b->slot + n) & (r34rx::kCount - 1);
+        auto &w = s.slots[slot].last;
+        if (mapping) {
+            w.mapCommand = command; w.tMapInv = command.tComplete;
+            w.flags |= r34rx::kMapInvalidated;
+            r->preMapped[slot] = true;
+        } else {
+            w.unmapCommand = command; w.tUnmapInv = command.tComplete;
+            r->preUnmapped[slot] = true;
+        }
+    }
+    if (mapping) { ++r->mapInvalidations; r->mapBatchSlots += count; }
+    else { ++r->unmapInvalidations; r->unmapBatchSlots += count; }
+    if (count > r->maxBatch) r->maxBatch = count;
+    result = kIOReturnSuccess;
+done:
+    if (result != kIOReturnSuccess)
+        s.flags |= mapping ? r34rx::kFlagMapFailed : r34rx::kFlagUnmapFailed;
+    IOLockUnlock(d->lock);
+    return result;
+}
+
 IOReturn org_example_AMDMapperProbe::r34RxMap(
     IOMemoryDescriptor *memory, uint64_t descriptorOffset, uint64_t length,
     uint32_t mapOptions, const IODMAMapSpecification *mapSpecification,
@@ -1856,12 +1980,29 @@ IOReturn org_example_AMDMapperProbe::r34RxMap(
     {
         auto &entry = s.slots[slot];
         auto &w = entry.last;
-        if ((w.flags & r34rx::kMapPublished) && !(w.flags & r34rx::kMapUnmapped))
-            goto done;
         const ProbeLayout L = probeLayout(memory, 0, length, 1);
         if (L.error || L.runs != 1 || L.totalBytes != length ||
             !L.pages || L.pages > r34rx::kPagesPerSlot ||
             (pageList && pageList->pageOffset != L.firstOffset)) goto done;
+        if (r->preMapped[slot]) {
+            // The private batch already published and invalidated this exact
+            // prepared MD. Success is synchronous, just as in the scalar path.
+            if (r->preUnmapped[slot] ||
+                (w.flags & (r34rx::kMapInvalidated | r34rx::kMapUnmapped)) !=
+                    r34rx::kMapInvalidated ||
+                w.memory != (UInt64)(uintptr_t)memory ||
+                w.command != (UInt64)(uintptr_t)dmaCommand ||
+                w.pa != L.run[0].pa || w.pages != L.pages || w.mapLength != length)
+                goto done;
+            r->preMapped[slot] = false;
+            w.mapOptions = mapOptions;
+            *mapAddress = w.iova; *mapLength = w.mapLength;
+            ++entry.mapCount; ++s.mapOk;
+            result = kIOReturnSuccess;
+            goto done;
+        }
+        if ((w.flags & r34rx::kMapPublished) && !(w.flags & r34rx::kMapUnmapped))
+            goto done;
         const UInt32 first = amdtx::kRxFirstPage + slot * r34rx::kPagesPerSlot;
         volatile UInt64 *table = d->iovaL1[first / 512];
         if (!table) { result = kIOReturnNotReady; goto done; }
@@ -1888,6 +2029,7 @@ IOReturn org_example_AMDMapperProbe::r34RxMap(
         if (!r17Invalidate(d->mmio, d->command, w.mapCommand, "r34-rx-map")) {
             d->accepting = false; result = kIOReturnIOError; goto done;
         }
+        ++r->mapInvalidations;
         w.tMapInv = w.mapCommand.tComplete;
         w.flags |= r34rx::kMapInvalidated;
         *mapAddress = w.iova; *mapLength = w.mapLength;
@@ -1920,20 +2062,27 @@ IOReturn org_example_AMDMapperProbe::r34RxUnmap(
         auto &entry = s.slots[slot];
         auto &w = entry.last;
         if ((w.flags & (r34rx::kMapInvalidated | r34rx::kMapUnmapped)) !=
-            r34rx::kMapInvalidated || mapAddress != w.iova || mapLength != w.mapLength)
-            goto done;
-        const UInt32 first = amdtx::kRxFirstPage + slot * r34rx::kPagesPerSlot;
-        volatile UInt64 *table = d->iovaL1[first / 512];
-        if (!table) { result = kIOReturnNotReady; goto done; }
-        volatile UInt64 *leaves = table + first % 512;
-        for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j) leaves[j] = 0;
-        OSSynchronizeIO();
-        w.tUnmapPublish = mach_absolute_time();
-        for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j) w.clearPte[j] = leaves[j];
-        if (!r17Invalidate(d->mmio, d->command, w.unmapCommand, "r34-rx-unmap")) {
-            d->accepting = false; result = kIOReturnIOError; goto done;
+            r34rx::kMapInvalidated || mapAddress != w.iova || mapLength != w.mapLength ||
+            r->preMapped[slot]) goto done;
+        if (r->preUnmapped[slot]) {
+            // The batch CW completed before the driver called Cmd.complete().
+            // This call now releases the standard owner's accounting once.
+            r->preUnmapped[slot] = false;
+        } else {
+            const UInt32 first = amdtx::kRxFirstPage + slot * r34rx::kPagesPerSlot;
+            volatile UInt64 *table = d->iovaL1[first / 512];
+            if (!table) { result = kIOReturnNotReady; goto done; }
+            volatile UInt64 *leaves = table + first % 512;
+            for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j) leaves[j] = 0;
+            OSSynchronizeIO();
+            w.tUnmapPublish = mach_absolute_time();
+            for (UInt32 j = 0; j < r34rx::kPagesPerSlot; ++j) w.clearPte[j] = leaves[j];
+            if (!r17Invalidate(d->mmio, d->command, w.unmapCommand, "r34-rx-unmap")) {
+                d->accepting = false; result = kIOReturnIOError; goto done;
+            }
+            ++r->unmapInvalidations;
+            w.tUnmapInv = w.unmapCommand.tComplete;
         }
-        w.tUnmapInv = w.unmapCommand.tComplete;
         w.flags |= r34rx::kMapUnmapped;
         w.unmapResult = kIOReturnSuccess;
         --s.liveOwners; ++s.unmapOk; ++entry.unmapCount;
@@ -1985,7 +2134,7 @@ bool org_example_AMDMapperProbe::r34RxPrepareMap(
     r->control.mapper = this; r->control.context = this;
     r->control.callback = &org_example_AMDMapperProbe::r34RxCallback;
     __atomic_store_n(&fR34Rx, r, __ATOMIC_RELEASE);
-    setProperty("m2-3h-rx-mode", "native-ring-remap1024");
+    setProperty("m2-3h-rx-mode", "native-ring-batch16");
     setProperty("m2-3h-rx-ready", "no");
     setProperty("m2-3h-rx-state", "preparing");
     if (r34RxControl(r34rx::kPrepare) != kIOReturnSuccess) {
@@ -2203,6 +2352,13 @@ void org_example_AMDMapperProbe::r34RxExport() {
     setHexProperty(this, "m2-3o-rx-replacements", r->control.out.replaced);
     setHexProperty(this, "m2-3o-rx-bound-pairs", r->snapshot.boundPairs);
     setHexProperty(this, "m2-3o-rx-physical-cover-ok", r->snapshot.coverOk);
+    setHexProperty(this, "m2-3q-rx-map-invalidations", r->mapInvalidations);
+    setHexProperty(this, "m2-3q-rx-unmap-invalidations", r->unmapInvalidations);
+    setHexProperty(this, "m2-3q-rx-map-batch-calls", r->mapBatchCalls);
+    setHexProperty(this, "m2-3q-rx-unmap-batch-calls", r->unmapBatchCalls);
+    setHexProperty(this, "m2-3q-rx-map-batch-slots", r->mapBatchSlots);
+    setHexProperty(this, "m2-3q-rx-unmap-batch-slots", r->unmapBatchSlots);
+    setHexProperty(this, "m2-3q-rx-max-batch", r->maxBatch);
 }
 
 void org_example_AMDMapperProbe::r34RxRelease() {

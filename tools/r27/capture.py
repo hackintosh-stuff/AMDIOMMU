@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture Round35 evidence after the finite load; no live peer or old ABI verifier.
+"""Capture Round36 evidence after the finite load; no live peer or old ABI verifier.
 
 All workspace paths are relative to the project. Missing evidence is recorded
 in the manifest and returns 1 after saving the available failure diagnostics.
@@ -17,9 +17,9 @@ import struct
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSIONS = {'RTL812xLucy': '1.1.220', 'AMDMapperProbe': '0.44.0'}
+VERSIONS = {'RTL812xLucy': '1.1.221', 'AMDMapperProbe': '0.45.0'}
 ABI = {'native': 7, 'standard': 5, 'domain': 4, 'driver_mode': 2,
-       'rx_driver': 2, 'rx_backend': 2}
+       'rx_driver': 3, 'rx_backend': 3}
 EXPORTS = (
     ('probe', 'm2-3b-domain-raw', 'r21-domain-raw.bin'),
     ('probe', 'm2-3b-pt-raw', 'r21-pt-raw.bin'),
@@ -90,7 +90,7 @@ def collect_system(out, stamp):
         rc, text = command(args)
         lines.append('%s : %s' % (label, text.strip() if rc == 0 else '(unavailable)'))
     loaded_rc, loaded = command(['kmutil', 'showloaded', '--list-only'])
-    identity = ['scope : r35', 'expected_abi : native7/std5/domain4/nativeRX2 mode2',
+    identity = ['scope : r36', 'expected_abi : native7/std5/domain4/nativeRX3 mode2',
                 'captured_utc : ' + stamp, 'kmutil_returncode : %d' % loaded_rc,
                 '# loaded kext identity (read-only)', loaded]
     installed = {}
@@ -129,8 +129,8 @@ def collect_system(out, stamp):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('out', help='new or empty project-relative capture directory')
-    parser.add_argument('--load', default='runs/r35')
-    parser.add_argument('--peer-log', default='runs/r35/peer.log')
+    parser.add_argument('--load', default='runs/r36')
+    parser.add_argument('--peer-log', default='runs/r36/peer.log')
     parser.add_argument('--iface', default='en2')
     args = parser.parse_args()
     out, load, peer_log = (project_path(value) for value in (args.out, args.load, args.peer_log))
@@ -197,7 +197,7 @@ def main():
             expected_bytes = {'r21-domain-raw.bin': 44592,
                               'r34-rx-driver.bin': 270432, 'r34-rx-backend.bin': 475216}.get(name)
             if expected_bytes is not None and len(data) != expected_bytes:
-                errors.append('Round35 export size mismatch: %s: %d != %d' %
+                errors.append('Round36 export size mismatch: %s: %d != %d' %
                               (name, len(data), expected_bytes))
             (out / name).write_bytes(data)
             digest = sha(data)
@@ -238,7 +238,7 @@ def main():
             data = path.read_bytes()
             observed[label] = struct.unpack_from('<I', data, offset)[0] if len(data) >= offset + 4 else None
     report = {
-        'scope': 'r35', 'captured_utc': stamp, 'interface': args.iface,
+        'scope': 'r36', 'captured_utc': stamp, 'interface': args.iface,
         'load_source': args.load, 'peer_source': args.peer_log,
         'declared_token': token, 'token_scope': 'userspace-integrity-and-rx-observation-only',
         'batch': batch, 'application_requests': requests,
@@ -255,14 +255,14 @@ def main():
         'cleanup': property_text(texts['probe'], 'm2-3b-cleanup'),
         'exports': exports, 'errors': errors, 'warnings': warnings,
         'capture_status': 'incomplete' if errors else 'complete',
-        'note': 'archive only; native7/std5/domain4/nativeRX2; internal TX map sequence is not '
+        'note': 'archive only; native7/std5/domain4/nativeRX3; internal TX map sequence is not '
                 'the client request id; no old ABI verifier or OBS-ring-completeness '
                 'requirement; ordinary Lucy RX ring supplies bootstrap ranges without an experimental '
-                'pool or spares; r34 raw filenames identify the native RX ABI family, now version 2; '
+                'pool or spares; r34 raw filenames identify the native RX ABI family, now version 3 with synchronous RX invalidation batches; '
                 'later TX publications are cross-checks only'}
     write_text(out / 'R27-EXPORTS.json', json.dumps(report, indent=2) + '\n')
-    lines = ['scope : r35', 'captured_utc : ' + stamp,
-             'interface : ' + args.iface, 'expected_abi : native7/std5/domain4/nativeRX2 mode2',
+    lines = ['scope : r36', 'captured_utc : ' + stamp,
+             'interface : ' + args.iface, 'expected_abi : native7/std5/domain4/nativeRX3 mode2',
              'capture_status : ' + report['capture_status'],
              'No correctness verdict; hashes are computed from archived bytes.',
              'files (sha256, bytes, relative name):']
@@ -271,7 +271,7 @@ def main():
             data = path.read_bytes()
             lines.append('  %s  %10d  %s' % (sha(data), len(data), path.relative_to(out).as_posix()))
     write_text(out / 'MANIFEST.txt', '\n'.join(lines) + '\n')
-    print('Round35 capture %s: %s' % (report['capture_status'], args.out))
+    print('Round36 capture %s: %s' % (report['capture_status'], args.out))
     for error in errors:
         print('  INCOMPLETE: ' + error)
     return int(bool(errors))

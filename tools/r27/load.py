@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round35 device domain: 4096 requests, 125 s idle, another 4096, explicit stop.
+"""Round36 device domain: 4096 requests, 125 s idle, another 4096, explicit stop.
 Wait for driver-owned RX mappings, then drive normal replacement and drain.
 Both phases run after setup worker exit in the same service-owned domain.
 Only an active all-standard domain permits the batch; never retransmit requests.
@@ -326,7 +326,7 @@ def ord_probe(s, peer, seq, emit, tag):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('out', nargs='?', default='runs/r35')
+    ap.add_argument('out', nargs='?', default='runs/r36')
     ap.add_argument('--iface', default='en2')
     ap.add_argument('--peer', default='192.168.50.122')
     ap.add_argument('--port', type=int, default=9110)
@@ -341,7 +341,7 @@ def main():
     if int((out / 'batch.txt').read_text().strip()) != 512:
         raise ValueError('round27 keeps the kernel declaration batch512')
     if int((out / 'requests.txt').read_text().strip()) != len(REQUESTS):
-        raise ValueError('round35 requires 8192 application requests')
+        raise ValueError('round36 requires 8192 application requests')
     payload(token, 1)
     with (out / 'load.txt').open('w') as f:
         def log(line):
@@ -413,7 +413,7 @@ def main():
                     if '"m2-3h-rx-ready" = "yes"' not in props:
                         time.sleep(.02)
                         continue
-                    if '"m2-3h-rx-mode" = "native-ring-remap1024"' not in props:
+                    if '"m2-3h-rx-mode" = "native-ring-batch16"' not in props:
                         log('load_result FAIL-not-native-RX')
                         return 2
                     state = session.parse_status(props)
@@ -454,7 +454,7 @@ def main():
                     if pre_sent < PRE_PROBES:
                         continue
                     log('load_m2_3g_mode : all-standard')
-                    log('load_m2_3h_rx : native-ring-remap1024')
+                    log('load_m2_3h_rx : native-ring-batch16')
                     log('load_authorization_age_ns : %d (%.3f s, explicit-stop)'
                         % (age, age / 1e9))
                     log('load_session : 4096+4096 idle=125s explicit-stop=1 service-owned=1')

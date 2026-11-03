@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round35: Lucy's ordinary RX ring with native mapping and replacement.
+"""Round36: Lucy's ordinary RX ring with native mapping and replacement.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,11 +29,12 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round35-normal-RX-ring; no-experimental-pool-or-spares; native-remap; service-owned-domain; 4096+4096-after-125s-idle'
+SCOPE = 'round36-normal-RX-ring; no-experimental-pool-or-spares; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
-RX_VERSION, RX_COUNT = 2, 1024
+RX_VERSION, RX_COUNT = 3, 1024
+RX_BATCH_MAX = 16
 RX_DRIVER_BYTES, RX_BACKEND_BYTES = 270432, 475216
 RX_DRIVER_HEADER, RX_DRIVER_SLOT_BYTES = 96, 264
 RX_BACKEND_HEADER, RX_BACKEND_SLOT_BYTES = 80, 464
@@ -139,7 +140,7 @@ def decode_rx_backend(blob):
                          'tMapPublish tMapInv tUnmapPublish tUnmapInv', '10Q', blob, offset)
             r['mapPte'] = struct.unpack_from('<2Q', blob, offset + 80)
             r['clearPte'] = struct.unpack_from('<2Q', blob, offset + 96)
-            r.update(A.unpack('slot pages mapOptions flags mapResult unmapResult reserved0 reserved1',
+            r.update(A.unpack('slot pages mapOptions flags mapResult unmapResult mapBatch unmapBatch',
                               '8I', blob, offset + 112))
             r['mapCommand'] = A.cmdrec(blob, offset + 144)
             r['unmapCommand'] = A.cmdrec(blob, offset + 184)
@@ -213,9 +214,9 @@ def check(cap):
         A.need(0 < token < 0x80000000 and sh['token'] == bh['token'] == token,
                'inconsistent/non-low-half token')
         A.need(dh['devid'] == gh['bdf'] == sh['bdf'] == bh['bdf'], 'capture device association differs')
-        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX2', 'state': 'ok'})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX3', 'state': 'ok'})
     except (A.Refused, OSError, ValueError, KeyError, IndexError, struct.error) as exc:
-        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX2', 'state': 'FAIL', 'detail': str(exc)})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX3', 'state': 'FAIL', 'detail': str(exc)})
         return result()
 
     def driver_property(key, numeric=False):
@@ -761,7 +762,7 @@ def check(cap):
         return {'before': len(before), 'during': len(during), 'after': len(after)}
     run('ordinary-traffic-before-during-and-three-after', ordinary)
     def rx_mappings():
-        A.need(P['m2-3h-rx-mode'] == 'native-ring-remap1024' and
+        A.need(P['m2-3h-rx-mode'] == 'native-ring-batch16' and
                P['m2-3h-rx-state'] == 'drained-and-unmapped' and
                P['m2-3h-rx-ready'] == 'no', 'native RX did not reach its released final state')
         A.need(P['m2-3p-rx-source'] ==
@@ -788,8 +789,23 @@ def check(cap):
                P['m2-3e-exit-gate-close'] and
                P['m2-3h-rx-live-owners'] == P['m2-3h-rx-pending'] == 0,
                'native RX readiness/drain or raw/property ownership differs')
-        sequences = {d[key]['expected'] for d in dom + [dh['probeFirst'], dh['probeReuse']]
-                     for key in ('mapCommand', 'retireCommand')}
+        tx_sequences = {d[key]['expected'] for d in dom + [dh['probeFirst'], dh['probeReuse']]
+                        for key in ('mapCommand', 'retireCommand')}
+        rx_sequences = {}
+        batch_stats = {key: P['m2-3q-rx-' + key] for key in
+                       ('map-invalidations', 'unmap-invalidations', 'map-batch-calls',
+                        'unmap-batch-calls', 'map-batch-slots', 'unmap-batch-slots', 'max-batch')}
+        for phase, total in (('map', rb['mapOk']), ('unmap', rb['unmapOk'])):
+            calls = batch_stats[phase + '-batch-calls']
+            slots = batch_stats[phase + '-batch-slots']
+            invalidations = batch_stats[phase + '-invalidations']
+            A.need(0 < calls <= slots <= RX_BATCH_MAX * calls and slots <= total and
+                   invalidations == total - slots + calls,
+                   phase + ' batch members/standard calls/invalidation totals differ')
+        logical = rb['mapOk'] + rb['unmapOk']
+        invalidations = batch_stats['map-invalidations'] + batch_stats['unmap-invalidations']
+        A.need(1 < batch_stats['max-batch'] <= RX_BATCH_MAX and invalidations < logical,
+               'normal RX did not exercise multi-slot invalidation coalescing')
         memory_ids, command_ids, leaf_tables, iovas = set(), set(), set(), set()
         for i, (slot, driver_slot) in enumerate(zip(rxbackend, rxslots)):
             A.need(slot['flags'] == 0 and slot['sampleCount'] == 1 and
@@ -821,11 +837,28 @@ def check(cap):
                        label + 'map/OWN/DMA/unmap completion order differs')
                 for key in ('mapCommand', 'unmapCommand'):
                     c = r[key]
+                    packed = r['mapBatch' if key == 'mapCommand' else 'unmapBatch']
+                    first, width = packed & 0xffff, packed >> 16
                     A.need(c['expected'] > 0 and c['expected'] == c['observed'] and
                            c['words'] == [0, dh['domid'] | (3 << 28), 0xfffff003, 0x7fffffff] and
-                           c['expected'] not in sequences,
-                           label + 'invalidation command/completion or shared sequence differs')
-                    sequences.add(c['expected'])
+                           c['expected'] not in tx_sequences,
+                           label + 'invalidation command/completion or TX sequence differs')
+                    if packed:
+                        A.need(first < RX_COUNT and 1 <= width <= RX_BATCH_MAX and
+                               (i - first) % RX_COUNT < width,
+                               label + 'slot is outside its declared invalidation batch')
+                    else:
+                        width = 1
+                    signature = (key, packed, c['observed'], tuple(c['words']), c['tComplete'])
+                    group = rx_sequences.get(c['expected'])
+                    if group is None:
+                        group = rx_sequences[c['expected']] = {'signature': signature, 'slots': set()}
+                    else:
+                        A.need(packed and group['signature'] == signature,
+                               label + 'shared RX completion is not the same batch and phase')
+                    A.need(i not in group['slots'] and len(group['slots']) < width,
+                           label + 'repeated slot or too many retained members for this batch')
+                    group['slots'].add(i)
                 A.need(r['mapCommand']['expected'] < r['unmapCommand']['expected'] <= dh['completionSequence'] and
                        r['mapCommand']['tComplete'] == r['tMapInv'] and
                        r['unmapCommand']['tComplete'] == r['tUnmapInv'],
@@ -847,13 +880,25 @@ def check(cap):
                            label + 'RX PTE walk differs from the mapped receive buffer')
         A.need(sum(s['mapCount'] for s in rxbackend) == rb['mapOk'] and
                sum(s['unmapCount'] for s in rxbackend) == rb['unmapOk'] and
-               dh['commandCompleted'] >= 2 * dh['mapsTotal'] + rb['mapOk'] + rb['unmapOk'],
-               'shared command totals do not cover TX/probe and native RX mapping generations')
+               dh['commandCompleted'] >= 2 * dh['mapsTotal'] + invalidations,
+               'shared command totals do not cover TX/probe and actual RX invalidation batches')
         return {'mapped': rb['mapOk'], 'unmapped': rb['unmapOk'], 'initialMappings': RX_COUNT,
                 'driverOwnedPairs': len(memory_ids), 'liveOwners': 0,
                 'source': 'lucy-normal-ring', 'ringId': rh['ringId'],
                 'bootstrapRanges': RX_COUNT, 'experimentalPoolRPCs': 0, 'experimentalSpares': 0,
                 'normalReplacementResumedAt': resumed,
+                'mapInvalidations': batch_stats['map-invalidations'],
+                'unmapInvalidations': batch_stats['unmap-invalidations'],
+                'mapBatchCalls': batch_stats['map-batch-calls'],
+                'unmapBatchCalls': batch_stats['unmap-batch-calls'],
+                'mapBatchSlots': batch_stats['map-batch-slots'],
+                'unmapBatchSlots': batch_stats['unmap-batch-slots'],
+                'maxBatch': batch_stats['max-batch'],
+                'meanMapBatch': batch_stats['map-batch-slots'] / batch_stats['map-batch-calls'],
+                'meanUnmapBatch': batch_stats['unmap-batch-slots'] / batch_stats['unmap-batch-calls'],
+                'invalidationCyclesSaved': logical - invalidations,
+                'retainedInvalidationGroups': len(rx_sequences),
+                'batchEvidence': 'retained members only; shared phase/range/command/completion',
                 'retainedGenerations': RX_COUNT * 2, 'writablePages': len(iovas),
                 'leafTables': len(leaf_tables), 'iovaBase': RX_BASE, 'slotBytes': RX_STRIDE,
                 'mapBeforeOwn': True, 'unmapAfterCompletion': True}

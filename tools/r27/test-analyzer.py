@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused Round35 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round36 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
@@ -35,7 +35,7 @@ legacy = analyzer.A
 
 TOKEN = 7
 PEER = ('127.0.0.2', 9110)
-ABI_CHECK = 'capture-ABI-domain4-native7-std5-nativeRX2'
+ABI_CHECK = 'capture-ABI-domain4-native7-std5-nativeRX3'
 COUNTER_CHECK = 'all-TX-standard-mode2-cumulative-and-unmarked-no-cover'
 LOG_CHECK = 'full8192-bytes-no-retry-no-duplicate-credit'
 CMD_CHECK = 'original8192-command-ring-wraps-and-postwrap-completion'
@@ -96,7 +96,12 @@ int main(int argc, char **argv) {
     d.ptBytes = sizeof(pt); d.rootLevel = 3; d.devid = 0x0200; d.domid = 7;
     d.historyTotal = d.mapsTotal = d.retiresTotal = 10249; d.historyStart = 10217;
     d.commandCapacity = _COMMAND_RING_BYTES_ / 16;
-    d.commandSubmits = d.commandCompleted = d.completionSequence = 2 * (10240 + 5 * r34rx::kCount + 9) + 3;
+    // Four normal ring passes use 63 full batches plus two 8-slot partials.
+    // Install and the final physical drain remain scalar.
+    constexpr uint32_t batchGroups = 4 * 65;
+    constexpr uint32_t rxInvalidations = r34rx::kCount + batchGroups;
+    d.commandSubmits = d.commandCompleted = d.completionSequence =
+        2 * (10240 + 9) + 2 * rxInvalidations + 3;
     d.commandWraps = d.commandSubmits * 2 / d.commandCapacity;
     d.commandPostWrapCompleted = d.commandCompleted - (d.commandCapacity / 2 - 1);
     d.slotsUsed = 65535; d.maxLiveOwners = 16;
@@ -236,16 +241,23 @@ int main(int argc, char **argv) {
             r.iova = r34rx::kIovaBase + i * 8192 + (r.pa & 4095);
             r.slot = i; r.mapLength = r34rx::kCapacity; r.mapOptions = 2;
             r.pages = (r.pa & 4095) ? 2 : 1;
+            const uint32_t firstSlot = i < 1008 ? i / 16 * 16 : 1008 + (i - 1008) / 8 * 8;
+            const uint32_t width = i < 1008 ? 16 : 8;
+            const uint32_t group = i < 1008 ? i / 16 : 63 + (i - 1008) / 8;
+            r.mapBatch = firstSlot | (width << 16);
+            r.unmapBatch = first ? r.mapBatch : 0; // Final physical drain is scalar.
             r.tMapPublish = first ? 1190 + i : 7000 + i;
-            r.tMapInv = r.tMapPublish + 1;
-            w.tPost = first ? 1200 + i : 7020 + i;
+            r.tMapInv = (first ? 1190 : 7000) + firstSlot + width;
+            w.tPost = r.tMapInv + 1 + (i - firstSlot);
             w.tDone = first ? 1290 + i : 8801 + i / 16;
-            r.tUnmapPublish = w.tDone; r.tUnmapInv = w.tDone + 1;
-            const uint64_t sequence = (first ? 1000 : 24000) + 2 * i;
+            r.tUnmapPublish = first ? 1290 + firstSlot + width : w.tDone;
+            r.tUnmapInv = r.tUnmapPublish + 1;
+            const uint64_t mapSequence = first ? 1200 + 2 * group : 21700 + group;
+            const uint64_t unmapSequence = first ? 1201 + 2 * group : 22000 + i;
             r.mapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
-                            sequence, sequence, r.tMapInv};
+                            mapSequence, mapSequence, r.tMapInv};
             r.unmapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
-                              sequence + 1, sequence + 1, r.tUnmapInv};
+                              unmapSequence, unmapSequence, r.tUnmapInv};
             r.flags = 7;
             for (uint32_t j = 0; j < r.pages; ++j)
                 r.mapPte[j] = ((r.pa & ~4095ULL) + j * 4096) | perm;
@@ -316,10 +328,14 @@ def properties():
          'm2-3n-teardown-start': session_time(8790),
          'm2-3n-teardown-end': session_time(9055),
          'm2-3l-tx-deadline': 0,
-         'm2-3h-rx-mode': 'native-ring-remap1024', 'm2-3o-rx-ready-time': 410,
+         'm2-3h-rx-mode': 'native-ring-batch16', 'm2-3o-rx-ready-time': 410,
          'm2-3p-rx-source': 'lucy-normal-ring', 'm2-3p-rx-bootstrap-ranges': 1024,
          'm2-3p-rx-pool-rpcs': 0, 'm2-3p-rx-spares': 0, 'm2-3p-rx-ring-id': 0x355200,
          'm2-3p-rx-physical-resume': 'done',
+         'm2-3q-rx-map-invalidations': 1284, 'm2-3q-rx-unmap-invalidations': 1284,
+         'm2-3q-rx-map-batch-calls': 260, 'm2-3q-rx-unmap-batch-calls': 260,
+         'm2-3q-rx-map-batch-slots': 4096, 'm2-3q-rx-unmap-batch-slots': 4096,
+         'm2-3q-rx-max-batch': 16,
          'm2-3h-rx-state': 'drained-and-unmapped', 'm2-3h-rx-ready': 'no',
          'm2-b2-t-recovery-start': 9023, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0,
          'm2-3i-tail-state': 'confirmed', 'm2-3i-tail-seq': analyzer.RX_COUNT,
@@ -339,10 +355,11 @@ def properties():
                 'm2-3e-enter-last-inflight', 'm2-3e-enter-last-ring',
                 'm2-3e-exit-last-inflight', 'm2-3e-exit-last-ring'):
         p[key] = 0
-    p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': 30741,
-              'm2-3b-command-completed': 30741, 'm2-3b-command-wraps': 120,
-              'm2-3b-command-post-wrap-completed': 30486,
-              'm2-3b-completion-sequence': 30741,
+    command_total = 2 * 10249 + 2 * 1284 + 3
+    p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': command_total,
+              'm2-3b-command-completed': command_total, 'm2-3b-command-wraps': command_total * 2 // 512,
+              'm2-3b-command-post-wrap-completed': command_total - 255,
+              'm2-3b-completion-sequence': command_total,
               'm2-b2-window-valid': 'yes', 'm2-b2-win-raw-truncated': 'no',
               'm2-b2-win-status-start': 8, 'm2-b2-win-status-end': 8,
               'm2-3e-enter': 'gate-open-after-dte-and-invalidations',
@@ -568,6 +585,10 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual((self.capture / 'r34-rx-backend.bin').stat().st_size, analyzer.RX_BACKEND_BYTES)
         self.assertEqual(by_id[RX_MAP_CHECK]['mapped'], 5120)
         self.assertEqual(by_id[RX_MAP_CHECK]['unmapped'], 5120)
+        self.assertEqual((by_id[RX_MAP_CHECK]['mapBatchCalls'],
+                          by_id[RX_MAP_CHECK]['unmapBatchCalls'],
+                          by_id[RX_MAP_CHECK]['maxBatch']), (260, 260, 16))
+        self.assertEqual(by_id[RX_MAP_CHECK]['invalidationCyclesSaved'], 7672)
         self.assertEqual(by_id[RX_MAP_CHECK]['writablePages'], 1536)
         self.assertEqual(by_id[RX_MAP_CHECK]['leafTables'], 4)
         self.assertEqual((by_id[RX_MAP_CHECK]['source'], by_id[RX_MAP_CHECK]['ringId'],

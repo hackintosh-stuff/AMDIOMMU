@@ -203,6 +203,7 @@ private:
     IOReturn r34RxControl(UInt32 op);
     static int r34RxCallback(void *, r34rx::Binding *);
     IOReturn r34RxOperation(r34rx::Binding *);
+    IOReturn r34RxBatch(r34rx::Binding *);
     bool r34RxCandidate(IOMemoryDescriptor *, IODMACommand *) const;
     IOReturn r34RxMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
         const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,

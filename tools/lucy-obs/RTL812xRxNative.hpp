@@ -1,5 +1,6 @@
 /* Native RX: driver-owned receive mappings for the ordinary replacement path.
- * Round35 prepares Lucy's existing ring directly, without an experimental pool.
+ * The existing Lucy ring has no experimental pool. Round36 batches confirmed
+ * map/unmap invalidations while standard DMA callbacks remain synchronous.
  * Kernel-only control pointers stay in Request/Binding. Exported snapshots
  * contain numeric identities, mapping evidence and completed DMA witnesses.
  * Each slot keeps its first IOVA DMA lifecycle and its latest lifecycle.
@@ -13,13 +14,14 @@ typedef unsigned long long u64;
 static const char kFunctionName[] = "rtl812x-r34-rx-native";
 static const u64 kIovaBase = 0x1000200000ULL;
 enum {
-    kVersion = 2, kCount = 1024, kCapacity = 4096, kPagesPerSlot = 2,
-    kSamples = 1, kTailMax = 4096,
+    kVersion = 3, kCount = 1024, kCapacity = 4096, kPagesPerSlot = 2,
+    kSamples = 1, kTailMax = 4096, kBatchSize = 16,
     kInstall = 1, kSnapshot = 2, kDisarm = 3, kDrain = 4, kRelease = 5,
     kPrepare = 6, kAuthorize = 7, kResumePhysical = 8,
     kAbsent = 0, kInstalled = 1, kDisarmed = 2, kDrained = 3, kReleased = 4,
     kPrepared = 5,
     kBind = 1, kRead = 2, kCover = 3, kUnbind = 4,
+    kBatchMap = 5, kBatchUnmap = 6,
     kMapPublished = 1, kMapInvalidated = 2, kMapUnmapped = 4,
     kWitnessPosted = 1, kWitnessDone = 2, kWitnessUnmapped = 4,
     kWitnessError = 8,
@@ -32,7 +34,8 @@ struct MapRecord {
     u64 tMapPublish, tMapInv, tUnmapPublish, tUnmapInv;
     u64 mapPte[2], clearPte[2];
     u32 slot, pages, mapOptions, flags;
-    u32 mapResult, unmapResult, reserved0, reserved1;
+    // Zero denotes scalar work; batch fields encode firstSlot | (count << 16).
+    u32 mapResult, unmapResult, mapBatch, unmapBatch;
     r17domain::Command mapCommand, unmapCommand;
 };
 struct BackendSlot {

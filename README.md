@@ -1,6 +1,39 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round35 / native RX bootstrap on Lucy's ordinary ring
+## Current Round36 / RX invalidation batches
+
+Base: `051c90050b195d5ae388018da4463e785c38e9ac`, the documentation successor
+of the accepted Round35 implementation `e925368111fd92a567d348040a6026e63205ae70`.
+Round35's original capture was independently reanalyzed: all 14 checks passed.
+
+Candidate versions: Lucy **1.1.221** / Probe **0.45.0**. TX remains
+domain4/native7/std5; native RX uses ABI3 with unchanged record sizes.
+
+- Keep Lucy's ordinary RX ring and 1024 reusable MD/Cmd pairs.
+- In each receive call, collect up to 16 adjacent completed slots, bounded by
+  the current packet budget. Process partial batches immediately.
+- Record completion, clear the batch's PTEs and confirm one invalidation before
+  standard command completion and ordinary mbuf replacement/delivery.
+- Prepare the current buffers, publish their PTEs and confirm one invalidation
+  before standard map callbacks return and any new IOVA OWN is published.
+- Keep install and drain on the established scalar paths. No batch is carried
+  across receive calls or idle intervals.
+- Preserve per-slot lifecycle evidence. A batch shares its confirmed command
+  record; packed map/unmap group fields identify the first slot and width.
+  Report actual invalidation counts, group widths and saved confirmation cycles.
+
+The existing 14-check normal run remains the acceptance workload. Its RX
+mapping evidence now accepts confirmed shared commands within one declared
+batch and checks actual invalidation counts. Report savings against the same
+run's logical map/unmap count; no fixed reduction percentage is required.
+
+Use the same fixed Git checkout, upstream `_scratch/lucy-upstream` and SDK.
+The native template family remains `--tx 21 --rx 34`; the build runner uses
+`--check-r36`, `runs/r36` and `org.example.round36load` with token `0x36c0de36`.
+Focused host checks and actual generated receive-loop checks passed. A macOS
+SDK build and one normal hardware acceptance run remain to be recorded.
+
+## Accepted Round35 / native RX bootstrap on Lucy's ordinary ring
 
 Base: `18be5c49b911b351f7ec7fa5b52b23d46581666e`.
 Candidate: Lucy **1.1.220** / Probe **0.44.0**. TX retains domain4/native7/std5;

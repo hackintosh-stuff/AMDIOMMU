@@ -3,7 +3,8 @@
 The ordinary non-VTD receive loop stays in use. Each ring slot owns one virtual
 MD/command pair. Completion retires its mapping before replaceOrCopyPacket can
 deliver the old mbuf; the replacement is mapped before the next OWN publication.
-Round35 prepares the existing ring directly and never allocates an R15 pool.
+The existing ring is prepared directly without an R15 pool. Round36 batches
+up to sixteen already completed slots, without waiting across poll calls.
 The older RX4 path remains selectable from its original template.
 """
 from pathlib import Path
@@ -17,9 +18,15 @@ MEMBERS = BASE['MEMBERS'] + r'''
     static IOReturn r34RxAction(OSObject *, void *, void *, void *, void *);
     IOReturn r34RxControl(r34rx::Request *);
     bool r34RxBinding(UInt32, UInt32, r34rx::MapRecord *, UInt64 = 0);
+    bool r34RxPrepareSlot(UInt32);
+    bool r34RxFinishMapSlot(UInt32);
     bool r34RxMapSlot(UInt32);
     bool r34RxUnmapSlot(UInt32);
+    bool r34RxRecordDone(UInt32, UInt64, UInt32, UInt32);
     bool r34RxComplete(UInt32, UInt64, UInt32, UInt32);
+    bool r36RxBatchCall(UInt32, UInt32, UInt32);
+    bool r36RxBeginBatch(UInt32, UInt32);
+    bool r36RxPublish(UInt32, UInt64, UInt64, UInt64);
     bool r34RxRearm(UInt32, UInt32, UInt32, bool, UInt64 *);
     void r34RxPosted(UInt32, UInt64);
     bool r34RxCanReplace() const;
@@ -48,6 +55,9 @@ struct RTL8125::R34RxState {
     UInt32 keepTx[kNumTxDesc], filtered[5];
     UInt64 tPrepared, tAuthorized, tPhysicalResumed;
     bool authorized, physicalResumed;
+    UInt32 batchFirst, batchCount, batchQueued;
+    UInt32 batches, batchSlots, maxBatch;
+    UInt64 batchOld[r34rx::kBatchSize], batchWord[r34rx::kBatchSize];
 };
 
 bool RTL8125::r34RxBinding(UInt32 op, UInt32 slot,
@@ -65,13 +75,11 @@ bool RTL8125::r34RxBinding(UInt32 op, UInt32 slot,
     return true;
 }
 
-bool RTL8125::r34RxMapSlot(UInt32 slot)
+bool RTL8125::r34RxPrepareSlot(UInt32 slot)
 {
     R34RxState *p = r34Rx;
     auto &s = p->snapshot;
-    auto &w = p->current[slot];
     IOMemoryDescriptor *md = p->memory[slot];
-    IODMACommand *cmd = p->command[slot];
     if (p->mapped[slot] || p->wired[slot]) return false;
     p->ranges[slot].address = (IOVirtualAddress)mbuf_datastart(rxBufArray[slot].mbuf);
     p->ranges[slot].length = r34rx::kCapacity;
@@ -82,6 +90,19 @@ bool RTL8125::r34RxMapSlot(UInt32 slot)
         return false;
     }
     p->wired[slot] = true;
+    return true;
+}
+
+bool RTL8125::r34RxFinishMapSlot(UInt32 slot)
+{
+    R34RxState *p = r34Rx;
+    auto &s = p->snapshot;
+    auto &w = p->current[slot];
+    IOMemoryDescriptor *md = p->memory[slot];
+    IODMACommand *cmd = p->command[slot];
+    if (!p->wired[slot] || p->mapped[slot]) return false;
+    // A batch pre-map has already completed invalidation. The ordinary
+    // callback claims that confirmed mapping; scalar calls map synchronously.
     if (cmd->setMemoryDescriptor(md, true) != kIOReturnSuccess) {
         s.flags |= r34rx::kFlagMapFailed;
         return false;
@@ -107,6 +128,11 @@ bool RTL8125::r34RxMapSlot(UInt32 slot)
     s.maps++; s.slots[slot].mapCount++;
     s.slots[slot].currentPA = record.pa;
     return true;
+}
+
+bool RTL8125::r34RxMapSlot(UInt32 slot)
+{
+    return r34RxPrepareSlot(slot) && r34RxFinishMapSlot(slot);
 }
 
 bool RTL8125::r34RxUnmapSlot(UInt32 slot)
@@ -174,15 +200,10 @@ bool RTL8125::r34RxObserve(UInt32 kind, UInt32 slot, UInt32 token)
     return keep;
 }
 
-bool RTL8125::r34RxComplete(UInt32 slot, UInt64 oldAddr,
-                           UInt32 status, UInt32 length)
+bool RTL8125::r34RxRecordDone(UInt32 slot, UInt64 oldAddr,
+                             UInt32 status, UInt32 length)
 {
     R34RxState *p = r34Rx;
-    if (!p || p->physicalResumed || p->snapshot.state == r34rx::kReleased)
-        return true;
-    if (p->snapshot.state == r34rx::kPrepared ||
-        (p->snapshot.state == r34rx::kInstalled && !p->authorized)) return true;
-    if (!p->mapped[slot]) return true;
     auto &s = p->snapshot;
     auto &w = p->current[slot];
     if (w.tPost) {
@@ -196,8 +217,104 @@ bool RTL8125::r34RxComplete(UInt32 slot, UInt64 oldAddr,
         if (status & RxRES) w.flags |= r34rx::kWitnessError;
         s.completed++; s.slots[slot].doneCount++; s.pendingPosted--;
     }
-    // Unmap BEFORE replaceOrCopyPacket can return the old mbuf to the stack.
-    return r34RxUnmapSlot(slot);
+    return true;
+}
+
+bool RTL8125::r34RxComplete(UInt32 slot, UInt64 oldAddr,
+                           UInt32 status, UInt32 length)
+{
+    R34RxState *p = r34Rx;
+    if (!p || p->physicalResumed || p->snapshot.state == r34rx::kReleased)
+        return true;
+    if (p->snapshot.state == r34rx::kPrepared ||
+        (p->snapshot.state == r34rx::kInstalled && !p->authorized)) return true;
+    // BeginBatch already records completion and retires every selected slot.
+    if (!p->mapped[slot]) return true;
+    return r34RxRecordDone(slot, oldAddr, status, length) && r34RxUnmapSlot(slot);
+}
+
+bool RTL8125::r36RxBatchCall(UInt32 op, UInt32 first, UInt32 count)
+{
+    R34RxState *p = r34Rx;
+    if (!p || !p->callback || !count || count > r34rx::kBatchSize ||
+        first >= r34rx::kCount) return false;
+    r34rx::Binding b = {};
+    b.version = r34rx::kVersion; b.bytes = sizeof(b);
+    b.op = op; b.slot = first; b.length = count;
+    return p->callback(p->context, &b) == kIOReturnSuccess;
+}
+
+bool RTL8125::r36RxBeginBatch(UInt32 first, UInt32 budget)
+{
+    R34RxState *p = r34Rx;
+    if (!p || p->physicalResumed || p->snapshot.state != r34rx::kInstalled ||
+        !p->authorized) return true;
+    if (p->batchCount) return first ==
+        (p->batchFirst + p->batchQueued) % r34rx::kCount;
+    const UInt32 limit = budget < r34rx::kBatchSize ? budget : r34rx::kBatchSize;
+    UInt32 count = 0;
+    while (count < limit) {
+        const UInt32 slot = (first + count) % r34rx::kCount;
+        if (OSSwapLittleToHostInt32(rxDescArray[slot].cmd.opts1) & DescOwn) break;
+        ++count;
+    }
+    if (!count) return true;
+    p->batchFirst = first; p->batchCount = count; p->batchQueued = 0;
+    // OWN is clear for the whole selected chunk. Record completion before the
+    // shared invalidation, then keep standard DMA completion synchronous.
+    for (UInt32 n = 0; n < count; ++n) {
+        const UInt32 slot = (first + n) % r34rx::kCount;
+        const UInt32 status = OSSwapLittleToHostInt32(rxDescArray[slot].cmd.opts1);
+        if (!p->mapped[slot] || !r34RxRecordDone(slot, rxBufArray[slot].phyAddr,
+                                               status, status & 0x1fff)) return false;
+    }
+    if (!r36RxBatchCall(r34rx::kBatchUnmap, first, count)) {
+        p->snapshot.flags |= r34rx::kFlagUnmapFailed; return false;
+    }
+    for (UInt32 n = 0; n < count; ++n)
+        if (!r34RxUnmapSlot((first + n) % r34rx::kCount)) return false;
+    return true;
+}
+
+bool RTL8125::r36RxPublish(UInt32 slot, UInt64 addr, UInt64 oldAddr, UInt64 word1)
+{
+    R34RxState *p = r34Rx;
+    if (!p->batchCount) {
+        rxDescArray[slot].buf.addr = OSSwapHostToLittleInt64(addr);
+        wmb();
+        rxDescArray[slot].buf.blen = OSSwapHostToLittleInt64(word1);
+        r34RxPosted(slot, addr);
+        rxpostRecordRearm(slot, addr, oldAddr, word1);
+        return true;
+    }
+    const UInt32 n = p->batchQueued;
+    if (n >= p->batchCount || slot != (p->batchFirst + n) % r34rx::kCount) {
+        p->snapshot.flags |= r34rx::kFlagAddressMismatch; return false;
+    }
+    p->batchOld[n] = oldAddr; p->batchWord[n] = word1;
+    if (++p->batchQueued != p->batchCount) return true;
+    // Every new mbuf is wired, but none of these descriptors has OWN yet.
+    // One confirmed map covers the chunk. Complete all ordinary DMA callbacks
+    // before publishing the first descriptor back to the NIC.
+    if (!r36RxBatchCall(r34rx::kBatchMap, p->batchFirst, p->batchCount)) {
+        p->snapshot.flags |= r34rx::kFlagMapFailed; return false;
+    }
+    for (UInt32 i = 0; i < p->batchCount; ++i)
+        if (!r34RxFinishMapSlot((p->batchFirst + i) % r34rx::kCount)) return false;
+    for (UInt32 i = 0; i < p->batchCount; ++i) {
+        const UInt32 current = (p->batchFirst + i) % r34rx::kCount;
+        const UInt64 iova = p->current[current].iova;
+        rxBufArray[current].phyAddr = iova;
+        rxDescArray[current].buf.addr = OSSwapHostToLittleInt64(iova);
+        wmb();
+        rxDescArray[current].buf.blen = OSSwapHostToLittleInt64(p->batchWord[i]);
+        r34RxPosted(current, iova);
+        rxpostRecordRearm(current, iova, p->batchOld[i], p->batchWord[i]);
+    }
+    ++p->batches; p->batchSlots += p->batchCount;
+    if (p->batchCount > p->maxBatch) p->maxBatch = p->batchCount;
+    p->batchCount = p->batchQueued = 0;
+    return true;
 }
 
 bool RTL8125::r34RxRearm(UInt32 slot, UInt32 token, UInt32 reqId,
@@ -218,6 +335,7 @@ bool RTL8125::r34RxRearm(UInt32 slot, UInt32 token, UInt32 reqId,
         w.reserved = 1; // do not relabel this DMA with later physical tail packets
     }
     if (s.state == r34rx::kInstalled) {
+        if (p->batchCount) return r34RxPrepareSlot(slot);
         if (!r34RxMapSlot(slot)) return false;
         *addr = p->current[slot].iova;
         rxBufArray[slot].phyAddr = *addr;
@@ -371,7 +489,7 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
     bcopy(&s, &request->out, sizeof(s));
     OSData *raw = OSData::withBytes(&s, sizeof(s));
     if (raw) { setProperty("rtl812x-r34-rx-native-raw", raw); raw->release(); }
-    setProperty("rtl812x-r34-rx-mode", "native-ring-remap1024");
+    setProperty("rtl812x-r34-rx-mode", "native-ring-batch16");
     setProperty("rtl812x-r34-rx-state", s.state, 32);
     setProperty("rtl812x-r34-rx-maps", s.maps, 32);
     setProperty("rtl812x-r34-rx-unmaps", s.unmaps, 32);
@@ -390,6 +508,10 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
     for (UInt32 kind = 1; kind < 5; ++kind)
         filtered += __atomic_load_n(&p->filtered[kind], __ATOMIC_RELAXED);
     setProperty("rtl812x-r35-obs-filtered", filtered, 32);
+    setProperty("rtl812x-r36-rx-batches", p->batches, 32);
+    setProperty("rtl812x-r36-rx-batch-slots", p->batchSlots, 32);
+    setProperty("rtl812x-r36-rx-max-batch", p->maxBatch, 32);
+    setProperty("rtl812x-r36-rx-pending-batch", p->batchCount, 32);
     return kIOReturnSuccess;
 }
 
@@ -496,15 +618,14 @@ def rx_business(text):
 def rx_rearm(text):
     text = BASE['rx_rearm'](text)
     start = text.index('        r15PoolRearm(')
-    end = text.index('        desc->buf.addr =', start)
-    old = text[start:end]
-    text = text[:start] + (
+    # The original block includes descriptor publication and RX-post evidence.
+    # Native batching moves both into Publish; history keeps the same block.
+    old = text[start:]
+    return text[:start] + (
         '        if (r34Rx) {\n'
-        '            if (!r34RxRearm(rxNextDescIndex, r27RxToken, r27RxReq, replaced, &addr)) break;\n'
-        '        } else {\n' + old + '        }\n') + text[end:]
-    return text.replace('        r15PoolPosted(rxNextDescIndex, addr);',
-        '        if (r34Rx) r34RxPosted(rxNextDescIndex, addr);\n'
-        '        else r15PoolPosted(rxNextDescIndex, addr);', 1)
+        '            if (!r34RxRearm(rxNextDescIndex, r27RxToken, r27RxReq, replaced, &addr) ||\n'
+        '                !r36RxPublish(rxNextDescIndex, addr, obsRxAddr, word1)) break;\n'
+        '        } else {\n' + old + '        }\n')
 
 
 def rx_decl(text):
@@ -514,5 +635,6 @@ def rx_decl(text):
 def rx_capture(text):
     return BASE['rx_capture'](text) + (
         '        replaced = false;\n'
+        '        if (r34Rx && !r36RxBeginBatch(rxNextDescIndex, maxCount - goodPkts)) break;\n'
         '        if (r34Rx && !r34RxComplete(rxNextDescIndex, obsRxAddr, descStatus1,\n'
         '                                      (UInt32)(descStatus1 & 0x1fff))) break;\n')

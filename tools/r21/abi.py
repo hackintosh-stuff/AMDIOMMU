@@ -276,7 +276,7 @@ def check_r26():
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in ('--check-r32', '--check-r34', '--check-r35'):
+    if len(sys.argv) > 1 and sys.argv[1] in ('--check-r32', '--check-r34', '--check-r35', '--check-r36'):
         want = abi()
         pins = {'domain_version': 4, 'domain_bytes': 44592,
                 'domain_record_bytes': 1304, 'domain_records_offset': 80,
@@ -290,8 +290,8 @@ def main():
                 'rx_request_bytes': 344192, 'rx_backend_bytes': 204864,
                 'rx_tail_seq_offset': 44, 'pool_version': 2, 'pool_spares': 1024,
                 'pool_snapshot_bytes': 114808, 'pool_request_bytes': 114856}
-        if sys.argv[1] in ('--check-r34', '--check-r35'):
-            pins.update({'rx_native_version': 2 if sys.argv[1] == '--check-r35' else 1,
+        if sys.argv[1] in ('--check-r34', '--check-r35', '--check-r36'):
+            pins.update({'rx_native_version': {'--check-r34': 1, '--check-r35': 2, '--check-r36': 3}[sys.argv[1]],
                          'rx_native_count': 1024,
                          'rx_native_driver_bytes': 270432, 'rx_native_backend_bytes': 475216,
                          'rx_native_driver_header': 96, 'rx_native_driver_slot_bytes': 264,
