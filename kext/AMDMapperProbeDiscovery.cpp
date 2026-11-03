@@ -10,6 +10,13 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 namespace {
+// The platform expert's table lookup lives behind a protected virtual slot.
+// Re-exposing that exact slot keeps this a read-only query: no new state, no
+// extra object, and no second ACPI implementation is introduced.
+class R47AcpiTables : public IOACPIPlatformExpert {
+public:
+    using IOACPIPlatformExpert::getACPITableData;
+};
 constexpr UInt16 kR47PciSegment = 0;
 // Basic registers, command/event indices and status end below 0x4000. The
 // optional performance-counter aperture is not used by this backend.
@@ -57,7 +64,8 @@ bool r47DiscoverHardware(IOService *probe, IOPCIDevice *nic,
     if (!acpi) return failure("failed-acpi-platform");
     // getACPITableData returns a borrowed const OSData. Retain a separate copy
     // as raw runtime evidence; the parser's views only live inside this call.
-    const OSData *table = acpi->getACPITableData("IVRS", 0);
+    const OSData *table =
+        ((R47AcpiTables *)acpi)->getACPITableData("IVRS", 0);
     if (!table) return failure("failed-ivrs-missing");
     OSData *raw = OSData::withData(table);
     if (!raw) return failure("failed-ivrs-copy");
