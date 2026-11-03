@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Round47 candidate / IVRS controller discovery and PM implementation TODO
+## Accepted Round47 / IVRS controller discovery, PM hardware TODO
 
 Formal base: `576c11adf03ce024bcf019d88cdc8b30781a19cc`, the accepted Round46
 result-documentation successor; tree `8b79ac2fdafe40ee4d7686e3f0d82996d01760e5`.
@@ -12,9 +12,23 @@ independent raw/PT/TCP audit confirmed 272 MiB, TSO6 completion increments
 71204 completed commands, 278 wraps and zero target faults. The actual report
 records one planned boot, one load and one valid measurement.
 
-**Candidate: Lucy 1.1.232 / Probe 0.54.0, ordinary `amdiommu=auto`, IPv4 and
-IPv6 TSO enabled, MTU1500.** Continue in this Git checkout. Real Mac build,
-boot and the Round47 hardware acceptance remain to be performed.
+**Accepted: ten mainline checks passed on the real Mac with Lucy 1.1.232 /
+Probe 0.54.0, ordinary `amdiommu=auto`, MTU1500 and both TSO modes enabled.**
+The deployed implementation is
+`0754d47b245ba2f641b0da194cdb6b1a11c03fb9`; two real blockers were fixed in
+this branch before deployment: the platform expert's table lookup is protected,
+and the derived accessor could not bind the unexported
+`IOACPIPlatformExpert::metaClass`, so the actual IVRS is now read through
+`IOACPIPlatformDevice::getACPITableData`. Real Mac compilation, strict
+codesign, boot and hardware acceptance passed in one planned boot, one load run
+and one valid measurement. The four IPv6 TCP streams carried 272 MiB; the two
+traffic windows added 2053 and 135 real TSO6 hardware completions; all four
+phases held 67 maps/1037 leaves/11 reachable tables of one domain, 67684
+commands completed over 264 wraps, and target faults stayed zero. Discovery
+resolved requester `0x2500` to unit 0 (`0000:00:00.2`), checked capability
+`0x40`/header `0x190b640f`, confirmed the IVRS and PCI bases both at
+`0xfd380000`, and observed firmware and runtime EFR `0x058f77ef22294a5a`.
+The actual report records one planned boot, one load and one valid measurement.
 
 The normal mapper now reads ACPI IVRS and reuses the existing topology parser
 to resolve the current NIC's requester and owning IVHD unit. It locates the
