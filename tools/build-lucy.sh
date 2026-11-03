@@ -250,7 +250,7 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 		     copyMapperForDevice() lookup happens once inside start(), so an
 		     iommu-parent published afterwards would always be too late. -->
 		<key>org.example.AMDMapperProbe</key>
-		<string>0.53.0</string>
+		<string>0.0.0</string>
 	</dict>
 	<key>OSBundleRequired</key>
 	<string>Network-Root</string>

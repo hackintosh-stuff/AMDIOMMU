@@ -10,6 +10,9 @@
     <key>CFBundlePackageType</key><string>KEXT</string>
     <key>CFBundleShortVersionString</key><string>0.53.0</string>
     <key>CFBundleVersion</key><string>0.53.0</string>
+    <!-- Declared so a client can name this kext in OSBundleLibraries; kmutil
+         compares against the compatible version, not the bundle version. -->
+    <key>OSBundleCompatibleVersion</key><string>0.53.0</string>
     <!--
       版本历史：
         0.53.0 M2-3y 第44轮：普通设备IOMapper自动发现；常驻控制器与通用MD/IODMACommand映射；正常网卡关闭和开启保留设备域。
