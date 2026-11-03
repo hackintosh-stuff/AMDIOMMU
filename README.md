@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round36 / RX invalidation batches
+## Accepted Round36 / RX invalidation batches
 
 Base: `051c90050b195d5ae388018da4463e785c38e9ac`, the documentation successor
 of the accepted Round35 implementation `e925368111fd92a567d348040a6026e63205ae70`.
@@ -30,8 +30,33 @@ run's logical map/unmap count; no fixed reduction percentage is required.
 Use the same fixed Git checkout, upstream `_scratch/lucy-upstream` and SDK.
 The native template family remains `--tx 21 --rx 34`; the build runner uses
 `--check-r36`, `runs/r36` and `org.example.round36load` with token `0x36c0de36`.
-Focused host checks and actual generated receive-loop checks passed. A macOS
-SDK build and one normal hardware acceptance run remain to be recorded.
+
+**Round36 hardware acceptance PASSED (14/14).** One planned boot and one valid
+measurement. The normal run really produced multi-slot batches: `max-batch=5`
+on both the driver and backend sides, with `pending-batch=0` at the end. RX
+logical maps and unmaps were 10654 each (9630 posted DMA plus 1024 install-time
+preparations); confirmed invalidations were 10643 each, spread over 9619 batch
+calls and 9630 batch slots, so the run saved 22 INV/CW cycles and the actual
+invalidation total stayed below the logical call total. The mean batch width was
+1.0011 because most receive calls had a single completed slot, and all 9630
+batch slots still carry per-slot PTE, PA/IOVA, generation and
+map/OWN/done/unmap ordering. posted equalled completed at 9630, 2599 real
+replacements occurred, 962 of 1024 slots differed between first and final
+retained generation addresses, all 1024 slots returned to their current mbuf,
+and owners/boundPairs/pending were zero. TX retired 10264 with rejected 0;
+domain maps 10273 = 10264 + 9 capacity probes; the command ring completed
+41835/41835 through 163 wraps. The setup worker exited before both domain
+observations, which shared the same root/DT/command addresses across the
+125.1829 s idle; R28T drained 1008/1008, R29D completed before TX close, and
+3/3 post-exit ordinary probes succeeded.
+
+Deployed source commit: `70d638df5bb3a5b5c421079107abe17b61b2cd64`. This
+documentation update is not a deployed revision.
+
+Round36 result and archive are outside this source repository:
+[Round36 result](<../../docs/m2-3q-round36-result.md>) and
+[evidence archive](<../../docs/evidence/r36-final-20261103.tgz>)
+(SHA256 `f9a997d3cd16cb4c11dbfec161cc7f3ef7698dcc5509f813d089486cf0432e1a`).
 
 ## Accepted Round35 / native RX bootstrap on Lucy's ordinary ring
 
