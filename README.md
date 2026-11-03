@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Round49 candidate / larger ordinary DMA mappings and RX batches
+## Accepted Round49 / larger ordinary DMA mappings and RX batches, PM hardware TODO
 
 Formal base: `e7074605b7077304d638f63440fe4467da918c8d`, the accepted Round48
 result-documentation successor; tree `3adb7278e1250c2d95f258d90ebecf227c65f5b5`.
@@ -15,9 +15,21 @@ archived analysis files. The driver and every successful mapper request used
 with zero target faults. The report records one build, one deployment, one
 planned boot, one load and one valid measurement, with no implementation fix.
 
-**Candidate: Lucy 1.1.234 / Probe 0.56.0, ordinary `amdiommu=auto`, MTU1500,
-TSO4 and TSO6 enabled.** Continue in this Git checkout. Real Mac build, boot
-and the eleven Round49 hardware checks remain pending.
+**Accepted: eleven mainline checks passed on the real Mac with Lucy 1.1.234 /
+Probe 0.56.0, ordinary `amdiommu=auto`, MTU1500, TSO4 and TSO6 enabled.** The
+deployed implementation is
+`5daec3527784199bf80c649da0f56f369624555d`, built once, deployed once and
+validated in one planned boot, one load run and one valid measurement; the
+deployment build log is `runs/r49-build.log`. The 256 KiB ordinary maps were
+real: 16 RX groups of 64 pages, `maxObservedPages = maxObservedRuns = 64`, and
+all four phases held 19 maps/1037 leaves/11 reachable tables of one domain with
+identity zero, including across one ordinary down/up that remapped every large
+RX group. Steady and down snapshots kept 1025 of 1037 live pages above 4 GiB
+with a maximum live PA of 16666193920, every successful request asked 32 bits
+(`map32ok == mapOk`, 30314 at the end) and every captured span stayed inside
+`[0x80000000, 0x81000000)`. The four IPv6 streams carried 272 MiB, TSO6 added
+2052 and 136 hardware completions, 60610 commands completed over 236 wraps,
+and target faults stayed zero.
 
 The ordinary mapper now accepts up to 64 mapped pages and 64 physical runs
 per request, covering an aligned 256 KiB buffer instead of the previous
