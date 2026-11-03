@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round38 / retire initial RX physical bootstrap after IOVA takeover
+## Accepted Round38 / retire initial RX physical bootstrap after IOVA takeover
 
 Base: `fa65abf486a2b181ceae9ad8ea4c42ff7e911940`, the documentation successor
 of the accepted Round37 implementation `bbeed6028f249ec842733b5fe685e87efc654110`.
@@ -33,7 +33,42 @@ and `org.example.round38load` with token `0x38c0de38`.
 Existing focused host checks, the generated receive-loop normal flow and the
 production bootstrap/backend normal flow passed during preparation.
 The accepted base and final patch application are checked separately.
-A real Mac build and one normal hardware acceptance run remain outstanding.
+
+**Round38 hardware acceptance PASSED (14/14).** One planned boot and one valid
+measurement. All 1024 distinct slots published a first real IOVA OWN, the last
+at 32,723,477,204 ns; the single retirement cleared 32,723,752,225 ns, its raw
+40-byte command completed at 32,723,757,215 ns with expected = observed = 5118,
+and the driver callback returned at 32,724,308,425 ns, all before the stop
+request. The active snapshot keeps exactly 13 identity leaves for the three
+fixed DMA spans, 1024 RX IOVA leaves covering every slot start and 21 TX IOVA
+leaves inside the TX window, while 1024 initial RX identity leaves were removed
+from a bootstrap of 1037 pages. Stop added 1024 current-buffer pages, so the
+final identity set is 1037 pages (4,247,552 B) = 13 fixed + 1024 current RX,
+with the arena cursor at 183 pages. RX logical maps/unmaps were 10763 each
+(9739 posted plus 1024 preparations) with 10716 confirmed invalidations over
+9692 batch calls and 9739 batch slots, `max-batch=10`, `pending-batch=0` and 94
+saved INV/CW cycles; the separate bootstrap retirement and the 1024 restore
+covers stay out of that identity. TX retired 10308 with rejected 0, domain maps
+10317 = 10308 + 9 probes, the command ring completed 43094/43094 through 168
+wraps, 8192/8192 replies crossed 125.1705 s idle, and 3/3 post-exit ordinary
+probes succeeded.
+
+The first analysis of this capture failed one check because the active-tree
+walker demanded IW from every present leaf. The 21 TX IOVA leaves are
+device-read-only by the established direction contract, so the checker now
+allows the missing IW only inside the TX window and the fixture maps its TX leaf
+read-only as well. That is a tool-only change: the deployed kext binaries are
+unchanged, and a rebuild reproduced identical Lucy bytes with only the linker
+assigned Probe UUID differing.
+
+Deployed source commit: `6910d03b298fc03550edda207a03be4fdd98263f`; the
+checker fix is `5bcb339c53c84fd262742e1091aa978502b2409c`. This documentation
+update is not a deployed revision.
+
+Round38 result and archive are outside this source repository:
+[Round38 result](<../../docs/m2-3s-round38-result.md>) and
+[evidence archive](<../../docs/evidence/r38-final-20261103.tgz>)
+(SHA256 `acfc8230c13ed19403d9b724da478f69f5074e3d41ac0b3e3db4052e9245b545`).
 
 ## Accepted Round37 / owned sparse physical DMA mappings
 
