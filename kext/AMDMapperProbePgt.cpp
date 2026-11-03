@@ -1355,9 +1355,11 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     //   无法把某个包归到窗口内，也无法排除统计发布延迟。
     //
     //   本步只读：不写设备寄存器，不改变 DMA 路径。
-    observeDeviceDma();
-    setProperty("m2-b2-dma-obs-before-window",
-                fM22b2Dma.ran ? "yes" : "no");
+    if (!fR31Session) {
+        observeDeviceDma();
+        setProperty("m2-b2-dma-obs-before-window",
+                    fM22b2Dma.ran ? "yes" : "no");
+    }
 
     // ---- 第 15c 步：绑定本次驱动实例（必须在窗口之前）----
     //
@@ -1369,11 +1371,13 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // 【第十轮为什么没有这一步】
     //   读侧把 want.epoch 写成 0，而 0 表示"不检查"。整条保护因此从未
     //   生效：驱动重载后同一块卡的新实例会被当成旧的。
-    m2b2BindDriverInstance();
-    setHexProperty(this, "m2-b2-epoch-bound-at-window",
-                   (UInt64)fM22b2Dma.epochBound);
-    setHexProperty(this, "m2-b2-epoch-bound-before-window",
-                   fM22b2Dma.tWinStart);
+    if (!fR31Session) {
+        m2b2BindDriverInstance();
+        setHexProperty(this, "m2-b2-epoch-bound-at-window",
+                       (UInt64)fM22b2Dma.epochBound);
+        setHexProperty(this, "m2-b2-epoch-bound-before-window",
+                       fM22b2Dma.tWinStart);
+    }
 
     // ---- 第 15d 步：RX 投递缓冲区集合的**水位**（必须在窗口之前）----
     //
@@ -1390,7 +1394,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     //   悄悄变小，而"全部覆盖"仍然成立。这正是本轮要消除的失效形态。
     //
     // 本步只读属性，不写设备寄存器，也不改变 DMA 路径。
-    m2b2RxSetRead(true);
+    if (!fR31Session) m2b2RxSetRead(true);
     // Replacements are impossible until both mapping and invalidation have
     // completed. Authorization accepts no new DMA addresses from the probe.
     setHexProperty(this, "m2-b2-r15-flood-token",
@@ -1425,13 +1429,14 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         firstFailReason = "normal dynamic IOVA capacity probe failed";
         goto recover;
     }
-    if (!r17EnterComplete(fM22b2Dma.tTranslateOn)) {
+    if (!fR31Session && !r17EnterComplete(fM22b2Dma.tTranslateOn)) {
         firstFailStage = "15e-abort-enter-resume";
         firstFailReason = "admission refused to reopen after the DTE flip";
         goto recover;
     }
-    // RX DMACommands use the already handed-over R17 command cursor. Native
-    // Install completes before Authorize allows the first RX IOVA publication.
+    // Native Install stops the NIC and maps its three fixed objects plus RX.
+    // Authorize restarts it with fixed IOVA bases and confirms real link/DMA
+    // recovery. Packet TX stays closed throughout this entry transition.
     if (!r27RxBegin()) {
         firstFailStage = "15e-abort-rx-standard-map";
         firstFailReason = "standard RX mappings or ring binding failed";
@@ -1441,6 +1446,21 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         firstFailStage = "15e-abort-rx-authorize";
         firstFailReason = "RX domain rejected authorization";
         goto recover;
+    }
+    if (fR31Session) {
+        // The entry reset rebuilt indices and the RX baseline. Sample these
+        // actual rings after the fixed-address switch, using PA for CPU reads.
+        observeDeviceDma();
+        setProperty("m2-b2-dma-obs-before-window", fM22b2Dma.ran ? "yes" : "no");
+        m2b2BindDriverInstance();
+        setHexProperty(this, "m2-b2-epoch-bound-at-window", (UInt64)fM22b2Dma.epochBound);
+        setHexProperty(this, "m2-b2-epoch-bound-before-window", fM22b2Dma.tWinStart);
+        m2b2RxSetRead(true);
+        if (!r17EnterComplete(fM22b2Dma.tTranslateOn)) {
+            firstFailStage = "15e-abort-enter-resume";
+            firstFailReason = "admission refused after fixed DMA and RX entry";
+            goto recover;
+        }
     }
     r27RxReady();
 
@@ -1707,12 +1727,15 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
     if (fM22b2Dma.ran && fM22b2Dma.haveTxRing && tailAfterOk) {
         const UInt64 bytes = 1024ULL * amdobs::TX_DESC_STRIDE;
         const char *why = nullptr;
-        if (amdobs::plausibleRingBase(fM22b2Dma.txRingBase, bytes,
+        UInt64 ringReadPA = fM22b2Dma.txRingBase;
+        if ((!fR31Session || r40FixedReadPA(r40fixed::kTxRing,
+                 fM22b2Dma.txRingBase, bytes, &ringReadPA)) &&
+            amdobs::plausibleRingBase(ringReadPA, bytes,
                                       M2B2_IDENTITY_LIMIT, &why) &&
-            amdobs::readVerdictDeviceReported(fM22b2Dma.txRingBase, bytes,
+            amdobs::readVerdictDeviceReported(ringReadPA, bytes,
                                 fM22b2Policy) == amdobs::RD_OK) {
             IOMemoryDescriptor *winMd = IOMemoryDescriptor::withPhysicalAddress(
-                fM22b2Dma.txRingBase, bytes, kIODirectionIn);
+                ringReadPA, bytes, kIODirectionIn);
             if (winMd) {
                 IOMemoryMap *m = winMd->map(kIOMapInhibitCache | kIOMapReadOnly);
                 if (m) {

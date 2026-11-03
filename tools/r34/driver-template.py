@@ -11,13 +11,15 @@ Round38 retires the RX bootstrap aliases once all slots have actually
 published their first IOVA OWN, after completing the current batch.
 Round39 stops the NIC before retiring the final mappings, without peer tail
 traffic, and restarts the physical ring after the original IOMMU state returns.
+Round40 also maps Lucy's existing descriptor rings and tally buffer through
+three persistent standard DMA commands, using the same stopped-NIC transition.
 The older RX4 path remains selectable from its original template.
 """
 from pathlib import Path
 import runpy
 
 BASE = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'r27/driver-template.py'))
-HEADERS = BASE['HEADERS'] + ['RTL812xRxNative.hpp']
+HEADERS = BASE['HEADERS'] + ['RTL812xRxNative.hpp', 'RTL812xFixedDma.hpp']
 MEMBERS = BASE['MEMBERS'] + r'''
     struct R34RxState;
     R34RxState *r34Rx = nullptr;
@@ -37,6 +39,12 @@ MEMBERS = BASE['MEMBERS'] + r'''
     bool r39RxPaused() const;
     bool r39RxStop();
     IOReturn r39RxResume();
+    UInt64 r40FixedRegister(UInt32);
+    bool r40FixedBinding(UInt32, UInt32, r34rx::MapRecord * = nullptr, UInt64 = 0);
+    bool r40FixedInstall();
+    IOReturn r40FixedActivate();
+    bool r40FixedRetire();
+    bool r40FixedRelease();
     bool r34RxRearm(UInt32, UInt32, UInt32, bool, UInt64 *);
     void r34RxPosted(UInt32, UInt64);
     bool r34RxCanReplace() const;
@@ -73,6 +81,12 @@ struct RTL8125::R34RxState {
     bool bootstrapRetireAttempted, bootstrapRetired;
     r34rx::StopRecord stop;
     bool hardwarePaused;
+    r40fixed::DriverSnapshot fixed;
+    IOMemoryDescriptor *fixedMemory[r40fixed::kCount];
+    IODMACommand *fixedCommand[r40fixed::kCount];
+    IOAddressRange fixedRanges[r40fixed::kCount];
+    bool fixedBound[r40fixed::kCount], fixedWired[r40fixed::kCount];
+    bool fixedMapped[r40fixed::kCount], entryRebuilding;
 };
 
 bool RTL8125::r34RxBinding(UInt32 op, UInt32 slot,
@@ -360,6 +374,193 @@ bool RTL8125::r39RxPaused() const
     return p && __atomic_load_n(&p->hardwarePaused, __ATOMIC_ACQUIRE);
 }
 
+UInt64 RTL8125::r40FixedRegister(UInt32 kind)
+{
+    struct rtl8125_private *tp = &linuxData;
+    const UInt32 low = kind == r40fixed::kTxRing ? TxDescStartAddrLow :
+        kind == r40fixed::kRxRing ? RxDescAddrLow : CounterAddrLow;
+    const UInt32 high = kind == r40fixed::kTxRing ? TxDescStartAddrHigh :
+        kind == r40fixed::kRxRing ? RxDescAddrHigh : CounterAddrHigh;
+    UInt64 address = ((UInt64)RTL_R32(tp, high) << 32) | RTL_R32(tp, low);
+    if (kind == r40fixed::kTally) address &= ~(UInt64)(CounterReset | CounterDump);
+    return address;
+}
+
+bool RTL8125::r40FixedBinding(UInt32 op, UInt32 kind,
+                            r34rx::MapRecord *out, UInt64 time)
+{
+    R34RxState *p = r34Rx;
+    if (!p || kind >= r40fixed::kCount || !p->callback) return false;
+    r34rx::Binding b = {};
+    b.version = r34rx::kVersion; b.bytes = sizeof(b); b.op = op; b.slot = kind;
+    if (op == r40fixed::kEntered) {
+        b.pa = time; b.length = r40fixed::kCount;
+    } else {
+        b.memory = p->fixedMemory[kind]; b.command = p->fixedCommand[kind];
+        b.pa = p->fixed.objects[kind].pa; b.length = p->fixed.objects[kind].bytes;
+    }
+    if (p->callback(p->context, &b) != kIOReturnSuccess) return false;
+    if (out) *out = b.out;
+    return true;
+}
+
+bool RTL8125::r40FixedInstall()
+{
+    R34RxState *p = r34Rx;
+    auto &f = p->fixed;
+    auto &s = p->snapshot;
+    if (f.entryCalls || s.state != r34rx::kPrepared || s.maps) return false;
+    struct rtl8125_private *tp = &linuxData;
+    ++f.entryCalls;
+    f.tStopBegin = mach_absolute_time();
+    f.commandBefore = RTL_R8(tp, ChipCmd);
+    f.interruptMaskBefore = RTL_R32(tp, IMR0_8125);
+    f.generationBefore = rxpostHdr ? rxpostHdr->ringGen : p->generation;
+    for (UInt32 i = 0; i < r40fixed::kCount; ++i) {
+        f.objects[i].registerBefore = r40FixedRegister(i);
+        if (f.objects[i].registerBefore != f.objects[i].pa) return false;
+    }
+    // TX admission is still closed from the pre-DTE drain. Prepare kept all
+    // RX mbufs unchanged, so this explicit rebuild preserves that manifest.
+    __atomic_store_n(&p->hardwarePaused, true, __ATOMIC_RELEASE);
+    timerSource->cancelTimeout();
+    interruptSource->disable();
+    netif->stopOutputThread();
+    netif->flushOutputQueue();
+    clear_mask((__LINK_UP_M | __POLL_MODE_M), &stateFlags);
+    setLinkStatus(kIONetworkLinkValid);
+    rtl8125_hw_reset(tp);
+    f.commandStopped = RTL_R8(tp, ChipCmd);
+    f.interruptMaskStopped = RTL_R32(tp, IMR0_8125);
+    if ((f.commandStopped & (CmdReset | CmdTxEnb | CmdRxEnb)) ||
+        f.interruptMaskStopped) return false;
+    f.resetVerified = 1;
+    f.tStopped = mach_absolute_time();
+    p->entryRebuilding = true;
+    clearRxTxRings();
+    p->entryRebuilding = false;
+    f.generationAfter = rxpostHdr ? rxpostHdr->ringGen : p->generation;
+    rxpostCaptureBaseline();
+    rxpostPublish();
+
+    // Mark ownership before allocating any pair. These virtual descriptors
+    // describe the existing driver buffers; their original MD/Cmd stay owned
+    // by Lucy and keep the physical allocation alive through final restart.
+    s.state = r34rx::kInstalled;
+    const IOVirtualAddress address[r40fixed::kCount] = {
+        (IOVirtualAddress)txDescArray, (IOVirtualAddress)rxDescArray,
+        (IOVirtualAddress)statData
+    };
+    for (UInt32 i = 0; i < r40fixed::kCount; ++i) {
+        auto &o = f.objects[i];
+        const UInt32 direction = i == r40fixed::kTally ? kIODirectionIn : kIODirectionInOut;
+        p->fixedRanges[i].address = address[i]; p->fixedRanges[i].length = o.bytes;
+        p->fixedMemory[i] = IOMemoryDescriptor::withOptions(&p->fixedRanges[i], 1, 0,
+            kernel_task, kIOMemoryTypeVirtual | direction | kIOMemoryAsReference, p->mapper);
+        p->fixedCommand[i] = IODMACommand::withSpecification(kIODMACommandOutputHost64,
+            64, 0, IODMACommand::kMapped, 0, 1, p->mapper, nullptr);
+        if (!p->fixedMemory[i] || !p->fixedCommand[i] ||
+            !r40FixedBinding(r40fixed::kBind, i)) return false;
+        p->fixedBound[i] = true;
+        o.memory = (UInt64)(uintptr_t)p->fixedMemory[i];
+        o.command = (UInt64)(uintptr_t)p->fixedCommand[i];
+        if (p->fixedMemory[i]->prepare(direction) != kIOReturnSuccess) return false;
+        p->fixedWired[i] = true;
+        if (p->fixedCommand[i]->setMemoryDescriptor(p->fixedMemory[i], true) !=
+            kIOReturnSuccess) return false;
+        p->fixedMapped[i] = true;
+        r34rx::MapRecord record = {};
+        IODMACommand::Segment64 segment = {};
+        UInt64 offset = 0; UInt32 count = 1;
+        if (!r40FixedBinding(r40fixed::kRead, i, &record) ||
+            !(record.flags & r40fixed::kMapInvalidated) || !record.tMapInv ||
+            record.memory != o.memory || record.command != o.command || record.pa != o.pa ||
+            p->fixedCommand[i]->gen64IOVMSegments(&offset, &segment, &count) != kIOReturnSuccess ||
+            count != 1 || offset != o.bytes || segment.fLength != o.bytes ||
+            segment.fIOVMAddr != record.iova || record.iova == o.pa ||
+            record.iova != r40fixed::kIovaBase + i * r40fixed::kStride + (o.pa & 4095ULL))
+            return false;
+        o.iova = record.iova; o.mapOptions = record.mapOptions;
+        ++o.mapCount; o.tMapReady = mach_absolute_time();
+    }
+    return true;
+}
+
+IOReturn RTL8125::r40FixedActivate()
+{
+    R34RxState *p = r34Rx;
+    auto &f = p->fixed;
+    if (f.tActive) return f.flags ? kIOReturnIOError : kIOReturnSuccess;
+    struct rtl8125_private *tp = &linuxData;
+    if (!f.tProgrammed) {
+        txPhyAddr = f.objects[r40fixed::kTxRing].iova;
+        rxPhyAddr = f.objects[r40fixed::kRxRing].iova;
+        statPhyAddr = f.objects[r40fixed::kTally].iova;
+        txDescDoneCount = txDescDoneLast = 0;
+        rtl812xEnable();
+        for (UInt32 i = 0; i < r40fixed::kCount; ++i) {
+            f.objects[i].registerActive = r40FixedRegister(i);
+            if (f.objects[i].registerActive != f.objects[i].iova) return kIOReturnIOError;
+        }
+        f.tProgrammed = mach_absolute_time();
+    }
+    const UInt32 phy = RTL_R32(tp, PHYstatus);
+    if (phy == 0xffffffffu || !(phy & LinkStatus)) return kIOReturnBusy;
+    // PHY negotiation needs no network callback. Keep the prepared mappings
+    // paused until link is up, so a link-down IRQ cannot clear this new ring.
+    if (p->hardwarePaused) {
+        __atomic_store_n(&p->hardwarePaused, false, __ATOMIC_RELEASE);
+        interruptSource->enable();
+    }
+    if (!test_bit(__LINK_UP, &stateFlags)) rtl812xCheckLinkStatus(tp);
+    const UInt32 command = RTL_R8(tp, ChipCmd);
+    if (!test_bit(__LINK_UP, &stateFlags) ||
+        (command & (CmdReset | CmdTxEnb | CmdRxEnb)) != (CmdTxEnb | CmdRxEnb))
+        return kIOReturnBusy;
+    for (UInt32 i = 0; i < r40fixed::kCount; ++i) {
+        f.objects[i].registerActive = r40FixedRegister(i);
+        if (f.objects[i].registerActive != f.objects[i].iova) return kIOReturnIOError;
+    }
+    f.tActive = mach_absolute_time();
+    return r40FixedBinding(r40fixed::kEntered, 0, nullptr, f.tActive)
+        ? kIOReturnSuccess : kIOReturnIOError;
+}
+
+bool RTL8125::r40FixedRetire()
+{
+    R34RxState *p = r34Rx;
+    for (UInt32 i = 0; i < r40fixed::kCount; ++i) {
+        if (!p->fixedMapped[i]) continue;
+        auto &o = p->fixed.objects[i];
+        if (p->fixedCommand[i]->complete(true, false) != kIOReturnSuccess) return false;
+        r34rx::MapRecord record = {};
+        const UInt32 direction = i == r40fixed::kTally ? kIODirectionIn : kIODirectionInOut;
+        if (!r40FixedBinding(r40fixed::kRead, i, &record) ||
+            !(record.flags & r40fixed::kMapUnmapped) || !record.tUnmapInv ||
+            p->fixedCommand[i]->clearMemoryDescriptor(false) != kIOReturnSuccess ||
+            p->fixedMemory[i]->complete(direction) != kIOReturnSuccess) return false;
+        p->fixedMapped[i] = p->fixedWired[i] = false;
+        ++o.unmapCount; o.tUnmapReady = mach_absolute_time();
+    }
+    txPhyAddr = p->fixed.objects[r40fixed::kTxRing].pa;
+    rxPhyAddr = p->fixed.objects[r40fixed::kRxRing].pa;
+    statPhyAddr = p->fixed.objects[r40fixed::kTally].pa;
+    return true;
+}
+
+bool RTL8125::r40FixedRelease()
+{
+    R34RxState *p = r34Rx;
+    for (UInt32 i = 0; i < r40fixed::kCount; ++i) {
+        if (p->fixedMapped[i] || p->fixedWired[i]) return false;
+        if (p->fixedBound[i] && !r40FixedBinding(r40fixed::kUnbind, i)) return false;
+        p->fixedBound[i] = false;
+        if (p->fixedCommand[i]) { p->fixedCommand[i]->release(); p->fixedCommand[i] = nullptr; }
+        if (p->fixedMemory[i]) { p->fixedMemory[i]->release(); p->fixedMemory[i] = nullptr; }
+    }
+    return true;
+}
+
 bool RTL8125::r39RxStop()
 {
     R34RxState *p = r34Rx;
@@ -433,6 +634,11 @@ bool RTL8125::r39RxStop()
     stop.stopRetired = s.stopRetired;
     stop.restored = s.restored;
     stop.tLastRestore = s.tLastRestore;
+    if (!r40FixedRetire()) {
+        p->fixed.flags |= r40fixed::kFlagUnmapFailed;
+        s.flags |= r34rx::kFlagUnmapFailed;
+        return false;
+    }
     if (s.pendingPosted || s.posted != s.completed + s.stopRetired ||
         s.maps != s.unmaps || s.restored != r34rx::kCount) return false;
     s.state = r34rx::kDrained;
@@ -472,6 +678,11 @@ IOReturn RTL8125::r39RxResume()
     if (!test_bit(__LINK_UP, &stateFlags) ||
         (command & (CmdReset | CmdTxEnb | CmdRxEnb)) != (CmdTxEnb | CmdRxEnb))
         return kIOReturnBusy;
+    for (UInt32 i = 0; i < r40fixed::kCount; ++i) {
+        auto &o = p->fixed.objects[i];
+        o.registerPhysical = r40FixedRegister(i);
+        if (o.registerPhysical != o.pa) return kIOReturnIOError;
+    }
     p->physicalResumed = true;
     p->tPhysicalResumed = stop.tResumed = mach_absolute_time();
     return kIOReturnSuccess;
@@ -561,6 +772,8 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
         s.version = r34rx::kVersion; s.bytes = sizeof(s); s.slotCount = r34rx::kCount;
         s.businessToken = request->businessToken;
         p->stop.version = r34rx::kStopVersion; p->stop.bytes = sizeof(p->stop);
+        p->fixed.version = r40fixed::kVersion; p->fixed.bytes = sizeof(p->fixed);
+        p->fixed.count = r40fixed::kCount;
         p->generation = rxpostHdr ?
             __atomic_load_n(&rxpostHdr->ringGen, __ATOMIC_RELAXED) : 1u;
         // These prepared, contiguous descriptors stay owned by Lucy for the
@@ -589,6 +802,9 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
             }
             physical.spans[i].pa = pa;
             physical.spans[i].bytes = physicalLength[i];
+            p->fixed.objects[i].kind = i;
+            p->fixed.objects[i].pa = pa;
+            p->fixed.objects[i].bytes = physicalLength[i];
         }
         for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
             UInt64 pa = 0;
@@ -628,11 +844,13 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
         if (s.state != r34rx::kPrepared || s.flags || !request->mapper ||
             !request->context || !request->callback || request->deadline)
             return kIOReturnBadArgument;
-        // Mark installation before allocating pairs, so an incomplete install
-        // cannot be mistaken for a prepared ring with no mapping ownership.
-        s.state = r34rx::kInstalled;
         p->mapper = static_cast<IOMapper *>(request->mapper); p->mapper->retain();
         p->context = request->context; p->callback = request->callback;
+        if (!r40FixedInstall()) {
+            p->fixed.flags |= r40fixed::kFlagMapFailed;
+            s.flags |= r34rx::kFlagMapFailed;
+            return kIOReturnIOError;
+        }
         for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
             p->ranges[slot].address = (IOVirtualAddress)mbuf_datastart(rxBufArray[slot].mbuf);
             p->ranges[slot].length = r34rx::kCapacity;
@@ -654,8 +872,14 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
         if (s.state != r34rx::kInstalled || s.flags || !s.nativeActive ||
             s.maps != r34rx::kCount || !s.tInstalled || request->deadline)
             return kIOReturnBadArgument;
-        p->authorized = true;
-        p->tAuthorized = mach_absolute_time();
+        controlResult = r40FixedActivate();
+        if (controlResult == kIOReturnSuccess) {
+            p->authorized = true;
+            p->tAuthorized = mach_absolute_time();
+        } else if (controlResult != kIOReturnBusy) {
+            p->fixed.flags |= r40fixed::kFlagMapFailed;
+            s.flags |= r34rx::kFlagMapFailed;
+        }
     } else if (request->op == r34rx::kDisarm || request->op == r34rx::kDrain) {
         p->authorized = false;
         if (!s.tDisarmed) s.tDisarmed = mach_absolute_time();
@@ -675,6 +899,7 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
             if (p->command[slot]) { p->command[slot]->release(); p->command[slot] = nullptr; }
             if (p->memory[slot]) { p->memory[slot]->release(); p->memory[slot] = nullptr; }
         }
+        if (!r40FixedRelease()) return kIOReturnBusy;
         p->mapper->release(); p->mapper = nullptr;
         p->context = nullptr; p->callback = nullptr;
         s.state = r34rx::kReleased; s.nativeActive = 0;
@@ -691,6 +916,8 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
     if (raw) { setProperty("rtl812x-r34-rx-native-raw", raw); raw->release(); }
     raw = OSData::withBytes(&p->stop, sizeof(p->stop));
     if (raw) { setProperty("rtl812x-r39-rx-stop-raw", raw); raw->release(); }
+    raw = OSData::withBytes(&p->fixed, sizeof(p->fixed));
+    if (raw) { setProperty("rtl812x-r40-fixed-dma-raw", raw); raw->release(); }
     setProperty("rtl812x-r34-rx-mode", "native-ring-batch16");
     setProperty("rtl812x-r34-rx-state", s.state, 32);
     setProperty("rtl812x-r34-rx-maps", s.maps, 32);
@@ -723,6 +950,11 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
 
 void RTL8125::r34RxInvalidate()
 {
+    // This one stopped-NIC rebuild keeps the immutable Prepare mbufs/spans.
+    // RX-post still bumps its real generation and publishes a fresh baseline.
+    if (r34Rx && r34Rx->entryRebuilding && r34Rx->hardwarePaused &&
+        r34Rx->snapshot.state == r34rx::kPrepared && !r34Rx->snapshot.maps)
+        return;
     if (r34Rx && r34Rx->snapshot.state != r34rx::kReleased) {
         r34Rx->snapshot.flags |= r34rx::kFlagRingReset;
         r34Rx->authorized = false;
@@ -735,6 +967,8 @@ bool RTL8125::r34RxFree()
     if (!r34Rx) return true;
     for (UInt32 slot = 0; slot < r34rx::kCount; ++slot)
         if (r34Rx->mapped[slot] || r34Rx->wired[slot] || r34Rx->bound[slot]) return false;
+    for (UInt32 i = 0; i < r40fixed::kCount; ++i)
+        if (r34Rx->fixedMapped[i] || r34Rx->fixedWired[i] || r34Rx->fixedBound[i]) return false;
     IOFree(r34Rx, sizeof(*r34Rx)); r34Rx = nullptr;
     return true;
 }

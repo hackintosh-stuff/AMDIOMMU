@@ -321,6 +321,7 @@ public:
     text = prefix + '#include "tools/lucy-obs/RTL812xRxMap.hpp"\n'
     text += '#include "kext/amd_iommu_bizwalk_core.hpp"\n'
     text += '#include "tools/lucy-obs/RTL812xRxNative.hpp"\n'
+    text += '#include "tools/lucy-obs/RTL812xFixedDma.hpp"\n'
     text += '#include "tools/lucy-obs/RTL812xRxPool.hpp"\n' + constants
     text += '\n#define M2B1_LOOP_TIMEOUT 32\n'
     text += base.section(header, 'struct LayoutRun {', '// ---- kNicPaths')

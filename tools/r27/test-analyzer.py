@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Focused Round39 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round40 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
 The positive fixture covers all 1024 RX map/post/done/restore/unmap lifecycles,
 including remapping, batch16, bootstrap retirement and local NIC stop without peer tail traffic.
 Final uncompleted OWN records are explicitly stop-retired, never counted as DMA completions.
+The same fixture maps the three fixed DMA objects through their actual headers,
+with active IOVA readbacks, no active identity leaves and physical restart readbacks.
 Rejection cases cover missing restoration and corrupted RX command evidence.
 """
 import importlib.util
@@ -67,6 +69,7 @@ struct IOService;
 #include "RTL812xTxMapStd.hpp"
 #include "AMDAliveTxDomainNative.hpp"
 #include "RTL812xRxNative.hpp"
+#include "RTL812xFixedDma.hpp"
 #include "amd_iommu_sparse_core.hpp"
 #include <cstddef>
 static_assert(sizeof(r34rx::Snapshot) == 270432, "native RX driver snapshot");
@@ -75,6 +78,8 @@ static_assert(offsetof(r34rx::Snapshot, slots) == 96, "native RX driver prefix")
 static_assert(offsetof(r34rx::BackendSnapshot, slots) == 80, "native RX backend prefix");
 static_assert(sizeof(r34rx::PhysicalLayout) == 64, "fixed physical DMA layout");
 static_assert(sizeof(r34rx::StopRecord) == 96, "local NIC stop record");
+static_assert(sizeof(r40fixed::DriverSnapshot) == 368, "fixed DMA driver snapshot");
+static_assert(sizeof(r40fixed::BackendSnapshot) == 1376, "fixed DMA backend snapshot");
 
 static uint64_t sessionTime(uint64_t value) {
     return value >= 2152 ? value + 125000000000ULL : value;
@@ -107,7 +112,7 @@ int main(int argc, char **argv) {
     constexpr uint32_t batchGroups = 4 * 65;
     constexpr uint32_t rxInvalidations = r34rx::kCount + batchGroups;
     d.commandSubmits = d.commandCompleted = d.completionSequence =
-        2 * (10240 + 9) + 2 * rxInvalidations + 4;
+        2 * (10240 + 9) + 2 * rxInvalidations + 4 + 2 * r40fixed::kCount;
     d.commandWraps = d.commandSubmits * 2 / d.commandCapacity;
     d.commandPostWrapCompleted = d.commandCompleted - (d.commandCapacity / 2 - 1);
     d.slotsUsed = 65535; d.maxLiveOwners = 16;
@@ -147,7 +152,7 @@ int main(int argc, char **argv) {
     b.magic = r20tx::kMagic; b.version = r20tx::kVersion; b.bytes = sizeof(b);
     b.bdf = d.devid; b.token = 7; b.nslot = 16;
     b.txNext = b.txDirty = b.txClose = b.txTail = 64;
-    b.tSample = 9025; b.ringAddr = 0x800000; b.ringDescSize = 16;
+    b.tSample = 9025; b.ringAddr = r40fixed::kIovaBase; b.ringDescSize = 16;
     b.ringBytes = 1024 * b.ringDescSize;
     b.sampleStage = r20tx::kStageExit; b.sampleSeq = 8; b.quiesced = 1;
     uint32_t nextPage = 0;
@@ -231,7 +236,7 @@ int main(int argc, char **argv) {
     rb.version = r34rx::kVersion; rb.bytes = sizeof(rb); rb.count = r34rx::kCount;
     rb.mapCalls = rb.mapOk = rb.unmapCalls = rb.unmapOk = rx.maps;
     rb.coverCalls = rb.coverOk = r34rx::kCount;
-    rb.ready = 1; rb.tReady = 410; rb.tDrained = 8870;
+    rb.ready = 1; rb.tReady = 410; rb.tDrained = 8880;
     stop.version = r34rx::kStopVersion; stop.bytes = sizeof(stop);
     stop.stopCalls = stop.resetVerified = 1;
     stop.commandBefore = 0x0c; stop.interruptMaskBefore = 0xff;
@@ -286,12 +291,12 @@ int main(int argc, char **argv) {
         ds.currentPA = ds.last.pa;
     }
     // Build and retire bootstrap with the production sparse helpers. Preserve
-    // one active copy alongside the final fixed-DMA/current-RX physical tree.
+    // one active copy alongside the final current-RX physical tree.
     r34rx::PhysicalLayout physical{};
     physical.version = r34rx::kPhysicalLayoutVersion;
     physical.bytes = sizeof(physical); physical.generation = 2;
     physical.count = r34rx::kPhysicalSpanCount;
-    physical.spans[0] = {b.ringAddr, b.ringBytes};
+    physical.spans[0] = {0x800000, b.ringBytes};
     physical.spans[1] = {0x810000, 1024 * 16};
     physical.spans[2] = {0x820000, 64};
     amdsparse::Arena identity = {pt, ptBase, 32, 7, d.rootLevel, ptBase, 0, 0, nullptr};
@@ -300,18 +305,56 @@ int main(int argc, char **argv) {
     for (const auto &slot : rx.slots)
         if (!amdsparse::mapOwnedRange(identity, slot.originalPA, r34rx::kCapacity)) std::abort();
     if (identity.addedLeaves != 1033) std::abort();
-    auto fixedPage = [&](amdsparse::u64 page) {
-        for (const auto &span : physical.spans)
-            if (page < span.pa + span.bytes && page + 4096 > span.pa) return true;
-        return false;
-    };
+    auto keepNone = [](amdsparse::u64) { return false; };
     unsigned removed = 0;
+    for (const auto &span : physical.spans)
+        if (!amdsparse::unmapOwnedRange(identity, span.pa, span.bytes,
+                                       keepNone, removed)) std::abort();
     for (const auto &slot : rx.slots)
         if (!amdsparse::unmapOwnedRange(identity, slot.originalPA, r34rx::kCapacity,
-                                       fixedPage, removed)) std::abort();
-    if (removed != 1024) std::abort();
+                                       keepNone, removed)) std::abort();
+    if (removed != 1033) std::abort();
     amdsparse::u64 activePt[32 * 512];
     std::memcpy(activePt, pt, sizeof(pt));
+    r40fixed::DriverSnapshot fixedDriver{};
+    r40fixed::BackendSnapshot fixedBackend{};
+    fixedDriver.version = fixedBackend.version = r40fixed::kVersion;
+    fixedDriver.bytes = sizeof(fixedDriver); fixedBackend.bytes = sizeof(fixedBackend);
+    fixedDriver.count = fixedBackend.count = r40fixed::kCount;
+    fixedDriver.entryCalls = fixedDriver.resetVerified = fixedBackend.entered = 1;
+    fixedDriver.commandBefore = 0x0c; fixedDriver.interruptMaskBefore = 0xff;
+    fixedDriver.generationBefore = physical.generation;
+    fixedDriver.generationAfter = physical.generation + 1;
+    fixedDriver.tStopBegin = 160; fixedDriver.tStopped = 161;
+    fixedDriver.tProgrammed = 402;
+    fixedDriver.tActive = fixedBackend.tEntered = 405;
+    fixedBackend.mapCalls = fixedBackend.mapOk = fixedBackend.unmapCalls = fixedBackend.unmapOk = 3;
+    for (uint32_t i = 0; i < r40fixed::kCount; ++i) {
+        auto &w = fixedDriver.objects[i]; auto &r = fixedBackend.objects[i];
+        w.memory = r.memory = 0xe00000 + i * 256;
+        w.command = r.command = 0xf00000 + i * 256;
+        w.pa = r.pa = physical.spans[i].pa;
+        w.bytes = r.bytes = physical.spans[i].bytes;
+        w.iova = r.iova = r40fixed::kIovaBase + i * r40fixed::kStride + (r.pa & 4095);
+        w.registerBefore = w.registerPhysical = r.pa;
+        w.registerActive = r.iova; w.kind = r.kind = i;
+        w.mapOptions = r.mapOptions = i == r40fixed::kTally ? 2 : 3;
+        w.mapCount = w.unmapCount = r.mapCalls = r.unmapCalls = 1;
+        r.pages = ((r.pa & 4095) + r.bytes + 4095) / 4096; r.flags = 7;
+        r.tMapPublish = 162 + 2 * i; r.tMapInv = r.tMapPublish + 1;
+        w.tMapReady = r.tMapInv + 1;
+        r.tUnmapPublish = 8871 + 2 * i; r.tUnmapInv = r.tUnmapPublish + 1;
+        w.tUnmapReady = r.tUnmapInv + 1;
+        const uint64_t mapSequence = 19 + i, unmapSequence = 23030 + i;
+        r.mapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
+                        mapSequence, mapSequence, r.tMapInv};
+        r.unmapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
+                          unmapSequence, unmapSequence, r.tUnmapInv};
+        for (uint32_t j = 0; j < r.pages; ++j) {
+            r.mapPte[j] = ((r.pa & ~4095ULL) + j * 4096) | perm;
+            activePt[2 * 512 + 256 + i * 16 + j] = r.mapPte[j];
+        }
+    }
     // Earlier slots may already be on an unretained intermediate generation.
     // Active IOVAs need not equal the final retained first/last PA samples.
     for (uint32_t i = 0; i < r34rx::kCount; ++i) {
@@ -354,6 +397,16 @@ int main(int argc, char **argv) {
     SESSION_TIME(stop.tStopBegin); SESSION_TIME(stop.tStopped);
     SESSION_TIME(stop.tLastUnmap); SESSION_TIME(stop.tLastRestore);
     SESSION_TIME(stop.tResumeBegin); SESSION_TIME(stop.tResumed);
+    SESSION_TIME(fixedDriver.tStopBegin); SESSION_TIME(fixedDriver.tStopped);
+    SESSION_TIME(fixedDriver.tProgrammed); SESSION_TIME(fixedDriver.tActive);
+    SESSION_TIME(fixedBackend.tEntered);
+    for (uint32_t i = 0; i < r40fixed::kCount; ++i) {
+        auto &w = fixedDriver.objects[i]; auto &r = fixedBackend.objects[i];
+        SESSION_TIME(w.tMapReady); SESSION_TIME(w.tUnmapReady);
+        SESSION_TIME(r.tMapPublish); SESSION_TIME(r.tMapInv);
+        SESSION_TIME(r.tUnmapPublish); SESSION_TIME(r.tUnmapInv);
+        SESSION_TIME(r.mapCommand.tComplete); SESSION_TIME(r.unmapCommand.tComplete);
+    }
     SESSION_TIME(retire.tComplete);
     for (uint32_t i = 0; i < r34rx::kCount; ++i) {
         auto &ds = rx.slots[i]; auto &bs = rb.slots[i];
@@ -373,6 +426,8 @@ int main(int argc, char **argv) {
     save(dir, "r34-rx-driver.bin", &rx, sizeof(rx));
     save(dir, "r34-rx-backend.bin", &rb, sizeof(rb));
     save(dir, "r39-rx-stop.bin", &stop, sizeof(stop));
+    save(dir, "r40-fixed-driver.bin", &fixedDriver, sizeof(fixedDriver));
+    save(dir, "r40-fixed-backend.bin", &fixedBackend, sizeof(fixedBackend));
     save(dir, "r37-physical-layout.bin", &physical, sizeof(physical));
     save(dir, "r38-active-pt-raw.bin", activePt, sizeof(activePt));
     save(dir, "r38-bootstrap-retire-command.bin", &retire, sizeof(retire));
@@ -403,9 +458,9 @@ def properties():
          'm2-3p-rx-pool-rpcs': 0, 'm2-3p-rx-spares': 0, 'm2-3p-rx-ring-id': 0x355200,
          'm2-3p-rx-physical-resume': 'done',
          'm2-3r-physical-mode': 'owned-sparse-4k', 'm2-3r-bootstrap-pages': 1033,
-         'm2-3r-restore-added-pages': 1536, 'm2-3r-identity-pages': 1545,
+         'm2-3r-restore-added-pages': 1536, 'm2-3r-identity-pages': 1536,
          'm2-3s-rx-bootstrap-retired': 'yes', 'm2-3s-fixed-pages': 9,
-         'm2-3s-bootstrap-removed-pages': 1024,
+         'm2-3s-bootstrap-removed-pages': 1033,
          'm2-3s-bootstrap-clear-time': session_time(2241),
          'm2-3s-bootstrap-retire-time': session_time(2242),
          'm2-3q-rx-map-invalidations': 1284, 'm2-3q-rx-unmap-invalidations': 1284,
@@ -413,7 +468,7 @@ def properties():
          'm2-3q-rx-map-batch-slots': 4096, 'm2-3q-rx-unmap-batch-slots': 4096,
          'm2-3q-rx-max-batch': 16,
          'm2-3h-rx-state': 'drained-and-unmapped', 'm2-3h-rx-ready': 'no',
-         'm2-b2-t-recovery-start': 8873, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0,
+         'm2-b2-t-recovery-start': 8883, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0,
          'm2-3h-rx-stop-retired': 1024, 'm2-3i-exit-retire-confirmed-time': 8792,
          'm2-3i-exit-driver-live': 0, 'm2-3i-exit-driver-held': 0,
          'm2-3i-exit-driver-mapped': 10240, 'm2-3i-exit-driver-retired': 10240,
@@ -430,7 +485,7 @@ def properties():
                 'm2-3e-enter-last-inflight', 'm2-3e-enter-last-ring',
                 'm2-3e-exit-last-inflight', 'm2-3e-exit-last-ring'):
         p[key] = 0
-    command_total = 2 * 10249 + 2 * 1284 + 4
+    command_total = 2 * 10249 + 2 * 1284 + 4 + 2 * 3
     p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': command_total,
               'm2-3b-command-completed': command_total, 'm2-3b-command-wraps': command_total * 2 // 512,
               'm2-3b-command-post-wrap-completed': command_total - 255,
@@ -449,7 +504,7 @@ def properties():
     leave = ('m2-3e-exit-gate-close', 'm2-3e-exit-submit-done',
              'm2-3e-exit-drain-done', 'm2-3e-t-translate-off',
              'm2-3e-t-detach', 'm2-3e-t-resume')
-    p.update(zip(enter, (100, 110, 120, 130, 140, 160)))
+    p.update(zip(enter, (100, 110, 120, 130, 140, 406)))
     p.update(zip(leave, (8770, 8780, 8790, 9030, 9040, 9050)))
     for key in enter + leave + ('m2-b2-t-recovery-start',
                                 'm2-3i-exit-retire-confirmed-time'):
@@ -657,13 +712,22 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual((by_id[RX_MAP_CHECK]['fixedPhysicalPages'],
                           by_id[RX_MAP_CHECK]['bootstrapPages'],
                           by_id[RX_MAP_CHECK]['restoreAddedPages'],
-                          by_id[RX_MAP_CHECK]['identityPages']), (9, 1033, 1536, 1545))
+                          by_id[RX_MAP_CHECK]['identityPages']), (9, 1033, 1536, 1536))
         self.assertEqual((by_id[RX_MAP_CHECK]['bootstrapRemovedPages'],
                           by_id[RX_MAP_CHECK]['activeIdentityPages'],
-                          by_id[RX_MAP_CHECK]['activeRxIovaPages']), (1024, 9, 1536))
+                          by_id[RX_MAP_CHECK]['activeRxIovaPages']), (1033, 0, 1536))
         self.assertEqual(by_id[RX_MAP_CHECK]['bootstrapRetireCommand']['expected'], 20000)
         self.assertEqual(by_id[RX_MAP_CHECK]['bootstrapDriverDone'], session_time(2243))
-        self.assertEqual(by_id[RX_MAP_CHECK]['identityBytes'], 1545 * 4096)
+        self.assertEqual(by_id[RX_MAP_CHECK]['identityBytes'], 1536 * 4096)
+        fixed = by_id[RX_MAP_CHECK]['fixedDMA']
+        self.assertEqual((fixed['mapped'], fixed['unmapped'], fixed['liveOwners'],
+                          fixed['boundPairs'], fixed['iovaPages']), (3, 3, 0, 0, 9))
+        self.assertEqual((fixed['generationBefore'], fixed['generationAfter']), (2, 3))
+        self.assertEqual([obj['registerActive'] for obj in fixed['objects']],
+                         [analyzer.FIXED_BASE + i * analyzer.FIXED_STRIDE for i in range(3)])
+        self.assertTrue(all(obj['registerPhysical'] == obj['pa'] for obj in fixed['objects']))
+        self.assertEqual((self.capture / 'r40-fixed-driver.bin').stat().st_size, analyzer.FIXED_DRIVER_BYTES)
+        self.assertEqual((self.capture / 'r40-fixed-backend.bin').stat().st_size, analyzer.FIXED_BACKEND_BYTES)
         self.assertEqual((by_id[RX_MAP_CHECK]['source'], by_id[RX_MAP_CHECK]['ringId'],
                           by_id[RX_MAP_CHECK]['experimentalPoolRPCs'],
                           by_id[RX_MAP_CHECK]['experimentalSpares']),

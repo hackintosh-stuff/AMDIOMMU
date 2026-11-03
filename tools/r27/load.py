@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Round39 device domain: 4096 requests, 125 s idle, another 4096, explicit stop.
-Wait for driver-owned RX mappings, then drive normal replacement and local stop.
+"""Round40 device domain: 4096 requests, 125 s idle, another 4096, explicit stop.
+Wait for fixed/RX IOVA mappings, then drive normal replacement and local stop.
 Both phases run after setup worker exit in the same service-owned domain.
 Only an active all-standard domain permits the batch; never retransmit requests.
 """
@@ -353,7 +353,7 @@ def ord_probe(s, peer, seq, emit, tag):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('out', nargs='?', default='runs/r39')
+    ap.add_argument('out', nargs='?', default='runs/r40')
     ap.add_argument('--iface', default='en2')
     ap.add_argument('--peer', default='192.168.50.122')
     ap.add_argument('--port', type=int, default=9110)
@@ -368,7 +368,7 @@ def main():
     if int((out / 'batch.txt').read_text().strip()) != 512:
         raise ValueError('round27 keeps the kernel declaration batch512')
     if int((out / 'requests.txt').read_text().strip()) != len(REQUESTS):
-        raise ValueError('round39 requires 8192 application requests')
+        raise ValueError('round40 requires 8192 application requests')
     payload(token, 1)
     with (out / 'load.txt').open('w') as f:
         def log(line):
@@ -387,7 +387,6 @@ def main():
         # Startup ordinary traffic. Bounded so a slow boot
         # cannot turn this into a flood; each probe is one datagram and one echo.
         PRE_PROBES = 20
-        pre = None
         pre_sent = 0
         pre_lines = []
         ord = OrdSeq()
@@ -411,27 +410,16 @@ def main():
                         except socket.timeout:
                             log('load_seed_echo : timeout nonmagic=1')
                     seeded = True
-                    pre = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    pre.bind((local, 0))
-                    pre.settimeout(.25)
-                if pre is not None and pre_sent < PRE_PROBES:
-                    pre_sent += 1
-                    seq = ord.next()
-                    data = ordinary(seq)
-                    before = now()
-                    pre.sendto(data, (a.peer, a.port))
-                    pre_lines.append('client_ord_sent seq=%d tag=pre %s t_ns=%d'
-                                     % (seq, evidence(data), before))
-                    try:
-                        echoed, source = pre.recvfrom(8192)
-                    except socket.timeout:
-                        pre_lines.append('client_ord_timeout seq=%d tag=pre' % seq)
-                    else:
-                        ok = echoed == data and source == (a.peer, a.port)
-                        pre_lines.append(
-                            'client_ord_recv seq=%d tag=pre %s payload_ok=%d '
-                            'from=%s:%d t_ns=%d'
-                            % (seq, evidence(echoed), int(ok), *source, now()))
+                if pre_sent < PRE_PROBES:
+                    # Entry now resets the NIC to program the fixed DMA IOVAs.
+                    # Rebind each startup probe just as the accepted exit path
+                    # does when configd republishes the interface address.
+                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as pre:
+                        bind_local(pre, local, pre_lines.append, tries=20, delay=.25)
+                        pre.settimeout(.25)
+                        pre_sent += 1
+                        ord_probe(pre, (a.peer, a.port), ord.next(),
+                                  pre_lines.append, 'pre')
                 props = command('ioreg', '-l', '-w0', '-r', '-c',
                                 'org_example_AMDMapperProbe', required=False)
                 expression = r'"' + re.escape(a.authorize_key) + r'" = "' + \
@@ -496,8 +484,6 @@ def main():
         log('load_route_interface : %s' % a.iface)
         log('load_local : %s' % local)
         log('load_mach_at_start_ns : %d' % now())
-        if pre is not None:
-            pre.close()
         (out / 'netstat-before.txt').write_text(command('netstat', '-I', a.iface, '-b'))
         time.sleep(.08)
         with (out / 'client.log').open('w') as client:

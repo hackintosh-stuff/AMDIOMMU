@@ -44,6 +44,7 @@ struct IOService;
 #include "RTL812xRxMap.hpp"
 #include "RTL812xRxPool.hpp"
 #include "RTL812xRxNative.hpp"
+#include "RTL812xFixedDma.hpp"
 int main() {
     std::printf("{\n");
     std::printf("  \"domain_version\": %u,\n", r17domain::kVersion);
@@ -91,6 +92,14 @@ int main() {
     std::printf("  \"rx_stop_retired_flag\": %u, \"rx_stop_retired_offset\": %zu, \"rx_slot_stop_retired_offset\": %zu,\n",
                 r34rx::kWitnessStopRetired, offsetof(r34rx::Snapshot, stopRetired),
                 offsetof(r34rx::DriverSlot, stopRetired));
+    std::printf("  \"fixed_version\": %u, \"fixed_count\": %u, \"fixed_pages\": %u,\n",
+                r40fixed::kVersion, r40fixed::kCount, r40fixed::kPages);
+    std::printf("  \"fixed_base\": %llu, \"fixed_stride\": %llu,\n",
+                r40fixed::kIovaBase, r40fixed::kStride);
+    std::printf("  \"fixed_driver_bytes\": %zu, \"fixed_driver_header\": %zu, \"fixed_driver_object_bytes\": %zu,\n",
+                sizeof(r40fixed::DriverSnapshot), offsetof(r40fixed::DriverSnapshot, objects), sizeof(r40fixed::DriverObject));
+    std::printf("  \"fixed_backend_bytes\": %zu, \"fixed_backend_header\": %zu, \"fixed_record_bytes\": %zu,\n",
+                sizeof(r40fixed::BackendSnapshot), offsetof(r40fixed::BackendSnapshot, objects), sizeof(r40fixed::Record));
     std::printf("  \"pool_version\": %u, \"pool_spares\": %u,\n",
                 r15pool::kVersion, r15pool::kSpareCount);
     std::printf("  \"pool_snapshot_bytes\": %zu, \"pool_request_bytes\": %zu,\n",
@@ -234,6 +243,10 @@ def check():
                           ('STOP_BYTES', want['rx_stop_bytes']),
                           ('STOP_TIME_OFFSET', want['rx_stop_time_offset']),
                           ('WITNESS_STOP_RETIRED', want['rx_stop_retired_flag'])]
+        current_pairs += [(name.upper(), want[name.lower()]) for name in
+                          ('FIXED_VERSION', 'FIXED_COUNT', 'FIXED_PAGES', 'FIXED_BASE', 'FIXED_STRIDE',
+                           'FIXED_DRIVER_BYTES', 'FIXED_DRIVER_HEADER', 'FIXED_DRIVER_OBJECT_BYTES',
+                           'FIXED_BACKEND_BYTES', 'FIXED_BACKEND_HEADER', 'FIXED_RECORD_BYTES')]
     for name, expect in current_pairs:
         if current.get(name) != expect:
             bad.append('%s: %s=%r headers=%r' %
@@ -297,7 +310,7 @@ def check_r26():
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in ('--check-r32', '--check-r34', '--check-r35', '--check-r36', '--check-r37', '--check-r38', '--check-r39'):
+    if len(sys.argv) > 1 and sys.argv[1] in ('--check-r32', '--check-r34', '--check-r35', '--check-r36', '--check-r37', '--check-r38', '--check-r39', '--check-r40'):
         want = abi()
         pins = {'domain_version': 4, 'domain_bytes': 44592,
                 'domain_record_bytes': 1304, 'domain_records_offset': 80,
@@ -311,23 +324,29 @@ def main():
                 'rx_request_bytes': 344192, 'rx_backend_bytes': 204864,
                 'rx_tail_seq_offset': 44, 'pool_version': 2, 'pool_spares': 1024,
                 'pool_snapshot_bytes': 114808, 'pool_request_bytes': 114856}
-        if sys.argv[1] in ('--check-r34', '--check-r35', '--check-r36', '--check-r37', '--check-r38', '--check-r39'):
-            pins.update({'rx_native_version': {'--check-r34': 1, '--check-r35': 2, '--check-r36': 3, '--check-r37': 3, '--check-r38': 3, '--check-r39': 4}[sys.argv[1]],
+        if sys.argv[1] in ('--check-r34', '--check-r35', '--check-r36', '--check-r37', '--check-r38', '--check-r39', '--check-r40'):
+            pins.update({'rx_native_version': {'--check-r34': 1, '--check-r35': 2, '--check-r36': 3, '--check-r37': 3, '--check-r38': 3, '--check-r39': 4, '--check-r40': 4}[sys.argv[1]],
                          'rx_native_count': 1024,
                          'rx_native_driver_bytes': 270432, 'rx_native_backend_bytes': 475216,
                          'rx_native_driver_header': 96, 'rx_native_driver_slot_bytes': 264,
                          'rx_native_backend_header': 80, 'rx_native_backend_slot_bytes': 464,
                          'rx_native_witness_bytes': 104, 'rx_native_map_record_bytes': 224})
-        if sys.argv[1] in ('--check-r37', '--check-r38', '--check-r39'):
+        if sys.argv[1] in ('--check-r37', '--check-r38', '--check-r39', '--check-r40'):
             pins.update({'physical_layout_version': 1, 'physical_layout_bytes': 64,
                          'physical_layout_header': 16, 'physical_span_bytes': 16,
                          'physical_span_count': 3})
-        if sys.argv[1] in ('--check-r38', '--check-r39'):
+        if sys.argv[1] in ('--check-r38', '--check-r39', '--check-r40'):
             pins.update({'rx_bootstrap_command_bytes': 40, 'rx_bootstrap_retire_op': 7})
-        if sys.argv[1] == '--check-r39':
+        if sys.argv[1] in ('--check-r39', '--check-r40'):
             pins.update({'rx_stop_version': 1, 'rx_stop_bytes': 96, 'rx_stop_time_offset': 48,
                          'rx_stop_retired_flag': 16, 'rx_stop_retired_offset': 60,
                          'rx_slot_stop_retired_offset': 52})
+        if sys.argv[1] == '--check-r40':
+            pins.update({'fixed_version': 1, 'fixed_count': 3, 'fixed_pages': 16,
+                         'fixed_base': 0x1000100000, 'fixed_stride': 0x10000,
+                         'fixed_driver_bytes': 368, 'fixed_driver_header': 80,
+                         'fixed_driver_object_bytes': 96, 'fixed_backend_bytes': 1376,
+                         'fixed_backend_header': 56, 'fixed_record_bytes': 440})
         bad = {k: (want.get(k), v) for k, v in pins.items() if want.get(k) != v}
         if bad:
             print('%s ABI MISMATCH: %r' % (sys.argv[1][8:], bad))

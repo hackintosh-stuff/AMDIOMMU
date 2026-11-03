@@ -15,6 +15,7 @@
 #include "../tools/lucy-obs/RTL812xRxPool.hpp"
 #include "../tools/lucy-obs/RTL812xRxMap.hpp"
 #include "../tools/lucy-obs/RTL812xRxNative.hpp"
+#include "../tools/lucy-obs/RTL812xFixedDma.hpp"
 // Round17: native-mbuf TX mapping ABI (round16's RTL812xTxMap.hpp is kept as
 // the archived staging ABI and is no longer included by the probe).
 #include "../tools/lucy-obs/RTL812xTxMapNative.hpp"
@@ -191,6 +192,15 @@ private:
     // This service owns only routing identities, PTEs and mapping evidence.
     struct R34RxDomain;
     R34RxDomain *fR34Rx = nullptr;
+    bool r40FixedCandidate(IOMemoryDescriptor *, IODMACommand *) const;
+    bool r40FixedOwnsAddress(uint64_t) const;
+    bool r40FixedTranslate(uint64_t, uint64_t *) const;
+    bool r40FixedReadPA(UInt32, UInt64, UInt64, UInt64 *) const;
+    IOReturn r40FixedOperation(r34rx::Binding *);
+    IOReturn r40FixedMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r40FixedUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
     bool r34RxPrepareMap(volatile UInt64 *, UInt64, UInt32, UInt32);
     bool r34RxBegin();
     bool r34RxAuthorize();

@@ -420,6 +420,13 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     // 而那正是 B2-0 的 16 KiB buffer，不是网卡。
     bool isProbeCall = fProbeCallActive;
 
+    // Fixed descriptor rings/tally own separate standard DMA command pairs.
+    // Their reserved IOVAs do not consume TX packet or RX slot accounting.
+    if (r40FixedCandidate(memory, dmaCommand))
+        return r40FixedMap(memory, descriptorOffset, length, mapOptions,
+                          mapSpecification, dmaCommand, pageList,
+                          mapAddress, mapLength);
+
     if (r34RxCandidate(memory, dmaCommand))
         return r34RxMap(memory, descriptorOffset, length, mapOptions,
                        mapSpecification, dmaCommand, pageList,
@@ -579,6 +586,9 @@ IOReturn org_example_AMDMapperProbe::iovmUnmapMemory(
 
     fUnmapCalls++;
 
+    if (r40FixedCandidate(memory, dmaCommand) || r40FixedOwnsAddress(mapAddress))
+        return r40FixedUnmap(memory, dmaCommand, mapAddress, mapLength);
+
     if (r34RxCandidate(memory, dmaCommand) ||
         (fR34Rx && r27RxOwnsAddress(mapAddress)))
         return r34RxUnmap(memory, dmaCommand, mapAddress, mapLength);
@@ -639,6 +649,11 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
 uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress) {
     fPhysAddrCalls++;
 
+    if (r40FixedOwnsAddress(mappedAddress)) {
+        uint64_t pa = 0;
+        return r40FixedTranslate(mappedAddress, &pa) ? pa : 0;
+    }
+
     if (r27RxOwnsAddress(mappedAddress)) {
         uint64_t pa = 0;
         return r27RxTranslate(mappedAddress, &pa) ? pa : 0;
@@ -682,7 +697,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.48.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.49.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

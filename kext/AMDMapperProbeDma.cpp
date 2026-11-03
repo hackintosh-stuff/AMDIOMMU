@@ -825,18 +825,32 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
     const UInt64 kRxDescBytes = 1024ULL * amdobs::RX_DESC_STRIDE;   // 16 KiB
     const UInt64 kStatBytes   = 0x1000ULL;
 
+    // The NIC reports bus addresses. Native fixed DMA now uses IOVAs, while
+    // a CPU IOMemoryDescriptor still needs the registered buffer's real PA.
+    // Keep the bus values in the observation set and resolve only CPU reads.
+    UInt64 txReadPA = fM22b2Dma.txRingBase;
+    UInt64 rxReadPA = fM22b2Dma.rxRingBase;
+    const bool txBacking = !fR31Session ||
+        r40FixedReadPA(r40fixed::kTxRing, fM22b2Dma.txRingBase, kTxDescBytes, &txReadPA);
+    const bool rxBacking = !fR31Session ||
+        r40FixedReadPA(r40fixed::kRxRing, fM22b2Dma.rxRingBase, kRxDescBytes, &rxReadPA);
+    const auto txReadVerdict = txBacking ?
+        amdobs::readVerdictDeviceReported(txReadPA, kTxDescBytes, fM22b2Policy) :
+        amdobs::RD_UNVERIFIED;
+    const auto rxReadVerdict = rxBacking ?
+        amdobs::readVerdictDeviceReported(rxReadPA, kRxDescBytes, fM22b2Policy) :
+        amdobs::RD_UNVERIFIED;
+    setHexProperty(this, "m2-b2-dma-tx-ring-read-pa", txBacking ? txReadPA : 0);
+    setHexProperty(this, "m2-b2-dma-rx-ring-read-pa", rxBacking ? rxReadPA : 0);
+
     // 环与统计缓冲的地址**无条件登记**。它们是设备确定会访问的内存。
     if (fM22b2Dma.haveTxRing) {
         set.insert(fM22b2Dma.txRingBase, kTxDescBytes, amdobs::PURP_TX_RING,
-                   amdobs::LIFE_INFLIGHT,
-                   amdobs::readVerdictDeviceReported(fM22b2Dma.txRingBase, kTxDescBytes,
-                                       fM22b2Policy));
+                   amdobs::LIFE_INFLIGHT, txReadVerdict);
     }
     if (fM22b2Dma.haveRxRing) {
         set.insert(fM22b2Dma.rxRingBase, kRxDescBytes, amdobs::PURP_RX_RING,
-                   amdobs::LIFE_INFLIGHT,
-                   amdobs::readVerdictDeviceReported(fM22b2Dma.rxRingBase, kRxDescBytes,
-                                       fM22b2Policy));
+                   amdobs::LIFE_INFLIGHT, rxReadVerdict);
     }
     if (fM22b2Dma.haveCounter && (fM22b2Dma.counterAddr & ~0xFFFULL) != 0) {
         fM22b2Dma.statBase = fM22b2Dma.counterAddr & ~0xFFFULL;
@@ -853,18 +867,16 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
     {
         const char *whyTx = nullptr;
         const bool txOk =
-            fM22b2Dma.haveTxRing &&
-            amdobs::plausibleRingBase(fM22b2Dma.txRingBase, kTxDescBytes,
+            fM22b2Dma.haveTxRing && txBacking &&
+            amdobs::plausibleRingBase(txReadPA, kTxDescBytes,
                                       M2B2_IDENTITY_LIMIT, &whyTx) &&
-            amdobs::readVerdictDeviceReported(fM22b2Dma.txRingBase, kTxDescBytes,
-                                fM22b2Policy) == amdobs::RD_OK;
+            txReadVerdict == amdobs::RD_OK;
         const char *whyRx = nullptr;
         const bool rxOk =
-            fM22b2Dma.haveRxRing &&
-            amdobs::plausibleRingBase(fM22b2Dma.rxRingBase, kRxDescBytes,
+            fM22b2Dma.haveRxRing && rxBacking &&
+            amdobs::plausibleRingBase(rxReadPA, kRxDescBytes,
                                       M2B2_IDENTITY_LIMIT, &whyRx) &&
-            amdobs::readVerdictDeviceReported(fM22b2Dma.rxRingBase, kRxDescBytes,
-                                fM22b2Policy) == amdobs::RD_OK;
+            rxReadVerdict == amdobs::RD_OK;
         setProperty("m2-b2-dma-tx-ring-trusted", txOk ? "yes" : "NO");
         setProperty("m2-b2-dma-rx-ring-trusted", rxOk ? "yes" : "NO");
         if (!txOk && fM22b2Dma.haveTxRing) {
@@ -917,7 +929,7 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
     // 长度字段给出这段 DMA 的真实大小（不再一律按一页近似）。
     if (fM22b2Dma.haveTxRing) {
         IOMemoryDescriptor *ringMd =
-            IOMemoryDescriptor::withPhysicalAddress(fM22b2Dma.txRingBase,
+            IOMemoryDescriptor::withPhysicalAddress(txReadPA,
                                                     kTxDescBytes,
                                                     kIODirectionIn);
         if (ringMd) {
@@ -991,7 +1003,7 @@ afterTxRing:
 
     if (fM22b2Dma.haveRxRing) {
         IOMemoryDescriptor *ringMd =
-            IOMemoryDescriptor::withPhysicalAddress(fM22b2Dma.rxRingBase,
+            IOMemoryDescriptor::withPhysicalAddress(rxReadPA,
                                                     kRxDescBytes,
                                                     kIODirectionIn);
         if (ringMd) {

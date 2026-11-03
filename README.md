@@ -1,5 +1,44 @@
 # AMDIOMMU — authoritative source repository
 
+## Current Round40 / all device DMA through IOVA after takeover
+
+Base: `db0d411e6e47d95a8e2209753debf88a4ff78595`, the accepted Round39
+result-documentation successor. Preserve the deployed implementation
+`f041f04a95bc6e5d2e037fad1d6e1ee6100f2b78` and its client address wait/rebind
+fix `18e621845b8ecfda75cb156459f05cd4c0409924`. The original Round39 capture
+was independently reanalyzed: 14/14 passed, with two planned boots and one
+valid measurement. Native local stop, honest stopRetired accounting and
+three ordinary probes after physical recovery are now hardware-verified.
+
+Candidate: Lucy **1.1.225** / Probe **0.49.0**. Keep TX native7/std5/domain4,
+native RX4, PhysicalLayout1 and StopRecord1. A separate FixedDMA1 record
+connects the original physical spans, standard MD/command mappings and the
+actual hardware-programmed addresses of the TX ring, RX ring and tally.
+
+- Keep initial sparse physical bootstrap while the device still uses PA.
+- With TX admission closed and drained, stop/rebuild the NIC once and map all
+  three fixed DMA objects through driver-owned standard MD/command pairs.
+- Use the unused IOVA gap between dynamic TX and RX for these fixed mappings;
+  ordinary TX records and RX slot/map/batch counters remain independent.
+- Program and read back the fixed IOVA bases through the existing hardware
+  enable path, then open normal traffic. CPU ring observations still read the
+  owned physical allocations and sample their baseline after the entry reset.
+- Once every RX slot has posted its first IOVA OWN, retire the entire physical
+  bootstrap, including fixed-object aliases. The active PT has no identity
+  leaves: TX payloads, RX buffers, descriptor rings and tally all use IOVA.
+- At the existing local stop, retire fixed mappings only after DMA is stopped,
+  restore the driver's PA members, release fixed owners, restore IOMMU and
+  restart ordinary physical traffic. The final identity set is current RX
+  pages only; the three fixed IOVA spans have been unmapped.
+
+Keep the established 4096 + 125-second idle + 4096 workload, one explicit
+local stop and three post-exit probes. Reuse the accepted address-rebinding
+behavior for startup probes because entry also resets the link. Keep the
+same 14 checks and existing fixture methods; no additional failure matrix.
+Use the same fixed checkout and upstream directory, `--tx 21 --rx 34`,
+`--check-r40`, `runs/r40`, `org.example.round40load`, token `0x40c0de40`.
+A real Mac build and one normal hardware acceptance run remain outstanding.
+
 ## Accepted Round39 / local NIC stop without peer drain packets
 
 Base: `00b12033c60fb88f51618fde5e8b908014f072cf`, the accepted Round38
