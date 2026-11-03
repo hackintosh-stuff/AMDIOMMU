@@ -3,6 +3,7 @@
 The ordinary non-VTD receive loop stays in use. Each ring slot owns one virtual
 MD/command pair. Completion retires its mapping before replaceOrCopyPacket can
 deliver the old mbuf; the replacement is mapped before the next OWN publication.
+Round35 prepares the existing ring directly and never allocates an R15 pool.
 The older RX4 path remains selectable from its original template.
 """
 from pathlib import Path
@@ -22,15 +23,15 @@ MEMBERS = BASE['MEMBERS'] + r'''
     bool r34RxRearm(UInt32, UInt32, UInt32, bool, UInt64 *);
     void r34RxPosted(UInt32, UInt64);
     bool r34RxCanReplace() const;
-    bool r34RxOwnsRing() const;
+    mbuf_t r34RxCopy(mbuf_t, UInt32);
+    bool r34RxObserve(UInt32, UInt32, UInt32);
     bool r34RxFree();
-    void r34RxResumePhysical();
     void r34RxInvalidate();
     bool r34RxParse(mbuf_t, UInt32 *, UInt32 *);
 '''
 
 METHODS = r'''
-#pragma mark --- round34 driver-owned normal RX replacement ---
+#pragma mark --- driver-owned normal RX ring and replacement ---
 
 struct RTL8125::R34RxState {
     r34rx::Snapshot snapshot;
@@ -43,7 +44,10 @@ struct RTL8125::R34RxState {
     bool bound[r34rx::kCount], wired[r34rx::kCount], mapped[r34rx::kCount];
     bool restorePending[r34rx::kCount];
     r34rx::Witness current[r34rx::kCount];
-    bool ringOwned, physicalResumed;
+    UInt32 generation;
+    UInt32 keepTx[kNumTxDesc], filtered[5];
+    UInt64 tPrepared, tAuthorized, tPhysicalResumed;
+    bool authorized, physicalResumed;
 };
 
 bool RTL8125::r34RxBinding(UInt32 op, UInt32 slot,
@@ -132,13 +136,42 @@ bool RTL8125::r34RxUnmapSlot(UInt32 slot)
 bool RTL8125::r34RxCanReplace() const
 {
     return r34Rx && (r34Rx->physicalResumed ||
-        (r34Rx->snapshot.state == r34rx::kInstalled && r15Pool &&
-         r15Pool->snap.state == r15pool::kAuthorized));
+        (r34Rx->snapshot.state == r34rx::kInstalled && r34Rx->authorized));
 }
 
-bool RTL8125::r34RxOwnsRing() const
+mbuf_t RTL8125::r34RxCopy(mbuf_t packet, UInt32 length)
 {
-    return r34Rx && r34Rx->ringOwned;
+    if (!r34Rx || !length || length > kRxBufferSize) return nullptr;
+    mbuf_t copy = rxPool->getPacket(length, MBUF_DONTWAIT);
+    if (copy && mbuf_trailingspace(copy) >= length) {
+        mbuf_copy_pkthdr(copy, packet);
+        mbuf_pkthdr_setheader(copy, nullptr);
+        bcopy(mbuf_data(packet), mbuf_data(copy), length);
+        return copy;
+    }
+    if (copy) mbuf_freem_list(copy);
+    r34Rx->snapshot.flags |= r34rx::kFlagCopyFailed;
+    return nullptr;
+}
+
+bool RTL8125::r34RxObserve(UInt32 kind, UInt32 slot, UInt32 token)
+{
+    R34RxState *p = __atomic_load_n(&r34Rx, __ATOMIC_ACQUIRE);
+    if (!p) return true;
+    bool keep = true;
+    if (kind == kObsKindTxSubmit) {
+        keep = token == p->snapshot.businessToken;
+        if (slot < kNumTxDesc)
+            __atomic_store_n(&p->keepTx[slot], keep ? 1u : 0u, __ATOMIC_RELEASE);
+    } else if (kind == kObsKindTxDone) {
+        keep = slot < kNumTxDesc &&
+            __atomic_load_n(&p->keepTx[slot], __ATOMIC_ACQUIRE) != 0;
+    } else if (kind == kObsKindRxDone || kind == kObsKindTxDoorbell) {
+        keep = token == p->snapshot.businessToken;
+    }
+    if (!keep && kind < 5)
+        __atomic_fetch_add(&p->filtered[kind], 1u, __ATOMIC_RELAXED);
+    return keep;
 }
 
 bool RTL8125::r34RxComplete(UInt32 slot, UInt64 oldAddr,
@@ -147,8 +180,8 @@ bool RTL8125::r34RxComplete(UInt32 slot, UInt64 oldAddr,
     R34RxState *p = r34Rx;
     if (!p || p->physicalResumed || p->snapshot.state == r34rx::kReleased)
         return true;
-    if (p->snapshot.state == r34rx::kInstalled &&
-        r15Pool->snap.state != r15pool::kAuthorized) return true;
+    if (p->snapshot.state == r34rx::kPrepared ||
+        (p->snapshot.state == r34rx::kInstalled && !p->authorized)) return true;
     if (!p->mapped[slot]) return true;
     auto &s = p->snapshot;
     auto &w = p->current[slot];
@@ -175,8 +208,8 @@ bool RTL8125::r34RxRearm(UInt32 slot, UInt32 token, UInt32 reqId,
     auto &d = s.slots[slot];
     auto &w = p->current[slot];
     if (p->physicalResumed || s.state == r34rx::kReleased) return true;
-    if (s.state == r34rx::kInstalled &&
-        r15Pool->snap.state != r15pool::kAuthorized) return true;
+    if (s.state == r34rx::kPrepared ||
+        (s.state == r34rx::kInstalled && !p->authorized)) return true;
     if (replaced) { s.replaced++; d.replaceCount++; }
     if (w.tPost && w.tDone && !w.reserved) {
         w.token = token; w.reqId = reqId; w.replaced = replaced ? 1u : 0u;
@@ -189,7 +222,7 @@ bool RTL8125::r34RxRearm(UInt32 slot, UInt32 token, UInt32 reqId,
         *addr = p->current[slot].iova;
         rxBufArray[slot].phyAddr = *addr;
     } else if (!d.tPhysicalOwn) {
-        // Replacement mbufs need not belong to the initial bootstrap set.
+        // Replacement mbufs need not belong to the ring captured at Prepare.
         // Add their current physical span before publishing physical OWN.
         const UInt64 pa = mbuf_data_to_physical(mbuf_datastart(rxBufArray[slot].mbuf));
         if (!pa || !r34RxBinding(r34rx::kCover, slot, nullptr, pa)) {
@@ -233,26 +266,58 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
 {
     if (!request || request->version != r34rx::kVersion ||
         request->bytes != sizeof(*request) || request->op < r34rx::kInstall ||
-        request->op > r34rx::kRelease) return kIOReturnBadArgument;
-    R15PoolState *pool = r15Pool;
-    if (!pool || !rxBufArray || !rxDescArray || !rxPool) return kIOReturnNotReady;
-    if (request->poolId != pool->snap.poolId ||
-        request->expectedGeneration != pool->snap.generation) return kIOReturnBadArgument;
-    if (request->op == r34rx::kInstall) {
-        if (r34Rx || pool->rx27.version || pool->snap.state != r15pool::kPrepared ||
-            pool->snap.flags || !request->mapper || !request->context || !request->callback ||
-            !request->businessToken || request->businessToken != pool->snap.reserved[0])
-            return kIOReturnBadArgument;
-        r34Rx = (R34RxState *)IOMallocZero(sizeof(R34RxState));
-        if (!r34Rx) return kIOReturnNoMemory;
-        auto *p = r34Rx;
+        request->op > r34rx::kResumePhysical) return kIOReturnBadArgument;
+    if (!rxBufArray || !rxDescArray || !rxPool) return kIOReturnNotReady;
+    if (request->op == r34rx::kPrepare) {
+        if (r34Rx || r15Pool) return kIOReturnBusy;
+        if (!netif || !test_bit(__ENABLED, &stateFlags) ||
+            !test_bit(__LINK_UP, &stateFlags)) return kIOReturnNotReady;
+        if (!request->businessToken || request->deadline) return kIOReturnBadArgument;
+        auto *p = (R34RxState *)IOMallocZero(sizeof(R34RxState));
+        if (!p) return kIOReturnNoMemory;
         auto &s = p->snapshot;
+        s.version = r34rx::kVersion; s.bytes = sizeof(s); s.slotCount = r34rx::kCount;
+        s.businessToken = request->businessToken;
+        p->generation = rxpostHdr ?
+            __atomic_load_n(&rxpostHdr->ringGen, __ATOMIC_RELAXED) : 1u;
+        for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
+            UInt64 pa = 0;
+            if (!r15PhysicalSpan(rxBufArray[slot].mbuf, &pa) ||
+                pa != rxBufArray[slot].phyAddr ||
+                pa != OSSwapLittleToHostInt64(rxDescArray[slot].buf.addr)) {
+                IOFree(p, sizeof(*p)); return kIOReturnNotAligned;
+            }
+            s.slots[slot].originalPA = pa;
+            s.slots[slot].currentPA = pa;
+        }
+        for (UInt32 slot = 0; slot < kNumTxDesc; ++slot) p->keepTx[slot] = 1;
+        p->tPrepared = mach_absolute_time();
+        s.ringId = p->tPrepared ? p->tPrepared : 1;
+        s.state = r34rx::kPrepared;
+        // Borrow Lucy's existing ring. The receive hook keeps it copy-only
+        // until the probe maps these exact spans and authorizes native RX.
+        // No mbuf, spare pool, or ownership handoff is created here.
+        request->expectedGeneration = p->generation;
+        __atomic_store_n(&r34Rx, p, __ATOMIC_RELEASE);
+    } else {
+        if (!r34Rx) return kIOReturnNotReady;
+        if (request->ringId != r34Rx->snapshot.ringId ||
+            request->expectedGeneration != r34Rx->generation ||
+            request->businessToken != r34Rx->snapshot.businessToken)
+            return kIOReturnBadArgument;
+    }
+    auto *p = r34Rx;
+    auto &s = p->snapshot;
+    if (request->op == r34rx::kInstall) {
+        if (s.state != r34rx::kPrepared || s.flags || !request->mapper ||
+            !request->context || !request->callback || request->deadline)
+            return kIOReturnBadArgument;
+        // Mark installation before allocating pairs, so an incomplete install
+        // cannot be mistaken for a prepared ring with no mapping ownership.
+        s.state = r34rx::kInstalled;
         p->mapper = static_cast<IOMapper *>(request->mapper); p->mapper->retain();
         p->context = request->context; p->callback = request->callback;
-        s.version = r34rx::kVersion; s.bytes = sizeof(s); s.slotCount = r34rx::kCount;
-        s.poolId = request->poolId; s.businessToken = request->businessToken;
         for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
-            s.slots[slot].originalPA = rxBufArray[slot].phyAddr;
             p->ranges[slot].address = (IOVirtualAddress)mbuf_datastart(rxBufArray[slot].mbuf);
             p->ranges[slot].length = r34rx::kCapacity;
             p->memory[slot] = IOMemoryDescriptor::withOptions(&p->ranges[slot], 1, 0,
@@ -267,63 +332,72 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
             p->bound[slot] = true;
             if (!r34RxMapSlot(slot)) return kIOReturnIOError;
         }
-        // These ring mbufs now follow Lucy's ordinary replace/copy ownership.
-        // R15 keeps only its unused bootstrap spares and must never free a
-        // ring mbuf which replaceOrCopyPacket has already delivered upstream.
-        for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) pool->mbufs[slot] = nullptr;
-        p->ringOwned = true;
-        s.state = r34rx::kInstalled; s.nativeActive = 1;
+        s.nativeActive = 1;
         s.tInstalled = mach_absolute_time();
-    } else {
-        if (!r34Rx) return kIOReturnNotReady;
-        auto *p = r34Rx;
-        auto &s = p->snapshot;
-        if (request->op == r34rx::kDisarm || request->op == r34rx::kDrain) {
-            __atomic_store_n(&pool->snap.state, (UInt32)r15pool::kDisarmed, __ATOMIC_RELEASE);
-            if (!s.tDisarmed) s.tDisarmed = mach_absolute_time();
-            if (s.state != r34rx::kReleased)
-                s.state = (request->op == r34rx::kDrain && !s.pendingPosted &&
-                    s.restored == r34rx::kCount) ? r34rx::kDrained : r34rx::kDisarmed;
-        } else if (request->op == r34rx::kRelease) {
-            if (s.state != r34rx::kDrained || s.pendingPosted || s.posted != s.completed)
-                return kIOReturnBusy;
-            for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
-                if (p->mapped[slot] || p->wired[slot] ||
-                    !r34RxBinding(r34rx::kUnbind, slot, nullptr)) return kIOReturnBusy;
-                p->bound[slot] = false;
-                if (p->command[slot]) { p->command[slot]->release(); p->command[slot] = nullptr; }
-                if (p->memory[slot]) { p->memory[slot]->release(); p->memory[slot] = nullptr; }
-            }
-            p->mapper->release(); p->mapper = nullptr;
-            p->context = nullptr; p->callback = nullptr;
-            s.state = r34rx::kReleased; s.nativeActive = 0;
+    } else if (request->op == r34rx::kAuthorize) {
+        if (s.state != r34rx::kInstalled || s.flags || !s.nativeActive ||
+            s.maps != r34rx::kCount || !s.tInstalled || request->deadline)
+            return kIOReturnBadArgument;
+        p->authorized = true;
+        p->tAuthorized = mach_absolute_time();
+    } else if (request->op == r34rx::kDisarm || request->op == r34rx::kDrain) {
+        p->authorized = false;
+        if (!s.tDisarmed) s.tDisarmed = mach_absolute_time();
+        if (s.state != r34rx::kReleased)
+            s.state = (request->op == r34rx::kDrain && !s.pendingPosted &&
+                s.restored == r34rx::kCount) ? r34rx::kDrained : r34rx::kDisarmed;
+    } else if (request->op == r34rx::kRelease) {
+        if (s.state != r34rx::kDrained || s.pendingPosted || s.posted != s.completed)
+            return kIOReturnBusy;
+        for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
+            if (p->mapped[slot] || p->wired[slot] ||
+                !r34RxBinding(r34rx::kUnbind, slot, nullptr)) return kIOReturnBusy;
+            p->bound[slot] = false;
+            if (p->command[slot]) { p->command[slot]->release(); p->command[slot] = nullptr; }
+            if (p->memory[slot]) { p->memory[slot]->release(); p->memory[slot] = nullptr; }
         }
+        p->mapper->release(); p->mapper = nullptr;
+        p->context = nullptr; p->callback = nullptr;
+        s.state = r34rx::kReleased; s.nativeActive = 0;
+    } else if (request->op == r34rx::kResumePhysical) {
+        if (s.state != r34rx::kReleased && s.state != r34rx::kPrepared)
+            return kIOReturnBusy;
+        // The caller has restored the original translation/register state.
+        // A pre-DTE abort may also release a ring that was only prepared.
+        s.state = r34rx::kReleased;
+        p->physicalResumed = true;
+        p->tPhysicalResumed = mach_absolute_time();
     }
-    const auto &s = r34Rx->snapshot;
     bcopy(&s, &request->out, sizeof(s));
     OSData *raw = OSData::withBytes(&s, sizeof(s));
     if (raw) { setProperty("rtl812x-r34-rx-native-raw", raw); raw->release(); }
-    setProperty("rtl812x-r34-rx-mode", "driver-owned-replacement");
+    setProperty("rtl812x-r34-rx-mode", "native-ring-remap1024");
     setProperty("rtl812x-r34-rx-state", s.state, 32);
     setProperty("rtl812x-r34-rx-maps", s.maps, 32);
     setProperty("rtl812x-r34-rx-unmaps", s.unmaps, 32);
     setProperty("rtl812x-r34-rx-replaced", s.replaced, 32);
     setProperty("rtl812x-r34-rx-flags", s.flags, 32);
+    setProperty("rtl812x-r35-rx-source", "lucy-normal-ring");
+    setProperty("rtl812x-r35-rx-experimental-pool", r15Pool ? 1u : 0u, 32);
+    setProperty("rtl812x-r35-rx-spares", r15Pool ? r15Pool->snap.spareCount : 0u, 32);
+    setProperty("rtl812x-r35-rx-ring-id", s.ringId, 64);
+    setProperty("rtl812x-r35-rx-prepare-time", p->tPrepared, 64);
+    setProperty("rtl812x-r35-rx-authorize-time", p->tAuthorized, 64);
+    setProperty("rtl812x-r35-rx-resume-time", p->tPhysicalResumed, 64);
+    setProperty("rtl812x-r35-obs-scope", "declared-business-only; native-rx-witnesses-retained");
+    setProperty("rtl812x-r35-obs-business-token", s.businessToken, 32);
+    UInt32 filtered = 0;
+    for (UInt32 kind = 1; kind < 5; ++kind)
+        filtered += __atomic_load_n(&p->filtered[kind], __ATOMIC_RELAXED);
+    setProperty("rtl812x-r35-obs-filtered", filtered, 32);
     return kIOReturnSuccess;
-}
-
-void RTL8125::r34RxResumePhysical()
-{
-    // Probe calls R15 Finish only after restoring the original hardware state.
-    // Until this point the restored physical ring remains copy-only for R29D.
-    if (r34Rx && r34Rx->snapshot.state == r34rx::kReleased)
-        r34Rx->physicalResumed = true;
 }
 
 void RTL8125::r34RxInvalidate()
 {
     if (r34Rx && r34Rx->snapshot.state != r34rx::kReleased) {
         r34Rx->snapshot.flags |= r34rx::kFlagRingReset;
+        r34Rx->authorized = false;
         r34Rx->snapshot.state = r34rx::kDisarmed;
     }
 }
@@ -387,25 +461,29 @@ def pool_methods(text):
          '        return commandGate->runAction(r34RxAction, param1);\n'
          '    }\n'
          '    if (functionName && functionName->isEqualTo(r27rx::kFunctionName)) {')
-    once('    } else if (request->op == r15pool::kDisarm) {\n',
-         '    } else if (request->op == r15pool::kDisarm) {\n'
-         '        r34RxResumePhysical();\n')
     once('void RTL8125::r15PoolInvalidate()\n{\n',
          'void RTL8125::r15PoolInvalidate()\n{\n    r34RxInvalidate();\n')
-    once('    if (rxBufArray) for (UInt32 i = 0; i < r15pool::kRingCount; i++) {\n',
-         '    const bool nativeRing = r34RxOwnsRing();\n'
+    once('void RTL8125::r15PoolFree()\n{\n',
+         'void RTL8125::r15PoolFree()\n{\n'
          '    if (!r34RxFree()) {\n'
          '        if (rxBufArray) for (UInt32 i = 0; i < r15pool::kRingCount; i++)\n'
          '            rxBufArray[i].mbuf = nullptr;\n'
          '        setProperty("rtl812x-r34-rx-stop", "PINNED-mappings-not-released");\n'
          '        return;\n'
-         '    }\n'
-         '    if (rxBufArray && !nativeRing) for (UInt32 i = 0; i < r15pool::kRingCount; i++) {\n')
+         '    }\n')
+    once('bool RTL8125::r15PoolObserve(UInt32 kind, UInt32 slot, UInt32 token)\n{\n',
+         'bool RTL8125::r15PoolObserve(UInt32 kind, UInt32 slot, UInt32 token)\n{\n'
+         '    if (__atomic_load_n(&r34Rx, __ATOMIC_ACQUIRE))\n'
+         '        return r34RxObserve(kind, slot, token);\n')
     return text + '\n' + METHODS
 
 
 def pool_receive(text):
-    return text.replace('if (r15Pool) {', 'if (r15Pool && !r34RxCanReplace()) {', 1)
+    return text.replace('        if (r15Pool) {',
+        '        if (r34Rx && !r34RxCanReplace()) {\n'
+        '            replaced = false;\n'
+        '            newPkt = r34RxCopy(bufPkt, (UInt32)pktSize);\n'
+        '        } else if (r15Pool) {', 1)
 
 
 def rx_business(text):

@@ -14,6 +14,7 @@
 // each mapping owner is released only after its own retire CompletionWait.
 #include "AMDMapperProbeInternal.hpp"
 #include "amd_iommu_tx_core.hpp"
+#include "amd_iommu_bizwalk_core.hpp"
 #include "../tools/lucy-obs/AMDAliveTxDomainNative.hpp"
 #include "../tools/lucy-obs/RTL812xTxMapStd.hpp"
 #include <IOKit/IOLocks.h>
@@ -103,7 +104,7 @@ struct org_example_AMDMapperProbe::R34RxDomain {
     // Borrowed from Lucy between Bind and Unbind; Lucy releases the objects.
     IOMemoryDescriptor *memory[r34rx::kCount];
     IODMACommand *command[r34rx::kCount];
-    bool installed, released;
+    bool prepared, installed, released, physicalResumed;
     r34rx::Request control;
     r34rx::BackendSnapshot snapshot;
 };
@@ -1792,7 +1793,7 @@ IOReturn org_example_AMDMapperProbe::r34RxOperation(r34rx::Binding *b) {
             !d->installed || !d->commandOwned) goto coverFailed;
         {
             // Stop returns the CURRENT native mbuf to physical DMA, which can
-            // differ from the bootstrap pool. Confirm its identity mapping
+            // differ from the initial ring. Confirm its identity mapping
             // before Lucy writes physical OWN. Keep RX accounting separate.
             amdtx::Segment input = {b->pa, b->length, 0};
             amdsparse::Arena a = {d->pt, d->ptBase,
@@ -1968,10 +1969,11 @@ IOReturn org_example_AMDMapperProbe::r34RxControl(UInt32 op) {
     return result;
 }
 
-bool org_example_AMDMapperProbe::r34RxBegin() {
-    if (fR34Rx || fR27Rx || !r18StdReady() || !fR17->commandOwned || !fR15Service)
+bool org_example_AMDMapperProbe::r34RxPrepareMap(
+        volatile UInt64 *pt, UInt64 ptBase, UInt32 totalPages, UInt32 basePages) {
+    if (!fR31Session || fR34Rx || fR27Rx || !fR15Service || !fR15Request.reserved)
         return false;
-    R27ClientContext client(this, fR31Session ? nullptr : fM22b2Timer);
+    R27ClientContext client(this, nullptr);
     R34RxDomain *r = (R34RxDomain *)IOMalloc(sizeof(R34RxDomain));
     if (!r) return false;
     bzero(r, sizeof(*r));
@@ -1979,15 +1981,84 @@ bool org_example_AMDMapperProbe::r34RxBegin() {
     r->snapshot.version = r34rx::kVersion;
     r->snapshot.bytes = sizeof(r->snapshot);
     r->snapshot.count = r34rx::kCount;
-    r->control.poolId = fR15Request.poolId;
-    r->control.expectedGeneration = fR15Request.expectedGeneration;
     r->control.businessToken = fR15Request.reserved;
     r->control.mapper = this; r->control.context = this;
     r->control.callback = &org_example_AMDMapperProbe::r34RxCallback;
     __atomic_store_n(&fR34Rx, r, __ATOMIC_RELEASE);
-    setProperty("m2-3h-rx-mode", "driver-owned-native-remap1024");
+    setProperty("m2-3h-rx-mode", "native-ring-remap1024");
     setProperty("m2-3h-rx-ready", "no");
     setProperty("m2-3h-rx-state", "preparing");
+    if (r34RxControl(r34rx::kPrepare) != kIOReturnSuccess) {
+        setProperty("m2-3h-rx-state", "FAIL-native-prepare"); return false;
+    }
+    const auto &s = r->control.out;
+    r->prepared = true;
+    r->control.ringId = s.ringId;
+    if (s.version != r34rx::kVersion || s.bytes != sizeof(s) ||
+        s.state != r34rx::kPrepared || s.flags || !s.ringId ||
+        !r->control.expectedGeneration || s.slotCount != r34rx::kCount ||
+        s.businessToken != fR15Request.reserved || s.maps || s.nativeActive) {
+        setProperty("m2-3h-rx-state", "FAIL-native-ring-manifest"); return false;
+    }
+    setProperty("m2-3p-rx-source", "lucy-normal-ring");
+    setHexProperty(this, "m2-3p-rx-ring-id", s.ringId);
+    setHexProperty(this, "m2-3p-rx-ring-generation", r->control.expectedGeneration);
+    setHexProperty(this, "m2-3p-rx-spares", 0);
+    setHexProperty(this, "m2-3p-rx-pool-rpcs", fR15PoolRpcCalls);
+    // Prepare holds the existing physical ring copy-only. It does not take
+    // mbuf ownership, allocate spare buffers, or alter any NIC-owned address.
+    amdsparse::Arena arena = {pt, ptBase, totalPages, basePages,
+        fM22b2Use3L ? 3u : 4u, ptBase, 0, 0, nullptr};
+    auto read = [&](UInt64 pa, unsigned ix) -> UInt64 {
+        volatile amdsparse::u64 *table = amdsparse::table(arena, pa);
+        return table ? table[ix] : 0;
+    };
+    UInt32 mapped = 0;
+    UInt64 maxEnd = 0;
+    for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
+        const UInt64 pa = s.slots[slot].originalPA;
+        if (!pa || !amdsparse::mapOwnedRange(arena, pa, r34rx::kCapacity)) {
+            setProperty("m2-3h-rx-state", "FAIL-native-bootstrap-map");
+            setProperty("m2-3p-rx-map-why", arena.why ? arena.why : "invalid-ring-span");
+            setHexProperty(this, "m2-3p-rx-map-bad-slot", slot);
+            return false;
+        }
+        amdbw::RangeResult range;
+        amdbw::walkRange(read, arena.rootLevel, ptBase, pa, r34rx::kCapacity, true, range);
+        if (!range.ok) {
+            setProperty("m2-3h-rx-state", "FAIL-native-bootstrap-walk");
+            setProperty("m2-3p-rx-map-why", range.why ? range.why : "walk");
+            setHexProperty(this, "m2-3p-rx-map-bad-slot", slot);
+            return false;
+        }
+        ++mapped;
+        if (pa + r34rx::kCapacity > maxEnd) maxEnd = pa + r34rx::kCapacity;
+    }
+    OSSynchronizeIO();
+    fR15MapTicks = mach_absolute_time();
+    setHexProperty(this, "m2-3p-rx-bootstrap-map-time", fR15MapTicks);
+    setHexProperty(this, "m2-3p-rx-bootstrap-ranges", mapped);
+    setHexProperty(this, "m2-3p-rx-bootstrap-max-end", maxEnd);
+    setHexProperty(this, "m2-3p-rx-sparse-pages", arena.addedPages);
+    setHexProperty(this, "m2-3p-rx-sparse-leaves", arena.addedLeaves);
+    setHexProperty(this, "m2-3p-rx-pt-used-pages", arena.next);
+    UInt64 oneSecondNS = 0;
+    absolutetime_to_nanoseconds(1000000000ULL, &oneSecondNS);
+    if (oneSecondNS != 1000000000ULL) {
+        setProperty("m2-3h-rx-state", "FAIL-native-timebase"); return false;
+    }
+    setProperty("m2-b2-map-limit-kind", "bootstrap-only-not-address-ceiling");
+    setProperty("m2-3h-rx-state", "native-ring-mapped-before-dte");
+    r34RxExport();
+    return true;
+}
+
+bool org_example_AMDMapperProbe::r34RxBegin() {
+    R34RxDomain *r = fR34Rx;
+    if (!r || r->installed || fR27Rx || !r18StdReady() || !fR17->commandOwned ||
+        r->control.out.state != r34rx::kPrepared || !fR15MapTicks)
+        return false;
+    R27ClientContext client(this, nullptr);
     if (r34RxControl(r34rx::kInstall) != kIOReturnSuccess) {
         r->snapshot.flags |= r34rx::kFlagMapFailed;
         setProperty("m2-3h-rx-state", "FAIL-native-install");
@@ -1997,6 +2068,39 @@ bool org_example_AMDMapperProbe::r34RxBegin() {
     // Install stamps this after the driver's 1024 initial prepares complete.
     fR15InvTicks = r->control.out.tInstalled;
     setProperty("m2-3h-rx-state", "installed-awaiting-authorize");
+    r34RxExport();
+    return true;
+}
+
+bool org_example_AMDMapperProbe::r34RxAuthorize() {
+    R34RxDomain *r = fR34Rx;
+    if (!r || !r->installed || !fR15InvTicks ||
+        r->control.out.maps != r34rx::kCount || r->control.out.flags)
+        return false;
+    R27ClientContext client(this, nullptr);
+    const bool ok = r34RxControl(r34rx::kAuthorize) == kIOReturnSuccess;
+    setProperty("m2-3p-rx-authorize", ok ? "done" : "FAIL");
+    setHexProperty(this, "m2-3p-rx-authorize-deadline", r->control.deadline);
+    return ok;
+}
+
+bool org_example_AMDMapperProbe::r34RxResumePhysical() {
+    R34RxDomain *r = fR34Rx;
+    if (!r || r->physicalResumed) return true;
+    if (!r->prepared) {
+        // A refused Prepare has not frozen or borrowed the driver's ring.
+        r->released = r->physicalResumed = true;
+        return true;
+    }
+    if (r->snapshot.liveOwners || r->snapshot.boundPairs ||
+        (!r->released && r->control.out.state != r34rx::kPrepared)) return false;
+    R27ClientContext client(this, nullptr);
+    if (r34RxControl(r34rx::kResumePhysical) != kIOReturnSuccess) {
+        setProperty("m2-3p-rx-physical-resume", "FAIL"); return false;
+    }
+    r->physicalResumed = true;
+    r->released = true; // A Prepare-only cancellation has no MD/Cmd to release.
+    setProperty("m2-3p-rx-physical-resume", "done");
     r34RxExport();
     return true;
 }
@@ -2015,6 +2119,10 @@ void org_example_AMDMapperProbe::r34RxReady() {
 bool org_example_AMDMapperProbe::r34RxFinish(UInt32 budgetMs) {
     R34RxDomain *r = fR34Rx;
     if (!r || r->released) return true;
+    // Before Install the unchanged physical ring is already safe for restore;
+    // ResumePhysical will unfreeze it after the hardware state is restored.
+    if (!r->installed && !r->snapshot.liveOwners && !r->snapshot.boundPairs)
+        return true;
     R27ClientContext client(this, fR31Session ? nullptr : fM22b2Timer);
     setProperty("m2-3h-rx-ready", "no");
     if (r34RxControl(r34rx::kDisarm) != kIOReturnSuccess) goto failed;
@@ -2075,9 +2183,10 @@ bool org_example_AMDMapperProbe::r34RxTailDone(UInt32 budgetMs) {
 void org_example_AMDMapperProbe::r34RxExport() {
     R34RxDomain *r = fR34Rx;
     if (!r) return;
-    IOLockLock(fR17->lock);
+    // Native bootstrap exists before the TX/page-table backend is prepared.
+    if (fR17) IOLockLock(fR17->lock);
     OSData *raw = OSData::withBytes(&r->snapshot, sizeof(r->snapshot));
-    IOLockUnlock(fR17->lock);
+    if (fR17) IOLockUnlock(fR17->lock);
     if (raw) { setProperty("m2-3o-rx-backend-raw", raw); raw->release(); }
     raw = OSData::withBytes(&r->control.out, sizeof(r->control.out));
     if (raw) { setProperty("m2-3o-rx-driver-raw", raw); raw->release(); }
@@ -2098,7 +2207,8 @@ void org_example_AMDMapperProbe::r34RxExport() {
 
 void org_example_AMDMapperProbe::r34RxRelease() {
     R34RxDomain *r = fR34Rx;
-    if (!r || !r->released || r->snapshot.liveOwners || r->snapshot.boundPairs) return;
+    if (!r || !r->released || !r->physicalResumed ||
+        r->snapshot.liveOwners || r->snapshot.boundPairs) return;
     // Lucy has completed/unbound its objects; final OSData copies own evidence.
     r->driver->release();
     __atomic_store_n(&fR34Rx, (R34RxDomain *)nullptr, __ATOMIC_RELEASE);

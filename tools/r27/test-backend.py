@@ -2,7 +2,7 @@
 """Compile actual RX1024 mapper methods against the existing R25 host stubs.
 
 This executes the established production layout/identity/stripe/unmap checks
-and real command ring helpers. Round34 callbacks and lifecycle bodies also
+and real command ring helpers. Native RX callbacks and lifecycle bodies also
 compile against the same API placeholders; no additional test matrix is added.
 It does not emulate IOKit command lifetime, Lucy, or NIC DMA.
 """
@@ -25,6 +25,8 @@ DECLARATIONS = r'''
     bool r17Prepare(volatile UInt64 *,UInt64,UInt32);
     struct R27RxDomain;
     R27RxDomain *fR27Rx=nullptr;
+    UInt32 fR15PoolRpcCalls=0;
+    UInt64 fR15MapTicks=0;
     UInt64 fR15InvTicks=0;
     bool r27RxCandidate(IOMemoryDescriptor *, IODMACommand *) const;
     bool r27RxOwnsAddress(uint64_t) const;
@@ -309,6 +311,7 @@ public:
     prefix += 'using IOPhysicalAddress=UInt64;\n'
     prefix += base.section(header, 'static inline UInt64 m2b2NowNS()', '// ---- m2b2WallSecs')
     text = prefix + '#include "tools/lucy-obs/RTL812xRxMap.hpp"\n'
+    text += '#include "kext/amd_iommu_bizwalk_core.hpp"\n'
     text += '#include "tools/lucy-obs/RTL812xRxNative.hpp"\n'
     text += '#include "tools/lucy-obs/RTL812xRxPool.hpp"\n' + constants
     text += '\n#define M2B1_LOOP_TIMEOUT 32\n'

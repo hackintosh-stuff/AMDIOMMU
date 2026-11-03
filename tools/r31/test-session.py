@@ -172,7 +172,10 @@ public:
     IOService *fPublishNotifier=nullptr, *fNicDevice=nullptr, *fTarget=nullptr;
     IOService *fR15Service=nullptr, *driver=nullptr;
     r15pool::Request fR15Request{};
+    UInt32 fR15PoolRpcCalls=0;
     UInt64 fR15MapTicks=0, fR15InvTicks=0;
+    void *fR34Rx=nullptr;
+    bool nativeRxResumed=false;
     IOWorkLoop *loop=nullptr;
     unsigned runs=0;
     bool rxDrained=false, tailDrained=false, txDrained=false;
@@ -234,8 +237,16 @@ WINDOW_STRUCT;
         assert(detached && resourcesAlive());
         resumed=true; lifecycle.emplace_back("resume"); return true;
     }
+    bool r34RxResumePhysical() {
+        if (!fR34Rx || nativeRxResumed) return true;
+        assert(restoredAt && rxDrained && resourcesAlive());
+        nativeRxResumed=true; lifecycle.emplace_back("rx-resume"); return true;
+    }
+    void r34RxRelease() {
+        assert(nativeRxResumed); fR34Rx=nullptr;
+    }
     void r17Export(void *) {}
-    void r17Release() { assert(resumed); backendReleased=true; }
+    void r17Release() { assert(resumed); r34RxRelease(); backendReleased=true; }
 };
 DOMAIN_STRUCT;
 static UInt64 m2b2NowNS() { return mach_absolute_time(); }
@@ -263,6 +274,7 @@ static void m2b2DoPostSample(void *p) {
 }
 void org_example_AMDMapperProbe::m2b2R15Finish() {
     assert(backendReleased && restoredAt && resourcesAlive());
+    if (fR31Session) return;
     fR15Request.out.state=r15pool::kDisarmed;
     lifecycle.emplace_back("pool-disarm");
 }
@@ -292,7 +304,7 @@ DOMAIN_LOCALS
     ctx.completionSequence=129; ctx.idx=7; ctx.tail=128; ctx.completed=129;
     postSampleDone=true; postSample.bar=&fakeMMIO; postSample.haveBar=true;
     fR15Service=driver; driver->retain();
-    fR15Request.poolId=0x3301; fR15Request.out.state=r15pool::kActive;
+    fR34Rx=driver; // Native RX borrows the ordinary ring; no R15 pool exists.
     registers[M2B2_OFF_DEV_TABLE]=tblPA;
     registers[M2B2_OFF_CMD_BUF]=cmdPA;
     registers[M2B2_OFF_EVT_BUF]=evtPA;
@@ -344,7 +356,7 @@ int main() {
     assert(p.runs == 1 && p.refs == 1 && !p.fR31WorkerActive);
     assert(p.fR33Domain && p.resourcesAlive() && allocations.size() == 1);
     assert(p.fR15Service == &driver && driver.refs == 2);
-    assert(p.fR15Request.out.state == r15pool::kActive);
+    assert(p.fR34Rx == &driver && !p.fR15Request.poolId);
     assert(lifecycle.empty() && !p.fR31SessionCompleted);
     assert(p.numbers["m2-3n-setup-worker-exit-time"] >
            p.numbers["m2-3l-session-start"]);
@@ -353,7 +365,7 @@ int main() {
     auto *domain=p.fR33Domain;
     const UInt64 started=tick;
     // Logical idle/traffic intervals pass with no session worker kept alive.
-    // Neither domain identity nor the driver/pool owner may change between them.
+    // Neither domain identity nor the driver/native RX context may change.
     for (unsigned ms : {40000u, 45000u, 40000u}) {
         IOSleep(ms);
         assert(!queued && !p.fR31WorkerActive && p.refs == 1);
@@ -361,7 +373,7 @@ int main() {
         assert(domain->rootPA == 0x100000 && domain->tblPA == 0x200000);
         assert(domain->ctx.completionSequence == 129 && p.resourcesAlive());
         assert(p.fR15Service == &driver && driver.refs == 2);
-        assert(p.fR15Request.out.state == r15pool::kActive);
+        assert(p.fR34Rx == &driver && !p.fR15Request.poolId);
         assert(p.strings["m2-3l-session-state"] == "active");
         assert(p.strings["m2-3n-domain-state"] == "active");
         assert(lifecycle.empty());
@@ -406,7 +418,7 @@ int main() {
     assert(p.states == expectedStates);
     const std::vector<std::string> expectedLifecycle{
         "post-sample", "post-map-release", "rx-drain", "tail-drain", "tx-drain",
-        "restore", "detach", "resume", "pool-disarm", "mapping-release",
+        "restore", "rx-resume", "detach", "resume", "mapping-release",
         "descriptor-release", "memory-release", "memory-release", "memory-release",
         "memory-release", "memory-release", "driver-release", "context-release"};
     assert(lifecycle == expectedLifecycle);

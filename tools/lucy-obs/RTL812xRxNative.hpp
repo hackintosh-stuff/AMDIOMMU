@@ -1,4 +1,5 @@
-/* Round34: driver-owned receive mappings for the ordinary replacement path.
+/* Native RX: driver-owned receive mappings for the ordinary replacement path.
+ * Round35 prepares Lucy's existing ring directly, without an experimental pool.
  * Kernel-only control pointers stay in Request/Binding. Exported snapshots
  * contain numeric identities, mapping evidence and completed DMA witnesses.
  * Each slot keeps its first IOVA DMA lifecycle and its latest lifecycle.
@@ -12,16 +13,19 @@ typedef unsigned long long u64;
 static const char kFunctionName[] = "rtl812x-r34-rx-native";
 static const u64 kIovaBase = 0x1000200000ULL;
 enum {
-    kVersion = 1, kCount = 1024, kCapacity = 4096, kPagesPerSlot = 2,
+    kVersion = 2, kCount = 1024, kCapacity = 4096, kPagesPerSlot = 2,
     kSamples = 1, kTailMax = 4096,
     kInstall = 1, kSnapshot = 2, kDisarm = 3, kDrain = 4, kRelease = 5,
+    kPrepare = 6, kAuthorize = 7, kResumePhysical = 8,
     kAbsent = 0, kInstalled = 1, kDisarmed = 2, kDrained = 3, kReleased = 4,
+    kPrepared = 5,
     kBind = 1, kRead = 2, kCover = 3, kUnbind = 4,
     kMapPublished = 1, kMapInvalidated = 2, kMapUnmapped = 4,
     kWitnessPosted = 1, kWitnessDone = 2, kWitnessUnmapped = 4,
     kWitnessError = 8,
     kFlagMapFailed = 1, kFlagUnmapFailed = 2, kFlagAddressMismatch = 4,
-    kFlagStopped = 8, kFlagCoverFailed = 16, kFlagRingReset = 32
+    kFlagStopped = 8, kFlagCoverFailed = 16, kFlagRingReset = 32,
+    kFlagCopyFailed = 64
 };
 struct MapRecord {
     u64 generation, memory, command, pa, iova, mapLength;
@@ -60,7 +64,7 @@ struct Snapshot {
     u32 businessToken, slotCount, maps, unmaps;
     u32 posted, completed, replaced, restored;
     u32 pendingPosted, tailSeq, nativeActive, reserved;
-    u64 poolId, tInstalled, tDisarmed, tLastRestore;
+    u64 ringId, tInstalled, tDisarmed, tLastRestore;
     DriverSlot slots[kCount];
 };
 struct Binding {
@@ -72,7 +76,7 @@ struct Binding {
 typedef int (*Callback)(void *, Binding *);
 struct Request {
     u32 version, bytes, op, expectedGeneration;
-    u64 poolId, deadline;
+    u64 ringId, deadline;
     u32 businessToken, reserved;
     void *mapper, *context;
     Callback callback;

@@ -191,7 +191,10 @@ private:
     // This service owns only routing identities, PTEs and mapping evidence.
     struct R34RxDomain;
     R34RxDomain *fR34Rx = nullptr;
+    bool r34RxPrepareMap(volatile UInt64 *, UInt64, UInt32, UInt32);
     bool r34RxBegin();
+    bool r34RxAuthorize();
+    bool r34RxResumePhysical();
     bool r34RxFinish(UInt32 budgetMs);
     bool r34RxTailDone(UInt32 budgetMs);
     void r34RxReady();
@@ -1293,10 +1296,12 @@ public:
                        UInt64 ptBasePA, UInt64 ptBytes);
     void m2b2PublishRxSet();
 
-    // Finite owned allocation domain. The request stays in this heap-owned
-    // service, never on the kernel stack. Driver retains ring/spare mbufs.
+    // Shared driver reference and token storage for the historical finite
+    // path and native sessions. Sessions use the R34 control, never pool RPCs.
+    // The finite path alone retains the R15 ring/spare allocation domain.
     IOService *fR15Service;
     r15pool::Request fR15Request;
+    UInt32 fR15PoolRpcCalls;
     UInt64 fR15MapTicks;
     UInt64 fR15InvTicks;
     bool m2b2R15Call(UInt32 op);

@@ -334,6 +334,8 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     setProperty("m2-b2-stage", "0-start");
     fR15Service = nullptr;
     bzero(&fR15Request, sizeof(fR15Request));
+    fR15PoolRpcCalls = 0;
+    if (fR31Session) setHexProperty(this, "m2-3p-rx-pool-rpcs", 0);
     fR15MapTicks = 0;
     fR15InvTicks = 0;
     R15Scope r15Scope = {this};
@@ -407,8 +409,9 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     const UInt32 basePtPageCount =
         fM22b2Use4K ? M2B2_4K_TOTAL_PAGES
                     : (fM22b2Use3L ? M2B2_3L_TOTAL_PAGES : M2B2_TOTAL_PAGES);
-    // Round30 doubles the owned pool to 2048 entries (1024 ring + 1024 spare).
-    // Sparse identity tables and the TX/RX IOVA subtree have separate budgets.
+    // Sparse bootstrap tables and the TX/RX IOVA subtree have separate budgets.
+    // Native sessions map the 1024 existing RX buffers; only the finite path
+    // also allocates/maps the historical 1024 experimental spares.
     // This is table capacity, NOT an identity-mapped RAM limit.
     const UInt32 ptPageCount = basePtPageCount + 256u + M2B2_IOVA_RESERVED_PAGES;
     const UInt64 ptBytes = (UInt64)ptPageCount * M2B2_PAGE_SIZE;
@@ -613,14 +616,15 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         }
     }
 
-    // Establish the driver's complete finite allocation domain BEFORE the
-    // DTE can switch. The driver becomes copy-only until explicitly authorized;
-    // all ordinary replacement allocations are excluded for this transaction.
+    // Freeze the current RX ring BEFORE the DTE can switch. Native sessions
+    // borrow Lucy's existing buffers; the historical finite path uses R15.
+    // Both stay copy-only until their initial mappings are confirmed.
     if (!fM22b2SleepOnly &&
         (!m2b2R15PrepareMap(pt, (UInt64)ptPA,
                            ptPageCount - M2B2_IOVA_RESERVED_PAGES, basePtPageCount) ||
          !r17Prepare(pt, (UInt64)ptPA, ptPageCount))) {
-        setProperty("m2-b2-verdict", "FAIL-r15-owned-pre-map");
+        setProperty("m2-b2-verdict", fR31Session ? "FAIL-native-ring-pre-map"
+                                               : "FAIL-r15-owned-pre-map");
         setProperty("m2-b2-stage", "3b-abort-owned-map");
         ptMem->release(); tbl->release(); cmdBufMd->release();
         semMd->release(); evtMd->release();
@@ -1412,16 +1416,16 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         firstFailReason = "admission refused to reopen after the DTE flip";
         goto recover;
     }
-    // RX DMACommands use the already handed-over R17 command cursor. Prepare
-    // and Install complete before R15 is allowed to publish any RX IOVA.
+    // RX DMACommands use the already handed-over R17 command cursor. Native
+    // Install completes before Authorize allows the first RX IOVA publication.
     if (!r27RxBegin()) {
         firstFailStage = "15e-abort-rx-standard-map";
-        firstFailReason = "standard RX mappings or pool binding failed";
+        firstFailReason = "standard RX mappings or ring binding failed";
         goto recover;
     }
     if (!m2b2R15Authorize()) {
-        firstFailStage = "15e-abort-pool-authorize";
-        firstFailReason = "finite RX domain rejected authorization";
+        firstFailStage = "15e-abort-rx-authorize";
+        firstFailReason = "RX domain rejected authorization";
         goto recover;
     }
     r27RxReady();
@@ -2590,6 +2594,16 @@ recover:
         setHexProperty(this, "m2-b2-dma-t-translate-off", fM22b2Dma.tTranslateOff);
         setProperty("m2-3e-translate-off", "confirmed-by-register-readback");
         r17SetTranslateOff(fM22b2Dma.tTranslateOff);
+        // Native RX stayed copy-only through the physical tail. Translation
+        // is now restored, so ordinary buffer replacement may resume. Keep
+        // its control context alive until this acknowledgement is received.
+        if (fR31Session && !r34RxResumePhysical()) {
+            setProperty("m2-3b-cleanup", "PINNED-native-RX-resume-refused");
+            setProperty("m2-b2-verdict", "INVALID-native-RX-resume-refused");
+            setProperty("m2-b2-stage", "18b-pinned-native-RX-resume");
+            r17Export(&ctx);
+            return;
+        }
     }
     if (hadWindow) {
         if (!regsRestored) {
@@ -2624,8 +2638,8 @@ recover:
         r17Release();
         setProperty("m2-3b-cleanup", "no-window-installed");
     }
-    // Stop swaps after translation is off; installed RX objects remain retained
-    // and copy-only, never freed while the NIC can still reach them.
+    // The finite pool stays copy-only. Native sessions resumed above through
+    // their own control after register restoration.
     m2b2R15Finish();
 
     // ---- 第 19 步：判定 ----

@@ -2278,8 +2278,10 @@ def body_is_current(cpp_text):
                  'r15PoolObserve') + (('r27RxAction', 'r27RxControl',
                  'r27RxRearm', 'r27RxPosted', 'r27RxActive', 'r27RxParse') if RX else ()) + (('r34RxBinding', 'r34RxMapSlot',
                  'r34RxUnmapSlot', 'r34RxComplete', 'r34RxRearm', 'r34RxPosted',
-                 'r34RxControl', 'r34RxAction', 'r34RxFree', 'r34RxParse') if RX_SELECT == '34' else ()):
-        m = re.search(r'^(?:void|bool|IOReturn|mbuf_t) RTL8125::%s\(.*?\)\s*\{' % name,
+                 'r34RxControl', 'r34RxAction', 'r34RxFree', 'r34RxParse',
+                 'r34RxCanReplace', 'r34RxCopy', 'r34RxObserve',
+                 'r34RxInvalidate') if RX_SELECT == '34' else ()):
+        m = re.search(r'^(?:void|bool|IOReturn|mbuf_t) RTL8125::%s\(.*?\)\s*(?:const\s*)?\{' % name,
                       OBS_METHODS + RXPOST_METHODS + POOL_METHODS, re.M | re.S)
         if not m:
             return True, None          # cannot judge -> do not block
@@ -2297,7 +2299,7 @@ def body_is_current(cpp_text):
             i += 1
         want = tmpl[start:i + 1]
 
-        m2 = re.search(r'^(?:void|bool|IOReturn|mbuf_t) RTL8125::%s\(.*?\)\s*\{' % name,
+        m2 = re.search(r'^(?:void|bool|IOReturn|mbuf_t) RTL8125::%s\(.*?\)\s*(?:const\s*)?\{' % name,
                        cpp_text, re.M | re.S)
         if not m2:
             return False, name
@@ -2539,8 +2541,10 @@ def main():
     cpp_text = TX['patch_cpp'](cpp_text)
     write(cpp, cpp_text)
     print("patched %s" % cpp)
-    print("applied observation v2, RX post set, round-%s RX pool and round-%s explicit TX mapping"
-          % (RX_SELECT, TX_SELECT))
+    rx_label = ('native RX normal ring (ABI2)' if RX_SELECT == '34'
+                else 'round-%s RX pool' % RX_SELECT)
+    print("applied observation v2, RX post set, %s and round-%s explicit TX mapping"
+          % (rx_label, TX_SELECT))
     return 0
 
 

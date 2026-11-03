@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused Round34 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round35 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
@@ -35,7 +35,7 @@ legacy = analyzer.A
 
 TOKEN = 7
 PEER = ('127.0.0.2', 9110)
-ABI_CHECK = 'capture-ABI-domain4-native7-std5-nativeRX1'
+ABI_CHECK = 'capture-ABI-domain4-native7-std5-nativeRX2'
 COUNTER_CHECK = 'all-TX-standard-mode2-cumulative-and-unmarked-no-cover'
 LOG_CHECK = 'full8192-bytes-no-retry-no-duplicate-credit'
 CMD_CHECK = 'original8192-command-ring-wraps-and-postwrap-completion'
@@ -208,7 +208,7 @@ int main(int argc, char **argv) {
     r34rx::Snapshot rx{};
     r34rx::BackendSnapshot rb{};
     rx.version = r34rx::kVersion; rx.bytes = sizeof(rx);
-    rx.state = r34rx::kReleased; rx.poolId = 0x345200;
+    rx.state = r34rx::kReleased; rx.ringId = 0x355200;
     rx.slotCount = rx.restored = r34rx::kCount;
     rx.maps = rx.unmaps = 5 * r34rx::kCount;
     rx.posted = rx.completed = 4 * r34rx::kCount;
@@ -315,8 +315,11 @@ def properties():
          'm2-3n-command-pa': 0x300000, 'm2-3n-install-count': 1,
          'm2-3n-teardown-start': session_time(8790),
          'm2-3n-teardown-end': session_time(9055),
-         'm2-3l-tx-deadline': 0, 'm2-b2-r15-authorize-deadline': 0,
-         'm2-3h-rx-mode': 'driver-owned-native-remap1024', 'm2-3o-rx-ready-time': 410,
+         'm2-3l-tx-deadline': 0,
+         'm2-3h-rx-mode': 'native-ring-remap1024', 'm2-3o-rx-ready-time': 410,
+         'm2-3p-rx-source': 'lucy-normal-ring', 'm2-3p-rx-bootstrap-ranges': 1024,
+         'm2-3p-rx-pool-rpcs': 0, 'm2-3p-rx-spares': 0, 'm2-3p-rx-ring-id': 0x355200,
+         'm2-3p-rx-physical-resume': 'done',
          'm2-3h-rx-state': 'drained-and-unmapped', 'm2-3h-rx-ready': 'no',
          'm2-b2-t-recovery-start': 9023, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0,
          'm2-3i-tail-state': 'confirmed', 'm2-3i-tail-seq': analyzer.RX_COUNT,
@@ -507,7 +510,12 @@ class AnalyzerTests(unittest.TestCase):
             '"R26TxMode" = "all-standard"\n'
             '"R26TxMapped" = 10240\n"R26TxUnmarked" = 10240\n'
             '"R26TxLegacySelected" = 0\n"R26TxAttempts" = 10244\n'
-            '"rtl812x-txmap-cover-calls" = 0\n')
+            '"rtl812x-txmap-cover-calls" = 0\n'
+            '"rtl812x-r35-rx-source" = "lucy-normal-ring"\n'
+            '"rtl812x-r35-rx-experimental-pool" = 0\n'
+            '"rtl812x-r35-rx-spares" = 0\n'
+            '"rtl812x-r35-rx-ring-id" = 0x355200\n'
+            f'"rtl812x-r35-rx-resume-time" = {session_time(9035)}\n')
 
     def setUp(self):
         self.capture = self.root / 'case'
@@ -562,8 +570,13 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(by_id[RX_MAP_CHECK]['unmapped'], 5120)
         self.assertEqual(by_id[RX_MAP_CHECK]['writablePages'], 1536)
         self.assertEqual(by_id[RX_MAP_CHECK]['leafTables'], 4)
+        self.assertEqual((by_id[RX_MAP_CHECK]['source'], by_id[RX_MAP_CHECK]['ringId'],
+                          by_id[RX_MAP_CHECK]['experimentalPoolRPCs'],
+                          by_id[RX_MAP_CHECK]['experimentalSpares']),
+                         ('lucy-normal-ring', 0x355200, 0, 0))
         self.assertEqual(by_id[RX_DONE_CHECK]['sampledCompletions'], 2048)
         self.assertEqual(by_id[RX_DONE_CHECK]['restored'], 1024)
+        self.assertEqual(by_id[RX_DONE_CHECK]['firstLastPADifferentSlots'], 1024)
         self.assertEqual(by_id[RX_DONE_CHECK]['applicationRequests'], [1025])
         self.assertEqual(by_id[SESSION_CHECK]['stopRequests'], 1)
         self.assertEqual(by_id[SESSION_CHECK]['requestsPerPhase'], 4096)

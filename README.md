@@ -1,6 +1,50 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round34 / driver-owned RX streaming mappings
+## Current Round35 / native RX bootstrap on Lucy's ordinary ring
+
+Base: `18be5c49b911b351f7ec7fa5b52b23d46581666e`.
+Candidate: Lucy **1.1.220** / Probe **0.44.0**. TX retains domain4/native7/std5;
+native RX advances to ABI2 with an independent ring identity.
+
+Round34 passed its normal hardware run and all 14 checks: 8192 replies,
+125.201 s idle, 10578 RX map/unmap pairs, 9554 completed IOVA receives and
+2669 real buffer replacements. Round35 removes the experimental R15 pool
+from the service-owned native RX session:
+
+- Native Prepare borrows the existing 1024 Lucy RX buffers and temporarily
+  uses copy-only receive processing to keep their physical addresses stable.
+  It allocates no replacement ring and no experimental spare buffers.
+- The probe covers these current buffers for the initial physical DMA phase.
+  Install creates the existing driver-owned MD/Cmd pairs; native Authorize
+  then opens ordinary `replaceOrCopyPacket` and per-slot unmap/remap.
+- Lucy owns its ordinary RX mbufs throughout. The session no longer transfers
+  mbuf ownership through an experimental pool or calls that pool's control RPC.
+- Stop retains the measured current-buffer physical restore, R28T/R29D and TX
+  teardown. Only after hardware registers are restored does native ResumePhysical
+  reopen ordinary physical RX replacement.
+- The same 14-check normal run verifies the native ring identity, 1024 bootstrap
+  ranges, zero experimental pool/spares/RPCs, real replacement and final release.
+
+Use the fixed `repos/AMDIOMMU` checkout with a `round35-native-ring` Git branch.
+On the Mac, reuse its existing checkout and MacKernelSDK. Prepare pristine files
+from upstream `639144d1f284a9fee222a518691b01494f5e265d` in the reusable
+`_scratch/lucy-upstream` directory, then run:
+
+```sh
+sh tools/r27/build.sh _scratch/lucy-upstream
+```
+
+The native generator family remains `--tx 21 --rx 34`; this round evolves that
+implementation in place. Run defaults are `runs/r35` and `org.example.round35load`,
+with token `0x35c0de35`. The compatible `R31Stop` RPC and service-owned domain
+continue. Software checks reuse the existing focused cases. macOS SDK build and
+one normal hardware run must still be recorded for this new candidate.
+
+This step retains the necessary physical identity coverage during entry and
+restoration, and the existing synchronous per-slot RX invalidations. RX batch
+mapping is the next separate performance step after normal-ring bootstrap passes.
+
+## Historical Round34 / driver-owned RX streaming mappings
 
 Base: `648e729c73a345cdee3899ca634ee32f057c8d78`.
 Candidate: Lucy **1.1.219** / Probe **0.43.0**. TX retains domain4/native7/std5.
@@ -43,8 +87,8 @@ report `installs=1` with the same root/DT/command addresses
 `0x31880000`/`0x31a00000`/`0x31c00000` across the 125.2008 s idle. RX maps and
 unmaps were both 10578 = 9554 posted DMA operations + 1024 install-time
 preparations that never published an IOVA OWN; posted equalled completed at
-9554, 2669 real replacements occurred, 976 of 1024 slots changed physical
-address, and all 1024 slots returned to their current mbuf's physical address
+9554, 2669 real replacements occurred, 976 of 1024 slots had different physical addresses in their first and final
+retained generations, and all 1024 slots returned to their current mbuf's physical address
 with owners/boundPairs/pending zero. TX retired 10382 with rejected 0; domain
 maps 10391 = 10382 + 9 capacity probes; the command ring completed 41941/41941
 through 163 wraps, the higher rate being the cost of per-slot streaming.

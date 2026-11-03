@@ -636,7 +636,9 @@ void org_example_AMDMapperProbe::m2b2PublishRxSet() {
 // Prepare obtains a stable allocation domain while the driver holds every
 // object; authorize permits only entries from that immutable domain.
 bool org_example_AMDMapperProbe::m2b2R15Call(UInt32 op) {
-    if (!fR15Service) return false;
+    // A native session has its own ring lifecycle; it never prepares,
+    // authorizes or disarms the experimental pool.
+    if (fR31Session || !fR15Service) return false;
     fR15Request.version = r15pool::kVersion;
     fR15Request.bytes = sizeof(fR15Request);
     fR15Request.op = op;
@@ -646,6 +648,8 @@ bool org_example_AMDMapperProbe::m2b2R15Call(UInt32 op) {
     // Real RX poll/ISR exclusion is acquired by the driver. A work-loop gate
     // by itself cannot exclude pollInputPackets on its separate thread.
     for (UInt32 i = 0; i < 100; ++i) {
+        ++fR15PoolRpcCalls;
+        setHexProperty(this, "m2-3p-rx-pool-rpcs", fR15PoolRpcCalls);
         kr = fR15Service->callPlatformFunction(sym, false,
                                               &fR15Request, nullptr,
                                               nullptr, nullptr);
@@ -671,6 +675,8 @@ bool org_example_AMDMapperProbe::m2b2R15PrepareMap(
     if (!fR15Request.reserved) {
         setProperty("m2-b2-r15", "FAIL-business-token-absent"); return false;
     }
+    if (fR31Session)
+        return r34RxPrepareMap(pt, ptBase, totalPages, basePages);
     if (!m2b2R15Call(r15pool::kPrepare)) {
         setProperty("m2-b2-r15", "FAIL-prepare"); return false;
     }
@@ -786,6 +792,7 @@ bool org_example_AMDMapperProbe::m2b2R15PrepareMap(
 }
 
 bool org_example_AMDMapperProbe::m2b2R15Authorize() {
+    if (fR31Session) return r34RxAuthorize();
     if (!fR15Service || !fR15MapTicks || !fR15InvTicks) return false;
     // Zero keeps the current cyclic RX session authorized until Disarm.
     // The finite path retains its 120-second setup/window/drain allowance.
@@ -804,6 +811,7 @@ bool org_example_AMDMapperProbe::m2b2R15Authorize() {
 }
 
 void org_example_AMDMapperProbe::m2b2R15Finish() {
+    if (fR31Session) return; // Native ResumePhysical follows register restore.
     if (!fR15Service || !fR15Request.poolId) return;
     if (!m2b2R15Call(r15pool::kDisarm)) {
         setProperty("m2-b2-r15-disarm", "FAIL"); return;
@@ -827,6 +835,16 @@ void org_example_AMDMapperProbe::m2b2R15Finish() {
 
 void org_example_AMDMapperProbe::m2b2R15Release() {
     if (!fR15Service) return;
+    if (fR31Session) {
+        // Also unfreeze a Prepare-only ring when setup exits before install.
+        // Installed mappings must have completed the ordinary drain first.
+        if (!r34RxResumePhysical()) return;
+        r34RxRelease();
+        if (fR34Rx) return;
+        fR15Service->release();
+        fR15Service = nullptr;
+        return;
+    }
     // Also covers every early return before hardware is enabled. Revocation
     // never frees objects that can still be installed in RX descriptors.
     if (fR15Request.poolId &&

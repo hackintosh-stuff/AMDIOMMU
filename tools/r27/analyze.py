@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round34: driver-owned RX mappings and normal buffer replacement.
+"""Round35: Lucy's ordinary RX ring with native mapping and replacement.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,11 +29,11 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round34-driver-owned-RX; normal-replacement-remap; service-owned-domain; 4096+4096-after-125s-idle'
+SCOPE = 'round35-normal-RX-ring; no-experimental-pool-or-spares; native-remap; service-owned-domain; 4096+4096-after-125s-idle'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
-RX_VERSION, RX_COUNT = 1, 1024
+RX_VERSION, RX_COUNT = 2, 1024
 RX_DRIVER_BYTES, RX_BACKEND_BYTES = 270432, 475216
 RX_DRIVER_HEADER, RX_DRIVER_SLOT_BYTES = 96, 264
 RX_BACKEND_HEADER, RX_BACKEND_SLOT_BYTES = 80, 464
@@ -107,7 +107,7 @@ def decode_rx(blob):
     A.need(len(blob) == RX_DRIVER_BYTES, 'RX driver snapshot must be %d bytes' % RX_DRIVER_BYTES)
     h = A.unpack('version bytes state flags businessToken slotCount maps unmaps '
                  'posted completed replaced restored pendingPosted tailSeq nativeActive reserved '
-                 'poolId tInstalled tDisarmed tLastRestore', '16I4Q', blob)
+                 'ringId tInstalled tDisarmed tLastRestore', '16I4Q', blob)
     A.need(h['version'] == RX_VERSION and h['bytes'] == len(blob), 'RX driver ABI differs')
     rows = []
     for i in range(RX_COUNT):
@@ -213,9 +213,9 @@ def check(cap):
         A.need(0 < token < 0x80000000 and sh['token'] == bh['token'] == token,
                'inconsistent/non-low-half token')
         A.need(dh['devid'] == gh['bdf'] == sh['bdf'] == bh['bdf'], 'capture device association differs')
-        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX1', 'state': 'ok'})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX2', 'state': 'ok'})
     except (A.Refused, OSError, ValueError, KeyError, IndexError, struct.error) as exc:
-        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX1', 'state': 'FAIL', 'detail': str(exc)})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX2', 'state': 'FAIL', 'detail': str(exc)})
         return result()
 
     def driver_property(key, numeric=False):
@@ -761,9 +761,22 @@ def check(cap):
         return {'before': len(before), 'during': len(during), 'after': len(after)}
     run('ordinary-traffic-before-during-and-three-after', ordinary)
     def rx_mappings():
-        A.need(P['m2-3h-rx-mode'] == 'driver-owned-native-remap1024' and
+        A.need(P['m2-3h-rx-mode'] == 'native-ring-remap1024' and
                P['m2-3h-rx-state'] == 'drained-and-unmapped' and
                P['m2-3h-rx-ready'] == 'no', 'native RX did not reach its released final state')
+        A.need(P['m2-3p-rx-source'] ==
+               driver_property('rtl812x-r35-rx-source') == 'lucy-normal-ring' and
+               P['m2-3p-rx-bootstrap-ranges'] == RX_COUNT and
+               P['m2-3p-rx-pool-rpcs'] == P['m2-3p-rx-spares'] ==
+               driver_property('rtl812x-r35-rx-experimental-pool', True) ==
+               driver_property('rtl812x-r35-rx-spares', True) == 0 and
+               P['m2-3p-rx-ring-id'] ==
+               driver_property('rtl812x-r35-rx-ring-id', True) == rh['ringId'] > 0,
+               'RX bootstrap did not use the same ordinary Lucy ring without an experimental pool')
+        resumed = driver_property('rtl812x-r35-rx-resume-time', True)
+        A.need(P['m2-3p-rx-physical-resume'] == 'done' and
+               P['m2-3e-t-translate-off'] <= resumed <= P['m2-3e-t-resume'],
+               'normal RX replacement did not resume after register restoration')
         A.need(rb['count'] == RX_COUNT and rb['mapCalls'] == rb['mapOk'] ==
                rb['unmapCalls'] == rb['unmapOk'] == rh['maps'] == rh['unmaps'] and
                rb['mapOk'] == rh['posted'] + RX_COUNT and
@@ -838,6 +851,9 @@ def check(cap):
                'shared command totals do not cover TX/probe and native RX mapping generations')
         return {'mapped': rb['mapOk'], 'unmapped': rb['unmapOk'], 'initialMappings': RX_COUNT,
                 'driverOwnedPairs': len(memory_ids), 'liveOwners': 0,
+                'source': 'lucy-normal-ring', 'ringId': rh['ringId'],
+                'bootstrapRanges': RX_COUNT, 'experimentalPoolRPCs': 0, 'experimentalSpares': 0,
+                'normalReplacementResumedAt': resumed,
                 'retainedGenerations': RX_COUNT * 2, 'writablePages': len(iovas),
                 'leafTables': len(leaf_tables), 'iovaBase': RX_BASE, 'slotBytes': RX_STRIDE,
                 'mapBeforeOwn': True, 'unmapAfterCompletion': True}
@@ -845,7 +861,7 @@ def check(cap):
 
     def rx_completions():
         A.need(rh['state'] == 4 and rh['flags'] == rh['nativeActive'] == rh['pendingPosted'] == 0 and
-               rh['slotCount'] == rh['restored'] == RX_COUNT and rh['poolId'] > 0 and
+               rh['slotCount'] == rh['restored'] == RX_COUNT and rh['ringId'] > 0 and
                rh['businessToken'] == token and rh['posted'] == rh['completed'] >= 2 * RX_COUNT and
                rh['posted'] == sum(s['postCount'] for s in rxslots) and
                rh['completed'] == sum(s['doneCount'] for s in rxslots) and
@@ -904,10 +920,11 @@ def check(cap):
                'unique business DMA sample is missing from native RX')
         return {'posted': rh['posted'], 'completed': rh['completed'], 'restored': RX_COUNT,
                 'pending': 0, 'replacements': rh['replaced'], 'retainedReplacementSamples': replacements,
-                'slotsWithChangedPA': changed, 'sampledCompletions': RX_COUNT * 2,
+                'firstLastPADifferentSlots': changed, 'sampledCompletions': RX_COUNT * 2,
                 'businessCompletions': len(business), 'applicationRequests': sorted(business),
                 'correlation': 'first and final IOVA generation per slot; R27P token+ID and FCS length',
-                'scope': 'driver-owned MD/Cmd pairs; normal mbuf replacement and remap; cumulative totals'}
+                'scope': 'ordinary Lucy ring; driver-owned MD/Cmd pairs; normal mbuf replacement; '
+                         'PA comparison covers first/final retained generations only; cumulative totals'}
     run('rx1024-native-replacement-DMA-and-current-buffer-restore', rx_completions)
     return result()
 
