@@ -2396,49 +2396,45 @@ recover:
         postSample.haveBar = false;
     }
     if (fR31Session) setProperty("m2-3l-session-state", "draining");
-    // Disarm cyclic repost, then keep TX OPEN for the bounded userspace echo
-    // tail that returns every pending RX IOVA to its physical ring buffer.
-    // Standard RX unmaps still run under translation and the shared command
-    // buffer. On failure pin BEFORE closing TX so diagnostics/tail can continue.
-    const bool rxDrained = r27RxFinish(15000);
-    if (!rxDrained) {
-        // No TX close, DTE restoration, command stop, detach or table free.
-        setProperty("m2-3b-cleanup", "PINNED-RX-no-DTE-restore");
-        setProperty("m2-b2-verdict", "INVALID-RX-outstanding-or-unmap-pinned");
-        setProperty("m2-b2-stage", "17e-pinned-RX");
-        r17Export(&ctx);
-        return;
-    }
-    if (!r29WaitTailDone(5000)) {
-        setProperty("m2-3b-cleanup", "PINNED-tail-no-DTE-restore");
-        setProperty("m2-b2-verdict", "INVALID-tail-not-confirmed");
-        setProperty("m2-b2-stage", "17e-pinned-tail");
-        r17Export(&ctx);
-        return;
-    }
-    // ---- 第 17e 步：退出窗口的前半段（round22）----
-    //
-    // 【顺序】停止接纳 → 等已获准的提交写完 OWN → 排空硬件持有的 TX →
-    // 强制采退出快照。这几步都发生在翻译**仍然生效**的时候：硬件此刻可能
-    // 还持有描述符，它们必须继续被正确翻译，所以这里绝不能先改 DTE。
-    //
-    // 【失败即钉住】排空失败时不做 Disarm、不做 Detach、不恢复 DTE，把表、
-    // 命令缓冲和 backend 全部留在原处，并如实报告。第 21 轮的失败路径是
-    // "drained=false 仍然 Disarm/Detach → 返回失败"，结果是翻译留在原地、
-    // 而 Disarm 顺手打开了普通提交：普通包在没有 cover 的表上被放行。
     const bool hadWindow = r17Installed();
-    if (hadWindow) {
+    // Stop admission and drain every accepted TX while translation and the
+    // command engine remain active. Native RX then stops the NIC itself;
+    // the finite pool still needs TX open until its peer tail has finished.
+    auto stopTxAtExit = [&]() -> bool {
+        if (!hadWindow) return true;
         const bool stopped = r17StopSubmit(2000, "exit");
-        // 退出记录就在这一步取：排空成功与否都要取，失败时记录里的占用
-        // 正是"为什么被钉住"的证据。
         r17SampleExit(r20tx::kStageExit);
         if (!stopped) {
             setProperty("m2-3b-cleanup", "PINNED-outstanding-no-DTE-restore");
             setProperty("m2-b2-verdict", "INVALID-TX-outstanding-pinned");
             setProperty("m2-b2-stage", "17e-pinned-outstanding");
             r17Export(&ctx);
+        }
+        return stopped;
+    };
+    if (fR31Session && !stopTxAtExit()) return;
+
+    // Native RX confirms the hardware stop, unmaps every current slot and
+    // restores its physical address without peer traffic. The same standard
+    // unmaps and physical cover callbacks still finish under translation.
+    const bool rxDrained = r27RxFinish(15000);
+    if (!rxDrained) {
+        // No DTE restoration, command stop, detach or table free.
+        setProperty("m2-3b-cleanup", "PINNED-RX-no-DTE-restore");
+        setProperty("m2-b2-verdict", "INVALID-RX-outstanding-or-unmap-pinned");
+        setProperty("m2-b2-stage", "17e-pinned-RX");
+        r17Export(&ctx);
+        return;
+    }
+    if (!fR31Session) {
+        if (!r29WaitTailDone(5000)) {
+            setProperty("m2-3b-cleanup", "PINNED-tail-no-DTE-restore");
+            setProperty("m2-b2-verdict", "INVALID-tail-not-confirmed");
+            setProperty("m2-b2-stage", "17e-pinned-tail");
+            r17Export(&ctx);
             return;
         }
+        if (!stopTxAtExit()) return;
     }
     // ---- 第 18 步：恢复（状态机，任何一步失败都阻止释放）----
     //
@@ -2608,9 +2604,9 @@ recover:
         setHexProperty(this, "m2-b2-dma-t-translate-off", fM22b2Dma.tTranslateOff);
         setProperty("m2-3e-translate-off", "confirmed-by-register-readback");
         r17SetTranslateOff(fM22b2Dma.tTranslateOff);
-        // Native RX stayed copy-only through the physical tail. Translation
-        // is now restored, so ordinary buffer replacement may resume. Keep
-        // its control context alive until this acknowledgement is received.
+        // Native RX has stopped DMA and restored the current physical ring.
+        // Only after translation is restored may Lucy restart the NIC. Keep
+        // its control context alive until real link/RX/TX recovery is confirmed.
         if (fR31Session && !r34RxResumePhysical()) {
             setProperty("m2-3b-cleanup", "PINNED-native-RX-resume-refused");
             setProperty("m2-b2-verdict", "INVALID-native-RX-resume-refused");

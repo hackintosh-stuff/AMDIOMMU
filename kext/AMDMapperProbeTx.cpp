@@ -2355,7 +2355,17 @@ bool org_example_AMDMapperProbe::r34RxResumePhysical() {
     if (r->snapshot.liveOwners || r->snapshot.boundPairs ||
         (!r->released && r->control.out.state != r34rx::kPrepared)) return false;
     R27ClientContext client(this, nullptr);
-    if (r34RxControl(r34rx::kResumePhysical) != kIOReturnSuccess) {
+    // Lucy starts the physical ring once, then reports Busy until link and
+    // actual RX/TX enable are restored. Wait outside its command gate before
+    // Detach and ordinary output resume; do not restart it on every poll.
+    const UInt64 start = m2b2NowNS();
+    IOReturn result = kIOReturnBusy;
+    do {
+        result = r34RxControl(r34rx::kResumePhysical);
+        if (result != kIOReturnBusy) break;
+        IOSleep(10);
+    } while (m2b2ToMS(m2b2NowNS() - start) < 5000);
+    if (result != kIOReturnSuccess) {
         setProperty("m2-3p-rx-physical-resume", "FAIL"); return false;
     }
     r->physicalResumed = true;
@@ -2396,7 +2406,7 @@ bool org_example_AMDMapperProbe::r34RxFinish(UInt32 budgetMs) {
             const auto &s = r->control.out;
             if (kr == kIOReturnSuccess && s.version == r34rx::kVersion &&
                 s.bytes == sizeof(s) && s.state == r34rx::kDrained && !s.flags &&
-                !s.pendingPosted && s.posted == s.completed &&
+                !s.pendingPosted && s.posted == s.completed + s.stopRetired &&
                 s.restored == r34rx::kCount && s.maps == s.unmaps &&
                 !r->snapshot.liveOwners) { drained = true; break; }
             if (kr != kIOReturnSuccess && kr != kIOReturnBusy) break;
@@ -2463,6 +2473,7 @@ void org_example_AMDMapperProbe::r34RxExport() {
     setHexProperty(this, "m2-3h-rx-backend-flags", r->snapshot.flags);
     setHexProperty(this, "m2-3h-rx-posted", r->control.out.posted);
     setHexProperty(this, "m2-3h-rx-completed", r->control.out.completed);
+    setHexProperty(this, "m2-3h-rx-stop-retired", r->control.out.stopRetired);
     setHexProperty(this, "m2-3h-rx-restored", r->control.out.restored);
     setHexProperty(this, "m2-3h-rx-pending", r->control.out.pendingPosted);
     setHexProperty(this, "m2-3h-rx-flags", r->control.out.flags);

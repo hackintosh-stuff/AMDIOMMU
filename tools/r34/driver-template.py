@@ -9,6 +9,8 @@ Round37 exports the driver's actual TX/RX descriptor and tally spans so the
 bootstrap table can map only these objects and the frozen RX buffers.
 Round38 retires the RX bootstrap aliases once all slots have actually
 published their first IOVA OWN, after completing the current batch.
+Round39 stops the NIC before retiring the final mappings, without peer tail
+traffic, and restarts the physical ring after the original IOMMU state returns.
 The older RX4 path remains selectable from its original template.
 """
 from pathlib import Path
@@ -32,6 +34,9 @@ MEMBERS = BASE['MEMBERS'] + r'''
     bool r36RxBeginBatch(UInt32, UInt32);
     bool r36RxPublish(UInt32, UInt64, UInt64, UInt64);
     bool r38RxRetireBootstrap();
+    bool r39RxPaused() const;
+    bool r39RxStop();
+    IOReturn r39RxResume();
     bool r34RxRearm(UInt32, UInt32, UInt32, bool, UInt64 *);
     void r34RxPosted(UInt32, UInt64);
     bool r34RxCanReplace() const;
@@ -66,6 +71,8 @@ struct RTL8125::R34RxState {
     UInt32 firstIovaSlots;
     UInt64 tLastFirstIovaPost, tBootstrapRetired;
     bool bootstrapRetireAttempted, bootstrapRetired;
+    r34rx::StopRecord stop;
+    bool hardwarePaused;
 };
 
 bool RTL8125::r34RxBinding(UInt32 op, UInt32 slot,
@@ -347,6 +354,129 @@ bool RTL8125::r38RxRetireBootstrap()
     return true;
 }
 
+bool RTL8125::r39RxPaused() const
+{
+    R34RxState *p = __atomic_load_n(&r34Rx, __ATOMIC_ACQUIRE);
+    return p && __atomic_load_n(&p->hardwarePaused, __ATOMIC_ACQUIRE);
+}
+
+bool RTL8125::r39RxStop()
+{
+    R34RxState *p = r34Rx;
+    auto &s = p->snapshot;
+    auto &stop = p->stop;
+    if (s.state == r34rx::kDrained) return true;
+    if (stop.stopCalls || p->batchCount || p->batchQueued) return false;
+    struct rtl8125_private *tp = &linuxData;
+    ++stop.stopCalls;
+    stop.tStopBegin = mach_absolute_time();
+    stop.commandBefore = RTL_R8(tp, ChipCmd);
+    stop.interruptMaskBefore = RTL_R32(tp, IMR0_8125);
+    stop.rxNextBefore = rxNextDescIndex;
+
+    // The probe has already closed TX admission and drained its owners. Keep
+    // this command-gate + POLLING exclusion through the final RX unmaps.
+    // Paused entry points also exclude a queued timer, IRQ or poll callback.
+    __atomic_store_n(&p->hardwarePaused, true, __ATOMIC_RELEASE);
+    timerSource->cancelTimeout();
+    interruptSource->disable();
+    netif->stopOutputThread();
+    netif->flushOutputQueue();
+    clear_mask((__LINK_UP_M | __POLL_MODE_M), &stateFlags);
+    setLinkStatus(kIONetworkLinkValid);
+    rtl8125_hw_reset(tp);
+    stop.commandStopped = RTL_R8(tp, ChipCmd);
+    stop.interruptMaskStopped = RTL_R32(tp, IMR0_8125);
+    if ((stop.commandStopped & (CmdReset | CmdTxEnb | CmdRxEnb)) ||
+        stop.interruptMaskStopped) {
+        s.flags |= r34rx::kFlagStopped;
+        return false;
+    }
+    stop.resetVerified = 1;
+    stop.tStopped = mach_absolute_time();
+
+    for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
+        auto &d = s.slots[slot];
+        auto &w = p->current[slot];
+        const UInt64 oldAddr = OSSwapLittleToHostInt64(rxDescArray[slot].buf.addr);
+        if (!r34RxUnmapSlot(slot)) return false;
+        if (w.tUnmapInv > stop.tLastUnmap) stop.tLastUnmap = w.tUnmapInv;
+        if (w.tPost && !w.tDone && !(w.flags & r34rx::kWitnessStopRetired)) {
+            if (!s.pendingPosted) {
+                s.flags |= r34rx::kFlagAddressMismatch;
+                return false;
+            }
+            // No packet completion was observed for this final OWN. The NIC
+            // stop, not a fabricated tDone, authorizes retirement of its DMA.
+            w.flags |= r34rx::kWitnessStopRetired;
+            ++s.stopRetired; ++d.stopRetired; --s.pendingPosted;
+        }
+        if (w.tPost) { d.last = w; w.reserved = 1; }
+        const UInt64 pa = mbuf_data_to_physical(mbuf_datastart(rxBufArray[slot].mbuf));
+        if (!pa || !r34RxBinding(r34rx::kCover, slot, nullptr, pa)) {
+            s.flags |= r34rx::kFlagCoverFailed;
+            return false;
+        }
+        d.currentPA = pa;
+        rxBufArray[slot].phyAddr = pa;
+        rxDescArray[slot].buf.addr = OSSwapHostToLittleInt64(pa);
+        const UInt64 word1 = kRxBufferSize | DescOwn |
+            (slot == kRxLastDesc ? RingEnd : 0u);
+        wmb();
+        rxDescArray[slot].buf.blen = OSSwapHostToLittleInt64(word1);
+        if (!d.tPhysicalOwn) ++s.restored;
+        p->restorePending[slot] = false;
+        d.tPhysicalOwn = mach_absolute_time();
+        s.tLastRestore = d.tPhysicalOwn;
+        rxpostRecordRearm(slot, pa, oldAddr, word1);
+    }
+    stop.stopRetired = s.stopRetired;
+    stop.restored = s.restored;
+    stop.tLastRestore = s.tLastRestore;
+    if (s.pendingPosted || s.posted != s.completed + s.stopRetired ||
+        s.maps != s.unmaps || s.restored != r34rx::kCount) return false;
+    s.state = r34rx::kDrained;
+    return true;
+}
+
+IOReturn RTL8125::r39RxResume()
+{
+    R34RxState *p = r34Rx;
+    auto &stop = p->stop;
+    if (p->physicalResumed) return kIOReturnSuccess;
+    // A Prepare-only cancellation never stopped the NIC or owned mappings.
+    if (!stop.stopCalls) {
+        p->physicalResumed = true;
+        p->tPhysicalResumed = mach_absolute_time();
+        return kIOReturnSuccess;
+    }
+    if (!stop.resetVerified) return kIOReturnNotReady;
+    struct rtl8125_private *tp = &linuxData;
+    if (!stop.tResumeBegin) {
+        stop.tResumeBegin = mach_absolute_time();
+        // Release has removed all native owners, and the probe has confirmed
+        // the original IOMMU state. Use Lucy's existing rebuild/restart path.
+        clearRxTxRings();
+        stop.rxNextAfter = rxNextDescIndex;
+        txDescDoneCount = txDescDoneLast = 0;
+        rtl812xEnable();
+        __atomic_store_n(&p->hardwarePaused, false, __ATOMIC_RELEASE);
+        interruptSource->enable();
+    }
+    // The enable path starts PHY negotiation. Poll outside this command gate
+    // until the ordinary link-up path can enable DMA; never reset it again.
+    const UInt32 phy = RTL_R32(tp, PHYstatus);
+    if (phy != 0xffffffffu && (phy & LinkStatus) &&
+        !test_bit(__LINK_UP, &stateFlags)) rtl812xCheckLinkStatus(tp);
+    const UInt32 command = RTL_R8(tp, ChipCmd);
+    if (!test_bit(__LINK_UP, &stateFlags) ||
+        (command & (CmdReset | CmdTxEnb | CmdRxEnb)) != (CmdTxEnb | CmdRxEnb))
+        return kIOReturnBusy;
+    p->physicalResumed = true;
+    p->tPhysicalResumed = stop.tResumed = mach_absolute_time();
+    return kIOReturnSuccess;
+}
+
 bool RTL8125::r34RxRearm(UInt32 slot, UInt32 token, UInt32 reqId,
                         bool replaced, UInt64 *addr)
 {
@@ -430,6 +560,7 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
         auto &s = p->snapshot;
         s.version = r34rx::kVersion; s.bytes = sizeof(s); s.slotCount = r34rx::kCount;
         s.businessToken = request->businessToken;
+        p->stop.version = r34rx::kStopVersion; p->stop.bytes = sizeof(p->stop);
         p->generation = rxpostHdr ?
             __atomic_load_n(&rxpostHdr->ringGen, __ATOMIC_RELAXED) : 1u;
         // These prepared, contiguous descriptors stay owned by Lucy for the
@@ -492,6 +623,7 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
     }
     auto *p = r34Rx;
     auto &s = p->snapshot;
+    IOReturn controlResult = kIOReturnSuccess;
     if (request->op == r34rx::kInstall) {
         if (s.state != r34rx::kPrepared || s.flags || !request->mapper ||
             !request->context || !request->callback || request->deadline)
@@ -527,11 +659,14 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
     } else if (request->op == r34rx::kDisarm || request->op == r34rx::kDrain) {
         p->authorized = false;
         if (!s.tDisarmed) s.tDisarmed = mach_absolute_time();
-        if (s.state != r34rx::kReleased)
-            s.state = (request->op == r34rx::kDrain && !s.pendingPosted &&
-                s.restored == r34rx::kCount) ? r34rx::kDrained : r34rx::kDisarmed;
+        if (s.state != r34rx::kReleased && s.state != r34rx::kDrained) {
+            s.state = r34rx::kDisarmed;
+            if (request->op == r34rx::kDrain && !r39RxStop())
+                controlResult = kIOReturnIOError;
+        }
     } else if (request->op == r34rx::kRelease) {
-        if (s.state != r34rx::kDrained || s.pendingPosted || s.posted != s.completed)
+        if (s.state != r34rx::kDrained || s.pendingPosted ||
+            s.posted != s.completed + s.stopRetired)
             return kIOReturnBusy;
         for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
             if (p->mapped[slot] || p->wired[slot] ||
@@ -549,12 +684,13 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
         // The caller has restored the original translation/register state.
         // A pre-DTE abort may also release a ring that was only prepared.
         s.state = r34rx::kReleased;
-        p->physicalResumed = true;
-        p->tPhysicalResumed = mach_absolute_time();
+        controlResult = r39RxResume();
     }
     bcopy(&s, &request->out, sizeof(s));
     OSData *raw = OSData::withBytes(&s, sizeof(s));
     if (raw) { setProperty("rtl812x-r34-rx-native-raw", raw); raw->release(); }
+    raw = OSData::withBytes(&p->stop, sizeof(p->stop));
+    if (raw) { setProperty("rtl812x-r39-rx-stop-raw", raw); raw->release(); }
     setProperty("rtl812x-r34-rx-mode", "native-ring-batch16");
     setProperty("rtl812x-r34-rx-state", s.state, 32);
     setProperty("rtl812x-r34-rx-maps", s.maps, 32);
@@ -582,7 +718,7 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
     setProperty("rtl812x-r38-rx-last-first-iova-time", p->tLastFirstIovaPost, 64);
     setProperty("rtl812x-r38-rx-bootstrap-retired", p->bootstrapRetired ? 1u : 0u, 32);
     setProperty("rtl812x-r38-rx-bootstrap-retire-time", p->tBootstrapRetired, 64);
-    return kIOReturnSuccess;
+    return controlResult;
 }
 
 void RTL8125::r34RxInvalidate()
@@ -668,6 +804,28 @@ def pool_methods(text):
          '    if (__atomic_load_n(&r34Rx, __ATOMIC_ACQUIRE))\n'
          '        return r34RxObserve(kind, slot, token);\n')
     return text + '\n' + METHODS
+
+
+def pause_entries(text):
+    def once(old, new):
+        nonlocal text
+        assert text.count(old) == 1, 'round39 pause anchor: ' + old
+        text = text.replace(old, new, 1)
+
+    # Gate callbacks are serialized, but an already queued IRQ/timer and the
+    # independent network poll path must also stay quiet until restart begins.
+    for declaration in (
+        'void RTL8125::interruptOccurred(OSObject *client, IOInterruptEventSource *src, int count)',
+        'void RTL8125::rtl812xCheckLinkStatus(struct rtl8125_private *tp)',
+        'void RTL8125::timerActionRTL8125(IOTimerEventSource *timer)',
+        'void RTL8125::pollInputPackets(IONetworkInterface *interface, uint32_t maxCount, IOMbufQueue *pollQueue, void *context )',
+    ):
+        once(declaration + '\n{\n', declaration + '\n{\n'
+             '    if (r39RxPaused()) return;\n')
+    declaration = 'IOReturn RTL8125::setInputPacketPollingEnable(IONetworkInterface *interface, bool enabled)'
+    once(declaration + '\n{\n', declaration + '\n{\n'
+         '    if (r39RxPaused()) return kIOReturnSuccess;\n')
+    return text
 
 
 def pool_receive(text):

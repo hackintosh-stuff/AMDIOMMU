@@ -2,7 +2,8 @@
 """Compile the production service-domain lifecycle against host hardware stubs.
 
 One normal cycle: setup returns, the domain/driver survive 125 logical seconds,
-R31Stop queues teardown, and stop() joins it with its gate open. The real context,
+R31Stop queues teardown, and stop() joins it with its gate open. Native stop
+drains TX before local RX recovery and needs no peer tail. The real context,
 capture/handoff, workers, event endpoints, RX/TX recovery ordering, register
 restore/readback and resource-release blocks are compiled. Hardware setup and
 the historical evidence-analysis blocks are omitted; this is not a macOS kext
@@ -213,24 +214,35 @@ WINDOW_STRUCT;
     bool r27RxFinish(unsigned timeout) {
         assert(timeout == 15000 && resourcesAlive() && !restoredAt);
         assert(fR15Service == driver && driver->refs == 2);
+        assert(!rxDrained && !tailDrained);
+        assert(fR31Session ? txDrained : !txDrained);
         rxDrained=true; lifecycle.emplace_back("rx-drain"); return true;
     }
     bool r29WaitTailDone(unsigned timeout) {
-        assert(timeout == 5000 && rxDrained && !restoredAt);
+        assert(!fR31Session && timeout == 5000 && rxDrained &&
+               !tailDrained && !txDrained && !restoredAt);
         tailDrained=true; lifecycle.emplace_back("tail-drain"); return true;
     }
     bool r17Installed() const { return true; }
     bool r17StopSubmit(unsigned timeout, const char *) {
-        assert(timeout == 2000 && tailDrained && !restoredAt);
+        assert(timeout == 2000 && !txDrained && !restoredAt);
+        assert(fR31Session ? (!rxDrained && !tailDrained) :
+                            (rxDrained && tailDrained));
         txDrained=true; lifecycle.emplace_back("tx-drain"); return true;
     }
-    void r17SampleExit(unsigned) { assert(txDrained && !restoredAt); }
+    void r17SampleExit(unsigned) {
+        assert(txDrained && !restoredAt);
+        assert(fR31Session ? !rxDrained : tailDrained);
+        lifecycle.emplace_back("tx-exit-sample");
+    }
     void r17SetTranslateOff(UInt64 when) {
-        assert(txDrained && resourcesAlive());
+        assert(txDrained && rxDrained && resourcesAlive());
+        assert(fR31Session ? !tailDrained : tailDrained);
         restoredAt=when; lifecycle.emplace_back("restore");
     }
     bool r17Detach() {
         assert(restoredAt && resourcesAlive());
+        assert(!fR31Session || nativeRxResumed);
         detached=true; lifecycle.emplace_back("detach"); return true;
     }
     bool r17ResumeOutput() {
@@ -240,6 +252,7 @@ WINDOW_STRUCT;
     bool r34RxResumePhysical() {
         if (!fR34Rx || nativeRxResumed) return true;
         assert(restoredAt && rxDrained && resourcesAlive());
+        assert(txDrained && !tailDrained && !detached && !resumed);
         nativeRxResumed=true; lifecycle.emplace_back("rx-resume"); return true;
     }
     void r34RxRelease() {
@@ -417,17 +430,20 @@ int main() {
         "preparing", "active", "stop-requested", "draining", "stopped"};
     assert(p.states == expectedStates);
     const std::vector<std::string> expectedLifecycle{
-        "post-sample", "post-map-release", "rx-drain", "tail-drain", "tx-drain",
+        "post-sample", "post-map-release", "tx-drain", "tx-exit-sample", "rx-drain",
         "restore", "rx-resume", "detach", "resume", "mapping-release",
         "descriptor-release", "memory-release", "memory-release", "memory-release",
         "memory-release", "memory-release", "driver-release", "context-release"};
     assert(lifecycle == expectedLifecycle);
+    assert(p.txDrained && p.rxDrained && !p.tailDrained && p.nativeRxResumed);
     assert(loop.removed && timer.refs == 0 && !p.fM22b2Timer);
     assert(!p.fArmed && !p.fMapWindowOpen && p.baseStopped);
     assert(target.removed && nic.removed && notifier.disabled);
     assert(!p.fTarget && !p.fNicDevice && !p.fPublishNotifier);
     std::puts("PASS: production domain handoff/recovery/RPC/stop; setup worker exits; "
-              "125s logical ownership; restored registers precede resource/driver release");
+              "125s logical ownership; native TX drain/sample precedes local RX recovery "
+              "without peer tail; register restore and RX resume precede detach/output "
+              "and resource/driver release");
 }
 '''
 

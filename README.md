@@ -1,5 +1,42 @@
 # AMDIOMMU — authoritative source repository
 
+## Current Round39 / local NIC stop without peer drain packets
+
+Base: `00b12033c60fb88f51618fde5e8b908014f072cf`, the accepted Round38
+result-documentation successor. The deployed implementation is
+`6910d03b298fc03550edda207a03be4fdd98263f`; retain its checker-only correction
+`5bcb339c53c84fd262742e1091aa978502b2409c` for device-read-only TX IOVA leaves.
+The original Round38 capture was independently reanalyzed: all 14 checks
+passed, with the active identity set reduced to its 13 fixed DMA pages.
+
+Candidate: Lucy **1.1.224** / Probe **0.48.0**. Native RX advances to ABI4
+without changing its snapshot sizes; the former reserved counters now record
+stop-retired descriptors separately from real completed receives. TX
+native7/std5/domain4 and PhysicalLayout1 remain unchanged.
+
+- Close TX admission and confirm all outstanding TX mappings retired first.
+- Use Lucy's existing NIC reset/restart path under its normal exclusion,
+  with actual ChipCmd and interrupt-mask readback before RX mappings retire.
+- Reclaim all 1024 RX slots locally with the existing standard unmap and
+  current-PA cover operations. Uncompleted OWN entries keep tDone=0 and count
+  as stopRetired, so posted equals completed plus stopRetired.
+- After original IOMMU state is restored, rebuild the physical rings and
+  use the existing hardware/link startup path before reporting resume.
+- Keep a compact 96-byte stop record. Preserve the Round38 active/final page
+  table evidence and the same 14 normal checks, replacing the two peer-tail
+  checks with local stop and ordinary-traffic recovery.
+
+The normal workload stays 4096 + 125-second idle + 4096, followed by one
+explicit stop. The client makes no network requests while waiting for stop;
+it sends the existing three ordinary probes only after resume. No R28T/R29D
+exchange is required by the native session. Legacy finite helpers remain
+separate from this current path. Keep the same fixed checkout and upstream
+input directory; do not create a source copy or worktree for the round.
+Generator selection remains `--tx 21 --rx 34`, with `--check-r39`, `runs/r39`,
+`org.example.round39load` and token `0x39c0de39`. Existing focused software
+checks and generated receive-loop/backend normal-flow host checks passed.
+A real Mac build and one normal hardware acceptance run remain outstanding.
+
 ## Accepted Round38 / retire initial RX physical bootstrap after IOVA takeover
 
 Base: `fa65abf486a2b181ceae9ad8ea4c42ff7e911940`, the documentation successor

@@ -78,7 +78,9 @@ remaps its current buffer before the next OWN store. Stop restores the current
 physical ring before release. Round35 uses Lucy's ordinary ring without an experimental pool; Round36
 batches confirmed invalidations. Round38 retires initial RX identity mappings
 once every slot has posted IOVA OWN. Round37 exports the driver's three owned
-physical DMA spans for sparse4K bootstrap. Select --tx 21 --rx 34.
+physical DMA spans for sparse4K bootstrap. Round39 stops NIC DMA locally,
+retires the remaining RX OWN entries and resumes physical traffic without
+peer drain packets. Native RX ABI4 keeps its existing sizes. Select --tx 21 --rx 34.
 
 Usage:
     py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33|34]
@@ -2543,9 +2545,11 @@ def main():
                             "the methods insertion point")
 
     cpp_text = TX['patch_cpp'](cpp_text)
+    if RX and 'pause_entries' in RX:
+        cpp_text = RX['pause_entries'](cpp_text)
     write(cpp, cpp_text)
     print("patched %s" % cpp)
-    rx_label = ('native RX normal ring batch16 (ABI3)' if RX_SELECT == '34'
+    rx_label = ('native RX normal ring batch16 with local stop (ABI4)' if RX_SELECT == '34'
                 else 'round-%s RX pool' % RX_SELECT)
     print("applied observation v2, RX post set, %s and round-%s explicit TX mapping"
           % (rx_label, TX_SELECT))

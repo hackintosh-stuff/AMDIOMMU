@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round38: retire physical RX bootstrap after full IOVA takeover.
+"""Round39: stop and restore the normal RX ring without peer drain traffic.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,11 +29,11 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round38-normal-RX-ring; bootstrap-retired-after-takeover; owned-sparse-4k; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
+SCOPE = 'round39-local-NIC-stop; no-peer-drain-tail; bootstrap-retired-after-takeover; owned-sparse-4k; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
-RX_VERSION, RX_COUNT = 3, 1024
+RX_VERSION, RX_COUNT = 4, 1024
 RX_BATCH_MAX = 16
 RX_DRIVER_BYTES, RX_BACKEND_BYTES = 270432, 475216
 RX_DRIVER_HEADER, RX_DRIVER_SLOT_BYTES = 96, 264
@@ -42,6 +42,8 @@ RX_WITNESS_BYTES, RX_MAP_RECORD_BYTES = 104, 224
 PHYSICAL_LAYOUT_VERSION, PHYSICAL_LAYOUT_BYTES = 1, 64
 PHYSICAL_LAYOUT_HEADER, PHYSICAL_SPAN_BYTES, PHYSICAL_SPAN_COUNT = 16, 16, 3
 BOOTSTRAP_COMMAND_BYTES = 40
+STOP_VERSION, STOP_BYTES, STOP_TIME_OFFSET = 1, 96, 48
+WITNESS_STOP_RETIRED = 16
 RX_BASE, RX_STRIDE, RX_CAPACITY = 0x1000200000, 8192, 4096
 ALL_STANDARD_MODE = 2
 DOMAIN_VERSION, DOMAIN_HEADER, DOMAIN_RECORD_BYTES = 4, 80, 1304
@@ -110,14 +112,14 @@ def retained(h, rows, total_key, expected_total):
 def decode_rx(blob):
     A.need(len(blob) == RX_DRIVER_BYTES, 'RX driver snapshot must be %d bytes' % RX_DRIVER_BYTES)
     h = A.unpack('version bytes state flags businessToken slotCount maps unmaps '
-                 'posted completed replaced restored pendingPosted tailSeq nativeActive reserved '
+                 'posted completed replaced restored pendingPosted tailSeq nativeActive stopRetired '
                  'ringId tInstalled tDisarmed tLastRestore', '16I4Q', blob)
     A.need(h['version'] == RX_VERSION and h['bytes'] == len(blob), 'RX driver ABI differs')
     rows = []
     for i in range(RX_COUNT):
         at = RX_DRIVER_HEADER + i * RX_DRIVER_SLOT_BYTES
         slot = A.unpack('originalPA currentPA tPhysicalOwn mapCount unmapCount postCount doneCount '
-                        'replaceCount sampleCount flags reserved', '3Q8I', blob, at)
+                        'replaceCount sampleCount flags stopRetired', '3Q8I', blob, at)
         def witness(offset):
             return A.unpack('generation memory command pa iova tMapInv tPost tDone tUnmapInv '
                             'slot flags token reqId doneLength doneStatus replaced reserved',
@@ -126,6 +128,17 @@ def decode_rx(blob):
         slot['last'] = witness(at + RX_DRIVER_SLOT_BYTES - RX_WITNESS_BYTES)
         rows.append(slot)
     return h, rows
+
+
+def decode_stop(blob):
+    A.need(len(blob) == STOP_BYTES, 'RX stop record must be %d bytes' % STOP_BYTES)
+    h = A.unpack('version bytes stopCalls resetVerified commandBefore commandStopped '
+                 'interruptMaskBefore interruptMaskStopped rxNextBefore rxNextAfter '
+                 'stopRetired restored tStopBegin tStopped tLastUnmap tLastRestore '
+                 'tResumeBegin tResumed', '12I6Q', blob)
+    A.need(h['version'] == STOP_VERSION and h['bytes'] == len(blob),
+           'RX stop record ABI differs')
+    return h
 
 
 def decode_rx_backend(blob):
@@ -272,6 +285,7 @@ def check(cap):
         pt = blob('m2-3b-pt-raw', 'r21-pt-raw.bin')
         rh, rxslots = decode_rx(blob('rtl812x-r34-rx-native-raw', 'r34-rx-driver.bin'))
         rb, rxbackend = decode_rx_backend(blob('m2-3o-rx-backend-raw', 'r34-rx-backend.bin'))
+        stop = decode_stop(blob('rtl812x-r39-rx-stop-raw', 'r39-rx-stop.bin'))
         rxrecords = [slot['last'] for slot in rxbackend]
         client = (cap / 'client.log').read_text(encoding='utf-8')
         peer = (cap / 'peer.log').read_text(encoding='utf-8')
@@ -280,9 +294,9 @@ def check(cap):
         A.need(0 < token < 0x80000000 and sh['token'] == bh['token'] == token,
                'inconsistent/non-low-half token')
         A.need(dh['devid'] == gh['bdf'] == sh['bdf'] == bh['bdf'], 'capture device association differs')
-        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX3', 'state': 'ok'})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX4', 'state': 'ok'})
     except (A.Refused, OSError, ValueError, KeyError, IndexError, struct.error) as exc:
-        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX3', 'state': 'FAIL', 'detail': str(exc)})
+        checks.append({'id': 'capture-ABI-domain4-native7-std5-nativeRX4', 'state': 'FAIL', 'detail': str(exc)})
         return result()
 
     def driver_property(key, numeric=False):
@@ -388,10 +402,10 @@ def check(cap):
         A.need(idle_end - idle_begin >= 125_000_000_000 and
                min(halves[1]) - start > 120_000_000_000,
                'second 4096 requests did not survive the old 60/120-second limits')
-        A.need(request <= stopped <= ack and stopped <= rh['tDisarmed'] and
-               rh['tDisarmed'] < P['m2-3i-tail-confirmed-time'] <=
+        A.need(request <= stopped <= ack and stopped <= rh['tDisarmed'] <=
+               stop['tStopped'] <= rb['tDrained'] <=
                P['m2-3e-t-resume'] <= end <= observed_end,
-               'explicit stop/drain/tail/restore/session-end order differs')
+               'explicit stop/local retirement/restore/session-end order differs')
         # The two observations happen after the setup worker has returned,
         # before each half of actual network traffic. The same owned resources
         # survive the 125-second idle; final properties retain their identity.
@@ -433,106 +447,60 @@ def check(cap):
                 'teardownEnd': P['m2-3n-teardown-end']}
     run('service-owned-domain-after-setup-exit-125s-idle-stop-and-restore', session_lifecycle)
 
-    def drain_tail():
-        observed = re.findall(r'^client_drain_observed t_ns=(\d+)$', client, re.M)
-        A.need(len(observed) == 1 and rh['tDisarmed'] <= int(observed[0]) < P['m2-3i-tail-confirmed-time'],
-               'published drain observation missing/outside tail phase')
-        groups = {}
-        for text, names in ((client, ('client_tail_send', 'client_tail_recv')),
-                            (peer, ('peer_tail_recv', 'peer_tail_sent'))):
-            for name in names:
-                rows = {}
-                for line in text.splitlines():
-                    if not line.startswith(name + ' '):
-                        continue
-                    m = re.fullmatch(name + r' token=(0x[0-9a-fA-F]+) seq=(\d+) len=(\d+) '
-                                     r'sha256=([0-9a-f]{64}) payload=([0-9a-f]+)'
-                                     r'(?: payload_ok=(1))?(?: (?:from|to)=[^ ]+)? t(?:_ns)?=(\d+)', line)
-                    A.need(m is not None, 'malformed drain tail: ' + name)
-                    tok, seq, size = int(m[1], 16), int(m[2]), int(m[3])
-                    data, stamp = bytes.fromhex(m[5]), int(m[7])
-                    A.need(tok == token and 1 <= seq <= 4096 and seq not in rows and
-                           data == PROTOCOL.tail(token, seq) and len(data) == size and
-                           hashlib.sha256(data).hexdigest() == m[4], 'tail identity/bytes/hash differs')
-                    if name.endswith('recv'):
-                        A.need(m[6] == '1', 'tail receive not validated')
-                    if name.startswith('client_'):
-                        A.need(int(observed[0]) <= stamp and rh['tDisarmed'] <= stamp,
-                               'tail precedes published drain')
-                    rows[seq] = stamp
-                groups[name] = rows
-        sent, received = groups['client_tail_send'], groups['client_tail_recv']
-        A.need(sent and set(sent) == set(received) == set(groups['peer_tail_recv']) ==
-               set(groups['peer_tail_sent']) and set(sent) == set(range(1, len(sent) + 1)),
-               'missing/duplicate drain-tail exchange')
-        after_exit = re.findall(r'^client_after_exit resumed=1 t_ns=(\d+)$', client, re.M)
-        drain_checks = re.findall(r'^client_tail_drain_(ended|still_active) t_ns=(\d+)$', client, re.M)
-        A.need(len(after_exit) == 1 and
-               max(list(sent.values()) + list(received.values())) < int(after_exit[0]),
-               'tail extended beyond its final burst/after-exit')
-        A.need(len(drain_checks) == (len(sent) + 15) // 16 and
-               all(kind == 'still_active' for kind, _ in drain_checks[:-1]) and
-               drain_checks[-1][0] == 'ended',
-               'missing/repeated/intermediate drain-end observation')
-        for group, (_, stamp) in enumerate(drain_checks):
-            ids = range(group * 16 + 1, min((group + 1) * 16, len(sent)) + 1)
-            A.need(max(received[seq] for seq in ids) <= int(stamp) < int(after_exit[0]),
-                   'drain-state check precedes its completed burst')
-            if (group + 1) * 16 < len(sent):
-                A.need(int(stamp) <= sent[(group + 1) * 16 + 1], 'tail started next burst before drain-state check')
-        for seq in sent:
-            A.need(sent[seq] <= received[seq] and
-                   groups['peer_tail_recv'][seq] <= groups['peer_tail_sent'][seq], 'tail event order differs')
-        A.need(re.findall(r'^client_tail_summary .*$', client, re.M) ==
-               ['client_tail_summary sent=%d received=%d max=4096' % (len(sent), len(received))],
-               'drain-tail summary missing/inconsistent')
-        main_times = [int(t) for t in re.findall(r'^client_(?:sent|recv) .* t_ns=(\d+)$', client, re.M)]
-        A.need(len(main_times) == 2 * REQUEST_COUNT and main_times == sorted(main_times) and
-               max(main_times) <= int(observed[0]), 'main traffic timing overlaps drain tail')
-        return {'sent': len(sent), 'received': len(received), 'max': 4096,
-                'beganDuringPhysicalDrain': min(sent.values()) <= rh['tLastRestore']}
-    run('published-drain-R28T-tail-integrity', drain_tail)
+    def local_stop():
+        A.need(stop['stopCalls'] == stop['resetVerified'] == 1 and
+               stop['commandBefore'] & 0x1c == 0x0c and
+               stop['commandStopped'] & 0x1c == 0 and
+               stop['interruptMaskStopped'] == 0 and
+               0 <= stop['rxNextBefore'] < RX_COUNT and stop['rxNextAfter'] == 0,
+               'NIC stop/reset readback or restored ring index differs')
+        A.need(stop['restored'] == rh['restored'] == RX_COUNT and
+               0 < stop['stopRetired'] == rh['stopRetired'] <= RX_COUNT and
+               stop['tLastUnmap'] == max(r['tUnmapInv'] for r in rxrecords) and
+               stop['tLastRestore'] == rh['tLastRestore'] ==
+               max(s['tPhysicalOwn'] for s in rxslots),
+               'local stop record differs from final RX retirement/restoration')
+        order = [P['m2-3l-stop-request-time'], P['m2-3e-exit-gate-close'],
+                 P['m2-3e-exit-drain-done'], rh['tDisarmed'], stop['tStopBegin'],
+                 stop['tStopped'], stop['tLastUnmap'], stop['tLastRestore'],
+                 rb['tDrained'], P['m2-b2-t-recovery-start']]
+        A.need(all(t > 0 for t in order) and order == sorted(order),
+               'RX mappings retired before TX drain/NIC stop or after IOMMU recovery')
+        A.need(P['m2-3e-t-translate-off'] <= stop['tResumeBegin'] <=
+               stop['tResumed'] == driver_property('rtl812x-r35-rx-resume-time', True) <=
+               P['m2-3e-t-detach'] <= P['m2-3e-t-resume'],
+               'physical NIC did not resume after translation restore and before TX reopen')
+        return dict(stop, stopMethod='local NIC reset with register readback',
+                    completionAccounting='posted = completed + stopRetired')
+    run('local-NIC-stop-before-RX-retirement', local_stop)
 
-    def tail_done():
-        last = re.findall(r'^client_tail_summary sent=(\d+) received=(\d+) max=4096$', client, re.M)
-        A.need(len(last) == 1 and last[0][0] == last[0][1], 'tail count before done is not closed')
-        seq = int(last[0][0])
-        A.need(1 <= seq <= PROTOCOL.TAIL_MAX and seq == rh['tailSeq'] == P['m2-3i-tail-seq'],
-               'tail-done sequence differs from client/driver/probe')
-        stamps = {}
-        for text, names in ((client, ('client_tail_done_send', 'client_tail_done_recv')),
-                            (peer, ('peer_tail_done_recv', 'peer_tail_done_sent'))):
-            for name in names:
-                lines = [line for line in text.splitlines() if line.startswith(name + ' ')]
-                A.need(len(lines) == 1, 'tail-done must occur exactly once: ' + name)
-                m = re.fullmatch(name + r' token=(0x[0-9a-fA-F]+) seq=(\d+) len=(\d+) '
-                                 r'sha256=([0-9a-f]{64}) payload=([0-9a-f]+)'
-                                 r'(?: payload_ok=(1))?(?: (?:from|to)=[^ ]+)? t(?:_ns)?=(\d+)', lines[0])
-                A.need(m is not None, 'malformed tail-done: ' + name)
-                data = bytes.fromhex(m[5])
-                A.need(int(m[1], 16) == token and int(m[2]) == seq and
-                       data == PROTOCOL.tail_done(token, seq) and int(m[3]) == len(data) == 12 and
-                       m[4] == hashlib.sha256(data).hexdigest(), 'tail-done bytes/token/hash mismatch')
-                if name.endswith('recv'):
-                    A.need(m[6] == '1', 'tail-done receive was rejected')
-                stamps[name] = int(m[7])
-        tail_receives = [int(t) for t in re.findall(r'^client_tail_recv .* t_ns=(\d+)$', client, re.M)]
-        A.need(len(tail_receives) == seq and max(tail_receives) <= stamps['client_tail_done_send'] <=
-               stamps['client_tail_done_recv'], 'tail-done preceded the last completed tail batch')
-        A.need(stamps['peer_tail_done_recv'] <= stamps['peer_tail_done_sent'], 'peer done echo order differs')
-        # The parser observes the echo before enqueueInputPacket. Userland may
-        # receive that already-enqueued echo after the probe closes the TX gate.
-        confirmed = P['m2-3i-tail-confirmed-time']
-        A.need(P['m2-3i-tail-state'] == 'confirmed' and rh['state'] == 4 and not rh['pendingPosted'] and
-               max(r['tUnmapInv'] for r in rxrecords) <= confirmed and
-               stamps['client_tail_done_send'] <= confirmed <= P['m2-3e-exit-gate-close'],
-               'TX closed before the restored RX ring observed the tail-done echo')
-        after = re.findall(r'^client_after_exit resumed=1 t_ns=(\d+)$', client, re.M)
-        A.need(len(after) == 1 and stamps['client_tail_done_recv'] < int(after[0]),
-               'exit declared before client validated the done echo')
-        return {'sequence': seq, 'bytes': 12, 'confirmationObserved': confirmed,
-                'clientEchoReceived': stamps['client_tail_done_recv'], 'retries': 0}
-    run('R29D-tail-finished-before-TX-close', tail_done)
+    def autonomous_stop():
+        def one(pattern, name):
+            rows = re.findall('^' + pattern + '$', client, re.M)
+            A.need(len(rows) == 1, 'missing/repeated local stop ' + name)
+            return int(rows[0])
+        begin = one(r'client_stop_begin request_ns=(\d+)', 'begin')
+        end = one(r'client_stop_end stopped_ns=(\d+)', 'end')
+        A.need(begin == one(r'client_session_stop_request t_ns=(\d+)', 'request') and
+               end == one(r'client_session_stopped t_ns=(\d+)', 'stopped observation') and
+               begin <= P['m2-3l-stop-request-time'] <= stop['tStopBegin'] <=
+               stop['tResumed'] <= P['m2-3l-session-end'] <= end <=
+               one(r'client_after_exit resumed=1 t_ns=(\d+)', 'after-exit observation'),
+               'local stop request/physical resume/end observations differ')
+        A.need(not re.search(r'^client_tail_', client, re.M) and
+               not re.search(r'^peer_tail_', peer, re.M) and rh['tailSeq'] == 0,
+               'normal stop still uses the R28T/R29D peer tail')
+        sends = [int(t) for t in re.findall(
+            r'^client_(?:sent|ord_sent|seed_sent) .* t_ns=(\d+)$', client, re.M)]
+        A.need(sends and not any(begin <= t < end for t in sends),
+               'client sent network traffic while waiting for local stop')
+        after = [r for r in A._ord_records(client) if r['kind'] == 'recv' and
+                 r.get('ok') == 1 and r['tag'] == 'after-exit' and r['t'] >= end]
+        A.need(len(after) >= 3, 'ordinary receive did not recover after local stop')
+        return {'requestTime': begin, 'observedStopped': end, 'peerTailPackets': 0,
+                'clientSendsDuringStop': 0, 'ordinaryAfterExit': len(after),
+                'stopRetired': stop['stopRetired']}
+    run('peer-independent-stop-and-physical-resume', autonomous_stop)
 
     def counters():
         A.need(mapped_total >= MIN_MAPPINGS, 'fewer than %d mapped ordinary TX frames' % MIN_MAPPINGS)
@@ -804,8 +772,11 @@ def check(cap):
         enter = [P[k] for k in ('m2-3e-enter-gate-close', 'm2-3e-enter-submit-done', 'm2-3e-enter-drain-done',
                                 'm2-b2-dma-t-dte-written', 'm2-3e-t-translate-on', 'm2-3e-t-gate-open')]
         leave = [P[k] for k in ('m2-3e-exit-gate-close', 'm2-3e-exit-submit-done', 'm2-3e-exit-drain-done',
-                                'm2-3i-exit-retire-confirmed-time', 'm2-b2-t-recovery-start',
-                                'm2-3e-t-translate-off', 'm2-3e-t-detach', 'm2-3e-t-resume')]
+                                'm2-3i-exit-retire-confirmed-time')]
+        leave += [stop['tStopBegin'], stop['tStopped'], rb['tDrained'],
+                  P['m2-b2-t-recovery-start'], P['m2-3e-t-translate-off'],
+                  stop['tResumeBegin'], stop['tResumed'],
+                  P['m2-3e-t-detach'], P['m2-3e-t-resume']]
         A.need(all(t > 0 for t in enter + leave) and enter == sorted(enter) and leave == sorted(leave) and enter[-1] < leave[0],
                'window entry/exit timestamps out of order')
         for rows in (drv, std):
@@ -900,8 +871,8 @@ def check(cap):
                rb['coverFailed'] == 0 and rb['ready'] == 1 and
                rb['coverCalls'] == rb['coverOk'] >= RX_COUNT,
                'driver-owned RX map/unmap totals, physical cover or final ownership differs')
-        A.need(0 < rb['tReady'] == P['m2-3o-rx-ready-time'] <= rb['tDrained'] <=
-               P['m2-3e-exit-gate-close'] and
+        A.need(0 < rb['tReady'] == P['m2-3o-rx-ready-time'] <=
+               P['m2-3e-exit-gate-close'] <= stop['tStopped'] <= rb['tDrained'] and
                P['m2-3h-rx-live-owners'] == P['m2-3h-rx-pending'] == 0,
                'native RX readiness/drain or raw/property ownership differs')
         tx_sequences = {d[key]['expected'] for d in dom + [dh['probeFirst'], dh['probeReuse']]
@@ -947,11 +918,19 @@ def check(cap):
                 A.need(all(r[k] == w[k] for k in
                            ('generation', 'memory', 'command', 'pa', 'iova', 'tMapInv', 'tUnmapInv', 'slot')),
                        label + 'driver DMA witness is not the registered mapping')
+                stop_retired = bool(w['flags'] & WITNESS_STOP_RETIRED)
                 A.need(r['flags'] == 7 and r['mapResult'] == r['unmapResult'] == 0 and
                        P['m2-3e-t-translate-on'] <= r['tMapPublish'] <= r['tMapInv'] <=
-                       w['tPost'] < w['tDone'] <= r['tUnmapPublish'] <= r['tUnmapInv'] <=
+                       w['tPost'] <= r['tUnmapPublish'] <= r['tUnmapInv'] <=
                        rb['tDrained'] < P['m2-b2-t-recovery-start'],
-                       label + 'map/OWN/DMA/unmap completion order differs')
+                       label + 'map/OWN/unmap completion order differs')
+                if stop_retired:
+                    A.need(kind == 'last' and w['flags'] == 5 | WITNESS_STOP_RETIRED and
+                           w['tDone'] == 0 and w['tPost'] <= stop['tStopped'] <= r['tUnmapPublish'],
+                           label + 'uncompleted OWN retired before confirmed NIC stop')
+                else:
+                    A.need(w['flags'] == 7 and w['tPost'] < w['tDone'] <= r['tUnmapPublish'],
+                           label + 'map/OWN/DMA/unmap completion order differs')
                 for key in ('mapCommand', 'unmapCommand'):
                     c = r[key]
                     packed = r['mapBatch' if key == 'mapCommand' else 'unmapBatch']
@@ -1030,15 +1009,18 @@ def check(cap):
                 'batchEvidence': 'retained members only; shared phase/range/command/completion',
                 'retainedGenerations': RX_COUNT * 2, 'writablePages': len(iovas),
                 'leafTables': len(leaf_tables), 'iovaBase': RX_BASE, 'slotBytes': RX_STRIDE,
-                'mapBeforeOwn': True, 'unmapAfterCompletion': True}
+                'mapBeforeOwn': True, 'unmapAfterCompletionOrNICStop': True}
     run('rx1024-driver-owned-MD-Cmd-repeated-mapping-and-unmap', rx_mappings)
 
     def rx_completions():
         A.need(rh['state'] == 4 and rh['flags'] == rh['nativeActive'] == rh['pendingPosted'] == 0 and
                rh['slotCount'] == rh['restored'] == RX_COUNT and rh['ringId'] > 0 and
-               rh['businessToken'] == token and rh['posted'] == rh['completed'] >= 2 * RX_COUNT and
+               rh['businessToken'] == token and rh['posted'] == rh['completed'] + rh['stopRetired'] and
+               rh['completed'] >= 2 * RX_COUNT and
                rh['posted'] == sum(s['postCount'] for s in rxslots) and
                rh['completed'] == sum(s['doneCount'] for s in rxslots) and
+               rh['stopRetired'] == sum(s['stopRetired'] for s in rxslots) ==
+               stop['stopRetired'] == P['m2-3h-rx-stop-retired'] and
                rh['replaced'] == sum(s['replaceCount'] for s in rxslots) > 0,
                'native RX cumulative DMA, normal replacement or restoration differs')
         A.need(0 < rh['tInstalled'] <= rb['tReady'] <= rh['tDisarmed'] <= rb['tDrained'] and
@@ -1063,24 +1045,34 @@ def check(cap):
                 A.need(tok == token and data == payload(token, req) and len(data) == int(match[3]) and
                        hashlib.sha256(data).hexdigest() == match[4], 'RX-correlated peer reply bytes differ')
                 peer_ids.add(req)
-        business, replacements, changed = [], 0, 0
+        business, replacements, changed, completed_samples = [], 0, 0, 0
         for i, slot in enumerate(rxslots):
             first, last = slot['first'], slot['last']
             label = 'native RX slot %d: ' % i
             A.need(slot['flags'] == 0 and slot['sampleCount'] == 1 and
-                   slot['postCount'] == slot['doneCount'] >= 2 and
+                   slot['postCount'] == slot['doneCount'] + slot['stopRetired'] and
+                   slot['doneCount'] >= 2 and slot['stopRetired'] in (0, 1) and
+                   bool(last['flags'] & WITNESS_STOP_RETIRED) == bool(slot['stopRetired']) and
                    first['generation'] == 2 < last['generation'] == slot['mapCount'] and
                    first['tUnmapInv'] < last['tMapInv'] and
                    0 < slot['originalPA'] and 0 < slot['currentPA'] != last['iova'] and
-                   rh['tDisarmed'] <= last['tDone'] <= last['tUnmapInv'] <= slot['tPhysicalOwn'],
+                   rh['tDisarmed'] <= last['tUnmapInv'] <= slot['tPhysicalOwn'] and
+                   stop['tStopped'] <= slot['tPhysicalOwn'],
                    label + 'first/final generation or current-buffer physical restoration differs')
             changed += first['pa'] != last['pa']
             for w in (first, last):
+                if w['flags'] & WITNESS_STOP_RETIRED:
+                    A.need(w is last and w['slot'] == i and w['flags'] == (5 | WITNESS_STOP_RETIRED) and
+                           w['tDone'] == w['token'] == w['reqId'] == w['doneLength'] == w['replaced'] == 0 and
+                           w['tPost'] <= stop['tStopped'] <= w['tUnmapInv'],
+                           label + 'local stop retirement was relabelled as a DMA completion')
+                    continue
                 A.need(w['slot'] == i and w['flags'] == 7 and w['replaced'] in (0, 1) and
                        not w['doneStatus'] & 0x80000000 and
                        (w['doneStatus'] & 0x1fff) == w['doneLength'] and
                        0 < w['doneLength'] <= RX_CAPACITY,
                        label + 'DMA completion status/length or witness flags differ')
+                completed_samples += 1
                 replacements += w['replaced']
                 if w['token'] or w['reqId']:
                     req = w['reqId']
@@ -1092,11 +1084,14 @@ def check(cap):
                     business.append(req)
         A.need(business and len(set(business)) == len(business),
                'unique business DMA sample is missing from native RX')
-        return {'posted': rh['posted'], 'completed': rh['completed'], 'restored': RX_COUNT,
+        return {'posted': rh['posted'], 'completed': rh['completed'], 'stopRetired': rh['stopRetired'],
+                'restored': RX_COUNT,
                 'pending': 0, 'replacements': rh['replaced'], 'retainedReplacementSamples': replacements,
-                'firstLastPADifferentSlots': changed, 'sampledCompletions': RX_COUNT * 2,
+                'firstLastPADifferentSlots': changed, 'sampledCompletions': completed_samples,
                 'businessCompletions': len(business), 'applicationRequests': sorted(business),
-                'correlation': 'first and final IOVA generation per slot; R27P token+ID and FCS length',
+                'correlation': 'first completed and final retired IOVA generation per slot; '
+                               'real completions use R27P token+ID and FCS length; '
+                               'stop retirement does not claim DMA completion',
                 'scope': 'ordinary Lucy ring; driver-owned MD/Cmd pairs; normal mbuf replacement; '
                          'PA comparison covers first/final retained generations only; cumulative totals'}
     run('rx1024-native-replacement-DMA-and-current-buffer-restore', rx_completions)

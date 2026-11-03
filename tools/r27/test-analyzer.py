@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Focused Round38 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round39 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
 The positive fixture covers all 1024 RX map/post/done/restore/unmap lifecycles,
-including remapping, batch16/partial batches, bootstrap retirement and current-buffer restoration.
+including remapping, batch16, bootstrap retirement and local NIC stop without peer tail traffic.
+Final uncompleted OWN records are explicitly stop-retired, never counted as DMA completions.
 Rejection cases cover missing restoration and corrupted RX command evidence.
 """
 import importlib.util
@@ -35,7 +36,7 @@ legacy = analyzer.A
 
 TOKEN = 7
 PEER = ('127.0.0.2', 9110)
-ABI_CHECK = 'capture-ABI-domain4-native7-std5-nativeRX3'
+ABI_CHECK = 'capture-ABI-domain4-native7-std5-nativeRX4'
 COUNTER_CHECK = 'all-TX-standard-mode2-cumulative-and-unmarked-no-cover'
 LOG_CHECK = 'full8192-bytes-no-retry-no-duplicate-credit'
 CMD_CHECK = 'original8192-command-ring-wraps-and-postwrap-completion'
@@ -45,6 +46,8 @@ RX_MAP_CHECK = 'rx1024-driver-owned-MD-Cmd-repeated-mapping-and-unmap'
 RX_DONE_CHECK = 'rx1024-native-replacement-DMA-and-current-buffer-restore'
 SESSION_CHECK = 'service-owned-domain-after-setup-exit-125s-idle-stop-and-restore'
 ALLOCATION_CHECK = 'dynamic-IOVA-wide-map-eight-live-and-confirmed-reuse'
+STOP_CHECK = 'local-NIC-stop-before-RX-retirement'
+AUTONOMOUS_CHECK = 'peer-independent-stop-and-physical-resume'
 IDLE_NS = 125_000_000_000
 
 
@@ -71,6 +74,7 @@ static_assert(sizeof(r34rx::BackendSnapshot) == 475216, "native RX backend snaps
 static_assert(offsetof(r34rx::Snapshot, slots) == 96, "native RX driver prefix");
 static_assert(offsetof(r34rx::BackendSnapshot, slots) == 80, "native RX backend prefix");
 static_assert(sizeof(r34rx::PhysicalLayout) == 64, "fixed physical DMA layout");
+static_assert(sizeof(r34rx::StopRecord) == 96, "local NIC stop record");
 
 static uint64_t sessionTime(uint64_t value) {
     return value >= 2152 ? value + 125000000000ULL : value;
@@ -99,7 +103,7 @@ int main(int argc, char **argv) {
     d.historyTotal = d.mapsTotal = d.retiresTotal = 10249; d.historyStart = 10217;
     d.commandCapacity = _COMMAND_RING_BYTES_ / 16;
     // Four normal ring passes use 63 full batches plus two 8-slot partials.
-    // Install and the final physical drain remain scalar.
+    // Install and final local-stop retirement remain scalar.
     constexpr uint32_t batchGroups = 4 * 65;
     constexpr uint32_t rxInvalidations = r34rx::kCount + batchGroups;
     d.commandSubmits = d.commandCompleted = d.completionSequence =
@@ -214,25 +218,34 @@ int main(int argc, char **argv) {
     }
     r34rx::Snapshot rx{};
     r34rx::BackendSnapshot rb{};
+    r34rx::StopRecord stop{};
     rx.version = r34rx::kVersion; rx.bytes = sizeof(rx);
     rx.state = r34rx::kReleased; rx.ringId = 0x355200;
     rx.slotCount = rx.restored = r34rx::kCount;
     rx.maps = rx.unmaps = 5 * r34rx::kCount;
-    rx.posted = rx.completed = 4 * r34rx::kCount;
+    rx.posted = 4 * r34rx::kCount;
+    rx.completed = 3 * r34rx::kCount; rx.stopRetired = r34rx::kCount;
     rx.replaced = 2 * r34rx::kCount;
-    rx.businessToken = 7; rx.tailSeq = r34rx::kCount;
-    rx.tInstalled = 400; rx.tDisarmed = 8800; rx.tLastRestore = 8866;
+    rx.businessToken = 7;
+    rx.tInstalled = 400; rx.tDisarmed = 8800; rx.tLastRestore = 8868;
     rb.version = r34rx::kVersion; rb.bytes = sizeof(rb); rb.count = r34rx::kCount;
     rb.mapCalls = rb.mapOk = rb.unmapCalls = rb.unmapOk = rx.maps;
     rb.coverCalls = rb.coverOk = r34rx::kCount;
     rb.ready = 1; rb.tReady = 410; rb.tDrained = 8870;
+    stop.version = r34rx::kStopVersion; stop.bytes = sizeof(stop);
+    stop.stopCalls = stop.resetVerified = 1;
+    stop.commandBefore = 0x0c; stop.interruptMaskBefore = 0xff;
+    stop.rxNextBefore = 64; stop.stopRetired = stop.restored = r34rx::kCount;
+    stop.tStopBegin = 8801; stop.tStopped = 8802;
+    stop.tLastUnmap = 8867; stop.tLastRestore = rx.tLastRestore;
+    stop.tResumeBegin = 9031; stop.tResumed = 9035;
     for (uint32_t i = 0; i < r34rx::kCount; ++i) {
         auto &bs = rb.slots[i]; auto &ds = rx.slots[i];
         bs.mapCount = bs.unmapCount = ds.mapCount = ds.unmapCount = 5;
         bs.sampleCount = ds.sampleCount = 1;
-        ds.postCount = ds.doneCount = 4; ds.replaceCount = 2;
+        ds.postCount = 4; ds.doneCount = 3; ds.stopRetired = 1; ds.replaceCount = 2;
         ds.originalPA = 0x80000000ULL + i * 8192;
-        ds.tPhysicalOwn = 8803 + i / 16;
+        ds.tPhysicalOwn = 8805 + i / 16;
         for (uint32_t sample = 0; sample < 2; ++sample) {
             const bool first = sample == 0;
             auto &r = first ? bs.samples[0] : bs.last;
@@ -247,12 +260,12 @@ int main(int argc, char **argv) {
             const uint32_t width = i < 1008 ? 16 : 8;
             const uint32_t group = i < 1008 ? i / 16 : 63 + (i - 1008) / 8;
             r.mapBatch = firstSlot | (width << 16);
-            r.unmapBatch = first ? r.mapBatch : 0; // Final physical drain is scalar.
+            r.unmapBatch = first ? r.mapBatch : 0; // Final local-stop retirement is scalar.
             r.tMapPublish = first ? 1190 + i : 7000 + i;
             r.tMapInv = (first ? 1190 : 7000) + firstSlot + width;
             w.tPost = r.tMapInv + 1 + (i - firstSlot);
-            w.tDone = first ? 1290 + i : 8801 + i / 16;
-            r.tUnmapPublish = first ? 1290 + firstSlot + width : w.tDone;
+            w.tDone = first ? 1290 + i : 0;
+            r.tUnmapPublish = first ? 1290 + firstSlot + width : 8803 + i / 16;
             r.tUnmapInv = r.tUnmapPublish + 1;
             const uint64_t mapSequence = first ? 1200 + 2 * group : 21700 + group;
             const uint64_t unmapSequence = first ? 1201 + 2 * group : 22000 + i;
@@ -265,9 +278,9 @@ int main(int argc, char **argv) {
                 r.mapPte[j] = ((r.pa & ~4095ULL) + j * 4096) | perm;
             w.generation = r.generation; w.memory = r.memory; w.command = r.command;
             w.pa = r.pa; w.iova = r.iova; w.tMapInv = r.tMapInv; w.tUnmapInv = r.tUnmapInv;
-            w.slot = i; w.flags = 7;
+            w.slot = i; w.flags = first ? 7 : 5 | r34rx::kWitnessStopRetired;
             w.token = first && i == 0 ? 7 : 0; w.reqId = first && i == 0 ? 1025 : 0;
-            w.doneLength = first ? (i == 0 ? 78 : 1518) : 246;
+            w.doneLength = first ? (i == 0 ? 78 : 1518) : 0;
             w.doneStatus = w.doneLength; w.replaced = first && i != 0;
         }
         ds.currentPA = ds.last.pa;
@@ -338,6 +351,9 @@ int main(int argc, char **argv) {
     }
     SESSION_TIME(rx.tInstalled); SESSION_TIME(rx.tDisarmed); SESSION_TIME(rx.tLastRestore);
     SESSION_TIME(rb.tReady); SESSION_TIME(rb.tDrained);
+    SESSION_TIME(stop.tStopBegin); SESSION_TIME(stop.tStopped);
+    SESSION_TIME(stop.tLastUnmap); SESSION_TIME(stop.tLastRestore);
+    SESSION_TIME(stop.tResumeBegin); SESSION_TIME(stop.tResumed);
     SESSION_TIME(retire.tComplete);
     for (uint32_t i = 0; i < r34rx::kCount; ++i) {
         auto &ds = rx.slots[i]; auto &bs = rb.slots[i];
@@ -356,6 +372,7 @@ int main(int argc, char **argv) {
     if (damage == "unrestored") rx.slots[r34rx::kCount - 1].tPhysicalOwn = 0;
     save(dir, "r34-rx-driver.bin", &rx, sizeof(rx));
     save(dir, "r34-rx-backend.bin", &rb, sizeof(rb));
+    save(dir, "r39-rx-stop.bin", &stop, sizeof(stop));
     save(dir, "r37-physical-layout.bin", &physical, sizeof(physical));
     save(dir, "r38-active-pt-raw.bin", activePt, sizeof(activePt));
     save(dir, "r38-bootstrap-retire-command.bin", &retire, sizeof(retire));
@@ -377,7 +394,7 @@ def properties():
          'm2-3n-setup-worker-active': 0, 'm2-3n-setup-worker-exit-time': 430,
          'm2-3n-root-pa': 0x100000, 'm2-3n-dt-pa': 0x200000,
          'm2-3n-command-pa': 0x300000, 'm2-3n-install-count': 1,
-         'm2-3n-teardown-start': session_time(8790),
+         'm2-3n-teardown-start': session_time(8760),
          'm2-3n-teardown-end': session_time(9055),
          'm2-3l-tx-deadline': 0,
          'm2-3h-rx-mode': 'native-ring-batch16', 'm2-3o-rx-ready-time': 410,
@@ -396,9 +413,8 @@ def properties():
          'm2-3q-rx-map-batch-slots': 4096, 'm2-3q-rx-unmap-batch-slots': 4096,
          'm2-3q-rx-max-batch': 16,
          'm2-3h-rx-state': 'drained-and-unmapped', 'm2-3h-rx-ready': 'no',
-         'm2-b2-t-recovery-start': 9023, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0,
-         'm2-3i-tail-state': 'confirmed', 'm2-3i-tail-seq': analyzer.RX_COUNT,
-         'm2-3i-tail-confirmed-time': 8980, 'm2-3i-exit-retire-confirmed-time': 9022,
+         'm2-b2-t-recovery-start': 8873, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0,
+         'm2-3h-rx-stop-retired': 1024, 'm2-3i-exit-retire-confirmed-time': 8792,
          'm2-3i-exit-driver-live': 0, 'm2-3i-exit-driver-held': 0,
          'm2-3i-exit-driver-mapped': 10240, 'm2-3i-exit-driver-retired': 10240,
          'm2-3b-slots-live': 0}
@@ -434,8 +450,8 @@ def properties():
              'm2-3e-exit-drain-done', 'm2-3e-t-translate-off',
              'm2-3e-t-detach', 'm2-3e-t-resume')
     p.update(zip(enter, (100, 110, 120, 130, 140, 160)))
-    p.update(zip(leave, range(9000, 9060, 10)))
-    for key in enter + leave + ('m2-b2-t-recovery-start', 'm2-3i-tail-confirmed-time',
+    p.update(zip(leave, (8770, 8780, 8790, 9030, 9040, 9050)))
+    for key in enter + leave + ('m2-b2-t-recovery-start',
                                 'm2-3i-exit-retire-confirmed-time'):
         p[key] = session_time(p[key])
     return ''.join('"%s" = "%s"\n' % (key, hex(value) if isinstance(value, int) else value)
@@ -497,6 +513,8 @@ def real_logs(client_reorder=True, peer_reorder=True):
         load.request_session_stop(client_lines.append)
         stop.assert_called_once_with()
     client_lines.append('client_session_stopped t_ns=%d' % session_time(9090))
+    client_lines.append('client_stop_end stopped_ns=%d' % session_time(9090))
+    client_lines.append('client_after_exit resumed=1 t_ns=%d' % session_time(9100))
     with patch.object(load, 'now', side_effect=itertools.count(session_time(9100))):
         for _ in range(3):
             assert load.ord_probe(s, PEER, seq.next(), client_lines.append, 'after-exit')
@@ -527,29 +545,6 @@ def real_logs(client_reorder=True, peer_reorder=True):
          patch.object(peer.time, 'monotonic', side_effect=lambda: 0 if incoming else 2), \
          patch.object(peer.time, 'monotonic_ns', side_effect=itertools.count(1)):
         assert peer.serve(ps, TOKEN, 1, peer_lines.append) == 0
-    import hashlib
-    client_lines.append('client_drain_observed t_ns=%d' % session_time(8801))
-    for seq in range(1, analyzer.RX_COUNT + 1):
-        data = protocol.tail(TOKEN, seq)
-        evidence = 'token=0x%08x seq=%d len=%d sha256=%s payload=%s' % (
-            TOKEN, seq, len(data), hashlib.sha256(data).hexdigest(), data.hex())
-        stamp = session_time(8802 + (seq - 1) // 16)
-        client_lines.extend(['client_tail_send ' + evidence + ' t_ns=%d' % stamp,
-                             'client_tail_recv ' + evidence + ' payload_ok=1 t_ns=%d' % stamp])
-        peer_lines.extend(['peer_tail_recv ' + evidence + ' payload_ok=1 from=127.0.0.1:10000 t=%d' % seq,
-                           'peer_tail_sent ' + evidence + ' to=127.0.0.1:10000 t=%d' % (seq + 1)])
-        if seq % 16 == 0:
-            state = 'ended' if seq == analyzer.RX_COUNT else 'still_active'
-            client_lines.append('client_tail_drain_%s t_ns=%d' % (state, stamp))
-    client_lines.append('client_tail_summary sent=1024 received=1024 max=4096')
-    data = protocol.tail_done(TOKEN, analyzer.RX_COUNT)
-    evidence = 'token=0x%08x seq=%d len=%d sha256=%s payload=%s' % (
-        TOKEN, analyzer.RX_COUNT, len(data), hashlib.sha256(data).hexdigest(), data.hex())
-    client_lines.extend(['client_tail_done_send ' + evidence + ' t_ns=%d' % session_time(8970),
-                         'client_tail_done_recv ' + evidence + ' payload_ok=1 t_ns=%d' % session_time(9010)])
-    peer_lines.extend(['peer_tail_done_recv ' + evidence + ' payload_ok=1 from=127.0.0.1:10000 t=40',
-                       'peer_tail_done_sent ' + evidence + ' to=127.0.0.1:10000 t=41'])
-    client_lines.append('client_after_exit resumed=1 t_ns=%d' % session_time(9100))
     return '\n'.join(client_lines) + '\n', '\n'.join(peer_lines) + '\n'
 
 
@@ -673,7 +668,15 @@ class AnalyzerTests(unittest.TestCase):
                           by_id[RX_MAP_CHECK]['experimentalPoolRPCs'],
                           by_id[RX_MAP_CHECK]['experimentalSpares']),
                          ('lucy-normal-ring', 0x355200, 0, 0))
-        self.assertEqual(by_id[RX_DONE_CHECK]['sampledCompletions'], 2048)
+        self.assertEqual(by_id[RX_DONE_CHECK]['sampledCompletions'], 1024)
+        self.assertEqual((by_id[RX_DONE_CHECK]['posted'], by_id[RX_DONE_CHECK]['completed'],
+                          by_id[RX_DONE_CHECK]['stopRetired']), (4096, 3072, 1024))
+        self.assertEqual((self.capture / 'r39-rx-stop.bin').stat().st_size, analyzer.STOP_BYTES)
+        self.assertEqual((by_id[STOP_CHECK]['stopCalls'], by_id[STOP_CHECK]['resetVerified'],
+                          by_id[STOP_CHECK]['stopRetired']), (1, 1, 1024))
+        self.assertEqual((by_id[AUTONOMOUS_CHECK]['peerTailPackets'],
+                          by_id[AUTONOMOUS_CHECK]['clientSendsDuringStop'],
+                          by_id[AUTONOMOUS_CHECK]['ordinaryAfterExit']), (0, 0, 3))
         self.assertEqual(by_id[RX_DONE_CHECK]['restored'], 1024)
         self.assertEqual(by_id[RX_DONE_CHECK]['firstLastPADifferentSlots'], 1024)
         self.assertEqual(by_id[RX_DONE_CHECK]['applicationRequests'], [1025])
@@ -725,7 +728,7 @@ class AnalyzerTests(unittest.TestCase):
         slot = analyzer.RX_DRIVER_HEADER
         first = slot + analyzer.RX_DRIVER_SLOT_BYTES - 2 * analyzer.RX_WITNESS_BYTES
         for offset, fmt, value in ((slot + 16, 'Q', 1), (slot + 32, 'I', 5),
-                                   (slot + 36, 'I', 3), (slot + 44, 'I', 2),
+                                   (slot + 36, 'I', 4), (slot + 44, 'I', 2),
                                    (slot + 48, 'I', 1), (first, 'Q', 1),
                                    (first + 48, 'Q', 1), (first + 56, 'Q', 1),
                                    (first + 76, 'I', 3), (first + 80, 'I', 8),
@@ -742,17 +745,17 @@ class AnalyzerTests(unittest.TestCase):
                 path.write_bytes(blob)
                 self.expect(False, RX_DONE_CHECK)
 
-    def test_missing_or_corrupt_drain_tail(self):
+    def test_missing_or_corrupt_local_stop(self):
         path = self.capture / 'client.log'
         baseline = path.read_text()
-        for old, new in (('client_tail_recv ', 'missing_tail_recv '),
-                         ('client_drain_observed ', 'missing_drain_observed '),
-                         ('sent=1024 received=1024 max=4096', 'sent=1025 received=1024 max=4096'),
-                         ('seq=1 len=200', 'seq=4097 len=200'),
-                         ('t_ns=%d' % session_time(8802), 't_ns=%d' % session_time(8799))):
-            with self.subTest(old=old):
-                path.write_text(baseline.replace(old, new))
-                self.expect(False, 'published-drain-R28T-tail-integrity')
+        path.write_text(baseline.replace('client_stop_end ', 'missing_stop_end '))
+        self.expect(False, AUTONOMOUS_CHECK)
+        path.write_text(baseline)
+        path = self.capture / 'r39-rx-stop.bin'
+        blob = bytearray(path.read_bytes())
+        analyzer.struct.pack_into('<I', blob, 20, 0x0c)
+        path.write_bytes(blob)
+        self.expect(False, STOP_CHECK)
 
     def test_missing_rx_restoration_witness_is_rejected(self):
         subprocess.run([str(self.exe), str(self.capture), 'unrestored'], check=True)

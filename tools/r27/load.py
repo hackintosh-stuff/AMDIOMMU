@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Round38 device domain: 4096 requests, 125 s idle, another 4096, explicit stop.
-Wait for driver-owned RX mappings, then drive normal replacement and drain.
+"""Round39 device domain: 4096 requests, 125 s idle, another 4096, explicit stop.
+Wait for driver-owned RX mappings, then drive normal replacement and local stop.
 Both phases run after setup worker exit in the same service-owned domain.
 Only an active all-standard domain permits the batch; never retransmit requests.
 """
@@ -79,13 +79,15 @@ def session_idle(emit, client_deadline_ns):
 
 
 def request_session_stop(emit):
-    emit('client_session_stop_request t_ns=%d' % now())
+    stamp = now()
+    emit('client_stop_begin request_ns=%d' % stamp)
+    emit('client_session_stop_request t_ns=%d' % stamp)
     session.stop()
     emit('client_session_stop_ack t_ns=%d' % now())
 
 
 def drain_tail(s, peer, token, emit):
-    """Bounded, separate nonbusiness tail; no retransmission or main-ID credit."""
+    """Legacy finite-path helper; the current native session never calls it."""
     emit('client_drain_observed t_ns=%d' % now())
     sent = received = 0
     released = False
@@ -326,7 +328,7 @@ def ord_probe(s, peer, seq, emit, tag):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('out', nargs='?', default='runs/r38')
+    ap.add_argument('out', nargs='?', default='runs/r39')
     ap.add_argument('--iface', default='en2')
     ap.add_argument('--peer', default='192.168.50.122')
     ap.add_argument('--port', type=int, default=9110)
@@ -341,7 +343,7 @@ def main():
     if int((out / 'batch.txt').read_text().strip()) != 512:
         raise ValueError('round27 keeps the kernel declaration batch512')
     if int((out / 'requests.txt').read_text().strip()) != len(REQUESTS):
-        raise ValueError('round38 requires 8192 application requests')
+        raise ValueError('round39 requires 8192 application requests')
     payload(token, 1)
     with (out / 'load.txt').open('w') as f:
         def log(line):
@@ -514,18 +516,17 @@ def main():
                 # order of events rather than a hope about timing.
                 resumed = False
                 deadline2 = time.monotonic() + 90
-                tail_done = False
                 while time.monotonic() < deadline2:
                     props = command('ioreg', '-l', '-w0', '-r', '-c',
                                     'org_example_AMDMapperProbe', required=False)
-                    if not tail_done and '"m2-3h-rx-state" = "draining"' in props:
-                        tail_done = True
-                        if not drain_tail(s, (a.peer, a.port), token, emit):
-                            rc = 1
+                    # Stop makes no network requests. The driver stops DMA,
+                    # retires the ring locally and restores ordinary traffic.
                     if ('"m2-3e-after-exit" = "ordinary-output-resumed"' in props and
                             session.parse_status(props).get('session-state') == 'stopped'):
                         resumed = True
-                        emit('client_session_stopped t_ns=%d' % now())
+                        stamp = now()
+                        emit('client_session_stopped t_ns=%d' % stamp)
+                        emit('client_stop_end stopped_ns=%d' % stamp)
                         break
                     time.sleep(.3)
                 emit('client_after_exit resumed=%d t_ns=%d' % (int(resumed), now()))
@@ -538,7 +539,7 @@ def main():
                             ok_after += 1
                         time.sleep(.1)
                 emit('client_ord_after_exit ok=%d of=3' % ok_after)
-                if not resumed or ok_after != 3 or not tail_done or not stop_ok:
+                if not resumed or ok_after != 3 or not stop_ok:
                     rc = 1
             emit('client_result %s' %
                  ('OK' if rc == 0 and ok_after == 3 else 'PROBLEM'))

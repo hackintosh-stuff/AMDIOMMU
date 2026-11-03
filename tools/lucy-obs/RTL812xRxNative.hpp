@@ -5,6 +5,8 @@
  * needed alongside the initial RX buffers by the sparse bootstrap table.
  * Round38 retires the RX bootstrap aliases after every slot has published
  * its first IOVA OWN; fixed DMA objects stay mapped until domain teardown.
+ * Round39 stops the NIC locally before retiring the final RX mappings.
+ * Stop-retired descriptors remain distinct from observed RX completions.
  * Kernel-only control pointers stay in Request/Binding. Exported snapshots
  * contain numeric identities, mapping evidence and completed DMA witnesses.
  * Each slot keeps its first IOVA DMA lifecycle and its latest lifecycle.
@@ -18,8 +20,9 @@ typedef unsigned long long u64;
 static const char kFunctionName[] = "rtl812x-r34-rx-native";
 static const u64 kIovaBase = 0x1000200000ULL;
 enum {
-    kVersion = 3, kCount = 1024, kCapacity = 4096, kPagesPerSlot = 2,
+    kVersion = 4, kCount = 1024, kCapacity = 4096, kPagesPerSlot = 2,
     kPhysicalLayoutVersion = 1, kPhysicalSpanCount = 3,
+    kStopVersion = 1,
     kSamples = 1, kTailMax = 4096, kBatchSize = 16,
     kInstall = 1, kSnapshot = 2, kDisarm = 3, kDrain = 4, kRelease = 5,
     kPrepare = 6, kAuthorize = 7, kResumePhysical = 8,
@@ -29,7 +32,7 @@ enum {
     kBatchMap = 5, kBatchUnmap = 6, kRetireBootstrap = 7,
     kMapPublished = 1, kMapInvalidated = 2, kMapUnmapped = 4,
     kWitnessPosted = 1, kWitnessDone = 2, kWitnessUnmapped = 4,
-    kWitnessError = 8,
+    kWitnessError = 8, kWitnessStopRetired = 16,
     kFlagMapFailed = 1, kFlagUnmapFailed = 2, kFlagAddressMismatch = 4,
     kFlagStopped = 8, kFlagCoverFailed = 16, kFlagRingReset = 32,
     kFlagCopyFailed = 64
@@ -42,6 +45,14 @@ struct PhysicalSpan {
 struct PhysicalLayout {
     u32 version, bytes, generation, count;
     PhysicalSpan spans[kPhysicalSpanCount];
+};
+// One local stop/restart. Register values are actual NIC readbacks; tResumed
+// is recorded only after link-up and the RX/TX command bits are confirmed.
+struct StopRecord {
+    u32 version, bytes, stopCalls, resetVerified;
+    u32 commandBefore, commandStopped, interruptMaskBefore, interruptMaskStopped;
+    u32 rxNextBefore, rxNextAfter, stopRetired, restored;
+    u64 tStopBegin, tStopped, tLastUnmap, tLastRestore, tResumeBegin, tResumed;
 };
 struct MapRecord {
     u64 generation, memory, command, pa, iova, mapLength;
@@ -73,14 +84,14 @@ struct Witness {
 struct DriverSlot {
     u64 originalPA, currentPA, tPhysicalOwn;
     u32 mapCount, unmapCount, postCount, doneCount;
-    u32 replaceCount, sampleCount, flags, reserved;
+    u32 replaceCount, sampleCount, flags, stopRetired;
     Witness samples[kSamples], last;
 };
 struct Snapshot {
     u32 version, bytes, state, flags;
     u32 businessToken, slotCount, maps, unmaps;
     u32 posted, completed, replaced, restored;
-    u32 pendingPosted, tailSeq, nativeActive, reserved;
+    u32 pendingPosted, tailSeq, nativeActive, stopRetired;
     u64 ringId, tInstalled, tDisarmed, tLastRestore;
     DriverSlot slots[kCount];
 };
@@ -102,6 +113,7 @@ struct Request {
 };
 static_assert(sizeof(PhysicalSpan) == 16, "round37 physical DMA span");
 static_assert(sizeof(PhysicalLayout) == 64, "round37 physical DMA layout");
+static_assert(sizeof(StopRecord) == 96, "round39 local RX stop record");
 static_assert(sizeof(MapRecord) == 224, "round34 RX mapping record");
 static_assert(sizeof(BackendSlot) == 464, "round34 RX backend slot");
 static_assert(sizeof(BackendSnapshot) == 475216, "round34 RX backend snapshot");
