@@ -194,6 +194,31 @@ def route(peer):
     return m.group(1) if m else None
 
 
+def wait_local_address(iface, local, emit, timeout=20.0, delay=.25):
+    """Wait until the interface really owns the declared address again.
+
+    The local stop resets the NIC and rebuilds the physical ring, so macOS
+    detaches and re-attaches the interface address around that transition. A
+    socket bound to the old assignment then fails sendto with EADDRNOTAVAIL
+    (errno 49). Waiting for the address to be listed again is honest waiting
+    for the documented recovery, not a relaxed check: the address must be the
+    declared one and the deadline still fails the run.
+    """
+    deadline = time.monotonic() + timeout
+    wanted = 'inet %s ' % local
+    attempt = 0
+    while True:
+        if wanted in command('ifconfig', iface, required=False):
+            if attempt:
+                emit('client_address_wait attempts=%d' % attempt)
+            return True
+        if time.monotonic() >= deadline:
+            emit('client_address_wait timeout attempts=%d' % attempt)
+            return False
+        attempt += 1
+        time.sleep(delay)
+
+
 def bind_local(s, local, emit, tries=60, delay=.5):
     """Bind the declared source address, tolerating a boot-time address race.
 
@@ -531,12 +556,21 @@ def main():
                     time.sleep(.3)
                 emit('client_after_exit resumed=%d t_ns=%d' % (int(resumed), now()))
                 ok_after = 0
-                if resumed:
-                    s.settimeout(.5)
+                if resumed and wait_local_address(a.iface, local, emit):
+                    # The local stop detached and re-attached the interface
+                    # address, so the pre-stop socket no longer has a usable
+                    # source. Bind a fresh socket per probe on the restored
+                    # address; a datagram that never left is not a retransmit.
                     for _ in range(3):
-                        if ord_probe(s, (a.peer, a.port), ord.next(), emit,
-                                     'after-exit'):
-                            ok_after += 1
+                        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as ps:
+                            try:
+                                bind_local(ps, local, emit, tries=20, delay=.25)
+                                ps.settimeout(.5)
+                                if ord_probe(ps, (a.peer, a.port), ord.next(),
+                                             emit, 'after-exit'):
+                                    ok_after += 1
+                            except OSError as exc:
+                                emit('client_ord_after_exit error %s' % exc)
                         time.sleep(.1)
                 emit('client_ord_after_exit ok=%d of=3' % ok_after)
                 if not resumed or ok_after != 3 or not stop_ok:
