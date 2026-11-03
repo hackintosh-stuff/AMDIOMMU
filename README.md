@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round43 / an IOVA-only device domain from entry through stop
+## Accepted Round43 / an IOVA-only device domain from entry through stop
 
 Base: `7af436acaad62a58acbdb4b788142145ec4c744f`, the accepted Round42
 result-documentation successor (tree `a5f7f4a3aec7ad7b774c0f14e8e48f6e8700069f`).
@@ -32,8 +32,53 @@ and three ordinary probes after recovery. Update the existing 14 checks and
 normal fixture for the new entry order, active IOVA snapshot and empty final
 tree. Use the fixed checkout/upstream, `--tx 21 --rx 34`, `--check-r43`,
 `runs/r43`, `org.example.round43load` and token `0x43c0de43`.
-Host validation, real Mac compilation and hardware acceptance remain separate;
-Round43 hardware acceptance is pending.
+Host validation, real Mac compilation and hardware acceptance remain separate.
+
+**Round43 hardware acceptance PASSED (14/14).** One planned boot and one valid
+measurement. The entry stopped the NIC at 31,743,262,638 ns and read it back
+stopped at 31,743,867,276 ns with `ChipCmd` 12 -> 0 and `IMR0` 32821 -> 0, then
+wrote the device table at 31,745,126,384 ns, so the stop strictly precedes the
+DTE write and `stoppedBeforeDTE` is true. All 1024 initial IOVA OWN stores landed
+afterwards (31,756,479,818 and 31,757,085,827 ns), the active tree was captured at
+31,758,140,445 ns, driver active-ready followed at 31,758,140,595 ns, the fixed
+registers were programmed at 31,780,744,635 ns and only then did hardware become
+active at 32,171,479,859 ns and RX authorize at 32,171,493,419 ns.
+
+`physical-mode` is `iova-only`: bootstrap pages, removed pages, restore-added
+pages, physical cover calls and identity pages are all zero, and the final
+experimental page table has **zero present leaves**. The active snapshot keeps
+exactly 1024 RX IOVA leaves for the generation-1 buffers plus the three fixed
+spans (txRing 889,716,736 / 32,768 B, rxRing 889,749,504 / 16,384 B, tally
+15,107,784,704 / 192 B; 13 pages), and the fixed objects completed three standard
+map/unmap pairs each.
+
+RX counts are `maps = unmaps = posted = 10382` with `posted 10382 = completed
+9358 + stopRetired 1024`, mapCount = postCount per slot, first generation 1, 2598
+real replacements, 999 of 1024 slots differing between first and final retained
+generation addresses and 1024 slots restored. Invalidations were 10370 each over
+9346 batch calls and 9358 batch slots (`max-batch=5`, 24 saved cycles). TX retired
+9319 with rejected 0, domain maps 9328 = 9319 + 9 capacity probes, the command
+ring completed 39405/39405 through 153 wraps, business traffic completed 8192/8192
+with 1047 ordinary probes and no peer tail packet across a 125.290027393 s idle
+in one service-owned domain whose two observations share root/DT/command
+`0x3a680000`/`0x3a800000`/`0x3aa00000` with `installs=1`.
+
+Disarm stopped the NIC inside its own RPC (`stopCalls=1`, `rxNext` 142 -> 0,
+`stopRetired` 1024, restored 1024), the original IOMMU state was restored before
+the physical resume at 167,676,346,153 ns, owners/bindings/pending stayed zero,
+device page faults stayed zero and 3/3 ordinary probes succeeded after exit.
+
+Deployed implementation commit: `7d18caaa1ad5bcc9cae43cb85eb8761d6d05523a`. This
+documentation update is not a deployed revision.
+
+Round43 result and archive are outside this source repository:
+[Round43 result](<../../docs/m2-3x-round43-result.md>) and
+[evidence archive](<../../docs/evidence/r43-final-20261103.tgz>)
+(SHA256 `c102e10e5cd38aa7657f9254faebfe2df63d6b4857c5ec288e994d3cf4feccee`).
+
+The rearm observation ring stays capped at 4096 records, so
+`rtl812x-rxpost-state` still reports `degraded` with a wrapped prefix while
+`dropped` is zero; that is an observer capacity bound, not a traffic failure.
 
 ## Accepted Round42 / publish the entire RX IOVA ring before hardware enable
 
