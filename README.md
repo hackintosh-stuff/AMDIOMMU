@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round37 / owned sparse physical DMA mappings
+## Accepted Round37 / owned sparse physical DMA mappings
 
 Base: `11b7c10975f8fd021624f10bc23fa9863231f1ca`, the documentation successor
 of the accepted Round36 implementation `70d638df5bb3a5b5c421079107abe17b61b2cd64`.
@@ -28,10 +28,36 @@ Restore cover invalidations are separate from RX map/unmap batch savings.
 Use the fixed Git checkout and `_scratch/lucy-upstream`; generator selection
 remains `--tx 21 --rx 34`. The build runner uses `--check-r37`, `runs/r37`
 and `org.example.round37load` with token `0x37c0de37`.
-Existing focused host checks, generated receive-loop checks and actual sparse
-bootstrap/backend checks passed during preparation. The accepted baseline,
-release metadata and final patch application are verified separately.
-A real macOS SDK build and one normal hardware acceptance run remain outstanding.
+
+**Round37 hardware acceptance PASSED (14/14).** One planned boot and one valid
+measurement. `physical-mode` was `owned-sparse-4k`; the 64-byte
+`r37-physical-layout.bin` reported version 1, count 3 and generation 2 with the
+real spans txRing 663240704/32,768 B, rxRing 663273472/16,384 B and tally
+15,042,269,184/192 B (13 fixed pages). Bootstrap covered 1037 pages (13 fixed
+plus 1024 initial RX pages), the restore phase added 201 pages, and the final
+page-table walk found exactly 1238 unique 4 KiB identity leaves (5,070,848 B)
+matching the union of fixed DMA, original RX and current RX spans; the arena
+cursor used only 136 pages. All 1024 restore covers succeeded with no failures
+and no extra commands for already-covered slots. RX logical maps/unmaps were
+10669 each (9645 posted plus 1024 preparations) with 10639 confirmed
+invalidations over 9615 batch calls and 9645 batch slots, `max-batch=4`,
+`pending-batch=0` and 60 saved INV/CW cycles. posted equalled completed at
+9645, 2587 real replacements occurred, 861 of 1024 slots differed between first
+and final retained generation addresses, all 1024 slots returned to their
+current mbuf, and owners/boundPairs/pending were zero. TX retired 10278 with
+rejected 0; domain maps 10287 = 10278 + 9 capacity probes; the command ring
+completed 42056/42056 through 164 wraps. The setup worker exited before both
+domain observations, which shared the same root/DT/command addresses across the
+125.1111 s idle; R28T drained 1008/1008, R29D completed before TX close, and
+3/3 post-exit ordinary probes succeeded.
+
+Deployed source commit: `bbeed6028f249ec842733b5fe685e87efc654110`. This
+documentation update is not a deployed revision.
+
+Round37 result and archive are outside this source repository:
+[Round37 result](<../../docs/m2-3r-round37-result.md>) and
+[evidence archive](<../../docs/evidence/r37-final-20261103.tgz>)
+(SHA256 `c1b23f591e3a6ff9955893167ac30a15bebeab93bc34cf4ef0cf8324a94defc8`).
 
 ## Accepted Round36 / RX invalidation batches
 
