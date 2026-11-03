@@ -116,7 +116,7 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
     // start() runs, and that start() is exactly the copyMapperForDevice() call
     // this mapper must be visible to. Only a client that already started (or a
     // provider that is still open) means the lookup has been missed.
-    IOService *client = nic->getChildEntry(gIOServicePlane);
+    IOService *client = OSDynamicCast(IOService, nic->getChildEntry(gIOServicePlane));
     const bool clientStarted = client && client->isStarted();
     if (nic->isOpen()) {
         setProperty("r44-state", "failed-too-late-open");
