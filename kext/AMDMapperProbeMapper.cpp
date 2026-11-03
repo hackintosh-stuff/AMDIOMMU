@@ -18,10 +18,28 @@ struct org_example_AMDMapperProbe::R44MapperState {
     amdtx::BoundedAllocator<r44mapper::kPages, r44mapper::kMapPages> allocator;
     Mapping mappings[r44mapper::kRecords];
     r44mapper::Snapshot snapshot;
+    OSData *suspendLive, *suspendPT, *resumeLive, *resumePT;
     UInt64 nextHandle;
     bool accepting;
 
     volatile UInt64 &leaf(unsigned page) { return leaves[page / 512][page % 512]; }
+
+    void capturePowerBoundary(OSData *&live, OSData *&pt) {
+        if (live) { live->release(); live = nullptr; }
+        if (pt) { pt->release(); pt = nullptr; }
+        live = OSData::withCapacity((snapshot.liveCount ? snapshot.liveCount : 1) *
+                                    sizeof(r44mapper::Record));
+        if (live) {
+            for (unsigned i = 0; i < r44mapper::kRecords; ++i) {
+                if (mappings[i].live &&
+                    !live->appendBytes(&mappings[i].record, sizeof(r44mapper::Record))) {
+                    live->release(); live = nullptr;
+                    break;
+                }
+            }
+        }
+        pt = OSData::withBytes((const void *)tables, (unsigned)snapshot.ptBytes);
+    }
 };
 
 bool org_example_AMDMapperProbe::r44PrepareMappings(
@@ -70,6 +88,44 @@ bool org_example_AMDMapperProbe::r44QuiesceMappings() {
     return drained;
 }
 
+// TODO(R47-PM-HARDWARE): implemented from the existing lifetime/command
+// contracts; real system sleep/resume validation is pending. R47 exercises
+// normal networking only and does not trigger this transition for testing.
+IOReturn org_example_AMDMapperProbe::r47PowerTransition(UInt32 operation) {
+    auto *d = fR44Mapper;
+    if (!d) return kIOReturnNotReady;
+    // Lock order is Lucy command gate -> mapper lock. The backend never
+    // calls into the driver. PTE edits, CWs, snapshots and PM share this lock.
+    IOLockLock(d->lock);
+    if ((operation == 1 && !d->accepting) ||
+        (operation == 2 && d->accepting)) {
+        IOLockUnlock(d->lock);
+        return kIOReturnNotReady;
+    }
+    bool ok = false;
+    if (operation == 1) {
+        d->accepting = false;
+        d->snapshot.flags &= ~r44mapper::kAccepting;
+        if (d->resumeLive) { d->resumeLive->release(); d->resumeLive = nullptr; }
+        if (d->resumePT) { d->resumePT->release(); d->resumePT = nullptr; }
+        d->capturePowerBoundary(d->suspendLive, d->suspendPT);
+        ok = r47SuspendAuto();
+    } else if (operation == 2) {
+        ok = r47ResumeAuto();
+        if (ok) {
+            // Exact retained records/PT are exported before any ordinary
+            // mapping can run again. Allocation failure invalidates evidence,
+            // but does not turn a successful hardware wake into a PM failure.
+            d->capturePowerBoundary(d->resumeLive, d->resumePT);
+            d->accepting = true;
+            d->snapshot.flags |= r44mapper::kAccepting;
+        }
+    }
+    if (!ok) d->snapshot.flags |= r44mapper::kFailed;
+    IOLockUnlock(d->lock);
+    return ok ? kIOReturnSuccess : kIOReturnIOError;
+}
+
 UInt32 org_example_AMDMapperProbe::r44LiveMappings() const {
     auto *d = fR44Mapper;
     if (!d) return 0;
@@ -88,6 +144,10 @@ bool org_example_AMDMapperProbe::r44ReleaseMappings() {
     IOLockUnlock(d->lock);
     if (!release) return false;
     fR44Mapper = nullptr;
+    if (d->suspendLive) d->suspendLive->release();
+    if (d->suspendPT) d->suspendPT->release();
+    if (d->resumeLive) d->resumeLive->release();
+    if (d->resumePT) d->resumePT->release();
     IOLockFree(d->lock); IOFree(d, sizeof(*d));
     return true;
 }
@@ -227,6 +287,13 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
     IOLockLock(d->lock);
     auto &s = d->snapshot;
     ++s.unmapCalls;
+    // Sleep retains live mappings. Reject before clearing a single PTE or
+    // touching the command ring while the hardware is unavailable.
+    if (!d->accepting) {
+        ++s.unmapRejected;
+        IOLockUnlock(d->lock);
+        return kIOReturnNotReady;
+    }
     IOReturn result = kIOReturnBadArgument;
     for (unsigned slot = 0; slot < r44mapper::kRecords; ++slot) {
         auto &mapping = d->mappings[slot];
@@ -305,6 +372,16 @@ void org_example_AMDMapperProbe::r44PublishMappings() {
     if (summary) summary->release();
     if (active) active->release();
     if (tables) tables->release();
+    auto boundary = [this](const char *key, OSData *data) {
+        if (data) setProperty(key, data);
+        else removeProperty(key);
+    };
+    boundary("r47-suspend-live-raw", d->suspendLive);
+    boundary("r47-suspend-pt-raw", d->suspendPT);
+    boundary("r47-resume-live-raw", d->resumeLive);
+    boundary("r47-resume-pt-raw", d->resumePT);
+    setProperty("r47-pm-snapshots-valid",
+        d->suspendLive && d->suspendPT && d->resumeLive && d->resumePT ? "yes" : "no");
     // The same lock serializes the shared hardware command producer and the
     // event/command snapshot; platform export never takes this lock again.
     r44PublishAuto();

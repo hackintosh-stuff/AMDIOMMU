@@ -298,6 +298,20 @@ void org_example_AMDMapperProbe::r31RequestStop() {
     r33ScheduleDomainStop();
 }
 
+IOReturn org_example_AMDMapperProbe::callPlatformFunction(
+    const OSSymbol *name, bool wait, void *target, void *operation,
+    void *unused3, void *unused4) {
+    if (name && name->isEqualTo("R47PowerTransition")) {
+        if (!fR44Auto || !fNicDevice) return kIOReturnNotReady;
+        const uintptr_t op = (uintptr_t)operation;
+        if (target != fNicDevice || unused3 || unused4 || (op != 1 && op != 2))
+            return kIOReturnBadArgument;
+        return r47PowerTransition((UInt32)op);
+    }
+    return super::callPlatformFunction(name, wait, target, operation,
+                                      unused3, unused4);
+}
+
 IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
     OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
     OSObject *snapshot = dict ? dict->getObject("R44Snapshot") : nullptr;
@@ -745,7 +759,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.53.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.54.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

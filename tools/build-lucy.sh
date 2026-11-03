@@ -202,9 +202,9 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.231</string>
+	<string>1.1.232</string>
 	<key>CFBundleVersion</key>
-	<string>1.1.231</string>
+	<string>1.1.232</string>
 	<key>IOKitPersonalities</key>
 	<dict>
 		<key>RTL8125</key>
@@ -251,9 +251,10 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 		     iommu-parent published afterwards would always be too late.
 		     The requested version must sit inside the provider's compatible
 		     range (OSBundleCompatibleVersion <= requested <= CFBundleVersion),
-		     otherwise kmutil cannot resolve the dependency at all. -->
+		     otherwise kmutil cannot resolve the dependency at all.
+		     Round47 requires the synchronous mapper PM API in 0.54.0. -->
 		<key>org.example.AMDMapperProbe</key>
-		<string>0.53.0</string>
+		<string>0.54.0</string>
 	</dict>
 	<key>OSBundleRequired</key>
 	<string>Network-Root</string>

@@ -1,6 +1,7 @@
 // Persistent per-device hardware lifecycle for amdiommu=auto.
 // The experiment's timer, Lucy bindings and measurement windows are not used.
 #include "AMDMapperProbeInternal.hpp"
+#include "AMDMapperProbeDiscovery.hpp"
 
 namespace {
 constexpr UInt32 kR44TablePages = 16;
@@ -27,18 +28,27 @@ struct org_example_AMDMapperProbe::R44Controller {
     volatile UInt8 *base;
     UInt64 tablePA, devicePA, commandPA, semaphorePA, eventPA;
     UInt64 originalDT, originalCommand, originalEvent, originalControl;
+    R47HardwareInfo hardware;
+    UInt64 startupEfr;
     UInt64 readyTime, activeTime;
     UInt64 invDevCompleted, invPagesCompleted;
+    UInt64 lastInvDevSequence, lastInvPagesSequence;
     UInt64 eventEntries, targetFaults;
+    UInt64 sleepControl, observedControl;
+    UInt64 suspendTime, resumeTime, suspendSequence;
+    UInt64 resumeDevSequence, resumePagesSequence;
+    UInt64 suspendCount, resumeCount, powerFailures;
     UInt32 lastEvent[4];
     UInt32 deviceID;
     M2B2CmdCtx command;
     const char *state;
     bool configured, ready, active, pinned, restored;
     bool eventOverflow, eventInvalid;
+    bool suspended, powerFailed, resumeRegistersRestored;
 
-    bool restore() {
-        if (!configured) { restored = true; return true; }
+    // The driver has already stopped DMA. Stop the hardware producers before
+    // changing their ring pointers or returning the controller to firmware.
+    bool stopHardware() {
         UInt64 ctrl = mmioRead64(base, M2B2_OFF_CONTROL);
         ctrl &= ~(M2B2_CTRL_CMDBUF_EN | M2B2_CTRL_EVT_LOG_EN);
         mmioWrite64(base, M2B2_OFF_CONTROL, ctrl);
@@ -50,18 +60,59 @@ struct org_example_AMDMapperProbe::R44Controller {
         }
         ctrl = mmioRead64(base, M2B2_OFF_CONTROL) & ~M2B2_CTRL_IOMMU_EN;
         mmioWrite64(base, M2B2_OFF_CONTROL, ctrl);
-        if ((status & (M2B2_STATUS_CMDBUF_RUN | M2B2_STATUS_EVT_RUN)) ||
-            (mmioRead64(base, M2B2_OFF_CONTROL) & M2B2_CTRL_IOMMU_EN))
-            return false;
+        observedControl = mmioRead64(base, M2B2_OFF_CONTROL);
+        return !(status & (M2B2_STATUS_CMDBUF_RUN | M2B2_STATUS_EVT_RUN)) &&
+            !(observedControl & kR44Enabled);
+    }
+
+    // TAIL belongs to the event producer. Consume the final events after it
+    // stops, before a resume resets the ring. Fault history stays cumulative.
+    void collectEvents() {
+        const UInt32 status = mmioRead32(base, M2B2_OFF_STATUS);
+        if (status & M2B2_STATUS_EVT_OVERFLOW) eventOverflow = true;
+        UInt64 head = mmioRead64(base, M2B2_OFF_EVT_HEAD);
+        const UInt64 tail = mmioRead64(base, M2B2_OFF_EVT_TAIL);
+        if (head >= M2B2_EVT_BUFFER_SIZE || tail >= M2B2_EVT_BUFFER_SIZE ||
+            ((head | tail) & 15)) eventInvalid = true;
+        else {
+            const volatile UInt32 *entries =
+                (volatile UInt32 *)events->getBytesNoCopy();
+            while (head != tail) {
+                const UInt32 entry = (UInt32)head / 4;
+                const UInt32 type = entries[entry + 1] >> M2B2_EVENT_TYPE_SHIFT;
+                if (!type) { eventInvalid = true; break; }
+                for (UInt32 i = 0; i < 4; ++i) lastEvent[i] = entries[entry + i];
+                ++eventEntries;
+                if ((lastEvent[0] & M2B2_EVENT_DEVID_MASK) == deviceID)
+                    ++targetFaults;
+                head = (head + 16) % M2B2_EVT_BUFFER_SIZE;
+            }
+            mmioWrite64(base, M2B2_OFF_EVT_HEAD, head);
+        }
+    }
+
+    bool powerFailure(const char *reason) {
+        ready = false;
+        suspended = true;
+        powerFailed = true;
+        state = reason;
+        ++powerFailures;
+        return false;
+    }
+
+    bool restore() {
+        if (!configured) { restored = true; return true; }
+        if (suspended || !stopHardware()) return false;
         mmioWrite64(base, M2B2_OFF_DEV_TABLE, originalDT);
         mmioWrite64(base, M2B2_OFF_CMD_BUF, originalCommand);
         mmioWrite64(base, M2B2_OFF_EVT_BUF, originalEvent);
         mmioWrite64(base, M2B2_OFF_CONTROL, originalControl);
         OSSynchronizeIO();
+        observedControl = mmioRead64(base, M2B2_OFF_CONTROL);
         restored = mmioRead64(base, M2B2_OFF_DEV_TABLE) == originalDT &&
             mmioRead64(base, M2B2_OFF_CMD_BUF) == originalCommand &&
             mmioRead64(base, M2B2_OFF_EVT_BUF) == originalEvent &&
-            mmioRead64(base, M2B2_OFF_CONTROL) == originalControl;
+            observedControl == originalControl;
         if (restored) { configured = false; ready = false; active = false; }
         return restored;
     }
@@ -126,11 +177,18 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
         return false;
     }
 
+    R47HardwareInfo hardware{};
+    if (!r47DiscoverHardware(this, nic, hardware)) {
+        setProperty("r44-state", "failed-hardware-discovery");
+        return false;
+    }
+
     R44Controller *c = (R44Controller *)IOMalloc(sizeof(R44Controller));
     if (!c) { setProperty("r44-state", "failed-controller-memory"); return false; }
     bzero(c, sizeof(*c));
     fR44Controller = c;
     c->state = "preparing";
+    c->hardware = hardware;
     c->deviceID = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
 
@@ -147,19 +205,36 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
     }
 
     if (!failure) {
-        // This first normal mode targets the same verified X570 IOMMU BAR as
-        // R43. The EFR check protects the MMIO access before any register write.
+        // IVRS ownership and the matching PCI capability/BAR were checked
+        // before allocating the backend. Map only the basic register window.
         c->mmioMemory = IOMemoryDescriptor::withPhysicalAddress(
-            (IOPhysicalAddress)M21_MMIO_BASE, (IOByteCount)M21_MMIO_LEN,
-            kIODirectionNone);
+            (IOPhysicalAddress)c->hardware.mmioBase,
+            (IOByteCount)c->hardware.mmioBytes, kIODirectionNone);
         if (c->mmioMemory)
             c->mmioMap = c->mmioMemory->map(kIOMapInhibitCache | kIOMapAnywhere);
         if (!c->mmioMap) failure = "failed-mmio-map";
         else {
             c->base = (volatile UInt8 *)c->mmioMap->getVirtualAddress();
-            if (mmioRead64(c->base, M21_OFF_EXT_FEAT) != M21_EFR_EXPECTED)
-                failure = "failed-iommu-identity";
+            if (c->hardware.pciEfrSupported)
+                c->startupEfr = mmioRead64(c->base, M21_OFF_EXT_FEAT);
+            setProperty("r47-mmio-efr", (unsigned long long)c->startupEfr, 64);
+            // Host four-level translation, INV_DEV/INV_PAGES and CW are the
+            // basic path. Guest/PASID/performance EFR bits are not requirements.
+            // If firmware supplies an EFR image, verify the same unit's actual
+            // register instead of requiring this board's former fixed value.
+            if ((c->hardware.pciEfrSupported && c->startupEfr == ~0ULL) ||
+                (c->hardware.firmwareEfrPresent &&
+                 (!c->hardware.pciEfrSupported ||
+                  c->startupEfr != c->hardware.firmwareEfr))) {
+                setProperty("r47-efr-match", "no");
+                failure = "failed-iommu-efr";
+            } else {
+                setProperty("r47-efr-match", !c->hardware.pciEfrSupported ?
+                    "not-reported" : (c->hardware.firmwareEfrPresent ?
+                    "yes" : "firmware-absent"));
+            }
         }
+        setProperty("r47-discovery-state", failure ? failure : "ready");
     }
     if (!failure) {
         c->originalDT = mmioRead64(c->base, M2B2_OFF_DEV_TABLE);
@@ -228,13 +303,13 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
 }
 #pragma clang diagnostic pop
 
-bool org_example_AMDMapperProbe::r44Invalidate() {
+bool org_example_AMDMapperProbe::r44Invalidate(bool invalidateDevice) {
     // The generic mapper's lock serializes PTE writes, command submission and
     // this first-map DTE installation. Failed completion never returns an IOVA.
     R44Controller *c = fR44Controller;
     if (!c || !c->ready || c->command.failed) return false;
     OSSynchronizeIO();
-    if (!c->active) {
+    if (!c->active || invalidateDevice) {
         volatile UInt64 *dte = (volatile UInt64 *)c->devices->getBytesNoCopy();
         dte[c->deviceID * 4 + 1] = kR44Domain;
         dte[c->deviceID * 4] = (c->tablePA & M2B2_PTE_ADDR_MASK) |
@@ -247,6 +322,7 @@ bool org_example_AMDMapperProbe::r44Invalidate() {
             return false;
         }
         ++c->invDevCompleted;
+        c->lastInvDevSequence = c->command.completionSequence;
     }
     const UInt64 address = m2b2InvAddress();
     if (!m2b2Submit(c->base, &c->command, "r44-invalidate-pages", 0,
@@ -256,6 +332,7 @@ bool org_example_AMDMapperProbe::r44Invalidate() {
         return false;
     }
     ++c->invPagesCompleted;
+    c->lastInvPagesSequence = c->command.completionSequence;
     if (!c->active) {
         c->active = true;
         c->activeTime = mach_absolute_time();
@@ -264,33 +341,108 @@ bool org_example_AMDMapperProbe::r44Invalidate() {
     return true;
 }
 
+// TODO(R47-PM-HARDWARE): validate the real suspend/resume sequence once this
+// AMD platform can sleep reliably. R47 acceptance does not invoke this path.
+bool org_example_AMDMapperProbe::r47SuspendAuto() {
+    // The mapper lock is held and admission is closed. Lucy's PM gate has
+    // already completed the network family's disable/clearRxTxRings path.
+    R44Controller *c = fR44Controller;
+    if (!c || !c->ready || c->suspended || c->powerFailed) return false;
+    c->resumeRegistersRestored = false;
+    c->sleepControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
+    if ((c->sleepControl & kR44Enabled) != kR44Enabled || !r44Invalidate())
+        return c->powerFailure("failed-pm-suspend-fence");
+    c->suspendSequence = c->command.completionSequence;
+    if (!c->stopHardware())
+        return c->powerFailure("failed-pm-suspend-controller");
+    c->collectEvents();
+    c->ready = false;
+    c->suspended = true;
+    c->suspendTime = mach_absolute_time();
+    ++c->suspendCount;
+    c->state = "suspended";
+    return true;
+}
+
+// TODO(R47-PM-HARDWARE): D0 readiness and retained BAR/MMIO across real system
+// sleep need hardware validation; normal interface down/up is not this test.
+bool org_example_AMDMapperProbe::r47ResumeAuto() {
+    // The PCI parent and Lucy's D0 transition are complete, but its normal
+    // enable has not run. All tables, DMA objects and mapping records survive.
+    R44Controller *c = fR44Controller;
+    if (!c || !c->suspended || c->powerFailed) return false;
+    if (c->hardware.pciEfrSupported &&
+        mmioRead64(c->base, M21_OFF_EXT_FEAT) != c->startupEfr)
+        return c->powerFailure("failed-pm-resume-identity");
+    if (!c->stopHardware())
+        return c->powerFailure("failed-pm-resume-stop");
+
+    // Linux v6.6 init.c early_enable_iommu() reloads the device table and
+    // stopped command/event rings on resume, then enables and invalidates.
+    // Only the ring position restarts: sequence numbers and evidence counters
+    // must remain monotonic, so an old semaphore value cannot complete a new CW.
+    bzero(c->commands->getBytesNoCopy(), M23_CMD_BUF_SIZE);
+    bzero(c->events->getBytesNoCopy(), M2B2_EVT_BUFFER_SIZE);
+    c->command.idx = 0;
+    c->command.tail = 0;
+    OSSynchronizeIO();
+    const UInt64 dt = c->devicePA | ((M22B_TABLE_SIZE_FULL >> 12) - 1);
+    const UInt64 commands = c->commandPA | M23_CMD_SIZE_CODE;
+    const UInt64 events = c->eventPA | M2B2_EVT_LEN_MASK;
+    mmioWrite64(c->base, M2B2_OFF_DEV_TABLE, dt);
+    mmioWrite64(c->base, M2B2_OFF_CMD_BUF, commands);
+    mmioWrite64(c->base, M2B2_OFF_EVT_BUF, events);
+    mmioWrite64(c->base, M2B2_OFF_CMD_HEAD, 0);
+    mmioWrite64(c->base, M2B2_OFF_CMD_TAIL, 0);
+    mmioWrite64(c->base, M2B2_OFF_EVT_HEAD, 0);
+    mmioWrite64(c->base, M2B2_OFF_EVT_TAIL, 0);
+    mmioWrite32(c->base, M2B2_OFF_STATUS, M2B2_STATUS_EVT_OVERFLOW);
+    UInt64 control = c->sleepControl & ~kR44Enabled;
+    mmioWrite64(c->base, M2B2_OFF_CONTROL, control | M2B2_CTRL_CMDBUF_EN);
+    control |= M2B2_CTRL_CMDBUF_EN | M2B2_CTRL_EVT_LOG_EN;
+    mmioWrite64(c->base, M2B2_OFF_CONTROL, control);
+    control |= M2B2_CTRL_IOMMU_EN;
+    mmioWrite64(c->base, M2B2_OFF_CONTROL, control);
+    OSSynchronizeIO();
+    c->observedControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
+    c->resumeRegistersRestored =
+        mmioRead64(c->base, M2B2_OFF_DEV_TABLE) == dt &&
+        mmioRead64(c->base, M2B2_OFF_CMD_BUF) == commands &&
+        mmioRead64(c->base, M2B2_OFF_EVT_BUF) == events &&
+        c->observedControl == c->sleepControl;
+    if (!c->resumeRegistersRestored)
+        return c->powerFailure("failed-pm-resume-registers");
+    UInt32 status = 0;
+    const UInt32 running = M2B2_STATUS_CMDBUF_RUN | M2B2_STATUS_EVT_RUN;
+    for (UInt32 i = 0; i < M2B1_LOOP_TIMEOUT; ++i) {
+        status = mmioRead32(c->base, M2B2_OFF_STATUS);
+        if ((status & running) == running) break;
+    }
+    if ((status & running) != running)
+        return c->powerFailure("failed-pm-resume-engines");
+
+    c->ready = true;
+    // Force the device-cache invalidation even though the DTE remains active
+    // in retained memory. Do not overwrite the original startup timestamps.
+    if (!r44Invalidate(true))
+        return c->powerFailure("failed-pm-resume-invalidation");
+    c->resumeDevSequence = c->lastInvDevSequence;
+    c->resumePagesSequence = c->lastInvPagesSequence;
+    c->resumeTime = mach_absolute_time();
+    ++c->resumeCount;
+    c->suspended = false;
+    c->state = c->active ? "active" : "ready-passthrough";
+    return true;
+}
+
 void org_example_AMDMapperProbe::r44PublishAuto() {
     R44Controller *c = fR44Controller;
     if (!c) return;
     // Called while the generic mapper lock is held, or before publication /
     // after quiescing. The event producer owns TAIL; only advance consumed HEAD.
-    if (c->configured) {
-        const UInt32 status = mmioRead32(c->base, M2B2_OFF_STATUS);
-        if (status & M2B2_STATUS_EVT_OVERFLOW) c->eventOverflow = true;
-        UInt64 head = mmioRead64(c->base, M2B2_OFF_EVT_HEAD);
-        const UInt64 tail = mmioRead64(c->base, M2B2_OFF_EVT_TAIL);
-        if (head >= M2B2_EVT_BUFFER_SIZE || tail >= M2B2_EVT_BUFFER_SIZE ||
-            ((head | tail) & 15)) c->eventInvalid = true;
-        else {
-            const volatile UInt32 *events =
-                (volatile UInt32 *)c->events->getBytesNoCopy();
-            while (head != tail) {
-                const UInt32 entry = (UInt32)head / 4;
-                const UInt32 type = events[entry + 1] >> M2B2_EVENT_TYPE_SHIFT;
-                if (!type) { c->eventInvalid = true; break; }
-                for (UInt32 i = 0; i < 4; ++i) c->lastEvent[i] = events[entry + i];
-                ++c->eventEntries;
-                if ((c->lastEvent[0] & M2B2_EVENT_DEVID_MASK) == c->deviceID)
-                    ++c->targetFaults;
-                head = (head + 16) % M2B2_EVT_BUFFER_SIZE;
-            }
-            mmioWrite64(c->base, M2B2_OFF_EVT_HEAD, head);
-        }
+    if (c->configured && !c->suspended) {
+        c->collectEvents();
+        c->observedControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
     }
     auto number = [this](const char *key, UInt64 value) {
         setProperty(key, (unsigned long long)value, 64);
@@ -302,6 +454,18 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     setProperty("r44-event-overflow", c->eventOverflow ? "yes" : "no");
     setProperty("r44-event-valid", c->eventInvalid ? "no" : "yes");
     setProperty("r44-command-failed", c->command.failed ? "yes" : "no");
+    setProperty("r47-pm-state", c->powerFailed ? "failed" :
+                (c->suspended ? "suspended" : "awake"));
+    setProperty("r47-resume-registers-restored",
+                c->resumeRegistersRestored ? "yes" : "no");
+    number("r47-suspend-count", c->suspendCount);
+    number("r47-resume-count", c->resumeCount);
+    number("r47-pm-failures", c->powerFailures);
+    number("r47-suspend-at", c->suspendTime);
+    number("r47-resume-at", c->resumeTime);
+    number("r47-suspend-cw-sequence", c->suspendSequence);
+    number("r47-resume-inv-dev-sequence", c->resumeDevSequence);
+    number("r47-resume-inv-pages-sequence", c->resumePagesSequence);
     number("r44-target-devid", c->deviceID);
     number("r44-domain-id", kR44Domain);
     number("r44-root-pa", c->tablePA);
@@ -326,7 +490,8 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
         snprintf(key, sizeof(key), "r44-last-event%u", i);
         number(key, c->lastEvent[i]);
     }
-    if (c->base) number("r44-control", mmioRead64(c->base, M2B2_OFF_CONTROL));
+    // A snapshot taken while suspended must never probe powered-down MMIO.
+    number("r44-control", c->observedControl);
     if (c->devices) {
         const volatile UInt64 *dte =
             (volatile UInt64 *)c->devices->getBytesNoCopy();

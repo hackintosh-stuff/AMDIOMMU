@@ -97,7 +97,8 @@ def registry(class_name, marker):
     return found[0]
 
 
-def snapshot(parent, label, driver_prefixes=('rtl812x-r44-',)):
+def snapshot(parent, label, driver_prefixes=('rtl812x-r44-',),
+             probe_prefixes=('r44-',), extra_exports=None):
     """One explicit read-only export; production mapping has no capture limit."""
     out = parent / label
     out.mkdir(parents=True, exist_ok=False)
@@ -105,7 +106,10 @@ def snapshot(parent, label, driver_prefixes=('rtl812x-r44-',)):
     probe = registry('org_example_AMDMapperProbe', 'r44-mode')
     driver = registry('RTL8125', 'rtl812x-r44-mapper-found')
     exports = {}
-    for key, name in EXPORTS.items():
+    requested = dict(EXPORTS)
+    if extra_exports:
+        requested.update(extra_exports)
+    for key, name in requested.items():
         value = probe.get(key)
         if not isinstance(value, bytes):
             raise ValueError('missing raw export ' + key)
@@ -115,7 +119,7 @@ def snapshot(parent, label, driver_prefixes=('rtl812x-r44-',)):
         return {key: value for key, value in props.items()
                 if key.startswith(prefix) and isinstance(value, (str, int, bool))}
     value = {'label': label, 'captured_ns': load_helpers.now(), 'exports': exports,
-             'probe': scalars(probe, 'r44-'), 'driver': scalars(driver, driver_prefixes)}
+             'probe': scalars(probe, probe_prefixes), 'driver': scalars(driver, driver_prefixes)}
     write_json(out / 'snapshot.json', value)
     value['mapper'] = decode(probe['r44-mapper-raw'])
     return value

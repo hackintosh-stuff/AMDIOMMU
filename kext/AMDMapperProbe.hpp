@@ -53,6 +53,8 @@ public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
     IOReturn setProperties(OSObject *properties) override;
+    IOReturn callPlatformFunction(const OSSymbol *, bool,
+        void *, void *, void *, void *) override;
 
     uint64_t getPageSize() const override;
 
@@ -91,8 +93,15 @@ private:
     bool r44StartAuto();
     bool r44AttachAuto(IOService *);
     bool r44StopAuto();
-    bool r44Invalidate();
+    bool r44Invalidate(bool invalidateDevice = false);
     void r44PublishAuto();
+    // TODO(R47-PM-HARDWARE): validate real system sleep/resume when the
+    // platform supports it. Normal network operation does not invoke PM.
+    // Called synchronously by Lucy's existing gated PM actions. The normal
+    // network-family disable has retired TX and rebuilt RX before suspend.
+    IOReturn r47PowerTransition(UInt32);
+    bool r47SuspendAuto();
+    bool r47ResumeAuto();
     bool r44PrepareMappings(volatile UInt64 *, UInt64, UInt32, UInt32);
     bool r44QuiesceMappings();
     bool r44ReleaseMappings();

@@ -1,5 +1,67 @@
 # AMDIOMMU — authoritative source repository
 
+## Round47 candidate / IVRS controller discovery and PM implementation TODO
+
+Formal base: `576c11adf03ce024bcf019d88cdc8b30781a19cc`, the accepted Round46
+result-documentation successor; tree `8b79ac2fdafe40ee4d7686e3f0d82996d01760e5`.
+The deployed Round46 implementation is
+`9915c0f908bac8f2df2660fbace0fab80bf09c12`, with exactly the delivered candidate
+tree. The analyzer rerun passed 9/9 and reproduced the archived JSON. An
+independent raw/PT/TCP audit confirmed 272 MiB, TSO6 completion increments
+2057 and 136, four snapshots with 67 maps/1037 leaves/11 reachable tables,
+71204 completed commands, 278 wraps and zero target faults. The actual report
+records one planned boot, one load and one valid measurement.
+
+**Candidate: Lucy 1.1.232 / Probe 0.54.0, ordinary `amdiommu=auto`, IPv4 and
+IPv6 TSO enabled, MTU1500.** Continue in this Git checkout. Real Mac build,
+boot and the Round47 hardware acceptance remain to be performed.
+
+The normal mapper now reads ACPI IVRS and reuses the existing topology parser
+to resolve the current NIC's requester and owning IVHD unit. It locates the
+unit's actual PCI nub and verifies the firmware register base against the
+enabled Secure Device capability before mapping MMIO. Controller identity
+uses runtime IVRS/PCI information and the observed EFR, replacing the fixed
+MMIO address and fixed EFR equality in the ordinary startup path. This round
+still serves the existing single NIC on PCI segment 0 with its plain requester
+policy; it does not implement a system mapper or multi-device attachment.
+
+Retain the ordinary mapper ABI1, 4096 IOVA pages, 1024 live records, per-map
+32-page/32-run limits, RX64 groups and three fixed mappings. Probe's compatible
+version remains 0.53.0; Lucy requests 0.54.0 for the new PM entry. The Probe
+adds the IOACPIFamily dependency needed for the actual ACPI table API.
+
+The driver also includes a gated IOMMU suspend/resume path. It coordinates
+ordinary NIC disable and DMA stop with mapper freezing and controller stop;
+resume restores the same tables and rings, completes invalidations, and only
+then permits NIC enable. Existing live mappings and initial activation
+identity remain available across this path. The runtime EFR is also the
+same-controller reference for resume.
+
+**TODO(R47-PM-HARDWARE): actual system sleep/resume is not validated on this
+platform.** Do not trigger system sleep, a wake wait, or an artificial awake
+IOMMU stop/replay cycle in this round. PM implementation and host validation
+must not be reported as successful hardware power-management validation.
+The TODO remains separate from the ordinary mainline acceptance result.
+
+Use `tools/r47/build.sh` with the same pinned upstream inputs and generation
+flags. Runtime entry points are deploy.py, peer.py, boot-load.sh, load.py,
+capture.py, analyze.py and disarm-next.py under tools/r47. Use runs/r47,
+TCP9113, userspace token 0x47c0de47 and org.example.round47load.
+`R47Snapshot` collects ordinary counters and discovery evidence; the existing
+TSO6 counters retain their `rtl812x-r46-` names.
+
+The finite workload remains explicit AF_INET6 upload/download 128 MiB each,
+ordinary interface down/up, then upload/download 8 MiB each. Select existing
+local and peer IPv6 addresses; the tools do not create addresses or routes.
+The four phases remain before/pre-down/down/after-up. Each phase captures the
+complete mapper/live/PT evidence plus the actual IVRS bytes. The analyzer
+retains the nine ordinary checks and adds one IVRS/PCI discovery check;
+hardware PM is recorded separately as TODO and is not a required gate.
+
+On success, remove the finite job, set only the next boot to `amdiommu=off`,
+unmount EFI and confirm the peer exits. Keep the current ordinary mapper
+active and do not append a cleanup reboot.
+
 ## Accepted Round46 / ordinary IPv6 TCP and hardware TSO
 
 Formal base: `b7869df730b33107f16d277f4974b826df667c53`, the accepted Round45

@@ -180,12 +180,16 @@ SHARED = [
     ('static bool parseMmioBootArg() {', 'block_until', 'boot-arg parsers'),
 ]
 
+# This remains the historical monolith migration tool, not a generator for
+# today's independently maintained modules. MEMBERS also records their owner;
+# src/Ivrs*.cpp are reused library units registered directly in build-m1a.sh.
 MEMBERS = [
     ('AMDMapperProbe.cpp', 'entry point, IOMapper contract, kmod glue', [
         'bool org_example_AMDMapperProbe::initHardware',
         'bool org_example_AMDMapperProbe::init(',
         'bool org_example_AMDMapperProbe::start',
         'void org_example_AMDMapperProbe::stop',
+        'IOReturn org_example_AMDMapperProbe::callPlatformFunction',
         'IOReturn org_example_AMDMapperProbe::iovmMapMemory',
         'IOReturn org_example_AMDMapperProbe::iovmUnmapMemory',
         'IOReturn org_example_AMDMapperProbe::iovmInsert',
@@ -205,7 +209,12 @@ MEMBERS = [
         'bool org_example_AMDMapperProbe::r44AttachAuto',
         'bool org_example_AMDMapperProbe::r44StopAuto',
         'bool org_example_AMDMapperProbe::r44Invalidate',
+        'bool org_example_AMDMapperProbe::r47SuspendAuto',
+        'bool org_example_AMDMapperProbe::r47ResumeAuto',
         'void org_example_AMDMapperProbe::r44PublishAuto',
+    ]),
+    ('AMDMapperProbeDiscovery.cpp', 'runtime IVRS and PCI controller discovery', [
+        'bool r47DiscoverHardware',
     ]),
     ('AMDMapperProbeMapper.cpp', 'ordinary IOMapper allocation and translation', [
         'bool org_example_AMDMapperProbe::r44PrepareMappings',
@@ -215,6 +224,7 @@ MEMBERS = [
         'IOReturn org_example_AMDMapperProbe::r44MapMemory',
         'IOReturn org_example_AMDMapperProbe::r44UnmapMemory',
         'bool org_example_AMDMapperProbe::r44Translate',
+        'IOReturn org_example_AMDMapperProbe::r47PowerTransition',
         'void org_example_AMDMapperProbe::r44PublishMappings',
     ]),
     ('AMDMapperProbeB1B2.cpp', 'M1 mapper self-tests (B1, B2, B2a, B2b)', [
