@@ -309,7 +309,9 @@ int main(int argc, char **argv) {
             activePt[(3 + i / 256) * 512 + (i % 256) * 2 + j] =
                 ((pa & ~4095ULL) + j * 4096) | perm;
     }
-    activePt[2 * 512] = 0x70000000ULL | perm; // one contemporaneous TX IOVA
+    // One contemporaneous TX IOVA: the device only reads TX buffers, so the
+    // standard TX path maps it read-only and the leaf carries IR without IW.
+    activePt[2 * 512] = 0x70000000ULL | (perm & ~(1ULL << 62));
     r17domain::Command retire = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
                                 20000, 20000, 2242};
     identity.addedLeaves = 0;

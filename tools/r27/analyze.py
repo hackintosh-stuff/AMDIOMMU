@@ -197,8 +197,14 @@ def physical_pages(ranges):
     return pages
 
 
-def page_leaves(pt, root_pa, pt_base, level):
-    """Enumerate every present 4 KiB RW leaf in an immutable arena copy."""
+def page_leaves(pt, root_pa, pt_base, level, read_only_window=None):
+    """Enumerate every present 4 KiB leaf in an immutable arena copy.
+
+    Identity leaves and RX mappings are read/write because the device reads and
+    writes them. The standard TX path maps its IOVA window device-read-only
+    (the device only reads those buffers), so leaves inside that window may
+    carry IR without IW; every other leaf must have both bits.
+    """
     A.need(level in (3, 4), 'impossible page-table root level')
     pages, pending = {}, [(root_pa, level, 0)]
     while pending:
@@ -211,7 +217,9 @@ def page_leaves(pt, root_pa, pt_base, level):
                 continue
             address = base | (index << (12 + 9 * (depth - 1)))
             target = entry & 0x000FFFFFFFFFF000
-            A.need(entry & A.PTE_IR and entry & A.PTE_IW and
+            device_read_only = bool(read_only_window) and \
+                read_only_window[0] <= address < read_only_window[1]
+            A.need(entry & A.PTE_IR and (entry & A.PTE_IW or device_read_only) and
                    (entry >> 9) & 7 == depth - 1,
                    'page table contains a large leaf or wrong permissions/level')
             if depth > 1:
@@ -846,7 +854,8 @@ def check(cap):
         active_pt = blob('m2-3s-rx-active-pt-raw', 'r38-active-pt-raw.bin')
         A.need(len(active_pt) == len(pt) == dh['ptBytes'],
                'active and final page-table arena sizes differ')
-        active_leaves = page_leaves(active_pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'])
+        active_leaves = page_leaves(active_pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'],
+                                    (dh['iovaBase'], dh['iovaBase'] + dh['iovaBytes']))
         active_identity = {address for address, target in active_leaves.items() if address == target}
         rx_end = RX_BASE + RX_COUNT * RX_STRIDE
         A.need(active_identity == fixed_pages and
