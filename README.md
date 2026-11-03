@@ -37,8 +37,33 @@ sh tools/r27/build.sh _scratch/lucy-upstream
 The native generator family remains `--tx 21 --rx 34`; this round evolves that
 implementation in place. Run defaults are `runs/r35` and `org.example.round35load`,
 with token `0x35c0de35`. The compatible `R31Stop` RPC and service-owned domain
-continue. Software checks reuse the existing focused cases. macOS SDK build and
-one normal hardware run must still be recorded for this new candidate.
+continue. Software checks reuse the existing focused cases.
+
+**Round35 hardware acceptance PASSED (14/14).** One planned boot and one valid
+measurement. Both sides report `lucy-normal-ring` with the same nonzero ring id
+28726637338; the probe covered 1024 real bootstrap ranges and recorded zero
+experimental pool RPCs and zero spares, while the driver reported
+`experimental-pool=0` and `spares=0`. Native Prepare/Authorize ran on Lucy's
+ordinary ring, `ResumePhysical` completed at 172749769439 ns between
+translate-off and the driver's normal resume, and per-slot replacement resumed
+from that instant. RX maps and unmaps were both 10652 = 9628 posted DMA plus
+1024 install-time preparations; posted equalled completed at 9628, 2598 real
+replacements occurred, 933 of 1024 slots differed between first and final
+retained generation addresses, and all 1024 slots returned to their current
+mbuf with owners/boundPairs/pending zero. TX retired 10295 with rejected 0;
+domain maps 10304 = 10295 + 9 capacity probes; the command ring completed
+41915/41915 through 163 wraps. The setup worker exited before both domain
+observations, which shared the same root/DT/command addresses across the
+125.1189 s idle; R28T drained 1008/1008, R29D completed before TX close, and
+3/3 post-exit ordinary probes succeeded.
+
+Deployed source commit: `e925368111fd92a567d348040a6026e63205ae70`. This
+documentation update is not a deployed revision.
+
+Round35 result and archive are outside this source repository:
+[Round35 result](<../../docs/m2-3p-round35-result.md>) and
+[evidence archive](<../../docs/evidence/r35-final-20261103.tgz>)
+(SHA256 `3db51468bc095b4cee8194708c7e2760de54387b25d7ce607f971c0bd7192c55`).
 
 This step retains the necessary physical identity coverage during entry and
 restoration, and the existing synchronous per-slot RX invalidations. RX batch
