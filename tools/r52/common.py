@@ -94,13 +94,18 @@ def registry():
         ['ioreg', '-a', '-l', '-w0', '-p', 'IOService']))
 
 
+def bsd_name(node):
+    """ioreg -a exposes the human-readable property key; accept both spellings."""
+    return node.get('BSD Name') or node.get('IOBSDName')
+
+
 def selected_drivers(tree, config):
     result = {}
     for role, endpoint in roles(config).items():
         matches = [(node, parents) for node, parents in nodes(tree)
                    if (node.get('IOObjectClass') == 'RTL8125' or
                        'rtl812x-r44-mapper-found' in node) and
-                   any(child.get('IOBSDName') == endpoint['interface']
+                   any(bsd_name(child) == endpoint['interface']
                        for child, _ in nodes(node))]
         if len(matches) != 1:
             raise ValueError('expected one Lucy instance owning ' + endpoint['interface'])
