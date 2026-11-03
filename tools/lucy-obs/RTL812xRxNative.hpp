@@ -1,6 +1,8 @@
 /* Native RX: driver-owned receive mappings for the ordinary replacement path.
  * The existing Lucy ring has no experimental pool. Round36 batches confirmed
  * map/unmap invalidations while standard DMA callbacks remain synchronous.
+ * Round37 separately exports the three driver-owned physical DMA objects
+ * needed alongside the initial RX buffers by the sparse bootstrap table.
  * Kernel-only control pointers stay in Request/Binding. Exported snapshots
  * contain numeric identities, mapping evidence and completed DMA witnesses.
  * Each slot keeps its first IOVA DMA lifecycle and its latest lifecycle.
@@ -15,6 +17,7 @@ static const char kFunctionName[] = "rtl812x-r34-rx-native";
 static const u64 kIovaBase = 0x1000200000ULL;
 enum {
     kVersion = 3, kCount = 1024, kCapacity = 4096, kPagesPerSlot = 2,
+    kPhysicalLayoutVersion = 1, kPhysicalSpanCount = 3,
     kSamples = 1, kTailMax = 4096, kBatchSize = 16,
     kInstall = 1, kSnapshot = 2, kDisarm = 3, kDrain = 4, kRelease = 5,
     kPrepare = 6, kAuthorize = 7, kResumePhysical = 8,
@@ -28,6 +31,15 @@ enum {
     kFlagMapFailed = 1, kFlagUnmapFailed = 2, kFlagAddressMismatch = 4,
     kFlagStopped = 8, kFlagCoverFailed = 16, kFlagRingReset = 32,
     kFlagCopyFailed = 64
+};
+// Immutable for the prepared ring: TX descriptors, RX descriptors, tally.
+// This separate property leaves the native RX control/snapshot ABI unchanged.
+struct PhysicalSpan {
+    u64 pa, bytes;
+};
+struct PhysicalLayout {
+    u32 version, bytes, generation, count;
+    PhysicalSpan spans[kPhysicalSpanCount];
 };
 struct MapRecord {
     u64 generation, memory, command, pa, iova, mapLength;
@@ -85,6 +97,8 @@ struct Request {
     Callback callback;
     Snapshot out;
 };
+static_assert(sizeof(PhysicalSpan) == 16, "round37 physical DMA span");
+static_assert(sizeof(PhysicalLayout) == 64, "round37 physical DMA layout");
 static_assert(sizeof(MapRecord) == 224, "round34 RX mapping record");
 static_assert(sizeof(BackendSlot) == 464, "round34 RX backend slot");
 static_assert(sizeof(BackendSnapshot) == 475216, "round34 RX backend snapshot");

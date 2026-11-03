@@ -1,5 +1,38 @@
 # AMDIOMMU — authoritative source repository
 
+## Current Round37 / owned sparse physical DMA mappings
+
+Base: `11b7c10975f8fd021624f10bc23fa9863231f1ca`, the documentation successor
+of the accepted Round36 implementation `70d638df5bb3a5b5c421079107abe17b61b2cd64`.
+Round36's original capture was independently reanalyzed: all 14 checks passed.
+Its implementation tree exactly matches the prepared Round37 preimage.
+
+Candidate: Lucy **1.1.222** / Probe **0.46.0**; TX domain4/native7/std5 and
+native RX ABI3 remain unchanged. A separate 64-byte PhysicalLayout records
+Lucy's owned TX descriptor ring, RX descriptor ring and hardware statistics
+buffer, with the ring generation and each actual physical span.
+
+- Native sessions start with an empty root and add 4 KiB identity leaves only
+  for those fixed DMA spans and the 1024 ordinary RX bootstrap buffers.
+- Current buffers restored at stop receive only their required 4 KiB leaves;
+  missing mappings are confirmed before physical OWN is published.
+- Bootstrap, IOVA and restore tables use the existing arena's available space
+  in sequence. TX standard mapping and RX batch16 behavior remain in place.
+- The final raw page table is checked against the union of fixed DMA,
+  original RX and restored RX page spans. Every remaining leaf must be a
+  4 KiB identity leaf; no blanket 0..16 GiB identity map is built.
+
+The existing 14-check normal run remains the acceptance workload. Bootstrap
+mappings remain until domain teardown; active removal is a later change.
+Restore cover invalidations are separate from RX map/unmap batch savings.
+Use the fixed Git checkout and `_scratch/lucy-upstream`; generator selection
+remains `--tx 21 --rx 34`. The build runner uses `--check-r37`, `runs/r37`
+and `org.example.round37load` with token `0x37c0de37`.
+Existing focused host checks, generated receive-loop checks and actual sparse
+bootstrap/backend checks passed during preparation. The accepted baseline,
+release metadata and final patch application are verified separately.
+A real macOS SDK build and one normal hardware acceptance run remain outstanding.
+
 ## Accepted Round36 / RX invalidation batches
 
 Base: `051c90050b195d5ae388018da4463e785c38e9ac`, the documentation successor

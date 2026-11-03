@@ -80,6 +80,10 @@ int main() {
                 offsetof(r34rx::BackendSnapshot, slots), sizeof(r34rx::BackendSlot));
     std::printf("  \"rx_native_witness_bytes\": %zu, \"rx_native_map_record_bytes\": %zu,\n",
                 sizeof(r34rx::Witness), sizeof(r34rx::MapRecord));
+    std::printf("  \"physical_layout_version\": %u, \"physical_layout_bytes\": %zu,\n",
+                r34rx::kPhysicalLayoutVersion, sizeof(r34rx::PhysicalLayout));
+    std::printf("  \"physical_layout_header\": %zu, \"physical_span_bytes\": %zu, \"physical_span_count\": %u,\n",
+                offsetof(r34rx::PhysicalLayout, spans), sizeof(r34rx::PhysicalSpan), r34rx::kPhysicalSpanCount);
     std::printf("  \"pool_version\": %u, \"pool_spares\": %u,\n",
                 r15pool::kVersion, r15pool::kSpareCount);
     std::printf("  \"pool_snapshot_bytes\": %zu, \"pool_request_bytes\": %zu,\n",
@@ -212,7 +216,12 @@ def check():
                           ('RX_BACKEND_HEADER', want['rx_native_backend_header']),
                           ('RX_BACKEND_SLOT_BYTES', want['rx_native_backend_slot_bytes']),
                           ('RX_WITNESS_BYTES', want['rx_native_witness_bytes']),
-                          ('RX_MAP_RECORD_BYTES', want['rx_native_map_record_bytes'])]
+                          ('RX_MAP_RECORD_BYTES', want['rx_native_map_record_bytes']),
+                          ('PHYSICAL_LAYOUT_VERSION', want['physical_layout_version']),
+                          ('PHYSICAL_LAYOUT_BYTES', want['physical_layout_bytes']),
+                          ('PHYSICAL_LAYOUT_HEADER', want['physical_layout_header']),
+                          ('PHYSICAL_SPAN_BYTES', want['physical_span_bytes']),
+                          ('PHYSICAL_SPAN_COUNT', want['physical_span_count'])]
     for name, expect in current_pairs:
         if current.get(name) != expect:
             bad.append('%s: %s=%r headers=%r' %
@@ -276,7 +285,7 @@ def check_r26():
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in ('--check-r32', '--check-r34', '--check-r35', '--check-r36'):
+    if len(sys.argv) > 1 and sys.argv[1] in ('--check-r32', '--check-r34', '--check-r35', '--check-r36', '--check-r37'):
         want = abi()
         pins = {'domain_version': 4, 'domain_bytes': 44592,
                 'domain_record_bytes': 1304, 'domain_records_offset': 80,
@@ -290,13 +299,17 @@ def main():
                 'rx_request_bytes': 344192, 'rx_backend_bytes': 204864,
                 'rx_tail_seq_offset': 44, 'pool_version': 2, 'pool_spares': 1024,
                 'pool_snapshot_bytes': 114808, 'pool_request_bytes': 114856}
-        if sys.argv[1] in ('--check-r34', '--check-r35', '--check-r36'):
-            pins.update({'rx_native_version': {'--check-r34': 1, '--check-r35': 2, '--check-r36': 3}[sys.argv[1]],
+        if sys.argv[1] in ('--check-r34', '--check-r35', '--check-r36', '--check-r37'):
+            pins.update({'rx_native_version': {'--check-r34': 1, '--check-r35': 2, '--check-r36': 3, '--check-r37': 3}[sys.argv[1]],
                          'rx_native_count': 1024,
                          'rx_native_driver_bytes': 270432, 'rx_native_backend_bytes': 475216,
                          'rx_native_driver_header': 96, 'rx_native_driver_slot_bytes': 264,
                          'rx_native_backend_header': 80, 'rx_native_backend_slot_bytes': 464,
                          'rx_native_witness_bytes': 104, 'rx_native_map_record_bytes': 224})
+        if sys.argv[1] == '--check-r37':
+            pins.update({'physical_layout_version': 1, 'physical_layout_bytes': 64,
+                         'physical_layout_header': 16, 'physical_span_bytes': 16,
+                         'physical_span_count': 3})
         bad = {k: (want.get(k), v) for k, v in pins.items() if want.get(k) != v}
         if bad:
             print('%s ABI MISMATCH: %r' % (sys.argv[1][8:], bad))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round36: Lucy's ordinary RX ring with native mapping and replacement.
+"""Round37: ordinary RX batching with exact physical DMA coverage.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,7 +29,7 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round36-normal-RX-ring; no-experimental-pool-or-spares; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
+SCOPE = 'round37-normal-RX-ring; owned-sparse-4k; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
@@ -39,6 +39,8 @@ RX_DRIVER_BYTES, RX_BACKEND_BYTES = 270432, 475216
 RX_DRIVER_HEADER, RX_DRIVER_SLOT_BYTES = 96, 264
 RX_BACKEND_HEADER, RX_BACKEND_SLOT_BYTES = 80, 464
 RX_WITNESS_BYTES, RX_MAP_RECORD_BYTES = 104, 224
+PHYSICAL_LAYOUT_VERSION, PHYSICAL_LAYOUT_BYTES = 1, 64
+PHYSICAL_LAYOUT_HEADER, PHYSICAL_SPAN_BYTES, PHYSICAL_SPAN_COUNT = 16, 16, 3
 RX_BASE, RX_STRIDE, RX_CAPACITY = 0x1000200000, 8192, 4096
 ALL_STANDARD_MODE = 2
 DOMAIN_VERSION, DOMAIN_HEADER, DOMAIN_RECORD_BYTES = 4, 80, 1304
@@ -169,6 +171,58 @@ def rx_leaf_address(pt, root_pa, pt_base, level, iova):
         pa = entry & 0x000FFFFFFFFFF000
         level -= 1
     return pa
+
+
+def decode_physical_layout(blob):
+    A.need(len(blob) == PHYSICAL_LAYOUT_BYTES, 'physical layout must be 64 bytes')
+    h = A.unpack('version bytes generation count', '4I', blob)
+    A.need(h['version'] == PHYSICAL_LAYOUT_VERSION and h['bytes'] == len(blob) and
+           h['generation'] > 0 and h['count'] == PHYSICAL_SPAN_COUNT,
+           'physical layout ABI or ring generation differs')
+    spans = []
+    for i, name in enumerate(('txRing', 'rxRing', 'tally')):
+        span = A.unpack('pa bytes', '2Q', blob, PHYSICAL_LAYOUT_HEADER + i * PHYSICAL_SPAN_BYTES)
+        span['name'] = name
+        spans.append(span)
+    return h, spans
+
+
+def physical_pages(ranges):
+    pages = set()
+    for pa, size in ranges:
+        A.need(pa > 0 and size > 0 and pa + size <= 1 << 52,
+               'physical DMA span is empty or outside the address width')
+        pages.update(range(pa & ~4095, pa + size, 4096))
+    return pages
+
+
+def identity_leaf_pages(pt, root_pa, pt_base, level):
+    """Enumerate the final tree, including leaves outside the declared spans.
+
+    All TX/RX IOVAs have retired at capture. Remaining leaves must therefore
+    be exact 4 KiB physical mappings, not an implicit RAM-wide aperture.
+    """
+    A.need(level in (3, 4), 'impossible physical identity root level')
+    pages, pending = set(), [(root_pa, level, 0)]
+    while pending:
+        table, depth, base = pending.pop()
+        A.need(table & 4095 == 0 and 0 <= table - pt_base <= len(pt) - 4096,
+               'physical identity table outside the exported arena')
+        entries = struct.unpack_from('<512Q', pt, table - pt_base)
+        for index, entry in enumerate(entries):
+            if not entry & 1:
+                continue
+            address = base | (index << (12 + 9 * (depth - 1)))
+            target = entry & 0x000FFFFFFFFFF000
+            A.need(entry & A.PTE_IR and entry & A.PTE_IW and
+                   (entry >> 9) & 7 == depth - 1,
+                   'physical identity tree contains a large leaf or wrong permissions/level')
+            if depth > 1:
+                pending.append((target, depth - 1, address))
+            else:
+                A.need(target == address, 'remaining physical leaf is not identity-mapped')
+                pages.add(address)
+    return pages
 
 
 def check(cap):
@@ -774,6 +828,22 @@ def check(cap):
                P['m2-3p-rx-ring-id'] ==
                driver_property('rtl812x-r35-rx-ring-id', True) == rh['ringId'] > 0,
                'RX bootstrap did not use the same ordinary Lucy ring without an experimental pool')
+        layout, fixed_spans = decode_physical_layout(
+            blob('rtl812x-r37-physical-layout', 'r37-physical-layout.bin'))
+        A.need(P['m2-3r-physical-mode'] == 'owned-sparse-4k' and
+               layout['generation'] == P['m2-3p-rx-ring-generation'] and
+               fixed_spans[0]['pa'] == bh['ringAddr'] and fixed_spans[0]['bytes'] == bh['ringBytes'],
+               'physical layout mode, ring generation or TX ring identity differs')
+        fixed_pages = physical_pages((s['pa'], s['bytes']) for s in fixed_spans)
+        bootstrap_pages = fixed_pages | physical_pages((s['originalPA'], RX_CAPACITY) for s in rxslots)
+        restored_pages = physical_pages((s['currentPA'], RX_CAPACITY) for s in rxslots)
+        expected_pages = bootstrap_pages | restored_pages
+        actual_pages = identity_leaf_pages(pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'])
+        A.need(actual_pages == expected_pages and
+               P['m2-3r-bootstrap-pages'] == len(bootstrap_pages) and
+               P['m2-3r-restore-added-pages'] == len(restored_pages - bootstrap_pages) and
+               P['m2-3r-identity-pages'] == len(actual_pages),
+               'final 4KiB identity leaves differ from fixed DMA plus original/current RX spans')
         resumed = driver_property('rtl812x-r35-rx-resume-time', True)
         A.need(P['m2-3p-rx-physical-resume'] == 'done' and
                P['m2-3e-t-translate-off'] <= resumed <= P['m2-3e-t-resume'],
@@ -886,6 +956,12 @@ def check(cap):
                 'driverOwnedPairs': len(memory_ids), 'liveOwners': 0,
                 'source': 'lucy-normal-ring', 'ringId': rh['ringId'],
                 'bootstrapRanges': RX_COUNT, 'experimentalPoolRPCs': 0, 'experimentalSpares': 0,
+                'physicalMode': 'owned-sparse-4k', 'physicalLayoutGeneration': layout['generation'],
+                'fixedPhysicalSpans': fixed_spans, 'fixedPhysicalPages': len(fixed_pages),
+                'bootstrapPages': len(bootstrap_pages),
+                'restoreAddedPages': len(restored_pages - bootstrap_pages),
+                'identityPages': len(actual_pages), 'identityBytes': len(actual_pages) * 4096,
+                'physicalEvidence': 'all final present leaves; exact 4KiB union of fixed DMA and original/current RX spans',
                 'normalReplacementResumedAt': resumed,
                 'mapInvalidations': batch_stats['map-invalidations'],
                 'unmapInvalidations': batch_stats['unmap-invalidations'],

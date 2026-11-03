@@ -51,11 +51,13 @@ DECLARATIONS = r'''
 # emulator; the executable assertions below target actual mapper callbacks.
 LIFECYCLE_APIS = r'''
 class OSSymbol;
+class OSObject;
 class IOService {
 public:
     unsigned refs=1;
     void retain() { ++refs; }
     void release() { assert(refs); --refs; }
+    OSObject *copyProperty(const char *) { return nullptr; }
     IOReturn callPlatformFunction(const OSSymbol *,bool,void *,void *,void *,void *)
         { return kIOReturnSuccess; }
 };
@@ -298,6 +300,12 @@ def harness():
     prefix = prefix.replace('kIOReturnNoResources=6,',
                             'kIOReturnNoResources=6, kIOReturnNoMemory=7, kIODirectionIn=8, kIODMACommandOutputHost64=9,')
     prefix = prefix.replace('class IOService {};', LIFECYCLE_APIS)
+    prefix = prefix.replace('class OSData : public OSObject {\npublic:', r'''class OSData : public OSObject {
+public:
+    unsigned getLength() const { return 0; }
+    const void *getBytesNoCopy() const { return nullptr; }
+''')
+    prefix += '\n#define OSDynamicCast(type, object) dynamic_cast<type *>(object)\n'
     prefix += base.section(header, 'class R27ProbeTimer :', '// ---- probeRawMapper')
     prefix = prefix.replace('class IODMACommand {};', DMA_APIS)
     prefix = prefix.replace('class IOMemoryDescriptor {\npublic:', r'''class IOMemoryDescriptor {

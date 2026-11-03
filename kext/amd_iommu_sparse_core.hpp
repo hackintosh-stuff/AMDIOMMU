@@ -1,6 +1,7 @@
-// Round 15: bounded, allocation-free additions to an INACTIVE identity table.
-// Only callers with retained ownership may supply ranges. No RAM-top inference,
-// physical-memory probing, leaf splitting, or live-table mutation is performed.
+// Bounded, allocation-free identity additions for caller-owned DMA ranges.
+// Bootstrap runs while the table is inactive. A live caller holds its domain
+// lock and confirms invalidation before exposing a new physical DMA address.
+// No RAM-top inference, physical-memory probing or leaf splitting is performed.
 #pragma once
 #include "amd_iommu_pte_core.hpp"
 

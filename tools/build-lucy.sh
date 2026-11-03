@@ -202,9 +202,9 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.221</string>
+	<string>1.1.222</string>
 	<key>CFBundleVersion</key>
-	<string>1.1.221</string>
+	<string>1.1.222</string>
 	<key>IOKitPersonalities</key>
 	<dict>
 		<key>RTL8125</key>

@@ -11,4 +11,4 @@ python3 -B tools/apply-lucy-obs2.py "$SRC" --tx 21 --rx 34
 python3 -B tools/r27/check-local.py --source "$SRC/RTL812xLucy/RTL812xLucy.cpp"
 sh tools/build-lucy.sh "$SRC"
 sh tools/build-m1a.sh
-printf '%s\n' 'Round36 built: RTL812xLucy 1.1.221; AMDMapperProbe 0.45.0; TX native7/std5/domain4; native RX3 batch16 invalidations; ordinary-ring1024; service-owned device domain'
+printf '%s\n' 'Round37 built: RTL812xLucy 1.1.222; AMDMapperProbe 0.46.0; TX native7/std5/domain4; native RX3 batch16 invalidations; ordinary-ring1024; service-owned device domain'

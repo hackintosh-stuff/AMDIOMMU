@@ -406,14 +406,15 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     //
     // 2 MiB 模式：1 根 + 1 L2 + 16 叶子 + 1 空根 = 19 页 = 76 KiB
     // 4 KiB 模式：1 根 + 1 L2 + 32 叶子 + 1 空根 = 35 页 = 140 KiB
-    const UInt32 basePtPageCount =
+    const bool nativeSparse = fR31Session && !fM22b2SleepOnly;
+    const UInt32 legacyBasePtPageCount =
         fM22b2Use4K ? M2B2_4K_TOTAL_PAGES
                     : (fM22b2Use3L ? M2B2_3L_TOTAL_PAGES : M2B2_TOTAL_PAGES);
-    // Sparse bootstrap tables and the TX/RX IOVA subtree have separate budgets.
-    // Native sessions map the 1024 existing RX buffers; only the finite path
-    // also allocates/maps the historical 1024 experimental spares.
-    // This is table capacity, NOT an identity-mapped RAM limit.
-    const UInt32 ptPageCount = basePtPageCount + 256u + M2B2_IOVA_RESERVED_PAGES;
+    // Native starts with only the root and an independent empty reserve page.
+    // Keep the existing allocation capacity, but share all remaining pages
+    // between the actual bootstrap ranges, IOVA tables and physical restore.
+    const UInt32 basePtPageCount = nativeSparse ? 2u : legacyBasePtPageCount;
+    const UInt32 ptPageCount = legacyBasePtPageCount + 256u + M2B2_IOVA_RESERVED_PAGES;
     const UInt64 ptBytes = (UInt64)ptPageCount * M2B2_PAGE_SIZE;
 
     IOBufferMemoryDescriptor *ptMem =
@@ -523,7 +524,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // 物理地址换算：页号 → 物理地址
     // ptPA 是这块连续内存的物理基址，第 n 页的物理地址 = ptPA + n*4096
     const UInt64 rootPA = (UInt64)ptPA + rootPageIdx * M2B2_PAGE_SIZE;
-    const UInt64 l2PA   = (UInt64)ptPA + l2PageBase  * M2B2_PAGE_SIZE;
+    UInt64 l2PA = (UInt64)ptPA + l2PageBase * M2B2_PAGE_SIZE;
 
     volatile UInt64 *root = pt + rootPageIdx * M2B2_PTE_COUNT;
     volatile UInt64 *l2   = pt + l2PageBase  * M2B2_PTE_COUNT;
@@ -533,11 +534,14 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // 4 KiB 模式：只映射 64 MiB，同样 idx3 = 0。
     // 【3 级模式】根表本身就是"第 2 级"，**没有 L2 这一层**：
     //   根表项直接指向叶子表，所以这里不能写 root[0] = TablePte(3,...)。
-    if (!fM22b2Use3L) {
+    if (!nativeSparse && !fM22b2Use3L) {
         root[0] = m2b2TablePte(3, l2PA);
     }
 
-    if (fM22b2Use3L) {
+    if (nativeSparse) {
+        // r34RxPrepareMap adds only Lucy's fixed DMA objects and current RX
+        // buffers. No RAM-wide leaf is installed for a native session.
+    } else if (fM22b2Use3L) {
         // ---- 3 级 + 2 MiB 大页：root(2) → 叶子(1)，覆盖 16 GiB ----
         //
         // PAGE_MODE_3_LEVEL = 3 → 根表是第 2 级，每项覆盖 1 GiB。
@@ -621,7 +625,8 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // Both stay copy-only until their initial mappings are confirmed.
     if (!fM22b2SleepOnly &&
         (!m2b2R15PrepareMap(pt, (UInt64)ptPA,
-                           ptPageCount - M2B2_IOVA_RESERVED_PAGES, basePtPageCount) ||
+                           nativeSparse ? ptPageCount : ptPageCount - M2B2_IOVA_RESERVED_PAGES,
+                           basePtPageCount) ||
          !r17Prepare(pt, (UInt64)ptPA, ptPageCount))) {
         setProperty("m2-b2-verdict", fR31Session ? "FAIL-native-ring-pre-map"
                                                : "FAIL-r15-owned-pre-map");
@@ -630,19 +635,28 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         semMd->release(); evtMd->release();
         return;
     }
-    setProperty("m2-b2-pt", "built-4level-identity");
-    setProperty("m2-b2-leaf-mode", fM22b2Use4K ? "4KiB" : "2MiB");
+    if (nativeSparse) {
+        // The sparse helper allocated the actual child after the empty page.
+        // Carry that address into the service-owned domain and later dumps.
+        l2PA = fM22b2Use3L ? rootPA : root[0] & M2B2_PTE_ADDR_MASK;
+        l2 = pt + (l2PA - (UInt64)ptPA) / sizeof(UInt64);
+    }
+    setProperty("m2-b2-pt", nativeSparse ? "built-owned-sparse-4k" : "built-4level-identity");
+    setProperty("m2-b2-leaf-mode", (nativeSparse || fM22b2Use4K) ? "4KiB" : "2MiB");
+    if (nativeSparse) setProperty("m2-b2-leaf-mode-src", "native-owned-ranges");
     setHexProperty(this, "m2-b2-map-limit",
-                   fM22b2Use4K ? M2B2_4K_MAP_LIMIT : M2B2_IDENTITY_LIMIT);
+                   nativeSparse ? 0 : (fM22b2Use4K ? M2B2_4K_MAP_LIMIT : M2B2_IDENTITY_LIMIT));
     setHexProperty(this, "m2-b2-pt-root-pa", rootPA);
     setHexProperty(this, "m2-b2-pt-l2-pa", l2PA);
-    setHexProperty(this, "m2-b2-leaf-pages",
-                   fM22b2Use4K ? M2B2_4K_LEAF_PAGES : M2B2_LEAF_PAGES);
-    setHexProperty(this, "m2-b2-leaf-ptes",
-                   fM22b2Use4K ? M2B2_4K_LEAF_PTES : M2B2_LEAF_PTE_COUNT);
-    setHexProperty(this, "m2-b2-l2-pages", M2B2_L2_PAGES);
-    setHexProperty(this, "m2-b2-l1-pages",
-                   fM22b2Use4K ? M2B2_4K_L1_PAGES : 0);
+    if (!nativeSparse) {
+        setHexProperty(this, "m2-b2-leaf-pages",
+                       fM22b2Use4K ? M2B2_4K_LEAF_PAGES : M2B2_LEAF_PAGES);
+        setHexProperty(this, "m2-b2-leaf-ptes",
+                       fM22b2Use4K ? M2B2_4K_LEAF_PTES : M2B2_LEAF_PTE_COUNT);
+        setHexProperty(this, "m2-b2-l2-pages", M2B2_L2_PAGES);
+        setHexProperty(this, "m2-b2-l1-pages",
+                       fM22b2Use4K ? M2B2_4K_L1_PAGES : 0);
+    }
 
     // ---- 第 4 步：页表自检（软件走表，不碰硬件）----
     //
@@ -656,7 +670,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // 现在改成调用 amdpte::walkPageTable()，它要求逐级携带表级，
     // 并把"扩展页大小必须严格大于本级默认值"这条规范规则编进解码器。
     // 于是"构表错 + 自检错"这种共同错误会在自检阶段就被抓住。
-    {
+    if (!nativeSparse) {
         bool walkOk = true;
         UInt32 walkBad = 0;
         UInt64 walkFirstBad = 0;
@@ -2124,16 +2138,16 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
         setHexProperty(this, "m2-b2-dump-l2-pa", l2PA);
         setHexProperty(this, "m2-b2-dump-page-mode", (UInt64)ctx.pageMode);
         setHexProperty(this, "m2-b2-dump-pt-pages", (UInt64)ptPageCount);
-        const UInt64 dumpLimit = fM22b2Use4K ? M2B2_4K_MAP_LIMIT
-                                             : M2B2_IDENTITY_LIMIT;
+        const UInt64 dumpLimit = fR31Session ? 0 :
+            (fM22b2Use4K ? M2B2_4K_MAP_LIMIT : M2B2_IDENTITY_LIMIT);
         setHexProperty(this, "m2-b2-dump-map-limit", dumpLimit);
         const unsigned dumpRootLevel =
             fM22b2Use3L ? amdpte::LEVEL_1G : amdpte::LEVEL_512G;
         setHexProperty(this, "m2-b2-dump-root-level",
                        (UInt64)dumpRootLevel);
         setProperty("m2-b2-dump-leaf-encoding",
-                    fM22b2Use4K ? "NextLevel0-4KiB-default"
-                                : "NextLevel0-2MiB-default");
+                    (fR31Session || fM22b2Use4K) ? "NextLevel0-4KiB-default"
+                                               : "NextLevel0-2MiB-default");
 
         // 根表内容仍然导出（便于核对 root[0] 的编码），但**不再**用它
         // 推断下层内容。推断与观测必须分开。

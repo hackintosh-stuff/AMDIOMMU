@@ -75,8 +75,9 @@ RX15 path remains the default.
 Round 34 uses driver-owned virtual MD/command pairs for the normal RX
 replaceOrCopyPacket path. Each completed slot unmaps before mbuf delivery and
 remaps its current buffer before the next OWN store. Stop restores the current
-physical ring before release. R15 remains a bootstrap allocation snapshot; its
-spares do not participate in this receive path. Select --tx 21 --rx 34.
+physical ring before release. Round35 uses Lucy's ordinary ring without an experimental pool; Round36
+batches confirmed invalidations. Round37 also exports the driver's three owned
+physical DMA spans for sparse4K bootstrap. Select --tx 21 --rx 34.
 
 Usage:
     py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33|34]

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Focused Round36 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round37 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
 The positive fixture covers all 1024 RX map/post/done/restore/unmap lifecycles,
-including normal remapping, one matched business receive, and aligned/unaligned RX pages.
+including remapping, batch16/partial batches and exact physical DMA page coverage.
 Rejection cases cover missing restoration and corrupted RX command evidence.
 """
 import importlib.util
@@ -64,11 +64,13 @@ struct IOService;
 #include "RTL812xTxMapStd.hpp"
 #include "AMDAliveTxDomainNative.hpp"
 #include "RTL812xRxNative.hpp"
+#include "amd_iommu_sparse_core.hpp"
 #include <cstddef>
 static_assert(sizeof(r34rx::Snapshot) == 270432, "native RX driver snapshot");
 static_assert(sizeof(r34rx::BackendSnapshot) == 475216, "native RX backend snapshot");
 static_assert(offsetof(r34rx::Snapshot, slots) == 96, "native RX driver prefix");
 static_assert(offsetof(r34rx::BackendSnapshot, slots) == 80, "native RX backend prefix");
+static_assert(sizeof(r34rx::PhysicalLayout) == 64, "fixed physical DMA layout");
 
 static uint64_t sessionTime(uint64_t value) {
     return value >= 2152 ? value + 125000000000ULL : value;
@@ -86,7 +88,7 @@ int main(int argc, char **argv) {
     r20tx::Block b{};
     constexpr uint64_t base = 0x1000000000ULL, ptBase = 0x100000ULL;
     constexpr uint64_t perm = 1ULL | (1ULL << 61) | (1ULL << 62);
-    uint64_t pt[7 * 512]{};
+    amdsparse::u64 pt[32 * 512]{};
     pt[(base >> 30) & 511] = (ptBase + 4096) | perm | (2 << 9);
     for (uint32_t i = 0; i < 5; ++i)
         pt[512 + ((base >> 21) & 511) + i] = (ptBase + (2 + i) * 4096) | perm | (1 << 9);
@@ -270,6 +272,25 @@ int main(int argc, char **argv) {
         }
         ds.currentPA = ds.last.pa;
     }
+    // The final physical tree is the union of the initial ring, the current
+    // restored ring and three fixed DMA objects. Build it with the production
+    // sparse helper; none of the gaps between these spans should be present.
+    r34rx::PhysicalLayout physical{};
+    physical.version = r34rx::kPhysicalLayoutVersion;
+    physical.bytes = sizeof(physical); physical.generation = 2;
+    physical.count = r34rx::kPhysicalSpanCount;
+    physical.spans[0] = {b.ringAddr, b.ringBytes};
+    physical.spans[1] = {0x810000, 1024 * 16};
+    physical.spans[2] = {0x820000, 64};
+    amdsparse::Arena identity = {pt, ptBase, 32, 7, d.rootLevel, ptBase, 0, 0, nullptr};
+    for (const auto &span : physical.spans)
+        if (!amdsparse::mapOwnedRange(identity, span.pa, span.bytes)) std::abort();
+    for (const auto &slot : rx.slots)
+        if (!amdsparse::mapOwnedRange(identity, slot.originalPA, r34rx::kCapacity)) std::abort();
+    if (identity.addedLeaves != 1033) std::abort();
+    for (const auto &slot : rx.slots)
+        if (!amdsparse::mapOwnedRange(identity, slot.currentPA, r34rx::kCapacity)) std::abort();
+    if (identity.addedLeaves != 2569) std::abort();
     // Shift timestamp fields only; ABI, addresses, counters and protocol stay
     // identical. Both snapshots and real client logs include the idle gap.
 #define SESSION_TIME(field) field = sessionTime(field)
@@ -307,6 +328,7 @@ int main(int argc, char **argv) {
     if (damage == "unrestored") rx.slots[r34rx::kCount - 1].tPhysicalOwn = 0;
     save(dir, "r34-rx-driver.bin", &rx, sizeof(rx));
     save(dir, "r34-rx-backend.bin", &rb, sizeof(rb));
+    save(dir, "r37-physical-layout.bin", &physical, sizeof(physical));
     save(dir, "r21-domain-raw.bin", &d, sizeof(d));
     save(dir, "r21-driver-raw.bin", &g, sizeof(g));
     save(dir, "r21-std-raw.bin", &s, sizeof(s));
@@ -330,8 +352,11 @@ def properties():
          'm2-3l-tx-deadline': 0,
          'm2-3h-rx-mode': 'native-ring-batch16', 'm2-3o-rx-ready-time': 410,
          'm2-3p-rx-source': 'lucy-normal-ring', 'm2-3p-rx-bootstrap-ranges': 1024,
+         'm2-3p-rx-ring-generation': 2,
          'm2-3p-rx-pool-rpcs': 0, 'm2-3p-rx-spares': 0, 'm2-3p-rx-ring-id': 0x355200,
          'm2-3p-rx-physical-resume': 'done',
+         'm2-3r-physical-mode': 'owned-sparse-4k', 'm2-3r-bootstrap-pages': 1033,
+         'm2-3r-restore-added-pages': 1536, 'm2-3r-identity-pages': 2569,
          'm2-3q-rx-map-invalidations': 1284, 'm2-3q-rx-unmap-invalidations': 1284,
          'm2-3q-rx-map-batch-calls': 260, 'm2-3q-rx-unmap-batch-calls': 260,
          'm2-3q-rx-map-batch-slots': 4096, 'm2-3q-rx-unmap-batch-slots': 4096,
@@ -511,6 +536,7 @@ class AnalyzerTests(unittest.TestCase):
         if not compiler or not compiler[0]:
             raise RuntimeError('C++17 compiler required to test the real exported ABI')
         subprocess.run(compiler + ['-std=c++17', '-Wno-enum-compare', '-I', str(ROOT / 'tools/lucy-obs'),
+                        '-I', str(ROOT / 'kext'),
                         str(source), '-o', str(cls.exe)], check=True)
         cls.baseline = cls.root / 'baseline'
         cls.baseline.mkdir()
@@ -591,6 +617,15 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(by_id[RX_MAP_CHECK]['invalidationCyclesSaved'], 7672)
         self.assertEqual(by_id[RX_MAP_CHECK]['writablePages'], 1536)
         self.assertEqual(by_id[RX_MAP_CHECK]['leafTables'], 4)
+        self.assertEqual((self.capture / 'r37-physical-layout.bin').stat().st_size,
+                         analyzer.PHYSICAL_LAYOUT_BYTES)
+        self.assertEqual((by_id[RX_MAP_CHECK]['physicalMode'],
+                          by_id[RX_MAP_CHECK]['physicalLayoutGeneration']), ('owned-sparse-4k', 2))
+        self.assertEqual((by_id[RX_MAP_CHECK]['fixedPhysicalPages'],
+                          by_id[RX_MAP_CHECK]['bootstrapPages'],
+                          by_id[RX_MAP_CHECK]['restoreAddedPages'],
+                          by_id[RX_MAP_CHECK]['identityPages']), (9, 1033, 1536, 2569))
+        self.assertEqual(by_id[RX_MAP_CHECK]['identityBytes'], 2569 * 4096)
         self.assertEqual((by_id[RX_MAP_CHECK]['source'], by_id[RX_MAP_CHECK]['ringId'],
                           by_id[RX_MAP_CHECK]['experimentalPoolRPCs'],
                           by_id[RX_MAP_CHECK]['experimentalSpares']),

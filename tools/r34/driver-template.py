@@ -5,6 +5,8 @@ MD/command pair. Completion retires its mapping before replaceOrCopyPacket can
 deliver the old mbuf; the replacement is mapped before the next OWN publication.
 The existing ring is prepared directly without an R15 pool. Round36 batches
 up to sixteen already completed slots, without waiting across poll calls.
+Round37 exports the driver's actual TX/RX descriptor and tally spans so the
+bootstrap table can map only these objects and the frozen RX buffers.
 The older RX4 path remains selectable from its original template.
 """
 from pathlib import Path
@@ -398,6 +400,33 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
         s.businessToken = request->businessToken;
         p->generation = rxpostHdr ?
             __atomic_load_n(&rxpostHdr->ringGen, __ATOMIC_RELAXED) : 1u;
+        // These prepared, contiguous descriptors stay owned by Lucy for the
+        // lifetime of this ring. Read their raw PA and match the address Lucy
+        // programmed into the NIC; do not infer coverage from a RAM limit.
+        r34rx::PhysicalLayout physical = {};
+        physical.version = r34rx::kPhysicalLayoutVersion;
+        physical.bytes = sizeof(physical);
+        physical.generation = p->generation;
+        physical.count = r34rx::kPhysicalSpanCount;
+        IOMemoryDescriptor *physicalMemory[r34rx::kPhysicalSpanCount] = {
+            txBufDesc, rxBufDesc, statBufDesc
+        };
+        const UInt64 physicalAddress[r34rx::kPhysicalSpanCount] = {
+            txPhyAddr, rxPhyAddr, statPhyAddr
+        };
+        const UInt64 physicalLength[r34rx::kPhysicalSpanCount] = {
+            kTxDescSize, kRxDescSize, sizeof(RtlStatData)
+        };
+        for (UInt32 i = 0; i < r34rx::kPhysicalSpanCount; ++i) {
+            IOByteCount length = 0;
+            const UInt64 pa = physicalMemory[i] ? physicalMemory[i]->getPhysicalSegment(
+                0, &length, kIOMemoryMapperNone) : 0;
+            if (!pa || pa != physicalAddress[i] || length < physicalLength[i]) {
+                IOFree(p, sizeof(*p)); return kIOReturnNotAligned;
+            }
+            physical.spans[i].pa = pa;
+            physical.spans[i].bytes = physicalLength[i];
+        }
         for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
             UInt64 pa = 0;
             if (!r15PhysicalSpan(rxBufArray[slot].mbuf, &pa) ||
@@ -408,6 +437,11 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
             s.slots[slot].originalPA = pa;
             s.slots[slot].currentPA = pa;
         }
+        OSData *physicalRaw = OSData::withBytes(&physical, sizeof(physical));
+        if (!physicalRaw) { IOFree(p, sizeof(*p)); return kIOReturnNoMemory; }
+        const bool physicalPublished = setProperty("rtl812x-r37-physical-layout", physicalRaw);
+        physicalRaw->release();
+        if (!physicalPublished) { IOFree(p, sizeof(*p)); return kIOReturnNoMemory; }
         for (UInt32 slot = 0; slot < kNumTxDesc; ++slot) p->keepTx[slot] = 1;
         p->tPrepared = mach_absolute_time();
         s.ringId = p->tPrepared ? p->tPrepared : 1;
