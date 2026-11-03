@@ -2,7 +2,7 @@
 #include "AMDMapperProbeDiscovery.hpp"
 #include "amd_iommu/IvrsTopology.hpp"
 #include <IOKit/IOLib.h>
-#include <IOKit/acpi/IOACPIPlatformExpert.h>
+#include <IOKit/acpi/IOACPIPlatformDevice.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSIterator.h>
@@ -10,13 +10,6 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 namespace {
-// The platform expert's table lookup lives behind a protected virtual slot.
-// Re-exposing that exact slot keeps this a read-only query: no new state, no
-// extra object, and no second ACPI implementation is introduced.
-class R47AcpiTables : public IOACPIPlatformExpert {
-public:
-    using IOACPIPlatformExpert::getACPITableData;
-};
 constexpr UInt16 kR47PciSegment = 0;
 // Basic registers, command/event indices and status end below 0x4000. The
 // optional performance-counter aperture is not used by this backend.
@@ -45,6 +38,27 @@ IOPCIDevice *r47FindIommu(UInt16 deviceID) {
     it->release();
     return found;
 }
+
+// Any ACPI device exposes the firmware table set; the lookup itself is table
+// scoped, so one device is enough. The static IVRS table lives for the boot.
+IOACPIPlatformDevice *r47FindAcpiDevice() {
+    OSDictionary *matching = IOService::serviceMatching("IOACPIPlatformDevice");
+    if (!matching) return nullptr;
+    OSIterator *it = IOService::getMatchingServices(matching);
+    matching->release();
+    if (!it) return nullptr;
+    IOACPIPlatformDevice *found = nullptr;
+    OSObject *obj;
+    while ((obj = it->getNextObject())) {
+        IOACPIPlatformDevice *device = OSDynamicCast(IOACPIPlatformDevice, obj);
+        if (!device) continue;
+        device->retain();
+        found = device;
+        break;
+    }
+    it->release();
+    return found;
+}
 }
 
 bool r47DiscoverHardware(IOService *probe, IOPCIDevice *nic,
@@ -59,13 +73,12 @@ bool r47DiscoverHardware(IOService *probe, IOPCIDevice *nic,
     };
     probe->setProperty("r47-discovery-source", "acpi-ivrs+pci");
     probe->setProperty("r47-discovery-state", "reading-ivrs");
-    IOACPIPlatformExpert *acpi =
-        OSDynamicCast(IOACPIPlatformExpert, IOService::getPlatform());
-    if (!acpi) return failure("failed-acpi-platform");
+    IOACPIPlatformDevice *acpi = r47FindAcpiDevice();
+    if (!acpi) return failure("failed-acpi-device");
     // getACPITableData returns a borrowed const OSData. Retain a separate copy
     // as raw runtime evidence; the parser's views only live inside this call.
-    const OSData *table =
-        ((R47AcpiTables *)acpi)->getACPITableData("IVRS", 0);
+    const OSData *table = acpi->getACPITableData("IVRS", 0);
+    acpi->release();
     if (!table) return failure("failed-ivrs-missing");
     OSData *raw = OSData::withData(table);
     if (!raw) return failure("failed-ivrs-copy");
