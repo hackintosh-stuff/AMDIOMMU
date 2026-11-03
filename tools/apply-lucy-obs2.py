@@ -2126,6 +2126,7 @@ R47 = runpy.run_path(os.path.join(HERE, 'r47', 'driver-template.py'))
 R48 = runpy.run_path(os.path.join(HERE, 'r48', 'driver-template.py'))
 R49 = runpy.run_path(os.path.join(HERE, 'r49', 'driver-template.py'))
 R52 = runpy.run_path(os.path.join(HERE, 'r52', 'driver-template.py'))
+R53 = runpy.run_path(os.path.join(HERE, 'r53', 'driver-template.py'))
 # round -> (module, [headers written into the driver tree, in include order])
 TXR = {'16': (TX16, ['RTL812xTxMap.hpp']),
        '17': (TX17, ['RTL812xTxMapNative.hpp']),
@@ -2234,6 +2235,10 @@ def sync_headers(drv):
              (POOL_SRC, "RTL812xRxPool.hpp")]
     pairs += [(os.path.join(HERE, 'lucy-obs', name), name)
               for name in TXMAP_NAMES + RXMAP_NAMES]
+    if TX_SELECT == '21' and RX_SELECT == '34':
+        pairs.append((os.path.join(HERE, '..', 'kext',
+                                   'amd_iommu_device_policy.hpp'),
+                      'amd_iommu_device_policy.hpp'))
     for src, name in pairs:
         want = read(src)
         dst = os.path.join(drv, name)
@@ -2459,7 +2464,7 @@ def main():
                 fresh = R45['is_current'](hpp_text, cpp_text,
                     read(os.path.join(drv, 'RTL812xLucySetup.cpp')),
                     read(os.path.join(drv, 'RTL812xLucyVTD.cpp')),
-                    lambda text: R47['rewrite'](R46['rewrite'](text)))
+                    lambda text: R53['rewrite'](R47['rewrite'](R46['rewrite'](text))))
                 if not fresh:
                     stale = 'round45 normal mapped TCP/TSO'
             if fresh and TX_SELECT == '21' and RX_SELECT == '34':
@@ -2486,6 +2491,10 @@ def main():
                 fresh = R52['is_current'](cpp_text)
                 if not fresh:
                     stale = 'round52 per-device mapper identity'
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R53['is_current'](cpp_text)
+                if not fresh:
+                    stale = 'round53 selected or passthrough startup'
             if not fresh:
                 print("REFUSED: the tree is patched but its %s() body is STALE."
                       % stale)
@@ -2534,6 +2543,11 @@ def main():
         src = os.path.join(HERE, 'lucy-obs', name)
         write(os.path.join(drv, name), read(src))
         print("wrote  %s" % os.path.join(drv, name))
+
+    if TX_SELECT == '21' and RX_SELECT == '34':
+        name = 'amd_iommu_device_policy.hpp'
+        write(os.path.join(drv, name),
+              read(os.path.join(HERE, '..', 'kext', name)))
 
     # 2. the class
     hpp_text = replace_once(hpp_text, HPP_INCLUDE_OLD, HPP_INCLUDE_NEW,
@@ -2620,6 +2634,7 @@ def main():
             cpp_text, setup_text, vtd_text)
         hpp_text = R49['patch'](hpp_text)
         cpp_text = R52['patch'](cpp_text)
+        cpp_text = R53['patch'](cpp_text)
         write(hardware, hardware_text)
         write(hpp, hpp_text)
         write(setup, setup_text)

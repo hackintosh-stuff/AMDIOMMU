@@ -33,9 +33,9 @@ def serve(listener, token, seconds, mode, role, emit):
           'transfers': len(transfers), 'family': 'IPv6'})
 
 
-def main():
+def main(default_token=0x52c0de52):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--run-token', type=lambda value: int(value, 0), default=0x52c0de52)
+    parser.add_argument('--run-token', type=lambda value: int(value, 0), default=default_token)
     parser.add_argument('--mode', choices=('auto', 'off'), default='auto')
     parser.add_argument('--role', choices=('a', 'b'), required=True, help='a=down target; b=other device')
     parser.add_argument('--bind6', required=True, help='numeric peer IPv6 with this host scope if link-local')

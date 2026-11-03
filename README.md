@@ -1,5 +1,60 @@
 # AMDIOMMU — authoritative source repository
 
+## Candidate Round53 / mixed RTL8111 and RTL8127 device domains
+
+Base: `2be76054f30e208d57658dc7efa3df79c9050f7c`, the accepted R52 result
+documentation successor. Re-analysis of the original R52 off and auto
+captures passed 4/4 each and exactly reproduced their saved JSON results.
+R52 deployed `e69504d7d1e5a3e5bc2a897e4250905386891aa9`, including the real
+`BSD Name` versus `IOBSDName` tool correction. Both domains retained
+19 maps/1037 leaves/11 tables in three auto phases; 64 MiB completed with
+130.091535 ms upload payload overlap and zero target faults. The report's
+overlapping IOVA page counts are corrected here to 1037 / 973 / 1028 for
+before / down / after-up. Consecutive translation examples use 4 KiB IOVA
+steps (`0x80000000`, `0x80001000`, `0x80002000`, `0x80003000`).
+
+R53 adds an independent RealtekRTL8111 driver as a standard DMA client,
+sharing the already accepted controller with one RTL8127. It does not
+publish a system mapper or increase the existing per-domain capacity.
+The `amdiommu_devices=HHHH,HHHH` boot argument selects the two actual
+segment-zero PCI requesters. PCI nubs publish `amdiommu-dma-policy` so
+selected clients wait for their own mapper and unselected clients can
+continue on the physical path. With no explicit selection, the prior
+two-RTL8127 behavior remains available.
+
+The RTL8111 input is pinned to the official Mieze repository commit
+`a3dad34ed4f1e72805ce42f6d506f6917fdf79a0`. Its virtual-descriptor physical-segment lookup assumes a global mapper,
+so that lookup alone is insufficient with this project's `gSystem=false`.
+The adaptation uses explicit `IODMACommand` objects with the device's
+actual mapper for packet buffers as well as rings and tally memory,
+gets descriptor IOVAs through `gen64IOVMSegments`, and clears each command
+before completing or reusing its memory descriptor. It retains the
+current 64-page/16 MiB bounds, stops NIC DMA before the first DTE
+activation, and publishes a small per-instance snapshot.
+Both drivers use the same controller/domain backend; descriptor, packet
+and receive-buffer logic remains in the driver that owns it.
+
+Use `tools/r53` with A=RTL8111 and B=RTL8125 in the explicit endpoint
+configuration. The off baseline is 32 MiB. The auto workload remains
+64 MiB: concurrent normal traffic on both endpoints, B completing
+traffic while A is down, then A recovering after up. Four mainline
+analysis groups verify runtime identity, each driver's live DMA
+resources and complete page table, interface-bound byte integrity,
+and independent lifecycle with synchronous retirement and no faults.
+The two driver resource shapes are deliberately allowed to differ.
+
+Target versions: RTL812xLucy **1.1.238**, RealtekRTL8111 **3.0.53**
+(project R53 build), AMDMapperProbe **0.60.0**.
+Fetch the required pinned RTL8111 source files once into the fixed
+input directory with `tools/r53/fetch-rtl8111.py`, then build both fixed
+inputs with `sh tools/r53/build.sh <lucy-input> <rtl8111-input>`.
+Do not clone/copy the project or create another worktree for this round.
+
+This is a source candidate: actual macOS compilation and mixed-driver
+hardware validation remain to be performed. Keep ABI2, the R51 NPCache
+policy, synchronous unmap and the R52 shared command lock. Real system
+PM remains TODO; no PM or hot-plug test is added.
+
 ## Accepted Round52 / two device domains on one controller, PM hardware TODO
 
 Base: `a75864596ba0e371685f029e7978d795fce1d39f`, the accepted Round51

@@ -96,6 +96,11 @@ private:
     IOLock *fR52AttachLock = nullptr;
     UInt64 fR52SnapshotSequence = 0;
     bool fR52Stopping = false;
+    // R53 explicit segment-zero requester selection; an empty list keeps R52.
+    bool fR53SelectionExplicit = false;
+    UInt32 fR53Requesters[kR52MaxDomains] = {};
+    UInt32 fR53RequesterCount = 0;
+    bool r53ReadDeviceSelection();
     struct R52Domain;
     R52Domain *fR52Domain = nullptr;
     void r52AttachExistingDevices();

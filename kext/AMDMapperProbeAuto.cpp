@@ -3,6 +3,7 @@
 #include "AMDMapperProbeInternal.hpp"
 #include "AMDMapperProbeDiscovery.hpp"
 #include "amd_iommu_mapper_abi.hpp"
+#include "amd_iommu_device_policy.hpp"
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSCollectionIterator.h>
 
@@ -15,6 +16,34 @@ struct R52LockGuard {
     explicit R52LockGuard(IOLock *value) : lock(value) { IOLockLock(lock); }
     ~R52LockGuard() { IOLockUnlock(lock); }
 };
+// Mark each selected candidate before any preparation that can fail. Drivers
+// see either a completed per-device mapper or an explicit startup failure.
+struct R53AttachPolicy {
+    IOService *device;
+    bool mapped = false;
+    explicit R53AttachPolicy(IOService *value) : device(value) {
+        device->setProperty(amd_iommu_policy::kProperty,
+                            amd_iommu_policy::kSelected);
+    }
+    ~R53AttachPolicy() {
+        device->setProperty(amd_iommu_policy::kProperty, mapped ?
+            amd_iommu_policy::kMapped : amd_iommu_policy::kFailed);
+    }
+};
+
+bool r53ParseRequester(const char *text, UInt32 &requester) {
+    requester = 0;
+    for (UInt32 i = 0; i < 4; ++i) {
+        const char digit = text[i];
+        UInt32 value;
+        if (digit >= '0' && digit <= '9') value = digit - '0';
+        else if (digit >= 'a' && digit <= 'f') value = digit - 'a' + 10;
+        else if (digit >= 'A' && digit <= 'F') value = digit - 'A' + 10;
+        else return false;
+        requester = (requester << 4) | value;
+    }
+    return true;
+}
 constexpr UInt32 kR44TablePages = 16;
 // PCI IOMMU capability, not EFR: Linux v6.6 IOMMU_CAP_NPCACHE.
 constexpr UInt32 kR51NpCache = 1u << 26;
@@ -164,6 +193,31 @@ struct org_example_AMDMapperProbe::R44Controller {
 };
 
 
+bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
+    char selection[32] = {};
+    fR53SelectionExplicit = PE_parse_boot_argn("amdiommu_devices", selection,
+                                              sizeof(selection) - 1);
+    fR53RequesterCount = 0;
+    if (!fR53SelectionExplicit) {
+        setProperty("r53-device-selection", "default-rtl8127");
+        return true;
+    }
+    // One or two four-hex-digit segment-zero requester IDs, no saved BDFs.
+    const size_t length = strlen(selection);
+    if ((length != 4 && length != 9) ||
+        !r53ParseRequester(selection, fR53Requesters[0]) ||
+        (length == 9 && (selection[4] != ',' ||
+          !r53ParseRequester(selection + 5, fR53Requesters[1]) ||
+          fR53Requesters[0] == fR53Requesters[1]))) {
+        setProperty("r44-state", "failed-device-selection");
+        return false;
+    }
+    fR53RequesterCount = length == 9 ? 2 : 1;
+    setProperty("r53-device-selection", selection);
+    setProperty("r53-selected-count", fR53RequesterCount, 32);
+    return true;
+}
+
 bool org_example_AMDMapperProbe::r44StartAuto() {
     setProperty("r44-mode", "auto");
     setProperty("r52-role", "controller");
@@ -174,6 +228,7 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
     setProperty("r44-controller-ready", "no");
     setProperty("r44-system-mapper", "no");
     setProperty("m1b-gsystem", IOMapper::gSystem ? "NONNULL" : "NULL-as-expected");
+    if (!r53ReadDeviceSelection()) return false;
     fR52AttachLock = IOLockAlloc();
     if (!fR52AttachLock) return false;
     installPublishNotifier();
@@ -182,7 +237,7 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
         IOLockFree(fR52AttachLock); fR52AttachLock = nullptr;
         return false;
     }
-    // Notifications prepare new nubs before Lucy starts. Replay every already
+    // Notifications prepare new nubs before their DMA driver starts. Replay every already
     // published, unopened endpoint too; identical PCI IDs are not identities.
     r52AttachExistingDevices();
     r52PublishDomains();
@@ -194,17 +249,29 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
 bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
     if (!fR44Auto || fR52Owner || !fR52AttachLock) return false;
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
-    if (!nic || nic->configRead16(kIOPCIConfigVendorID) != 0x10ec ||
-        nic->configRead16(kIOPCIConfigDeviceID) != 0x8127) return false;
+    if (!nic || nic->configRead16(kIOPCIConfigVendorID) != 0x10ec) return false;
+    const UInt16 device = nic->configRead16(kIOPCIConfigDeviceID);
+    if (device != 0x8127 && device != 0x8168) return false;
     R52LockGuard attachment(fR52AttachLock);
-    if (fR52Stopping) return false;
     const UInt32 requester = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
+    bool selected = !fR53SelectionExplicit && device == 0x8127;
+    for (UInt32 i = 0; i < fR53RequesterCount; ++i)
+        if (fR53Requesters[i] == requester) selected = true;
+    if (!selected) {
+        nic->setProperty(amd_iommu_policy::kProperty,
+                         amd_iommu_policy::kPassthrough);
+        return false;
+    }
+    R53AttachPolicy policy(nic);
+    if (fR52Stopping) return false;
+    ++fPublishHits;
+    setProperty("r44-notify-hits", (unsigned long long)fPublishHits, 64);
     UInt32 slot = kR52MaxDomains;
     for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
         auto *mapper = fR52Mappers[i];
         if (!mapper) { if (slot == kR52MaxDomains) slot = i; continue; }
-        if (mapper->fNicDevice == nic) return true;
+        if (mapper->fNicDevice == nic) { policy.mapped = true; return true; }
         if (mapper->fR52Domain && mapper->fR52Domain->deviceID == requester) {
             setProperty("r52-attach-failure", "duplicate-requester");
             return false;
@@ -237,6 +304,7 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
         return false;
     }
     fR52Mappers[slot] = mapper;
+    policy.mapped = true;
     mapper->registerService();
     return true;
 }
@@ -400,7 +468,7 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slo
     setProperty("r47-efr-match", c->hardware.pciEfrSupported ?
         (c->hardware.firmwareEfrPresent ? "yes" : "firmware-absent") : "not-reported");
     // Identity and a complete domain snapshot precede copyMapperForDevice().
-    // Only first map activates this endpoint's DTE, after Lucy's reset.
+    // Only first map activates this endpoint's DTE, after the endpoint driver's reset.
     r44PublishMappings();
     if (!nic->setProperty("iommu-parent", this)) return false;
     setProperty("r44-parent", "set-before-driver-start");

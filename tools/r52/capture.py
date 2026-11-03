@@ -9,7 +9,7 @@ from common import OFF_PHASES, PHASES, VERSIONS, module, project_path, sha, writ
 C = module('_r52_capture_helpers', 'tools/r27/capture.py')
 
 
-def main():
+def main(round_id=52, abi='two-device-mapper-ABI2'):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('out')
     parser.add_argument('--load', required=True)
@@ -45,7 +45,7 @@ def main():
         except OSError as exc:
             errors.append(str(exc))
     stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    installed = C.collect_system(out, stamp, VERSIONS, 'r52', 'two-device-mapper-ABI2')
+    installed = C.collect_system(out, stamp, VERSIONS, 'r%d' % round_id, abi)
     commands = [('boot-args.txt', ['sysctl', '-n', 'kern.bootargs']),
                 ('probe.txt', ['ioreg', '-l', '-w0', '-r', '-c', 'org_example_AMDMapperProbe']),
                 ('driver.txt', ['ioreg', '-l', '-w0', '-r', '-c', 'RTL8125'])]
@@ -60,7 +60,7 @@ def main():
     C.write_text(out / 'dmesg.txt', text)
     files = {p.relative_to(out).as_posix(): {'bytes': p.stat().st_size, 'sha256': sha(p.read_bytes())}
              for p in sorted(out.rglob('*')) if p.is_file()}
-    write_json(out / 'manifest.json', {'scope': 'r52', 'mode': mode, 'captured_utc': stamp,
+    write_json(out / 'manifest.json', {'scope': 'r%d' % round_id, 'mode': mode, 'captured_utc': stamp,
                                      'installed': installed, 'files': files, 'errors': errors})
     print(json.dumps({'capture': args.out, 'files': len(files), 'errors': errors}, indent=2))
     return int(bool(errors))

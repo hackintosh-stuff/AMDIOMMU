@@ -173,6 +173,31 @@ def round_plan():
             'capacity_probe_maps': 9, 'capacity_probe_peak_owners': 8}
 
 
+def deployment_bundles():
+    """Later rounds may add a driver while preserving the original two-bundle flow."""
+    return list(zip(
+        (ROOT / 'build-lucy/RTL812xLucy.kext', ROOT / 'build-m1a/AMDMapperProbe.kext'),
+        (DRIVER_VERSION, PROBE_VERSION), REQUIRED_SYMBOLS))
+
+
+def recovery_sources(aux, config, targets, jobs):
+    return [aux, config] + targets + jobs
+
+
+def updated_boot_args(current_args, tokenarg):
+    return ' '.join([arg for arg in current_args.split()
+                     if not arg.startswith('amdiommu=')] + [tokenarg])
+
+
+def record_recovery_plan(backup, plan, sources, previous_boot_args):
+    """Optional round-specific recovery metadata, before replacing system files."""
+    pass
+
+
+def write_boot_config(config, cfg, bootargs, tokenarg):
+    run([sys.executable, ROOT / 'tools/r13/set-bootarg.py', config, tokenarg])
+
+
 def main(add_arguments=None, check_peer=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--efi', required=True, help='already mounted exact target EFI')
@@ -215,10 +240,11 @@ def main(add_arguments=None, check_peer=None):
     for name in ENTRY_POINTS:
         if not (HERE / name).is_file():
             raise ValueError('missing Round%d entry point: %s' % (ROUND, name))
-    bundles = [ROOT / 'build-lucy/RTL812xLucy.kext', ROOT / 'build-m1a/AMDMapperProbe.kext']
+    specs = deployment_bundles()
+    bundles = [row[0] for row in specs]
+    symbols = [row[2] for row in specs]
     expected = {}
-    for bundle, version, symbol in zip(bundles, (DRIVER_VERSION, PROBE_VERSION),
-                                       REQUIRED_SYMBOLS):
+    for bundle, version, symbol in specs:
         expected[bundle.stem] = bundle_identity(bundle, version, symbol)
     aux = Path('/Library/KernelCollections/AuxiliaryKernelExtensions.kc')
     jobs = sorted(Path('/Library/LaunchDaemons').glob('org.example.round*load.plist'))
@@ -226,7 +252,7 @@ def main(add_arguments=None, check_peer=None):
     for path in targets + jobs:
         if path.resolve() != path:
             raise ValueError('unexpected symlink in system replacement target: ' + str(path))
-    sources = [aux, config] + targets + jobs
+    sources = recovery_sources(aux, config, targets, jobs)
     if not all(source.exists() for source in sources):
         raise ValueError('a required recovery source is missing')
     total = sum(path.stat().st_size for source in sources
@@ -235,8 +261,7 @@ def main(add_arguments=None, check_peer=None):
     if total >= 1024 ** 3:
         raise ValueError('recovery copy must remain below 1 GiB')
     tokenarg = kernel_bootarg(args.token)
-    bootargs = ' '.join([arg for arg in current_args.split()
-                         if not arg.startswith('amdiommu=')] + [tokenarg])
+    bootargs = updated_boot_args(current_args, tokenarg)
     plan = round_plan()
     plan.update({'source_commit': source_ref['commit'], 'base_commit': BASE_COMMIT,
             'bootarg': tokenarg, 'mtu': 1500, 'tso4': TSO4, 'tso6': TSO6,
@@ -248,11 +273,12 @@ def main(add_arguments=None, check_peer=None):
         return 0
     run(['sudo', '-n', 'true'])
     backup.mkdir(parents=True, exist_ok=False)
+    record_recovery_plan(backup, plan, sources, current_args)
     for source in sources:
         run(['sudo', 'cp', '-Rp', source, backup / source.name])
     (backup / 'boot-args.txt').write_text(old, encoding='utf-8')
     out.mkdir(parents=True, exist_ok=True)
-    for bundle, target, symbol in zip(bundles, targets, REQUIRED_SYMBOLS):
+    for bundle, target, symbol in zip(bundles, targets, symbols):
         print('Verified replacement target: ' + str(target), flush=True)
         run(['sudo', 'rm', '-rf', target])
         run(['sudo', 'cp', '-R', bundle, target])
@@ -268,7 +294,7 @@ def main(add_arguments=None, check_peer=None):
     inspected = run(['sudo', 'kmutil', 'inspect', '-A', aux, '--show-kext-uuids'], capture=True)
     if not all(item['uuid'].lower() in inspected.lower() for item in expected.values()):
         raise ValueError('new UUID absent from rebuilt Auxiliary KC')
-    run([sys.executable, ROOT / 'tools/r13/set-bootarg.py', config, tokenarg])
+    write_boot_config(config, cfg, bootargs, tokenarg)
     run(['sudo', 'nvram', 'boot-args=' + bootargs])
     actual_args = output('nvram', 'boot-args').split(None, 1)[1].strip()
     actual_cfg = plistlib.loads(config.read_bytes())['NVRAM']['Add'][NVRAM_GUID]['boot-args']

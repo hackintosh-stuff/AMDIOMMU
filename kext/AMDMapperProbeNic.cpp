@@ -133,8 +133,14 @@ bool org_example_AMDMapperProbe::publishHandler(
     org_example_AMDMapperProbe *self =
         (org_example_AMDMapperProbe *)target;
     if (!self || !newService) return true;
+    if (self->fR44Auto) {
+        // Auto mode applies the explicit requester policy to both supported
+        // consumer families, including a passthrough marker for excluded NICs.
+        self->r44AttachAuto(newService);
+        return true;
+    }
 
-    // 只处理我们的靶子：device-id == 0x8127
+    // Legacy experiments keep their original RTL8127-only target.
     OSData *did = OSDynamicCast(OSData, newService->copyProperty("device-id"));
     bool isTarget = false;
     if (did && did->getLength() >= 2) {
@@ -152,8 +158,7 @@ bool org_example_AMDMapperProbe::publishHandler(
     // 但 kIOServiceSynchronous 下可能在同一实例上重复触发）
     if (self->fNicDevice == newService) return true;
 
-    if (self->fR44Auto) self->r44AttachAuto(newService);
-    else self->armNic(newService);
+    self->armNic(newService);
     return true;
 }
 
@@ -357,9 +362,7 @@ void org_example_AMDMapperProbe::r52AttachExistingDevices() {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     while (OSObject *object = it->getNextObject()) {
         IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, object);
-        if (!pci || pci->configRead16(kIOPCIConfigVendorID) != 0x10ec ||
-            pci->configRead16(kIOPCIConfigDeviceID) != 0x8127) continue;
-        r44AttachAuto(pci);
+        if (pci) r44AttachAuto(pci);
     }
 #pragma clang diagnostic pop
     it->release();

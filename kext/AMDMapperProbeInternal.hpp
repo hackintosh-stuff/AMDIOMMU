@@ -249,9 +249,9 @@ static inline BoundedProbeLayout<RunCapacity> probeLayout(
 // ------------------------------------------------------------- B2-b 靶子定位
 //
 // RTL8127 的 PCI ID 是 10EC:8127（Info.plist 里写作 0x812710ec）。
-// 板载 RTL8111H 是 10EC:8168，必须排除——它虽然也支持 iommu-parent，
-// 但驱动（RealtekRTL8111）会先探测 AppleVTD，不存在就不问 mapper，
-// 拿它做靶子验证不了任何东西（见 m1b-b2-design.md §3.2）。
+// Legacy B2 experiments keep excluding the onboard 10EC:8168. R53 auto mode
+// selects it explicitly with an adapted ordinary RealtekRTL8111 mapper client;
+// these historical path fallbacks do not participate in auto attachment.
 //
 // 时序教训（0.6.0 首次部署实测）：
 //   探针匹配 IOResources，start() 极早。此时 serviceMatching(IOPCIDevice)

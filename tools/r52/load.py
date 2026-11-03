@@ -68,7 +68,7 @@ def before_traffic(endpoints, token):
         return [record for role in ('a', 'b') for record in futures[role].result()]
 
 
-def main():
+def main(round_id=52, default_token=0x52c0de52):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('out')
     parser.add_argument('--config', required=True)
@@ -80,14 +80,14 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     token_path = out / 'token.txt'
     token = args.token if args.token is not None else (
-        int(token_path.read_text().strip(), 0) if token_path.exists() else 0x52c0de52)
+        int(token_path.read_text().strip(), 0) if token_path.exists() else default_token)
     P.request(token, *P.TRANSFERS[0])
     if (out / 'client.log').exists() or (out / 'snapshots').exists():
         raise ValueError('this output already contains a run; preserve its evidence')
     token_path.write_text('0x%08x\n' % token, encoding='utf-8')
     write_json(out / 'endpoints.json', config)
     write_json(out / 'run.json', {'mode': args.mode, 'token': token, 'config': config,
-                                 'roles': endpoints, 'scope': 'r52'})
+                                 'roles': endpoints, 'scope': 'r%d' % round_id})
     ok = False
     with (out / 'client.log').open('x', encoding='utf-8', newline='\n') as log:
         emit = lambda value: print(json.dumps(value, sort_keys=True), file=log, flush=True)
@@ -123,8 +123,8 @@ def main():
                   'transfers': len(P.transfers(args.mode))})
         except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
             emit({'event': 'result', 'side': 'client', 'ok': False, 'error': str(exc)})
-    (out / 'load.txt').write_text('scope : r52-two-device-ipv6\nmode : %s\nresult : %s\n' %
-                                (args.mode, 'OK' if ok else 'FAIL'), encoding='utf-8')
+    (out / 'load.txt').write_text('scope : r%d-two-device-ipv6\nmode : %s\nresult : %s\n' %
+                                (round_id, args.mode, 'OK' if ok else 'FAIL'), encoding='utf-8')
     return 0 if ok else 1
 
 
