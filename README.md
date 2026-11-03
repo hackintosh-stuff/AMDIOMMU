@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Candidate Round45 / ordinary IPv4 TCP and hardware TSO
+## Accepted Round45 / ordinary IPv4 TCP and hardware TSO
 
 Formal base: `035d1dd0f5e60afbc5f2715de3f425cb694d3f56`, the accepted Round44
 result-documentation successor; tree `0e3d8dbb967fa6e2984297c3e952b2b4759151ac`.
@@ -12,8 +12,22 @@ idle and ordinary interface down/up. There were three planned boots, four
 load attempts and one valid measurement. The recorded 16094/16027 map/unmap
 counts are boot totals; the valid phase1-to-pre-down interval adds 9830 each.
 
-**Candidate: Lucy 1.1.230 / Probe 0.53.0, `amdiommu=auto`, MTU1500,
-IPv4 TSO enabled and IPv6 TSO disabled.** Keep the accepted per-device mapper,
+**Accepted: nine ordinary mainline checks passed on the real Mac with Lucy
+1.1.230 / Probe 0.53.0, `amdiommu=auto`, MTU1500, IPv4 TSO enabled and IPv6
+TSO disabled.** The deployed implementation is
+`1a43d40039798e0ae21526c11c7151cfd289a834`, following the candidate
+`6eebf25f56e86c2b10a66f16a07752248193b63a` plus three direct-cause fixes:
+closing the IOResources/IOPCIDevice matching race with a bounded wait before
+the driver's one-shot mapper lookup, and two generator-anchor corrections.
+Real Mac compilation, codesign, boot and hardware acceptance all passed;
+two planned boots, two load runs and one valid measurement.
+
+The first boot lost the mapper to the driver start. IOKit does not order the
+two providers' matching, so the driver now waits up to two seconds for
+`iommu-parent` before opening the PCI nub, and the probe accepts an attached
+but unopened nub. No check, threshold or ABI was changed for this fix.
+
+Keep the accepted per-device mapper,
 4096-page allocator, ordinary mapper ABI1 and fixed/RX resource lifetime.
 The synchronous PCI nub lookup, compatible dependency `0.53.0`, IOResources
 probe lookup and normalized analysis comparison from the actual R44 fixes
@@ -58,11 +72,20 @@ Use `runs/r45` and the finite `org.example.round45load` job. Successful closure
 sets only the next boot to off and removes the job; the current mapper stays
 active. Keep source revisions in Git, without a round-specific repository copy.
 
-Host validation covers the generated driver methods, the four actual localhost
-TCP transfers and analyzer/tool contracts. Real Mac compilation and hardware
-acceptance of this candidate remain pending. The R45 result belongs in
-`../../docs/m2-3z-round45-result.md` with its actual evidence archive and source
-identity after that run completes.
+The real run moved 285212672 bytes in four TCP transfers with both endpoints'
+SHA256 and receipts verified; the two traffic windows added 2071 and 132 real
+TSO4 hardware completions, with max-length 65226, max-segments 17 and max-mss
+1448. All four phases kept one device domain and 67 complete live mappings
+(64 RX groups + 3 fixed); command completion reached 58754 with 229 real
+wraps and zero target faults. Observed throughput is reported without a
+line-rate threshold.
+
+Result and archive are outside this source repository:
+[Round45 result](<../../docs/m2-3z-round45-result.md>) and
+[evidence archive](<../../docs/evidence/r45-final-20261103.tgz>)
+(SHA256 `9ad3f165a6e9652c3fe374d5e840e41098ae10e9d3936edb2bc63725144f7aaa`).
+The finite job is removed, EFI is unmounted, the current mapper stays active
+and the next boot is `amdiommu=off`; no extra reboot was issued.
 
 ## Accepted Round44 / attach the RTL8125 to an ordinary device IOMapper
 
