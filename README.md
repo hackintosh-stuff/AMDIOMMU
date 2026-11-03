@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Current Round40 / all device DMA through IOVA after takeover
+## Round40 (attempt failed) / fixed DMA descriptors via standard IOVA
 
 Base: `db0d411e6e47d95a8e2209753debf88a4ff78595`, the accepted Round39
 result-documentation successor. Preserve the deployed implementation
@@ -37,7 +37,38 @@ behavior for startup probes because entry also resets the link. Keep the
 same 14 checks and existing fixture methods; no additional failure matrix.
 Use the same fixed checkout and upstream directory, `--tx 21 --rx 34`,
 `--check-r40`, `runs/r40`, `org.example.round40load`, token `0x40c0de40`.
-A real Mac build and one normal hardware acceptance run remain outstanding.
+**Round40 hardware attempt FAILED; the round is not accepted.** One planned
+boot, zero valid measurements. The Mac SDK build, EFI deployment, entry
+transition and exit path all completed as designed, and the three fixed
+objects are provably correct: TX ring 0x2e25e000/32768, RX ring
+0x2e266000/16384 and tally 0x388e52000/192 were mapped to 0x1000100000,
+0x1000110000 and 0x1000120000 with every PTE pointing at the original PA and
+carrying IR|IW, the six fixed map/unmap commands completed with
+expected == observed, and the NIC registers read back PA before entry, IOVA
+after activation and PA after exit.
+
+Business traffic nevertheless stopped completely after the entry: the client
+sent 80 frames and received none, the peer received zero business packets and
+zero window probes, native RX recorded maps=1024 with posted=0 and
+completed=0, so the bootstrap was never retired and active identity never
+reached zero. The 20 pre-entry probes and the 3 post-exit probes succeeded, so
+only the interval with the fixed IOVA entry was dead. Interface counters moved
+by +117 out packets and +7 in packets, and the IOMMU reported no device page
+faults. The exit path, which runs the same ring rebuild with translation off,
+restored ordinary traffic, so the leading hypothesis is that the entry's NIC
+reset under active translation does not re-arm the MAC's RX/TX descriptor
+processing; the next step is to sample RCR/IMR0 and the rxpost baseline right
+after activation before changing any ABI.
+
+Nine of the fourteen checks failed (business integrity, session phase 2, local
+stop record, TX totals, retained mappings, ordinary traffic, active page table,
+and both RX lifecycle checks). The machine was disarmed and ordinary traffic
+verified afterwards; the implementation commit is kept for diagnosis.
+
+Failure evidence is outside this source repository:
+[Round40 failure report](<../../docs/m2-3u-round40-result.md>) and
+[evidence archive](<../../docs/evidence/r40-failure-20261103.tgz>)
+(SHA256 `05a363f529fd99fe19d3f849e4bb213e994f059e742c1d9dd16c1282a8dba7ae`).
 
 ## Accepted Round39 / local NIC stop without peer drain packets
 
