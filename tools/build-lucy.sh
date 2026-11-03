@@ -248,9 +248,12 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 		<string>8.10.0</string>
 		<!-- The device mapper must be resident before this driver starts: its
 		     copyMapperForDevice() lookup happens once inside start(), so an
-		     iommu-parent published afterwards would always be too late. -->
+		     iommu-parent published afterwards would always be too late.
+		     The requested version must sit inside the provider's compatible
+		     range (OSBundleCompatibleVersion <= requested <= CFBundleVersion),
+		     otherwise kmutil cannot resolve the dependency at all. -->
 		<key>org.example.AMDMapperProbe</key>
-		<string>0.0.0</string>
+		<string>0.53.0</string>
 	</dict>
 	<key>OSBundleRequired</key>
 	<string>Network-Root</string>
