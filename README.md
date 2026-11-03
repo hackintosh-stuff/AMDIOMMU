@@ -32,7 +32,29 @@ sh tools/r27/build.sh _scratch/lucy-upstream
 
 Generation selects `--tx 21 --rx 33`. Run defaults are `runs/r33` and
 `org.example.round33load`. ABI layouts and the compatible stop RPC remain
-unchanged. Mac builds and hardware acceptance of this candidate are pending.
+unchanged.
+
+**Round33 hardware acceptance PASSED (14/14).** One planned boot and one valid
+measurement used token `0x33c0de33`. The setup worker exited at mach
+31,810,054,080 ns, and both active-domain observations, taken before each
+4096-request phase, report `setup_worker=0`, `installs=1` and the same
+root/DT/command addresses `0x34a60000`/`0x34c00000`/`0x34e00000`; all 8192
+replies crossed the 125.159 s idle. `R31Stop` scheduled a separate teardown
+worker that began 10.5 us after the stop request, drained R28T 1024/1024,
+completed R29D seq 1024 before closing TX, restored the registers and only then
+released the domain. TX mapped/retired 10303 with rejected 0; domain maps were
+10312 = 10303 + 9 capacity probes; the command ring completed 22675/22675
+through 88 wraps; RX1024 mapped/unmapped 1024/1024 with 9368 completions in
+four L1 tables; owners/pending/pinned/ring/livePages zero, no device page
+fault, 3/3 post-exit ordinary probes.
+
+Deployed source commit: `717cb625f5a560257dfd000e539966153fe93673`. This
+documentation update is not a deployed revision.
+
+Round33 result and archive are outside this source repository:
+[Round33 result](<../../docs/m2-3n-round33-result.md>) and
+[evidence archive](<../../docs/evidence/r33-final-20261103.tgz>)
+(SHA256 `b9462912ac89ae17d17e08c81f0ce0237c81e823622b1063950828ff1704a0e9`).
 
 This round retains the existing RX pool and bootstrap identity mappings.
 The next functional step is Lucy-owned native RX command/buffer replacement
