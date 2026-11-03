@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Round50 candidate / ranged ordinary IOVA invalidation
+## Accepted Round50 / ranged ordinary IOVA invalidation, PM hardware TODO
 
 Formal base: `23973d1652091ba0a671a4442e7a0fd3b2f87146`, the accepted Round49
 result-documentation successor; tree `cb92cf1b010cc6c0bdba1bcfb75b1c06b140fc10`.
@@ -14,9 +14,23 @@ completion increments 2052/136, 60610 completed commands over 236 wraps,
 and zero target faults. The report records one build, one deployment, one
 planned boot, one load and one valid measurement.
 
-**Candidate: Lucy 1.1.235 / Probe 0.57.0, ordinary auto mode, MTU1500,
-TSO4 and TSO6 enabled.** Continue in this Git checkout. Real Mac build,
-boot and the eleven Round50 hardware checks remain pending.
+**Accepted: eleven mainline checks passed on the real Mac with Lucy 1.1.235 /
+Probe 0.57.0, ordinary auto mode, MTU1500, TSO4 and TSO6 enabled.** The
+deployed implementation is
+`f17507ca33ca2d1e25d656f99cb91c250b52438c`, built once, deployed once and
+validated in one planned boot, one load run and one valid measurement; the
+deployment build log is `runs/r50-build.log`. Each phase completed exactly one
+full-domain invalidation and `range = mapOk + unmapOk - 1` ranged ones (61174
+at the end), with `full + range` equal to the 61175 completed page
+invalidations and 61176 completed commands. The latest range always matched the
+most recently completed mapper record; the observed command words decoded to
+INV_IOMMU_PAGES, domain 1, PDE=0 and correct reserved bits, and the down-phase
+64-page RX span encoded an aligned 512 KiB cover for its 256 KiB request. Both
+traffic windows advanced the ranged counters. Four phases still held 19
+maps/1037 leaves/11 tables of one domain with 16 real 64-page RX groups, 1025
+of 1037 live pages above 4 GiB, 32-bit requests with `map32ok == mapOk` inside
+`[0x80000000, 0x81000000)`, 272 MiB of IPv6 traffic and TSO6 increments
+2054/135, all with zero target faults.
 
 Ordinary map/unmap now supplies its complete allocated page range to
 r44Invalidate. The prebuilt low-IOVA tree keeps its upper-level tables, so
