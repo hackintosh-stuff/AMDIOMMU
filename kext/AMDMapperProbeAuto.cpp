@@ -115,21 +115,14 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
     if (!nic || nic->configRead16(kIOPCIConfigVendorID) != 0x10ec ||
         nic->configRead16(kIOPCIConfigDeviceID) != 0x8127) return false;
-    // Lucy closes the PCI provider after start() has allocated its resources,
-    // so isOpen() alone would also admit an already running physical driver.
-    // A publish notification can replay an existing service when installed.
-    // Attachment alone is not the boundary: the client is attached before its
-    // start() runs, and that start() is exactly the copyMapperForDevice() call
-    // this mapper must be visible to. Only a client that already started (or a
-    // provider that is still open) means the lookup has been missed.
-    // Attachment is the real boundary: once the client is attached the provider
-    // starts it immediately, so the one-shot lookup inside start() cannot see a
-    // parent published afterwards. Ordering is enforced by the driver's
-    // OSBundleLibraries dependency on this kext; the state names below keep the
-    // two late cases distinguishable in the snapshot.
-    if (nic->isOpen() || nic->getChildEntry(gIOServicePlane)) {
-        setProperty("r44-state", nic->isOpen() ? "failed-too-late-open"
-                                               : "failed-too-late-attached");
+    // The driver's single copyMapperForDevice() lookup runs before it opens
+    // the PCI provider. A client attached to the nub but not yet started is
+    // still safe to publish for: Round45's start() waits for this publication
+    // with the nub unopened, so the lookup has not been missed. Only an open
+    // provider means the driver already chose its DMA path. A publish
+    // notification can replay an existing service when installed.
+    if (nic->isOpen()) {
+        setProperty("r44-state", "failed-too-late-open");
         return false;
     }
 

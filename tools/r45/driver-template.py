@@ -188,6 +188,22 @@ MAP_BLOCK_NEW = '''        /* The sole output thread consumes commands; completi
         {
 '''
 
+# Round45's IOResources mapper service can be started just after this driver's
+# start(): IOKit matching for the two providers is not ordered. The single
+# copyMapperForDevice() lookup must see iommu-parent, so wait for that
+# publication with a hard bound while the PCI provider is still unopened.
+WAIT_OLD = '    pciDevice->retain();\n    if (!pciDevice->open(this)) {'
+WAIT_NEW = '''    pciDevice->retain();
+    /* Round45: the per-device mapper is published by a separate IOResources
+     * service. Wait only for that publication, with a hard bound, before the
+     * one-shot lookup below; the nub stays unopened so the probe can still
+     * attach. A missing mapper leaves the ordinary physical path unchanged. */
+    for (UInt32 r45WaitMs = 0; r45WaitMs < 2000; ++r45WaitMs) {
+        if (pciDevice->getProperty("iommu-parent")) break;
+        IOSleep(1);
+    }
+    if (!pciDevice->open(this)) {'''
+
 
 def patch(hpp, cpp, setup, vtd):
     def once(text, old, new, label):
@@ -208,6 +224,7 @@ def patch(hpp, cpp, setup, vtd):
         (POST_OLD, POST_NEW, 'actual TSO submission'),
         (COMPLETE_OLD, COMPLETE_NEW, 'hardware completion'),
         (DISABLE_OLD, DISABLE_NEW, 'disable snapshot'),
+        (WAIT_OLD, WAIT_NEW, 'mapper publication wait'),
     ):
         cpp = once(cpp, old, new, label)
     anchor = '\n#pragma mark --- statistics update methods ---\n'
