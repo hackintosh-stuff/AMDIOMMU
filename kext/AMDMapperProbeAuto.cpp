@@ -2,6 +2,7 @@
 // The experiment's timer, Lucy bindings and measurement windows are not used.
 #include "AMDMapperProbeInternal.hpp"
 #include "AMDMapperProbeDiscovery.hpp"
+#include "amd_iommu_mapper_abi.hpp"
 
 namespace {
 constexpr UInt32 kR44TablePages = 16;
@@ -32,6 +33,10 @@ struct org_example_AMDMapperProbe::R44Controller {
     UInt64 startupEfr;
     UInt64 readyTime, activeTime;
     UInt64 invDevCompleted, invPagesCompleted;
+    // R50 counters describe successfully completed ordinary invalidations.
+    UInt64 invFullCompleted, invRangeCompleted, invRangePages;
+    UInt64 lastRangeAddress, lastRangeBytes, lastRangeSequence;
+    UInt32 lastRangeCommand[4];
     UInt64 lastInvDevSequence, lastInvPagesSequence;
     UInt64 eventEntries, targetFaults;
     UInt64 sleepControl, observedControl;
@@ -303,11 +308,18 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
 }
 #pragma clang diagnostic pop
 
-bool org_example_AMDMapperProbe::r44Invalidate(bool invalidateDevice) {
+bool org_example_AMDMapperProbe::r44Invalidate(
+    bool invalidateDevice, UInt64 address, UInt64 bytes) {
     // The generic mapper's lock serializes PTE writes, command submission and
     // this first-map DTE installation. Failed completion never returns an IOVA.
     R44Controller *c = fR44Controller;
     if (!c || !c->ready || c->command.failed) return false;
+    const bool full = !c->active || invalidateDevice || !bytes;
+    if (!full && (((address | bytes) & 4095ULL) ||
+        address < r44mapper::kBase ||
+        address - r44mapper::kBase >= r44mapper::kPages * 4096ULL ||
+        bytes > r44mapper::kPages * 4096ULL - (address - r44mapper::kBase)))
+        return false;
     OSSynchronizeIO();
     if (!c->active || invalidateDevice) {
         volatile UInt64 *dte = (volatile UInt64 *)c->devices->getBytesNoCopy();
@@ -324,15 +336,29 @@ bool org_example_AMDMapperProbe::r44Invalidate(bool invalidateDevice) {
         ++c->invDevCompleted;
         c->lastInvDevSequence = c->command.completionSequence;
     }
-    const UInt64 address = m2b2InvAddress();
-    if (!m2b2Submit(c->base, &c->command, "r44-invalidate-pages", 0,
-            kR44Domain | ((UInt32)M2B2_CMD_INV_IOMMU_PAGES << 28),
-            (UInt32)address | M2B2_CMD_PDE_MASK, (UInt32)(address >> 32))) {
+    // First activation and power transitions still flush the complete domain
+    // and PDE cache. Ordinary maps only edit leaves of the prebuilt IOVA tree.
+    const UInt64 encoded = full ? m2b2InvAddress() : r50InvRangeAddress(address, bytes);
+    const UInt32 d0 = 0;
+    const UInt32 d1 = kR44Domain | ((UInt32)M2B2_CMD_INV_IOMMU_PAGES << 28);
+    const UInt32 d2 = (UInt32)encoded | (full ? M2B2_CMD_PDE_MASK : 0);
+    const UInt32 d3 = (UInt32)(encoded >> 32);
+    if (!m2b2Submit(c->base, &c->command, "r44-invalidate-pages", d0, d1, d2, d3)) {
         c->state = "failed-page-invalidation";
         return false;
     }
     ++c->invPagesCompleted;
     c->lastInvPagesSequence = c->command.completionSequence;
+    if (full) ++c->invFullCompleted;
+    else {
+        ++c->invRangeCompleted;
+        c->invRangePages += bytes / 4096;
+        c->lastRangeAddress = address;
+        c->lastRangeBytes = bytes;
+        c->lastRangeCommand[0] = d0; c->lastRangeCommand[1] = d1;
+        c->lastRangeCommand[2] = d2; c->lastRangeCommand[3] = d3;
+        c->lastRangeSequence = c->command.completionSequence;
+    }
     if (!c->active) {
         c->active = true;
         c->activeTime = mach_absolute_time();
@@ -478,6 +504,17 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     number("r44-dte-active-time", c->activeTime);
     number("r44-inv-dev-completed", c->invDevCompleted);
     number("r44-inv-pages-completed", c->invPagesCompleted);
+    number("r50-inv-full-completed", c->invFullCompleted);
+    number("r50-inv-range-completed", c->invRangeCompleted);
+    number("r50-inv-range-pages", c->invRangePages);
+    number("r50-last-range-address", c->lastRangeAddress);
+    number("r50-last-range-bytes", c->lastRangeBytes);
+    number("r50-last-range-sequence", c->lastRangeSequence);
+    for (UInt32 i = 0; i < 4; ++i) {
+        char key[32];
+        snprintf(key, sizeof(key), "r50-last-range-command%u", i);
+        number(key, c->lastRangeCommand[i]);
+    }
     number("r44-cmd-submits", c->command.submits);
     number("r44-cmd-completed", c->command.completed);
     number("r44-cmd-wraps", c->command.wraps);

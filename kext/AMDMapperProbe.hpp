@@ -93,7 +93,8 @@ private:
     bool r44StartAuto();
     bool r44AttachAuto(IOService *);
     bool r44StopAuto();
-    bool r44Invalidate(bool invalidateDevice = false);
+    bool r44Invalidate(bool invalidateDevice = false,
+        UInt64 address = 0, UInt64 bytes = 0);
     void r44PublishAuto();
     // TODO(R47-PM-HARDWARE): validate real system sleep/resume when the
     // platform supports it. Normal network operation does not invoke PM.

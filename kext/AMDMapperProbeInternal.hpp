@@ -909,6 +909,21 @@ static inline UInt64 m2b2InvAddress() {
     return a;
 }
 
+// R50 ordinary mappings use a page-aligned range inside their low IOVA pool.
+// Match Linux v6.6 build_inv_address(): S=0 for one 4 KiB page; otherwise
+// the highest changed address bit selects the smallest aligned power-of-two
+// range containing both endpoints. Lower address bits become ones, then the
+// reserved low bits are cleared before S is set. Hardware may invalidate a
+// wider range; this encoding does not promise preservation of adjacent IOTLBs.
+// The caller checks the pool bounds and nonzero page-aligned byte count.
+static inline UInt64 r50InvRangeAddress(UInt64 address, UInt64 bytes) {
+    if (bytes == 4096) return address;
+    UInt64 different = address ^ (address + bytes - 1);
+    unsigned highest = 0;
+    while (different >>= 1) ++highest;
+    return ((address | ((1ULL << highest) - 1)) & ~0xFFFULL) | 0x01ULL;
+}
+
 // ---- M2B2 measurement window (original lines 2579..2598) ----
 // ==================== 统一测量窗口（v0.20.0）====================
 //

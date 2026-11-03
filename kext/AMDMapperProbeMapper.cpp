@@ -265,7 +265,8 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         ++s.invalidates;
         // The platform activates the target DTE on this first ordinary map,
         // after Lucy reset and before any descriptor can receive this IOVA.
-        if (!r44Invalidate()) {
+        if (!r44Invalidate(false, r44mapper::kBase + record.basePage * 4096ULL,
+                           record.pages * 4096ULL)) {
             ++s.invalidateFailures;
             d->accepting = false; s.flags |= r44mapper::kFailed;
             s.flags &= ~r44mapper::kAccepting;
@@ -318,7 +319,8 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
         OSSynchronizeIO();
         record.tClear = mach_absolute_time(); record.state |= r44mapper::kClearPublished;
         ++s.invalidates;
-        if (!r44Invalidate()) {
+        if (!r44Invalidate(false, r44mapper::kBase + record.basePage * 4096ULL,
+                           record.pages * 4096ULL)) {
             ++s.invalidateFailures;
             d->accepting = false; s.flags |= r44mapper::kFailed;
             s.flags &= ~r44mapper::kAccepting;

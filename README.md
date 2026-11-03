@@ -1,5 +1,70 @@
 # AMDIOMMU — authoritative source repository
 
+## Round50 candidate / ranged ordinary IOVA invalidation
+
+Formal base: `23973d1652091ba0a671a4442e7a0fd3b2f87146`, the accepted Round49
+result-documentation successor; tree `cb92cf1b010cc6c0bdba1bcfb75b1c06b140fc10`.
+The deployed Round49 implementation is
+`5daec3527784199bf80c649da0f56f369624555d`, with exactly the delivered candidate
+tree and no implementation fixes. Its actual analyzer rerun passed 11/11
+and reproduced both archived analysis files. Independent raw evidence review
+confirmed 16 real 64-page/256 KiB RX groups, four phases of 19 maps/1037
+leaves/11 tables, 1025 high physical pages, 272 MiB of IPv6 traffic, TSO6
+completion increments 2052/136, 60610 completed commands over 236 wraps,
+and zero target faults. The report records one build, one deployment, one
+planned boot, one load and one valid measurement.
+
+**Candidate: Lucy 1.1.235 / Probe 0.57.0, ordinary auto mode, MTU1500,
+TSO4 and TSO6 enabled.** Continue in this Git checkout. Real Mac build,
+boot and the eleven Round50 hardware checks remain pending.
+
+Ordinary map/unmap now supplies its complete allocated page range to
+r44Invalidate. The prebuilt low-IOVA tree keeps its upper-level tables, so
+ordinary edits invalidate the covered leaf translations with PDE=0. A
+single-page request uses S=0; a multi-page request uses one aligned
+power-of-two cover with S=1. The range comes from record.basePage/pages,
+including physical-run padding and the first byte's page offset. First DTE
+activation, explicit device invalidation and PM calls retain full-domain
+PDE invalidation. The command ring, synchronous CompletionWait and IOVA
+return/reuse order are unchanged.
+
+This reduces the requested invalidation scope. It does not reduce the number
+of completion waits or promise a throughput gain: the encoded cover can
+include adjacent pages, and hardware may invalidate more than requested.
+The encoding follows AMD 48882 section 2.4.3/Table36 and the existing pinned
+reference/linux-v6.6/iommu.c build_inv_address contract.
+
+Keep ABI2, the 64-page/64-run capacity, 16 MiB low IOVA pool, RX16x64,
+fixed3/13pages, 19 steady/down mappings and 1037 leaves. Driver generation
+is unchanged. The R50 build reuses --check-r49 because the ABI is unchanged.
+Only existing Probe snapshot publication exposes range/full completion
+counters, cumulative requested pages and the latest actual range command
+words/sequence. No new DMA path or RPC is introduced.
+
+Use tools/r50, runs/r50, TCP9116, token 0x50c0de50 and
+org.example.round50load. Keep the eleven existing IVRS/DMA32/TCP/TSO checks;
+extend the hardware-command check with range/full accounting and independent
+command decoding against the most recently completed mapper record. Without
+PM, full=1 and range=mapOk+unmapOk-1. Normal IPv6 transfers 128/128/8/8 MiB
+and one interface down/up exercise the implementation. No extra workload
+matrix, allocation target or performance threshold is required.
+
+R49 deployment metadata retained two legacy capacity aliases at 32 despite
+correct new fields and raw ABI2 capacity64. R50 sets both aliases to 64.
+The R49 report's 1/2/4/5 sequence is the driver TSO sample sequence; its raw
+mapper sequence is 2/3/4/5. Neither documentation issue changes acceptance.
+
+R47 public ACPI discovery and PM implementation are retained. Real system
+sleep/resume stays TODO(R47-PM-HARDWARE), outside acceptance. Do not trigger
+sleep or an artificial awake controller stop/replay cycle. After successful
+acceptance, remove the finite job, set only the next boot to off, unmount
+EFI and confirm peer exit without a cleanup reboot.
+
+Previous result and evidence are outside this source repository:
+[Round49 result](<../../docs/m2-3ad-round49-result.md>) and
+[evidence archive](<../../docs/evidence/r49-final-20261103.tgz>)
+(SHA256 `7add839a6774d784d74d8d769a244090beac7e1ccfd013af60fbe9f2d459f1bc`).
+
 ## Accepted Round49 / larger ordinary DMA mappings and RX batches, PM hardware TODO
 
 Formal base: `e7074605b7077304d638f63440fe4467da918c8d`, the accepted Round48
