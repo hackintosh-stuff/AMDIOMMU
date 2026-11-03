@@ -39,7 +39,7 @@ def status():
     return parse_status(text)
 
 
-def find_probe_entry(io):
+def find_probe_entry(io, target=SERVICE):
     """Return the retained registry entry for the probe object.
 
     The probe is an unregistered IOService nub: it publishes properties but is
@@ -62,6 +62,8 @@ def find_probe_entry(io):
     io.IOIteratorNext.restype = ctypes.c_uint32
     io.IORegistryEntryGetName.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
     io.IORegistryEntryGetName.restype = ctypes.c_int
+    io.IOObjectConformsTo.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
+    io.IOObjectConformsTo.restype = ctypes.c_bool
     io.IOObjectRelease.argtypes = [ctypes.c_uint32]
 
     def search(start):
@@ -75,8 +77,9 @@ def find_probe_entry(io):
                 entry = io.IOIteratorNext(iterator)
                 if not entry:
                     break
-                if (io.IORegistryEntryGetName(entry, buffer) == 0 and
-                        buffer.value.decode('utf-8', 'replace') == SERVICE):
+                if ((io.IORegistryEntryGetName(entry, buffer) == 0 and
+                        buffer.value.decode('utf-8', 'replace') == target) or
+                        io.IOObjectConformsTo(entry, target.encode('ascii'))):
                     return entry
                 io.IOObjectRelease(entry)
         finally:
@@ -100,11 +103,11 @@ def find_probe_entry(io):
     finally:
         io.IOObjectRelease(root)
     if not entry:
-        raise RuntimeError('Round31 probe service not found')
+        raise RuntimeError('registry service not found: ' + target)
     return entry
 
 
-def set_boolean_property(name):
+def set_boolean_property(name, service_class=None):
     """Send one true-valued probe property RPC.
 
     Frameworks load only here, so importing the module and host-side protocol
@@ -127,7 +130,17 @@ def set_boolean_property(name):
     cf.CFRelease.argtypes = [ptr]
     cf.CFRelease.restype = None
 
-    service = find_probe_entry(io)
+    service = 0
+    if service_class:
+        io.IOServiceMatching.argtypes = [ctypes.c_char_p]
+        io.IOServiceMatching.restype = ptr
+        io.IOServiceGetMatchingService.argtypes = [ctypes.c_uint32, ptr]
+        io.IOServiceGetMatchingService.restype = ctypes.c_uint32
+        matching = io.IOServiceMatching(service_class.encode('ascii'))
+        if matching:
+            service = io.IOServiceGetMatchingService(0, matching)
+    if not service:
+        service = find_probe_entry(io, service_class or SERVICE)
     key = properties = None
     try:
         key = cf.CFStringCreateWithCString(None, name.encode('ascii'), 0x08000100)

@@ -2120,6 +2120,7 @@ TX20 = runpy.run_path(os.path.join(HERE, 'r20', 'driver-template.py'))
 # evidence stay reproducible byte-for-byte.
 TX21 = runpy.run_path(os.path.join(HERE, 'r21', 'driver-template.py'))
 R44 = runpy.run_path(os.path.join(HERE, 'r44', 'driver-template.py'))
+R45 = runpy.run_path(os.path.join(HERE, 'r45', 'driver-template.py'))
 # round -> (module, [headers written into the driver tree, in include order])
 TXR = {'16': (TX16, ['RTL812xTxMap.hpp']),
        '17': (TX17, ['RTL812xTxMapNative.hpp']),
@@ -2204,7 +2205,14 @@ TX_HOOKS = {
 
 
 def tx_hooks():
-    return TX.get('HOOKS') or TX_HOOKS[TX_SELECT]
+    hooks = TX.get('HOOKS') or TX_HOOKS[TX_SELECT]
+    if TX_SELECT == '21' and RX_SELECT == '34':
+        # The ordinary mapped path adds command-pool backpressure to this
+        # existing result hook. Check the final generated form, not R21's.
+        old_result = R45['RESULT_OLD'].strip().split(' ? ', 1)[0]
+        hooks = tuple(R45['RESULT_NEW'].strip() if h == old_result else h
+                      for h in hooks)
+    return hooks
 
 
 def sync_headers(drv):
@@ -2442,6 +2450,12 @@ def main():
                     read(os.path.join(drv, 'RTL812xLucySetup.cpp')))
                 if not fresh:
                     stale = 'round44 normal mapped DMA'
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R45['is_current'](hpp_text, cpp_text,
+                    read(os.path.join(drv, 'RTL812xLucySetup.cpp')),
+                    read(os.path.join(drv, 'RTL812xLucyVTD.cpp')))
+                if not fresh:
+                    stale = 'round45 normal mapped TCP/TSO'
             if not fresh:
                 print("REFUSED: the tree is patched but its %s() body is STALE."
                       % stale)
@@ -2566,8 +2580,11 @@ def main():
         cpp_text = RX['pause_entries'](cpp_text)
     if TX_SELECT == '21' and RX_SELECT == '34':
         hpp_text, cpp_text, setup_text = R44['patch'](hpp_text, cpp_text, setup_text)
+        hpp_text, cpp_text, setup_text, vtd_text = R45['patch'](
+            hpp_text, cpp_text, setup_text, vtd_text)
         write(hpp, hpp_text)
         write(setup, setup_text)
+        write(vtd, vtd_text)
     write(cpp, cpp_text)
     print("patched %s" % cpp)
     rx_label = ('normal device IOMapper path / legacy native RX ABI5' if RX_SELECT == '34'

@@ -97,7 +97,7 @@ def registry(class_name, marker):
     return found[0]
 
 
-def snapshot(parent, label):
+def snapshot(parent, label, driver_prefixes=('rtl812x-r44-',)):
     """One explicit read-only export; production mapping has no capture limit."""
     out = parent / label
     out.mkdir(parents=True, exist_ok=False)
@@ -115,7 +115,7 @@ def snapshot(parent, label):
         return {key: value for key, value in props.items()
                 if key.startswith(prefix) and isinstance(value, (str, int, bool))}
     value = {'label': label, 'captured_ns': load_helpers.now(), 'exports': exports,
-             'probe': scalars(probe, 'r44-'), 'driver': scalars(driver, 'rtl812x-r44-')}
+             'probe': scalars(probe, 'r44-'), 'driver': scalars(driver, driver_prefixes)}
     write_json(out / 'snapshot.json', value)
     value['mapper'] = decode(probe['r44-mapper-raw'])
     return value

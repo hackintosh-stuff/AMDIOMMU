@@ -19,6 +19,8 @@ HERE = Path(__file__).resolve().parent
 ROUND = 43
 BATCH = 512
 DEFAULT_TOKEN = None
+DEFAULT_PORT = 9110
+TSO4, TSO6 = False, False
 ENTRY_POINTS = ('boot-load.sh', 'load.py', 'protocol.py')
 REQUIRED_SYMBOLS = ('r17TxMap', 'r17Callback')
 # Accepted R42 initial RX IOVA; stop NIC before DTE and use an IOVA-only domain.
@@ -178,7 +180,7 @@ def main():
     parser.add_argument('--out', default='runs/r%d' % ROUND)
     parser.add_argument('--backup', help='project-relative recovery directory')
     parser.add_argument('--peer', default='192.168.50.122')
-    parser.add_argument('--port', type=int, default=9110)
+    parser.add_argument('--port', type=int, default=DEFAULT_PORT)
     parser.add_argument('--check-only', action='store_true')
     args = parser.parse_args()
     if not 0 < args.token < 0x80000000 or not 0 < args.port <= 65535:
@@ -232,7 +234,7 @@ def main():
                          if not arg.startswith('amdiommu=')] + [tokenarg])
     plan = round_plan()
     plan.update({'source_commit': source_ref['commit'], 'base_commit': BASE_COMMIT,
-            'bootarg': tokenarg, 'mtu': 1500, 'tso4': False, 'tso6': False,
+            'bootarg': tokenarg, 'mtu': 1500, 'tso4': TSO4, 'tso6': TSO6,
             'out': out.relative_to(ROOT).as_posix(),
             'backup': backup.relative_to(ROOT).as_posix(),
             'recovery_bytes': total, 'expected': expected})
@@ -270,7 +272,8 @@ def main():
     (out / 'token.txt').write_text('0x%08x\n' % args.token, encoding='utf-8')
     if 'kernel_batch' in plan:
         (out / 'batch.txt').write_text('%d\n' % BATCH, encoding='utf-8')
-    (out / 'requests.txt').write_text('8192\n', encoding='utf-8')
+    if 'application_requests' in plan:
+        (out / 'requests.txt').write_text('%d\n' % plan['application_requests'], encoding='utf-8')
     (out / 'expected-version.json').write_text(json.dumps(expected, indent=2) + '\n', encoding='utf-8')
     (out / 'deployment.json').write_text(json.dumps(plan, indent=2) + '\n', encoding='utf-8')
     (out / 'source-ref.json').write_text(json.dumps(source_ref, indent=2) + '\n', encoding='utf-8')

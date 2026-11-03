@@ -1,5 +1,69 @@
 # AMDIOMMU — authoritative source repository
 
+## Candidate Round45 / ordinary IPv4 TCP and hardware TSO
+
+Formal base: `035d1dd0f5e60afbc5f2715de3f425cb694d3f56`, the accepted Round44
+result-documentation successor; tree `0e3d8dbb967fa6e2984297c3e952b2b4759151ac`.
+The deployed Round44 implementation is `6c3e8ca7424dbfa0810ab0f4516ad4a5251e1092`.
+Its actual analyzer rerun passed 9/9 and reproduced the archived JSON. An
+independent raw walk confirmed all five snapshots: 67 live maps, 1024 RX plus
+13 fixed IOVA leaves, no identity leaves, and the same device domain through
+idle and ordinary interface down/up. There were three planned boots, four
+load attempts and one valid measurement. The recorded 16094/16027 map/unmap
+counts are boot totals; the valid phase1-to-pre-down interval adds 9830 each.
+
+**Candidate: Lucy 1.1.230 / Probe 0.53.0, `amdiommu=auto`, MTU1500,
+IPv4 TSO enabled and IPv6 TSO disabled.** Keep the accepted per-device mapper,
+4096-page allocator, ordinary mapper ABI1 and fixed/RX resource lifetime.
+The synchronous PCI nub lookup, compatible dependency `0.53.0`, IOResources
+probe lookup and normalized analysis comparison from the actual R44 fixes
+are part of this baseline.
+
+Before dequeuing a packet, the normal output path now checks TX DMA command
+availability as well as descriptor capacity. It leaves packets queued and
+returns `kIOReturnNoResources` until the existing completion path returns
+commands and wakes output. `txMapPacket()` returns zero on command exhaustion;
+it can no longer report uninitialized output segments as a successful map.
+
+Bounded lifetime counters observe actual `GiantSendv4` submissions after the
+OWN store and completions consumed by the hardware close-pointer path. Ring
+clear has a separate stop-retired count, so cleanup cannot masquerade as
+hardware completion. `R45Snapshot=true` samples those counters under the
+existing command gate; the TX hot path does not write registry properties.
+Counters survive ordinary interface down/up. Snapshot collection waits up to
+five seconds for posted/completed equality before recording each phase.
+
+The finite TCP peer uses port 9111 and token `0x45c0de45` only for userspace
+byte identity. Four transfers use deterministic position-sensitive payloads,
+SHA256 and peer receipts:
+
+| Stage | Upload | Download |
+| --- | ---: | ---: |
+| Before ordinary interface down/up | 128 MiB | 128 MiB |
+| After ordinary interface up | 8 MiB | 8 MiB |
+
+The total is 272 MiB. Snapshots are `before`, `pre-down`, `down`, `after-up`.
+Both traffic intervals must show new TSO4 hardware completions and bytes,
+with no mapping failures or stop-retired TSO packets. Throughput is recorded
+without a line-rate threshold. TCP retransmission is normal protocol behavior;
+the previous UDP no-retry condition and 125-second idle are not repeated.
+Normal down still retains 64 RX groups and three fixed mappings in the same
+domain. Complete live records and the whole PT remain the mapping authority.
+
+Use the same checkout and pinned upstream input with `tools/r45/build.sh`.
+The generator remains `--tx21 --rx34`, and `--check-r44` checks the unchanged
+mapper ABI. Other entry points under `tools/r45` are `deploy.py`, `peer.py`,
+`boot-load.sh`, `load.py`, `capture.py`, `analyze.py` and `disarm-next.py`.
+Use `runs/r45` and the finite `org.example.round45load` job. Successful closure
+sets only the next boot to off and removes the job; the current mapper stays
+active. Keep source revisions in Git, without a round-specific repository copy.
+
+Host validation covers the generated driver methods, the four actual localhost
+TCP transfers and analyzer/tool contracts. Real Mac compilation and hardware
+acceptance of this candidate remain pending. The R45 result belongs in
+`../../docs/m2-3z-round45-result.md` with its actual evidence archive and source
+identity after that run completes.
+
 ## Accepted Round44 / attach the RTL8125 to an ordinary device IOMapper
 
 Formal base: `102560a59bc448ddfd5600d5d958952e4875eb16`, the actual accepted
