@@ -114,8 +114,9 @@ struct org_example_AMDMapperProbe::R34RxDomain {
     UInt32 mapInvalidations, unmapInvalidations;
     UInt32 mapBatchCalls, unmapBatchCalls, mapBatchSlots, unmapBatchSlots, maxBatch;
     // One sparse arena serves bootstrap, IOVA tables and physical restore.
-    // All bootstrap identity leaves retire once fixed NIC objects and every
-    // RX descriptor use IOVA. Stop adds only the current RX buffers back.
+    // All bootstrap identity leaves retire after the stopped NIC's RX ring
+    // receives its initial IOVA OWN entries, before any DMA is enabled again.
+    // Stop adds only the current RX buffers back.
     UInt32 physicalNext, bootstrapPages, fixedPages, removedPages, restoreAddedPages;
     bool bootstrapRetired;
     UInt64 tBootstrapClear;
@@ -2042,20 +2043,37 @@ IOReturn org_example_AMDMapperProbe::r34RxOperation(r34rx::Binding *b) {
         --s.boundPairs;
         result = kIOReturnSuccess;
     } else if (b->op == r34rx::kRetireBootstrap) {
-        // Lucy calls once, after all 1024 distinct slots publish their first
-        // IOVA OWN and the current batch has finished. The three fixed DMA
-        // objects already use IOVA, so no bootstrap identity leaf is needed.
+        // Lucy calls during Authorize while the entry reset still holds DMA
+        // stopped. Install has mapped the three fixed objects and published
+        // the initial IOVA OWN for all 1024 RX slots. Retire their physical
+        // aliases before the hardware enable path can start using the ring.
         if (b->slot || b->length != r34rx::kCount || !b->pa ||
             !r->installed || r->released || r->bootstrapRetired ||
             !r->activePt || r->activePtBytes != d->ptBytes ||
             !d->installed || !d->commandOwned || s.coverCalls ||
             s.boundPairs != r34rx::kCount || s.liveOwners != r34rx::kCount ||
-            !r->fixed.entered || r->fixed.tEntered > b->pa ||
-            r->fixed.liveOwners != r40fixed::kCount)
+            s.mapOk != r34rx::kCount || s.unmapOk ||
+            r->fixed.entered || r->fixed.tEntered || r->fixed.flags ||
+            r->fixed.liveOwners != r40fixed::kCount ||
+            r->fixed.boundPairs != r40fixed::kCount)
             goto retireFailed;
-        for (UInt32 slot = 0; slot < r34rx::kCount; ++slot)
-            if (s.slots[slot].mapCount < 2 || r->preMapped[slot] ||
-                r->preUnmapped[slot]) goto retireFailed;
+        for (UInt32 i = 0; i < r40fixed::kCount; ++i) {
+            const auto &object = r->fixed.objects[i];
+            if (object.flags !=
+                    (r40fixed::kMapPublished | r40fixed::kMapInvalidated) ||
+                !object.tMapInv || object.tMapInv > b->pa)
+                goto retireFailed;
+        }
+        for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
+            const auto &entry = s.slots[slot];
+            const auto &mapping = entry.last;
+            if (entry.mapCount != 1 || entry.unmapCount ||
+                mapping.generation != 1 ||
+                mapping.flags != (r34rx::kMapPublished | r34rx::kMapInvalidated) ||
+                !mapping.tMapInv || mapping.tMapInv > b->pa ||
+                r->preMapped[slot] || r->preUnmapped[slot])
+                goto retireFailed;
+        }
         {
             amdsparse::Arena a = {d->pt, d->ptBase,
                 (unsigned)(d->ptBytes / 4096ULL), d->coverNext,
@@ -2390,9 +2408,9 @@ IOReturn org_example_AMDMapperProbe::r34RxUnmap(
         w.flags |= r34rx::kMapUnmapped;
         w.unmapResult = kIOReturnSuccess;
         --s.liveOwners; ++s.unmapOk; ++entry.unmapCount;
-        // Generation one was prepared before replacing physical ring entries.
-        // Retain the first actual IOVA generation, then keep last authoritative.
-        if (w.generation > 1 && entry.sampleCount < r34rx::kSamples)
+        // Generation one is now posted into the stopped ring before enable.
+        // Retain its real first IOVA lifetime, then keep last authoritative.
+        if (entry.sampleCount < r34rx::kSamples)
             entry.samples[entry.sampleCount++] = w;
         result = kIOReturnSuccess;
     }

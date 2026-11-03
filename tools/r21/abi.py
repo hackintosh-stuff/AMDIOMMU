@@ -310,7 +310,7 @@ def check_r26():
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in ('--check-r32', '--check-r34', '--check-r35', '--check-r36', '--check-r37', '--check-r38', '--check-r39', '--check-r40', '--check-r41'):
+    if len(sys.argv) > 1 and sys.argv[1] in ('--check-r32', '--check-r34', '--check-r35', '--check-r36', '--check-r37', '--check-r38', '--check-r39', '--check-r40', '--check-r41', '--check-r42'):
         want = abi()
         pins = {'domain_version': 4, 'domain_bytes': 44592,
                 'domain_record_bytes': 1304, 'domain_records_offset': 80,
@@ -324,24 +324,24 @@ def main():
                 'rx_request_bytes': 344192, 'rx_backend_bytes': 204864,
                 'rx_tail_seq_offset': 44, 'pool_version': 2, 'pool_spares': 1024,
                 'pool_snapshot_bytes': 114808, 'pool_request_bytes': 114856}
-        if sys.argv[1] in ('--check-r34', '--check-r35', '--check-r36', '--check-r37', '--check-r38', '--check-r39', '--check-r40', '--check-r41'):
-            pins.update({'rx_native_version': {'--check-r34': 1, '--check-r35': 2, '--check-r36': 3, '--check-r37': 3, '--check-r38': 3, '--check-r39': 4, '--check-r40': 4, '--check-r41': 4}[sys.argv[1]],
+        if sys.argv[1] in ('--check-r34', '--check-r35', '--check-r36', '--check-r37', '--check-r38', '--check-r39', '--check-r40', '--check-r41', '--check-r42'):
+            pins.update({'rx_native_version': {'--check-r34': 1, '--check-r35': 2, '--check-r36': 3, '--check-r37': 3, '--check-r38': 3, '--check-r39': 4, '--check-r40': 4, '--check-r41': 4, '--check-r42': 4}[sys.argv[1]],
                          'rx_native_count': 1024,
                          'rx_native_driver_bytes': 270432, 'rx_native_backend_bytes': 475216,
                          'rx_native_driver_header': 96, 'rx_native_driver_slot_bytes': 264,
                          'rx_native_backend_header': 80, 'rx_native_backend_slot_bytes': 464,
                          'rx_native_witness_bytes': 104, 'rx_native_map_record_bytes': 224})
-        if sys.argv[1] in ('--check-r37', '--check-r38', '--check-r39', '--check-r40', '--check-r41'):
+        if sys.argv[1] in ('--check-r37', '--check-r38', '--check-r39', '--check-r40', '--check-r41', '--check-r42'):
             pins.update({'physical_layout_version': 1, 'physical_layout_bytes': 64,
                          'physical_layout_header': 16, 'physical_span_bytes': 16,
                          'physical_span_count': 3})
-        if sys.argv[1] in ('--check-r38', '--check-r39', '--check-r40', '--check-r41'):
+        if sys.argv[1] in ('--check-r38', '--check-r39', '--check-r40', '--check-r41', '--check-r42'):
             pins.update({'rx_bootstrap_command_bytes': 40, 'rx_bootstrap_retire_op': 7})
-        if sys.argv[1] in ('--check-r39', '--check-r40', '--check-r41'):
+        if sys.argv[1] in ('--check-r39', '--check-r40', '--check-r41', '--check-r42'):
             pins.update({'rx_stop_version': 1, 'rx_stop_bytes': 96, 'rx_stop_time_offset': 48,
                          'rx_stop_retired_flag': 16, 'rx_stop_retired_offset': 60,
                          'rx_slot_stop_retired_offset': 52})
-        if sys.argv[1] in ('--check-r40', '--check-r41'):
+        if sys.argv[1] in ('--check-r40', '--check-r41', '--check-r42'):
             pins.update({'fixed_version': 1, 'fixed_count': 3, 'fixed_pages': 16,
                          'fixed_base': 0x1000100000, 'fixed_stride': 0x10000,
                          'fixed_driver_bytes': 368, 'fixed_driver_header': 80,

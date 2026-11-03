@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture Round41 evidence after the finite load.
+"""Capture Round42 evidence after the finite load.
 
 All workspace paths are relative to the project. Missing evidence is recorded
 in the manifest and returns 1 after saving the available failure diagnostics.
@@ -17,7 +17,7 @@ import struct
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSIONS = {'RTL812xLucy': '1.1.226', 'AMDMapperProbe': '0.50.0'}
+VERSIONS = {'RTL812xLucy': '1.1.227', 'AMDMapperProbe': '0.51.0'}
 ABI = {'native': 7, 'standard': 5, 'domain': 4, 'driver_mode': 2,
        'rx_driver': 4, 'rx_backend': 4, 'physical_layout': 1, 'rx_stop': 1,
        'fixed_driver': 1, 'fixed_backend': 1}
@@ -97,7 +97,7 @@ def collect_system(out, stamp):
         rc, text = command(args)
         lines.append('%s : %s' % (label, text.strip() if rc == 0 else '(unavailable)'))
     loaded_rc, loaded = command(['kmutil', 'showloaded', '--list-only'])
-    identity = ['scope : r41', 'expected_abi : native7/std5/domain4/nativeRX4 physicalLayout1 stopRecord1 fixedDMA1 mode2',
+    identity = ['scope : r42', 'expected_abi : native7/std5/domain4/nativeRX4 physicalLayout1 stopRecord1 fixedDMA1 mode2',
                 'captured_utc : ' + stamp, 'kmutil_returncode : %d' % loaded_rc,
                 '# loaded kext identity (read-only)', loaded]
     installed = {}
@@ -136,8 +136,8 @@ def collect_system(out, stamp):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('out', help='new or empty project-relative capture directory')
-    parser.add_argument('--load', default='runs/r41')
-    parser.add_argument('--peer-log', default='runs/r41/peer.log')
+    parser.add_argument('--load', default='runs/r42')
+    parser.add_argument('--peer-log', default='runs/r42/peer.log')
     parser.add_argument('--iface', default='en2')
     args = parser.parse_args()
     out, load, peer_log = (project_path(value) for value in (args.out, args.load, args.peer_log))
@@ -208,7 +208,7 @@ def main():
                               'r39-rx-stop.bin': 96,
                               'r40-fixed-driver.bin': 368, 'r40-fixed-backend.bin': 1376}.get(name)
             if expected_bytes is not None and len(data) != expected_bytes:
-                errors.append('Round41 export size mismatch: %s: %d != %d' %
+                errors.append('Round42 export size mismatch: %s: %d != %d' %
                               (name, len(data), expected_bytes))
             (out / name).write_bytes(data)
             digest = sha(data)
@@ -256,7 +256,7 @@ def main():
             data = path.read_bytes()
             observed[label] = struct.unpack_from('<I', data, offset)[0] if len(data) >= offset + 4 else None
     report = {
-        'scope': 'r41', 'captured_utc': stamp, 'interface': args.iface,
+        'scope': 'r42', 'captured_utc': stamp, 'interface': args.iface,
         'load_source': args.load, 'peer_source': args.peer_log,
         'declared_token': token, 'token_scope': 'userspace-integrity-and-rx-observation-only',
         'batch': batch, 'application_requests': requests,
@@ -283,10 +283,10 @@ def main():
                 'record preserve full bootstrap retirement before final current-buffer restoration; '
                 'stopRecord1 preserves local NIC stop/readback and physical resume without peer tail packets; '
                 'fixedDMA1 records three standard mappings and physical/IOVA/physical NIC register readbacks; '
-                'r41 entry IRQ readbacks remain in driver-obs.txt without changing raw ABIs; '
-                'later TX publications are cross-checks only'}
+                'R42 initial RX mappings are posted and bootstrap invalidation completes before NIC enable; '
+                'entry IRQ readbacks retain their r41 property names; later TX publications are cross-checks only'}
     write_text(out / 'R27-EXPORTS.json', json.dumps(report, indent=2) + '\n')
-    lines = ['scope : r41', 'captured_utc : ' + stamp,
+    lines = ['scope : r42', 'captured_utc : ' + stamp,
              'interface : ' + args.iface, 'expected_abi : native7/std5/domain4/nativeRX4 physicalLayout1 stopRecord1 fixedDMA1 mode2',
              'capture_status : ' + report['capture_status'],
              'No correctness verdict; hashes are computed from archived bytes.',
@@ -296,7 +296,7 @@ def main():
             data = path.read_bytes()
             lines.append('  %s  %10d  %s' % (sha(data), len(data), path.relative_to(out).as_posix()))
     write_text(out / 'MANIFEST.txt', '\n'.join(lines) + '\n')
-    print('Round41 capture %s: %s' % (report['capture_status'], args.out))
+    print('Round42 capture %s: %s' % (report['capture_status'], args.out))
     for error in errors:
         print('  INCOMPLETE: ' + error)
     return int(bool(errors))

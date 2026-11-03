@@ -13,6 +13,8 @@ Round39 stops the NIC before retiring the final mappings, without peer tail
 traffic, and restarts the physical ring after the original IOMMU state returns.
 Round40 also maps Lucy's existing descriptor rings and tally buffer through
 three persistent standard DMA commands, using the same stopped-NIC transition.
+Round42 posts every initial RX mapping while the NIC is stopped and retires
+the bootstrap identity aliases before enabling any IOVA receive traffic.
 The older RX4 path remains selectable from its original template.
 """
 from pathlib import Path
@@ -36,6 +38,7 @@ MEMBERS = BASE['MEMBERS'] + r'''
     bool r36RxBeginBatch(UInt32, UInt32);
     bool r36RxPublish(UInt32, UInt64, UInt64, UInt64);
     bool r38RxRetireBootstrap();
+    bool r42RxPostInitial();
     bool r39RxPaused() const;
     bool r39RxStop();
     IOReturn r39RxResume();
@@ -351,10 +354,16 @@ bool RTL8125::r38RxRetireBootstrap()
 {
     R34RxState *p = r34Rx;
     if (p->physicalResumed || p->snapshot.state != r34rx::kInstalled ||
-        !p->authorized || p->firstIovaSlots != r34rx::kCount) return true;
+        p->firstIovaSlots != r34rx::kCount) return true;
     if (p->bootstrapRetireAttempted) return p->bootstrapRetired;
-    // Each slot's old physical DMA has completed, and the whole current
-    // batch has published IOVA OWN. Retire the bootstrap aliases only once.
+    // Every initial IOVA OWN is already published, but hardware is still
+    // stopped. The entry reset ended the old physical DMA before these
+    // descriptors changed. No packet completion is inferred from that reset.
+    if (!p->hardwarePaused || !p->fixed.resetVerified || p->authorized ||
+        p->batchCount) {
+        p->snapshot.flags |= r34rx::kFlagMapFailed;
+        return false;
+    }
     p->bootstrapRetireAttempted = true;
     r34rx::Binding b = {};
     b.version = r34rx::kVersion; b.bytes = sizeof(b);
@@ -367,6 +376,30 @@ bool RTL8125::r38RxRetireBootstrap()
     p->bootstrapRetired = true;
     p->tBootstrapRetired = mach_absolute_time();
     return true;
+}
+
+bool RTL8125::r42RxPostInitial()
+{
+    R34RxState *p = r34Rx;
+    auto &s = p->snapshot;
+    if (!p->hardwarePaused || !p->fixed.resetVerified ||
+        s.maps != r34rx::kCount || s.posted || s.pendingPosted) return false;
+    for (UInt32 slot = 0; slot < r34rx::kCount; ++slot) {
+        auto &w = p->current[slot];
+        if (!p->mapped[slot] || !w.tMapInv || w.tPost || !w.iova) return false;
+        const UInt64 oldAddr = OSSwapLittleToHostInt64(rxDescArray[slot].buf.addr);
+        const UInt64 word = kRxBufferSize | DescOwn |
+            (slot == kRxLastDesc ? RingEnd : 0);
+        rxBufArray[slot].phyAddr = w.iova;
+        rxDescArray[slot].buf.addr = OSSwapHostToLittleInt64(w.iova);
+        wmb();
+        rxDescArray[slot].buf.blen = OSSwapHostToLittleInt64(word);
+        r34RxPosted(slot, w.iova);
+        rxpostRecordRearm(slot, w.iova, oldAddr, word);
+    }
+    // The backend marks Install complete only after this RPC returns.
+    // Authorize retires bootstrap aliases before rtl812xEnable is called.
+    return p->firstIovaSlots == r34rx::kCount;
 }
 
 bool RTL8125::r39RxPaused() const
@@ -494,6 +527,11 @@ IOReturn RTL8125::r40FixedActivate()
     if (f.tActive) return f.flags ? kIOReturnIOError : kIOReturnSuccess;
     struct rtl8125_private *tp = &linuxData;
     if (!f.tProgrammed) {
+        if (!p->hardwarePaused || !f.resetVerified ||
+            p->firstIovaSlots != r34rx::kCount ||
+            (RTL_R8(tp, ChipCmd) & (CmdReset | CmdTxEnb | CmdRxEnb)) ||
+            RTL_R32(tp, IMR0_8125) || !r38RxRetireBootstrap())
+            return kIOReturnIOError;
         txPhyAddr = f.objects[r40fixed::kTxRing].iova;
         rxPhyAddr = f.objects[r40fixed::kRxRing].iova;
         statPhyAddr = f.objects[r40fixed::kTally].iova;
@@ -874,6 +912,9 @@ IOReturn RTL8125::r34RxControl(r34rx::Request *request)
             }
             p->bound[slot] = true;
             if (!r34RxMapSlot(slot)) return kIOReturnIOError;
+        }
+        if (!r42RxPostInitial()) {
+            s.flags |= r34rx::kFlagMapFailed; return kIOReturnIOError;
         }
         s.nativeActive = 1;
         s.tInstalled = mach_absolute_time();

@@ -1,5 +1,41 @@
 # AMDIOMMU — authoritative source repository
 
+## Current Round42 / publish the entire RX IOVA ring before hardware enable
+
+Base: `8efddec6ca4280b59fe991b87516903f8628bf23`, the accepted Round41
+result-documentation successor (tree `4207a10f564eba051e0eeae197848566ac666317`).
+Its deployed implementation is `ac436c3e8e3dbb625f71545b4ee913bd5d273f7e`,
+whose tree exactly matches the delivered Round41 candidate. The original
+capture was reanalyzed on the actual source: 14/14 passed, with one planned
+boot and one valid measurement. The recomputed JSON matches the archived one.
+
+Candidate: Lucy **1.1.227** / Probe **0.51.0**. Keep TX native7/std5/domain4,
+native RX4, PhysicalLayout1, StopRecord1 and FixedDMA1. Keep the accepted
+Round41 entry IRQ handoff and all three standard fixed DMA mappings.
+
+Round41 left the prepared RX mappings unused until each slot's first physical
+receive completed. Round42 uses the existing stopped-NIC entry window to
+publish all 1024 prepared IOVAs directly into the ordinary RX ring. Each OWN
+store has its real first-generation post witness. With the NIC still stopped,
+retire every bootstrap identity leaf and confirm the existing INV/CW before
+calling the ordinary hardware enable path. Hardware entry, RX authorization
+and ready retain their actual later timestamps; they are not moved earlier.
+
+The active snapshot therefore proves identity=0 before the first RX/TX
+activation, without needing traffic to visit every RX slot. Initial mappings
+now carry real RX work: maps=posted, per-slot mapCount=postCount and the first
+retained generation is 1. Real completions and stop retirement stay separate,
+with posted=completed+stopRetired. Final physical recovery and the current-RX
+identity set keep the accepted Round41 behavior.
+
+Keep the same normal 4096 + 125-second idle + 4096 workload, one local stop
+and three ordinary probes after recovery. Strengthen the entry timing in the
+existing RX checks and update the existing normal fixture; retain 14 checks.
+Use the fixed checkout and upstream input, `--tx 21 --rx 34`, `--check-r42`,
+`runs/r42`, `org.example.round42load` and token `0x42c0de42`.
+Host validation, real Mac compilation and hardware acceptance remain separate;
+Round42 hardware acceptance is pending.
+
 ## Accepted Round41 / restore RX interrupt handling after fixed DMA entry
 
 Base: `223ac39a05cbcc74d91bce2f98bfbd186ac315a7`, the recorded Round40 failure
@@ -32,8 +68,8 @@ fixed checkout/upstream directory, `--tx 21 --rx 34`, `--check-r41`, `runs/r41`,
 **Round41 hardware acceptance PASSED (14/14).** One planned boot and one valid
 measurement. The entry diagnostics read a pending `ISR` bit of 32, IMR 0 after
 `rtl8125_irq_mask_and_ack`, and an armed mask of 32821 equal to the driver's
-`intrMask`, so the first completion is no longer delivered only as a stale
-level; software RX advanced for the whole run. Business traffic completed
+`intrMask`; software RX advanced for the whole run. These are the observed
+handoff readbacks, not a trace of individual MSI delivery. Business traffic completed
 8192/8192 with 1047 ordinary probes and no peer tail packet, across a
 125.177099894 s idle in a single `service-owned` domain whose two observations
 share root/DT/command `0x2d0a3000`/`0x2d200000`/`0x2d400000` with `installs=1`.

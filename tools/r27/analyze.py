@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round41: restore receive progress after fixed-DMA entry IRQ handoff.
+"""Round42: publish the full RX IOVA ring before enabling NIC DMA.
 
 The 8192 userspace request IDs are unrelated to the internal mapping-attempt
 IDs. Cumulative counts cover all mapped TX; only the final 32 retirement
@@ -29,7 +29,7 @@ PROTOCOL = _load_module('_round27_application_protocol', HERE / 'protocol.py')
 BURST, REQUESTS = PROTOCOL.BURST, PROTOCOL.REQUESTS
 bursts, payload = PROTOCOL.bursts, PROTOCOL.payload
 
-SCOPE = 'round41-fixed-DMA-entry-IRQ; zero-active-identity; local-NIC-stop; no-peer-drain-tail; owned-sparse-4k; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
+SCOPE = 'round42-initial-RX-IOVA; zero-identity-before-NIC-enable; local-NIC-stop; no-peer-drain-tail; owned-sparse-4k; synchronous-RX-batch16; service-owned-domain; 4096+4096-after-125s-idle'
 REQUEST_COUNT = len(REQUESTS)
 WINDOW_PROBES = 2 * len(bursts())
 MIN_MAPPINGS = REQUEST_COUNT + WINDOW_PROBES
@@ -961,19 +961,23 @@ def check(cap):
         retire_raw = blob('m2-3s-rx-bootstrap-retire-command', 'r38-bootstrap-retire-command.bin')
         A.need(len(retire_raw) == BOOTSTRAP_COMMAND_BYTES, 'bootstrap retirement command size differs')
         bootstrap_command = A.cmdrec(retire_raw, 0)
+        first_post = min(s['first']['tPost'] for s in rxslots)
         last_first_post = max(s['first']['tPost'] for s in rxslots)
+        authorized = driver_property('rtl812x-r35-rx-authorize-time', True)
         bootstrap_clear = P['m2-3s-bootstrap-clear-time']
         bootstrap_done = driver_property('rtl812x-r38-rx-bootstrap-retire-time', True)
         A.need(P['m2-3s-rx-bootstrap-retired'] == 'yes' and
                driver_property('rtl812x-r38-rx-bootstrap-retired', True) == 1 and
                driver_property('rtl812x-r38-rx-first-iova-slots', True) == RX_COUNT and
                driver_property('rtl812x-r38-rx-last-first-iova-time', True) == last_first_post and
-               0 < last_first_post <= bootstrap_clear <= bootstrap_command['tComplete'] ==
+               fh['tStopped'] <= first_post <= last_first_post <= rh['tInstalled'] <=
+               bootstrap_clear <= bootstrap_command['tComplete'] ==
                P['m2-3s-bootstrap-retire-time'] <= bootstrap_done <
-               P['m2-3l-stop-request-time'] <= rh['tDisarmed'] and
+               fh['tProgrammed'] <= fh['tActive'] <= authorized <=
+               P['m2-3e-t-gate-open'] <= P['m2-3l-stop-request-time'] <= rh['tDisarmed'] and
                0 < bootstrap_command['expected'] == bootstrap_command['observed'] <= dh['completionSequence'] and
                bootstrap_command['words'] == [0, dh['domid'] | (3 << 28), 0xfffff003, 0x7fffffff],
-               'bootstrap retirement did not follow all first IOVA publications with confirmed invalidation')
+               'initial RX IOVA publication and bootstrap invalidation did not precede NIC enable')
         actual_pages = identity_leaf_pages(pt, dh['rootPA'], dh['ptBase'], dh['rootLevel'])
         A.need(actual_pages == expected_pages and
                P['m2-3r-bootstrap-pages'] == len(bootstrap_pages) and
@@ -989,7 +993,7 @@ def check(cap):
                'normal RX replacement did not resume after register restoration')
         A.need(rb['count'] == RX_COUNT and rb['mapCalls'] == rb['mapOk'] ==
                rb['unmapCalls'] == rb['unmapOk'] == rh['maps'] == rh['unmaps'] and
-               rb['mapOk'] == rh['posted'] + RX_COUNT and
+               rb['mapOk'] == rh['posted'] and
                rb['flags'] == rb['mapRejects'] == rb['liveOwners'] == rb['boundPairs'] ==
                rb['coverFailed'] == 0 and rb['ready'] == 1 and
                rb['coverCalls'] == rb['coverOk'] >= RX_COUNT,
@@ -1020,10 +1024,11 @@ def check(cap):
         A.need(1 < batch_stats['max-batch'] <= RX_BATCH_MAX and invalidations < logical,
                'normal RX did not exercise multi-slot invalidation coalescing')
         memory_ids, command_ids, leaf_tables, iovas = set(), set(), set(), set()
+        initial_rx_pages = {}
         for i, (slot, driver_slot) in enumerate(zip(rxbackend, rxslots)):
             A.need(slot['flags'] == 0 and slot['sampleCount'] == 1 and
                    slot['mapCount'] == slot['unmapCount'] == driver_slot['mapCount'] ==
-                   driver_slot['unmapCount'] == driver_slot['postCount'] + 1,
+                   driver_slot['unmapCount'] == driver_slot['postCount'],
                    'RX slot %d mapping generations or retained sample differs' % i)
             pair = tuple(slot['first'][k] for k in ('memory', 'command'))
             A.need(all(pair) and pair[0] not in memory_ids and pair[1] not in command_ids,
@@ -1032,7 +1037,7 @@ def check(cap):
             for kind in ('first', 'last'):
                 r, w = slot[kind], driver_slot[kind]
                 label = 'RX slot %d %s: ' % (i, kind)
-                generation = 2 if kind == 'first' else slot['mapCount']
+                generation = 1 if kind == 'first' else slot['mapCount']
                 pages = ((r['pa'] & 4095) + RX_CAPACITY + 4095) // 4096
                 A.need(r['slot'] == i and r['generation'] == generation and
                        tuple(r[k] for k in ('memory', 'command')) == pair and
@@ -1043,6 +1048,15 @@ def check(cap):
                 A.need(all(r[k] == w[k] for k in
                            ('generation', 'memory', 'command', 'pa', 'iova', 'tMapInv', 'tUnmapInv', 'slot')),
                        label + 'driver DMA witness is not the registered mapping')
+                if kind == 'first':
+                    A.need(r['pa'] == driver_slot['originalPA'] and r['mapBatch'] == 0 and
+                           fh['tStopped'] <= r['tMapPublish'] <= r['tMapInv'] <=
+                           w['tPost'] <= rh['tInstalled'] and
+                           fh['tActive'] < w['tDone'],
+                           label + 'install mapping was not posted directly before NIC enable')
+                    for j in range(pages):
+                        address = (r['iova'] & ~4095) + j * 4096
+                        initial_rx_pages[address] = (r['pa'] & ~4095) + j * 4096
                 stop_retired = bool(w['flags'] & WITNESS_STOP_RETIRED)
                 A.need(r['flags'] == 7 and r['mapResult'] == r['unmapResult'] == 0 and
                        P['m2-3e-t-translate-on'] <= r['tMapPublish'] <= r['tMapInv'] <=
@@ -1100,11 +1114,17 @@ def check(cap):
                     A.need(pte == r['mapPte'][j] and
                            (j != 0 or got == (r['pa'] & ~4095)),
                            label + 'RX PTE walk differs from the mapped receive buffer')
+        active_rx_pages = {address: target for address, target in active_leaves.items()
+                           if RX_BASE <= address < rx_end}
+        A.need(active_rx_pages == initial_rx_pages,
+               'pre-enable active RX leaves differ from the 1024 initial mapped buffers')
         A.need(sum(s['mapCount'] for s in rxbackend) == rb['mapOk'] and
                sum(s['unmapCount'] for s in rxbackend) == rb['unmapOk'] and
                dh['commandCompleted'] >= 2 * dh['mapsTotal'] + invalidations + 1 + 2 * FIXED_COUNT,
                'shared command totals do not cover TX/probe, RX, fixed DMA and bootstrap retirement')
         return {'mapped': rb['mapOk'], 'unmapped': rb['unmapOk'], 'initialMappings': RX_COUNT,
+                'initialMappingsPosted': RX_COUNT, 'unpostedInitialMappings': 0,
+                'bootstrapRetiredBeforeNICEnable': True,
                 'driverOwnedPairs': len(memory_ids), 'liveOwners': 0,
                 'source': 'lucy-normal-ring', 'ringId': rh['ringId'],
                 'bootstrapRanges': RX_COUNT, 'experimentalPoolRPCs': 0, 'experimentalSpares': 0,
@@ -1115,11 +1135,12 @@ def check(cap):
                 'bootstrapRemovedPages': len(removed_pages),
                 'activeIdentityPages': len(active_identity),
                 'activeRxIovaPages': sum(RX_BASE <= address < rx_end for address in active_leaves),
-                'bootstrapLastFirstPost': last_first_post, 'bootstrapClearTime': bootstrap_clear,
+                'bootstrapFirstPost': first_post, 'bootstrapLastFirstPost': last_first_post,
+                'bootstrapClearTime': bootstrap_clear, 'authorizedTime': authorized,
                 'bootstrapRetireCommand': bootstrap_command, 'bootstrapDriverDone': bootstrap_done,
                 'restoreAddedPages': len(restored_pages),
                 'identityPages': len(actual_pages), 'identityBytes': len(actual_pages) * 4096,
-                'physicalEvidence': 'active identity is empty; fixed DMA uses three IOVA spans; final identity equals current RX',
+                'physicalEvidence': 'identity is empty before NIC enable; initial RX and fixed DMA use IOVA; final identity equals current RX',
                 'normalReplacementResumedAt': resumed,
                 'mapInvalidations': batch_stats['map-invalidations'],
                 'unmapInvalidations': batch_stats['unmap-invalidations'],
@@ -1179,7 +1200,7 @@ def check(cap):
                    slot['postCount'] == slot['doneCount'] + slot['stopRetired'] and
                    slot['doneCount'] >= 2 and slot['stopRetired'] in (0, 1) and
                    bool(last['flags'] & WITNESS_STOP_RETIRED) == bool(slot['stopRetired']) and
-                   first['generation'] == 2 < last['generation'] == slot['mapCount'] and
+                   first['generation'] == 1 < last['generation'] == slot['mapCount'] and
                    first['tUnmapInv'] < last['tMapInv'] and
                    0 < slot['originalPA'] and 0 < slot['currentPA'] != last['iova'] and
                    rh['tDisarmed'] <= last['tUnmapInv'] <= slot['tPhysicalOwn'] and

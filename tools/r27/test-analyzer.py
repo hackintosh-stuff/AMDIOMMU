@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused Round41 analyzer fixture; synthetic evidence is not hardware evidence.
+"""Focused Round42 analyzer fixture; synthetic evidence is not hardware evidence.
 
 Actual C++ headers generate native7/std5/domain4 and both RX snapshots.
 Current client/peer code generates the 8192 ordinary application logs.
@@ -108,12 +108,12 @@ int main(int argc, char **argv) {
     d.ptBytes = sizeof(pt); d.rootLevel = 3; d.devid = 0x0200; d.domid = 7;
     d.historyTotal = d.mapsTotal = d.retiresTotal = 10249; d.historyStart = 10217;
     d.commandCapacity = _COMMAND_RING_BYTES_ / 16;
-    // Four normal ring passes use 63 full batches plus two 8-slot partials.
-    // Install and final local-stop retirement remain scalar.
-    constexpr uint32_t batchGroups = 4 * 65;
+    // Initial maps are scalar and posted directly; three replacement passes
+    // use 63 full batches plus two 8-slot partials, then local stop is scalar.
+    constexpr uint32_t batchGroups = 3 * 65;
     constexpr uint32_t rxInvalidations = r34rx::kCount + batchGroups;
     d.commandSubmits = d.commandCompleted = d.completionSequence =
-        2 * (10240 + 9) + 2 * rxInvalidations + 4 + 2 * r40fixed::kCount;
+        2 * (10240 + 9) + 2 * rxInvalidations + r34rx::kCount + 1 + 2 * r40fixed::kCount;
     d.commandWraps = d.commandSubmits * 2 / d.commandCapacity;
     d.commandPostWrapCompleted = d.commandCompleted - (d.commandCapacity / 2 - 1);
     d.slotsUsed = 65535; d.maxLiveOwners = 16;
@@ -228,7 +228,7 @@ int main(int argc, char **argv) {
     rx.version = r34rx::kVersion; rx.bytes = sizeof(rx);
     rx.state = r34rx::kReleased; rx.ringId = 0x355200;
     rx.slotCount = rx.restored = r34rx::kCount;
-    rx.maps = rx.unmaps = 5 * r34rx::kCount;
+    rx.maps = rx.unmaps = 4 * r34rx::kCount;
     rx.posted = 4 * r34rx::kCount;
     rx.completed = 3 * r34rx::kCount; rx.stopRetired = r34rx::kCount;
     rx.replaced = 2 * r34rx::kCount;
@@ -247,33 +247,33 @@ int main(int argc, char **argv) {
     stop.tResumeBegin = 9031; stop.tResumed = 9035;
     for (uint32_t i = 0; i < r34rx::kCount; ++i) {
         auto &bs = rb.slots[i]; auto &ds = rx.slots[i];
-        bs.mapCount = bs.unmapCount = ds.mapCount = ds.unmapCount = 5;
+        bs.mapCount = bs.unmapCount = ds.mapCount = ds.unmapCount = 4;
         bs.sampleCount = ds.sampleCount = 1;
         ds.postCount = 4; ds.doneCount = 3; ds.stopRetired = 1; ds.replaceCount = 2;
-        ds.originalPA = 0x80000000ULL + i * 8192;
+        ds.originalPA = 0x80000000ULL + i * 0x3000 + (i % 2 ? 128 : 0);
         ds.tPhysicalOwn = 8805 + i / 16;
         for (uint32_t sample = 0; sample < 2; ++sample) {
             const bool first = sample == 0;
             auto &r = first ? bs.samples[0] : bs.last;
             auto &w = first ? ds.samples[0] : ds.last;
-            r.generation = first ? 2 : 5;
+            r.generation = first ? 1 : 4;
             r.memory = 0xc00000 + i * 256; r.command = 0xd00000 + i * 256;
-            r.pa = (first ? 0x90000000ULL : 0xa0000000ULL) + i * 0x3000 + (i % 2 ? 128 : 0);
+            r.pa = first ? ds.originalPA : 0xa0000000ULL + i * 0x3000 + (i % 2 ? 128 : 0);
             r.iova = r34rx::kIovaBase + i * 8192 + (r.pa & 4095);
             r.slot = i; r.mapLength = r34rx::kCapacity; r.mapOptions = 2;
             r.pages = (r.pa & 4095) ? 2 : 1;
             const uint32_t firstSlot = i < 1008 ? i / 16 * 16 : 1008 + (i - 1008) / 8 * 8;
             const uint32_t width = i < 1008 ? 16 : 8;
             const uint32_t group = i < 1008 ? i / 16 : 63 + (i - 1008) / 8;
-            r.mapBatch = firstSlot | (width << 16);
-            r.unmapBatch = first ? r.mapBatch : 0; // Final local-stop retirement is scalar.
-            r.tMapPublish = first ? 1190 + i : 7000 + i;
-            r.tMapInv = (first ? 1190 : 7000) + firstSlot + width;
-            w.tPost = r.tMapInv + 1 + (i - firstSlot);
+            r.mapBatch = first ? 0 : firstSlot | (width << 16);
+            r.unmapBatch = first ? firstSlot | (width << 16) : 0; // Final local-stop retirement is scalar.
+            r.tMapPublish = first ? 200 : 7000 + i;
+            r.tMapInv = first ? 201 : 7000 + firstSlot + width;
+            w.tPost = first ? 399 : r.tMapInv + 1 + (i - firstSlot);
             w.tDone = first ? 1290 + i : 0;
             r.tUnmapPublish = first ? 1290 + firstSlot + width : 8803 + i / 16;
             r.tUnmapInv = r.tUnmapPublish + 1;
-            const uint64_t mapSequence = first ? 1200 + 2 * group : 21700 + group;
+            const uint64_t mapSequence = first ? 30 + i : 21700 + group;
             const uint64_t unmapSequence = first ? 1201 + 2 * group : 22000 + i;
             r.mapCommand = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
                             mapSequence, mapSequence, r.tMapInv};
@@ -305,7 +305,7 @@ int main(int argc, char **argv) {
         if (!amdsparse::mapOwnedRange(identity, span.pa, span.bytes)) std::abort();
     for (const auto &slot : rx.slots)
         if (!amdsparse::mapOwnedRange(identity, slot.originalPA, r34rx::kCapacity)) std::abort();
-    if (identity.addedLeaves != 1033) std::abort();
+    if (identity.addedLeaves != 1545) std::abort();
     auto keepNone = [](amdsparse::u64) { return false; };
     unsigned removed = 0;
     for (const auto &span : physical.spans)
@@ -314,7 +314,7 @@ int main(int argc, char **argv) {
     for (const auto &slot : rx.slots)
         if (!amdsparse::unmapOwnedRange(identity, slot.originalPA, r34rx::kCapacity,
                                        keepNone, removed)) std::abort();
-    if (removed != 1033) std::abort();
+    if (removed != 1545) std::abort();
     amdsparse::u64 activePt[32 * 512];
     std::memcpy(activePt, pt, sizeof(pt));
     r40fixed::DriverSnapshot fixedDriver{};
@@ -327,7 +327,7 @@ int main(int argc, char **argv) {
     fixedDriver.generationBefore = physical.generation;
     fixedDriver.generationAfter = physical.generation + 1;
     fixedDriver.tStopBegin = 160; fixedDriver.tStopped = 161;
-    fixedDriver.tProgrammed = 402;
+    fixedDriver.tProgrammed = 404;
     fixedDriver.tActive = fixedBackend.tEntered = 405;
     fixedBackend.mapCalls = fixedBackend.mapOk = fixedBackend.unmapCalls = fixedBackend.unmapOk = 3;
     for (uint32_t i = 0; i < r40fixed::kCount; ++i) {
@@ -356,21 +356,16 @@ int main(int argc, char **argv) {
             activePt[2 * 512 + 256 + i * 16 + j] = r.mapPte[j];
         }
     }
-    // Earlier slots may already be on an unretained intermediate generation.
-    // Active IOVAs need not equal the final retained first/last PA samples.
+    // The active image is captured while the NIC is still stopped, so every
+    // RX leaf must describe the directly posted initial generation.
     for (uint32_t i = 0; i < r34rx::kCount; ++i) {
         const auto &w = rb.slots[i].samples[0];
-        const uint64_t pa = w.tUnmapInv < 2241 ?
-            0xb0000000ULL + i * 0x3000 + (w.pa & 4095) : w.pa;
         for (uint32_t j = 0; j < w.pages; ++j)
             activePt[(3 + i / 256) * 512 + (i % 256) * 2 + j] =
-                ((pa & ~4095ULL) + j * 4096) | perm;
+                ((w.pa & ~4095ULL) + j * 4096) | perm;
     }
-    // One contemporaneous TX IOVA: the device only reads TX buffers, so the
-    // standard TX path maps it read-only and the leaf carries IR without IW.
-    activePt[2 * 512] = 0x70000000ULL | (perm & ~(1ULL << 62));
     r17domain::Command retire = {{0, (3u << 28) | d.domid, 0xfffff003u, 0x7fffffffu},
-                                20000, 20000, 2242};
+                                1100, 1100, 402};
     identity.addedLeaves = 0;
     for (const auto &slot : rx.slots)
         if (!amdsparse::mapOwnedRange(identity, slot.currentPA, r34rx::kCapacity)) std::abort();
@@ -458,15 +453,15 @@ def properties():
          'm2-3p-rx-ring-generation': 2,
          'm2-3p-rx-pool-rpcs': 0, 'm2-3p-rx-spares': 0, 'm2-3p-rx-ring-id': 0x355200,
          'm2-3p-rx-physical-resume': 'done',
-         'm2-3r-physical-mode': 'owned-sparse-4k', 'm2-3r-bootstrap-pages': 1033,
+         'm2-3r-physical-mode': 'owned-sparse-4k', 'm2-3r-bootstrap-pages': 1545,
          'm2-3r-restore-added-pages': 1536, 'm2-3r-identity-pages': 1536,
          'm2-3s-rx-bootstrap-retired': 'yes', 'm2-3s-fixed-pages': 9,
-         'm2-3s-bootstrap-removed-pages': 1033,
-         'm2-3s-bootstrap-clear-time': session_time(2241),
-         'm2-3s-bootstrap-retire-time': session_time(2242),
-         'm2-3q-rx-map-invalidations': 1284, 'm2-3q-rx-unmap-invalidations': 1284,
-         'm2-3q-rx-map-batch-calls': 260, 'm2-3q-rx-unmap-batch-calls': 260,
-         'm2-3q-rx-map-batch-slots': 4096, 'm2-3q-rx-unmap-batch-slots': 4096,
+         'm2-3s-bootstrap-removed-pages': 1545,
+         'm2-3s-bootstrap-clear-time': 401,
+         'm2-3s-bootstrap-retire-time': 402,
+         'm2-3q-rx-map-invalidations': 1219, 'm2-3q-rx-unmap-invalidations': 1219,
+         'm2-3q-rx-map-batch-calls': 195, 'm2-3q-rx-unmap-batch-calls': 195,
+         'm2-3q-rx-map-batch-slots': 3072, 'm2-3q-rx-unmap-batch-slots': 3072,
          'm2-3q-rx-max-batch': 16,
          'm2-3h-rx-state': 'drained-and-unmapped', 'm2-3h-rx-ready': 'no',
          'm2-b2-t-recovery-start': 8883, 'm2-3h-rx-pending': 0, 'm2-3h-rx-live-owners': 0,
@@ -486,7 +481,7 @@ def properties():
                 'm2-3e-enter-last-inflight', 'm2-3e-enter-last-ring',
                 'm2-3e-exit-last-inflight', 'm2-3e-exit-last-ring'):
         p[key] = 0
-    command_total = 2 * 10249 + 2 * 1284 + 4 + 2 * 3
+    command_total = 2 * 10249 + 2 * 1219 + 1024 + 1 + 2 * 3
     p.update({'m2-3b-command-capacity': 512, 'm2-3b-submits': command_total,
               'm2-3b-command-completed': command_total, 'm2-3b-command-wraps': command_total * 2 // 512,
               'm2-3b-command-post-wrap-completed': command_total - 255,
@@ -644,9 +639,10 @@ class AnalyzerTests(unittest.TestCase):
             '"rtl812x-r35-rx-spares" = 0\n'
             '"rtl812x-r35-rx-ring-id" = 0x355200\n'
             '"rtl812x-r38-rx-first-iova-slots" = 1024\n'
-            f'"rtl812x-r38-rx-last-first-iova-time" = {session_time(2222)}\n'
+            '"rtl812x-r38-rx-last-first-iova-time" = 399\n'
             '"rtl812x-r38-rx-bootstrap-retired" = 1\n'
-            f'"rtl812x-r38-rx-bootstrap-retire-time" = {session_time(2243)}\n'
+            '"rtl812x-r38-rx-bootstrap-retire-time" = 403\n'
+            '"rtl812x-r35-rx-authorize-time" = 405\n'
             '"rtl812x-r41-irq-pending" = 1\n'
             '"rtl812x-r41-irq-masked" = 0\n'
             '"rtl812x-r41-irq-armed" = 32821\n'
@@ -705,12 +701,15 @@ class AnalyzerTests(unittest.TestCase):
                          {'before': 20, 'during': 1024, 'after': 3})
         self.assertEqual((self.capture / 'r34-rx-driver.bin').stat().st_size, analyzer.RX_DRIVER_BYTES)
         self.assertEqual((self.capture / 'r34-rx-backend.bin').stat().st_size, analyzer.RX_BACKEND_BYTES)
-        self.assertEqual(by_id[RX_MAP_CHECK]['mapped'], 5120)
-        self.assertEqual(by_id[RX_MAP_CHECK]['unmapped'], 5120)
+        self.assertEqual(by_id[RX_MAP_CHECK]['mapped'], 4096)
+        self.assertEqual(by_id[RX_MAP_CHECK]['unmapped'], 4096)
+        self.assertEqual(by_id[RX_MAP_CHECK]['initialMappingsPosted'], 1024)
+        self.assertEqual(by_id[RX_MAP_CHECK]['unpostedInitialMappings'], 0)
+        self.assertTrue(by_id[RX_MAP_CHECK]['bootstrapRetiredBeforeNICEnable'])
         self.assertEqual((by_id[RX_MAP_CHECK]['mapBatchCalls'],
                           by_id[RX_MAP_CHECK]['unmapBatchCalls'],
-                          by_id[RX_MAP_CHECK]['maxBatch']), (260, 260, 16))
-        self.assertEqual(by_id[RX_MAP_CHECK]['invalidationCyclesSaved'], 7672)
+                          by_id[RX_MAP_CHECK]['maxBatch']), (195, 195, 16))
+        self.assertEqual(by_id[RX_MAP_CHECK]['invalidationCyclesSaved'], 5754)
         self.assertEqual(by_id[RX_MAP_CHECK]['writablePages'], 1536)
         self.assertEqual(by_id[RX_MAP_CHECK]['leafTables'], 4)
         self.assertEqual((self.capture / 'r37-physical-layout.bin').stat().st_size,
@@ -720,12 +719,12 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual((by_id[RX_MAP_CHECK]['fixedPhysicalPages'],
                           by_id[RX_MAP_CHECK]['bootstrapPages'],
                           by_id[RX_MAP_CHECK]['restoreAddedPages'],
-                          by_id[RX_MAP_CHECK]['identityPages']), (9, 1033, 1536, 1536))
+                          by_id[RX_MAP_CHECK]['identityPages']), (9, 1545, 1536, 1536))
         self.assertEqual((by_id[RX_MAP_CHECK]['bootstrapRemovedPages'],
                           by_id[RX_MAP_CHECK]['activeIdentityPages'],
-                          by_id[RX_MAP_CHECK]['activeRxIovaPages']), (1033, 0, 1536))
-        self.assertEqual(by_id[RX_MAP_CHECK]['bootstrapRetireCommand']['expected'], 20000)
-        self.assertEqual(by_id[RX_MAP_CHECK]['bootstrapDriverDone'], session_time(2243))
+                          by_id[RX_MAP_CHECK]['activeRxIovaPages']), (1545, 0, 1536))
+        self.assertEqual(by_id[RX_MAP_CHECK]['bootstrapRetireCommand']['expected'], 1100)
+        self.assertEqual(by_id[RX_MAP_CHECK]['bootstrapDriverDone'], 403)
         self.assertEqual(by_id[RX_MAP_CHECK]['identityBytes'], 1536 * 4096)
         fixed = by_id[RX_MAP_CHECK]['fixedDMA']
         self.assertEqual((fixed['mapped'], fixed['unmapped'], fixed['liveOwners'],
@@ -801,7 +800,7 @@ class AnalyzerTests(unittest.TestCase):
         first = slot + analyzer.RX_DRIVER_SLOT_BYTES - 2 * analyzer.RX_WITNESS_BYTES
         for offset, fmt, value in ((slot + 16, 'Q', 1), (slot + 32, 'I', 5),
                                    (slot + 36, 'I', 4), (slot + 44, 'I', 2),
-                                   (slot + 48, 'I', 1), (first, 'Q', 1),
+                                   (slot + 48, 'I', 1), (first, 'Q', 2),
                                    (first + 48, 'Q', 1), (first + 56, 'Q', 1),
                                    (first + 76, 'I', 3), (first + 80, 'I', 8),
                                    (first + 84, 'I', 8193), (first + 96, 'I', 2)):
