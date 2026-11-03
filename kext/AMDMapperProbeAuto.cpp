@@ -116,18 +116,15 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
     // start() runs, and that start() is exactly the copyMapperForDevice() call
     // this mapper must be visible to. Only a client that already started (or a
     // provider that is still open) means the lookup has been missed.
-    IOService *client = OSDynamicCast(IOService, nic->getChildEntry(gIOServicePlane));
-    const bool clientStarted = client && client->isStarted();
-    if (nic->isOpen()) {
-        setProperty("r44-state", "failed-too-late-open");
+    // Attachment is the real boundary: once the client is attached the provider
+    // starts it immediately, so the one-shot lookup inside start() cannot see a
+    // parent published afterwards. Ordering is enforced by the driver's
+    // OSBundleLibraries dependency on this kext; the state names below keep the
+    // two late cases distinguishable in the snapshot.
+    if (nic->isOpen() || nic->getChildEntry(gIOServicePlane)) {
+        setProperty("r44-state", nic->isOpen() ? "failed-too-late-open"
+                                               : "failed-too-late-attached");
         return false;
-    }
-    if (clientStarted) {
-        setProperty("r44-state", "failed-too-late-started");
-        return false;
-    }
-    if (client) {
-        setProperty("r44-state", "attaching-to-pending-client");
     }
 
     R44Controller *c = (R44Controller *)IOMalloc(sizeof(R44Controller));
