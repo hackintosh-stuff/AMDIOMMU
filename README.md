@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Round48 candidate / ordinary 32-bit DMA address constraints
+## Accepted Round48 / ordinary 32-bit DMA constraints, PM hardware TODO
 
 Formal base: `123dea9ddb5f159535f1be5e42f01168203a0850`, the accepted Round47
 result-documentation successor; tree `08c7c25a982c47769d66bebd4db67d59d077a9dc`.
@@ -13,9 +13,21 @@ leaves/11 reachable tables, 272 MiB, TSO6 completion increments 2053 and 135,
 actual public `IOACPIPlatformDevice::getACPITableData` implementation that
 fixed Round47's real SDK access and AuxKC symbol-binding failures.
 
-**Candidate: Lucy 1.1.233 / Probe 0.55.0, ordinary `amdiommu=auto`, MTU1500,
-TSO4 and TSO6 enabled.** Continue in this Git checkout. Real Mac build, boot
-and the eleven Round48 hardware checks remain pending.
+**Accepted: eleven mainline checks passed on the real Mac with Lucy 1.1.233 /
+Probe 0.55.0, ordinary `amdiommu=auto`, MTU1500, TSO4 and TSO6 enabled.** The
+deployed implementation is
+`b98e74511073eb1eb487af12341b20c9d332d0e0`, built once, deployed once and
+validated in one planned boot, one load run and one valid measurement; the
+deployment build log is `runs/r48-build.log`. The driver configured 32 address
+bits, every successful mapper request asked for 32 bits (`min=max=32`,
+`map32Ok == mapOk` per phase, 36126 at the end) and every live and last
+map/unmap span stayed inside `[0x80000000, 0x81000000)` while the complete page
+tables still mapped the recorded physical pages. High physical addresses were
+actually covered: 1025 of 1037 live pages per phase sat above 4 GiB, with a
+maximum live PA of 15189209088 and 210251 cumulative high-PA pages. The four
+IPv6 TCP streams carried 272 MiB, TSO6 added 2051 and 133 hardware
+completions, all four phases held 67 maps/1037 leaves/11 tables of one domain,
+72186 commands completed over 281 wraps, and target faults stayed zero.
 
 The ordinary mapper uses an independent 16 MiB IOVA pool at 0x80000000,
 entirely below 4 GiB. Standard IODMACommand requests with 32 through 64 address
