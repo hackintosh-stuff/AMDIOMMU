@@ -14,21 +14,21 @@ RUN = common.MixedRun(54, 'a798b47a9daaae98d5d4efe98285c1bfbee9da2d',
 COMMANDS = ('peer', 'load', 'deploy', 'capture', 'analyze', 'disarm-next')
 
 
-def main():
+def main(run=RUN):
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         print('usage: run.py {%s} [arguments]' % ','.join(COMMANDS))
         return 0 if sys.argv[1:] in (['-h'], ['--help']) else 2
     command = sys.argv.pop(1)
-    common.select_run(RUN)
+    common.select_run(run)
     # Keep the finite protocol, real snapshot retake, and page-table checks shared.
     if command == 'peer':
-        return common.module('_mixed_peer', 'tools/r52/peer.py').main(default_token=RUN.token)
+        return common.module('_mixed_peer', 'tools/r52/peer.py').main(default_token=run.token)
     if command == 'load':
         return common.module('_mixed_load', 'tools/r52/load.py').main(
-            round_id=RUN.number, default_token=RUN.token)
+            round_id=run.number, default_token=run.token)
     if command == 'capture':
         return common.module('_mixed_capture', 'tools/r52/capture.py').main(
-            round_id=RUN.number, abi='mixed-RTL8111-RTL8125-mapper-ABI2')
+            round_id=run.number, abi='mixed-RTL8111-RTL8125-mapper-ABI2')
     return common.module('_mixed_entry', 'tools/r53/' + command + '.py').main()
 
 

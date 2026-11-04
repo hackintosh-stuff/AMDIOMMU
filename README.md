@@ -1,5 +1,32 @@
 # AMDIOMMU — authoritative source repository
 
+## Candidate Round55 / word-wise first-fit IOVA allocation
+
+Base: `30395d3572b36457b68dca2f37e9cdb027407017`, accepted R54 record.
+The effective R54 deployment used `b882f091a50080969ccb69bb9748113cb3d3e0cb`.
+Re-analysis of the original R54 auto5 capture reproduced the saved 4/4 result:
+8 transfers, 64 MiB, independent per-device pre-open claims, and zero target
+faults. R54 reused the accepted R53 32 MiB off baseline. Keep R54's final
+RX snapshot pairing and settled initial lifecycle capture.
+
+The allocator now searches its existing occupancy bitmap a word at a time.
+It selects the same lowest aligned free run as the previous per-page scan.
+No change to page-table publication, DMA permissions, returned address range,
+the 16 MiB per-domain pool, ABI2, or synchronous unmap-before-reuse. No
+instrumentation or new acceptance group is added to the runtime path.
+
+Replaying a 1-page request on R54 auto5 before/B selected page 1037 in both
+versions (1038 individual bit probes vs. 18 word probes). A 64-page request
+on down/B still selected page 1101 (2777 vs. 28). These are static replay
+counts, not kernel timing or network throughput measurements.
+
+Build only AMDMapperProbe **0.62.0** with `sh tools/build-m1a.sh`. Reuse the
+installed R54 clients: RTL812xLucy **1.1.239**, RealtekRTL8111 **3.0.54**.
+They request Probe 0.61.0, within the new bundle's 0.53.0–0.62.0 compatibility
+range. Use `python3 -B tools/r55/run.py <command> ...` for the existing
+two-interface workload. The accepted R54 client binaries and fixed upstream
+inputs do not need to be rebuilt. R55 macOS build and hardware run are pending.
+
 ## Accepted Round54 / explicit per-device requester claims, PM hardware TODO
 
 Base: `a798b47a9daaae98d5d4efe98285c1bfbee9da2d` (accepted R53 record).

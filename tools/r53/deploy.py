@@ -15,13 +15,14 @@ N = module('_r53_deploy_network', 'tools/r53/network.py')
 RTL8111_ID = 'com.insanelymac.RealtekRTL8111'
 CONFIG, EFI_INJECTIONS = None, []
 PREVIOUSLY_ABSENT = []
+CLIENT_DEPENDENCY = RUN.installed_client_dependency or VERSIONS['AMDMapperProbe']
 
 
 def require_offloads(info):
     params = info.get('IOKitPersonalities', {}).get('RTL8125', {}).get('Driver Parameters', {})
     if any(params.get(key) is not True for key in ('enableTSO4', 'enableTSO6')):
         raise ValueError('Lucy requires enableTSO4=true and enableTSO6=true')
-    if info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != VERSIONS['AMDMapperProbe']:
+    if info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != CLIENT_DEPENDENCY:
         raise ValueError('Lucy Probe compatibility version differs')
 
 
@@ -32,8 +33,16 @@ def bundle_identity(bundle, version, symbol):
     if bundle.stem == 'RealtekRTL8111':
         info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
         if (info.get('CFBundleIdentifier') != RTL8111_ID or
-                info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != VERSIONS['AMDMapperProbe']):
+                info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != CLIENT_DEPENDENCY):
             raise ValueError('RTL8111 bundle identity or mapper startup dependency differs')
+    if bundle.stem == 'AMDMapperProbe' and RUN.installed_client_dependency:
+        info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
+        compatible = info.get('OSBundleCompatibleVersion', version)
+        # These project versions are numeric major.minor.patch values.
+        def parts(value):
+            return tuple(map(int, value.split('.')))
+        if not parts(compatible) <= parts(CLIENT_DEPENDENCY) <= parts(version):
+            raise ValueError("new Probe excludes the installed clients' declared dependency")
     return BASE_BUNDLE_IDENTITY(bundle, version, symbol)
 
 
@@ -80,9 +89,12 @@ def check_endpoints(args):
 
 
 def deployment_bundles():
-    return [(ROOT / 'build-lucy/RTL812xLucy.kext', VERSIONS['RTL812xLucy'], 'r47PublishPM'),
+    installed = Path('/Library/Extensions')
+    lucy = installed if RUN.installed_client_dependency else ROOT / 'build-lucy'
+    rtl = installed if RUN.installed_client_dependency else ROOT / 'build-rtl8111'
+    return [(lucy / 'RTL812xLucy.kext', VERSIONS['RTL812xLucy'], 'r47PublishPM'),
             (ROOT / 'build-m1a/AMDMapperProbe.kext', VERSIONS['AMDMapperProbe'], 'r52PublishDomains'),
-            (ROOT / 'build-rtl8111/RealtekRTL8111.kext', VERSIONS['RealtekRTL8111'], 'r53SnapshotAction')]
+            (rtl / 'RealtekRTL8111.kext', VERSIONS['RealtekRTL8111'], 'r53SnapshotAction')]
 
 
 def recovery_sources(aux, config, targets, jobs):

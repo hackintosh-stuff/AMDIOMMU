@@ -19,20 +19,44 @@ struct BoundedAllocator {
 // The experiment keeps its original shape. The ordinary per-device mapper
 // uses the same bounded first-fit allocator with a larger compile-time pool.
 using Allocator = BoundedAllocator<kPages, kMapPages>;
+
+// Find the first page of the requested kind in [from, limit); limit means none.
+inline unsigned findNextBitmapPage(const u64 *used, unsigned from,
+                                   unsigned limit, bool occupied) {
+    while (from < limit) {
+        const unsigned wordBase = from & ~63U;
+        const u64 word = used[from / 64];
+        const u64 matches = (occupied ? word : ~word) & (~0ULL << (from % 64));
+        if (matches) {
+            const unsigned page = wordBase + static_cast<unsigned>(__builtin_ctzll(matches));
+            return page < limit ? page : limit;
+        }
+        from = wordBase + 64;
+    }
+    return limit;
+}
+
 template<unsigned PoolPages, unsigned MaxMapPages>
 inline bool allocate(BoundedAllocator<PoolPages, MaxMapPages> &a,
                      unsigned pages, unsigned &basePage,
                      unsigned alignmentPages = 1) {
     if (!pages || pages > MaxMapPages || !alignmentPages ||
         (alignmentPages & (alignmentPages - 1))) return false;
-    for (unsigned base = 0; base <= PoolPages - pages; ++base) {
-        if (base & (alignmentPages - 1)) continue;
-        bool free = true;
-        for (unsigned j = 0; j < pages; ++j) {
-            const unsigned p = base + j;
-            if (a.used[p / 64] & (1ULL << (p % 64))) { free = false; break; }
+    const unsigned lastBase = PoolPages - pages;
+    const u64 alignMask = alignmentPages - 1U;
+    unsigned from = 0;
+    while (from <= lastBase) {
+        const unsigned first = findNextBitmapPage(a.used, from, lastBase + 1, false);
+        const u64 aligned = (static_cast<u64>(first) + alignMask) & ~alignMask;
+        if (aligned > lastBase) return false;
+        const unsigned base = static_cast<unsigned>(aligned);
+        const unsigned end = base + pages;
+        const unsigned conflict = findNextBitmapPage(a.used, base, end, true);
+        if (conflict != end) {
+            // Every later start through conflict would still cover that busy page.
+            from = conflict + 1;
+            continue;
         }
-        if (!free) continue;
         bool reused = false;
         for (unsigned j = 0; j < pages; ++j) {
             const unsigned p = base + j;

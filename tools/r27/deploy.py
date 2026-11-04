@@ -241,14 +241,16 @@ def main(add_arguments=None, check_peer=None):
         if not (HERE / name).is_file():
             raise ValueError('missing Round%d entry point: %s' % (ROUND, name))
     specs = deployment_bundles()
-    bundles = [row[0] for row in specs]
-    symbols = [row[2] for row in specs]
     expected = {}
     for bundle, version, symbol in specs:
         expected[bundle.stem] = bundle_identity(bundle, version, symbol)
     aux = Path('/Library/KernelCollections/AuxiliaryKernelExtensions.kc')
     jobs = sorted(Path('/Library/LaunchDaemons').glob('org.example.round*load.plist'))
-    targets = [Path('/Library/Extensions') / bundle.name for bundle in bundles]
+    installed = Path('/Library/Extensions')
+    # A spec sourced from its installed location contributes its verified UUID
+    # to the collection/analysis but is not backed up, deleted or recopied.
+    replace = [row for row in specs if row[0] != installed / row[0].name]
+    targets = [installed / bundle.name for bundle, _, _ in replace]
     for path in targets + jobs:
         if path.resolve() != path:
             raise ValueError('unexpected symlink in system replacement target: ' + str(path))
@@ -268,6 +270,10 @@ def main(add_arguments=None, check_peer=None):
             'out': out.relative_to(ROOT).as_posix(),
             'backup': backup.relative_to(ROOT).as_posix(),
             'recovery_bytes': total, 'expected': expected})
+    if len(replace) != len(specs):
+        plan['retained_bundles'] = [bundle.stem for bundle, _, _ in specs
+                                    if bundle == installed / bundle.name]
+        plan['replaced_bundles'] = [bundle.stem for bundle, _, _ in replace]
     print(json.dumps(plan, indent=2), flush=True)
     if args.check_only:
         return 0
@@ -278,7 +284,7 @@ def main(add_arguments=None, check_peer=None):
         run(['sudo', 'cp', '-Rp', source, backup / source.name])
     (backup / 'boot-args.txt').write_text(old, encoding='utf-8')
     out.mkdir(parents=True, exist_ok=True)
-    for bundle, target, symbol in zip(bundles, targets, symbols):
+    for (bundle, _, symbol), target in zip(replace, targets):
         print('Verified replacement target: ' + str(target), flush=True)
         run(['sudo', 'rm', '-rf', target])
         run(['sudo', 'cp', '-R', bundle, target])

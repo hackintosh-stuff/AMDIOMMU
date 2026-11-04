@@ -8,14 +8,15 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.61.0</string>
-    <key>CFBundleVersion</key><string>0.61.0</string>
+    <key>CFBundleShortVersionString</key><string>0.62.0</string>
+    <key>CFBundleVersion</key><string>0.62.0</string>
     <!-- Client requests must fit [OSBundleCompatibleVersion, CFBundleVersion].
          Existing mapper ABI1 clients remain compatible with 0.53.0;
          Round54 clients require 0.61.0 for a pre-open claim on their selected PCI requester. -->
     <key>OSBundleCompatibleVersion</key><string>0.53.0</string>
     <!--
       版本历史：
+        0.62.0 第55轮：IOVA 位图按 64 位字查找最低对齐空闲区间；保留 R54 驱动 ABI 与同步回收。
         0.61.0 第54轮：显式 requester 由客户端在 PCI open 前申请设备域；普通 DMA 与按设备失效路径沿用 R53。
         0.60.0 第53轮：按显式requester选择RTL8111/RTL8127混合设备域；未选设备保持直通，共享原有普通DMA后端。
         0.59.0 第52轮：同一控制器接入两个RTL8127；每设备独立IOMapper、域、页表与IOVA池，共享命令环同步。
