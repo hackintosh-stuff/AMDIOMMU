@@ -136,12 +136,13 @@ def set_boolean(entry_id, name):
     io = ctypes.CDLL('/System/Library/Frameworks/IOKit.framework/IOKit')
     cf = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
     port, ptr = ctypes.c_uint32, ctypes.c_void_p
-    io.IORegistryGetRootEntry.argtypes, io.IORegistryGetRootEntry.restype = [port], port
-    io.IORegistryEntryCreateIterator.argtypes = [port, ctypes.c_char_p, port, ctypes.POINTER(port)]
-    io.IORegistryEntryCreateIterator.restype = port
-    io.IOIteratorNext.argtypes, io.IOIteratorNext.restype = [port], port
-    io.IORegistryEntryGetRegistryEntryID.argtypes = [port, ctypes.POINTER(ctypes.c_uint64)]
-    io.IORegistryEntryGetRegistryEntryID.restype = port
+    # IORegistryEntryIDMatching asks IOKit for this one entry directly. Walking
+    # the whole IOService plane per RPC cost seconds under RX remap load, which
+    # made an asynchronous snapshot pair impossible to sample coherently.
+    io.IORegistryEntryIDMatching.argtypes = [ctypes.c_uint64]
+    io.IORegistryEntryIDMatching.restype = ptr
+    io.IOServiceGetMatchingService.argtypes = [port, ptr]
+    io.IOServiceGetMatchingService.restype = port
     io.IORegistryEntrySetCFProperties.argtypes = [port, ptr]
     io.IORegistryEntrySetCFProperties.restype = port
     io.IOObjectRelease.argtypes, io.IOObjectRelease.restype = [port], port
@@ -150,20 +151,14 @@ def set_boolean(entry_id, name):
     cf.CFDictionaryCreate.argtypes = [ptr, ctypes.POINTER(ptr), ctypes.POINTER(ptr), ctypes.c_long, ptr, ptr]
     cf.CFDictionaryCreate.restype = ptr
     cf.CFRelease.argtypes, cf.CFRelease.restype = [ptr], None
-    root, iterator, service, key, properties = io.IORegistryGetRootEntry(0), port(), 0, None, None
+    service, key, properties = 0, None, None
     try:
-        if not root or io.IORegistryEntryCreateIterator(root, b'IOService', 1, ctypes.byref(iterator)):
-            raise RuntimeError('cannot iterate IOService plane')
-        while True:
-            entry = io.IOIteratorNext(iterator)
-            if not entry:
-                raise RuntimeError('registry entry disappeared: %d' % entry_id)
-            identity_value = ctypes.c_uint64()
-            if (io.IORegistryEntryGetRegistryEntryID(entry, ctypes.byref(identity_value)) == 0 and
-                    identity_value.value == entry_id):
-                service = entry
-                break
-            io.IOObjectRelease(entry)
+        matching = io.IORegistryEntryIDMatching(entry_id)
+        if not matching:
+            raise RuntimeError('cannot match registry entry: %d' % entry_id)
+        service = io.IOServiceGetMatchingService(0, matching)
+        if not service:
+            raise RuntimeError('registry entry disappeared: %d' % entry_id)
         key = cf.CFStringCreateWithCString(None, name.encode('ascii'), 0x08000100)
         if not key:
             raise RuntimeError('cannot create snapshot property key')
@@ -179,9 +174,8 @@ def set_boolean(entry_id, name):
             cf.CFRelease(properties)
         if key:
             cf.CFRelease(key)
-        for handle in (service, iterator.value, root):
-            if handle:
-                io.IOObjectRelease(handle)
+        if service:
+            io.IOObjectRelease(service)
 
 
 def scalars(node, prefixes):

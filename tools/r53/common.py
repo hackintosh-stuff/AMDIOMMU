@@ -210,45 +210,40 @@ def snapshot(parent, label, config, mode):
     tree = registry()
     drivers = selected_drivers(tree, config)
     if mode == 'auto':
-        # Both sides publish independently, so take the pair repeatedly until it
-        # is judgeable, bounded in time.
+        # Both sides publish through separate RPCs, so take the pair repeatedly
+        # until a single read is judgeable. Publishing both first and then
+        # dumping once keeps the two publications milliseconds apart instead of
+        # straddling a whole registry walk.
+        owners = [node for node, _ in nodes(tree) if node.get('r52-role') == 'controller']
+        if len(owners) != 1:
+            raise ValueError('expected one shared controller')
+        owner_id = owners[0]['IORegistryEntryID']
         deadline = time.monotonic() + 30
         while True:
             for value in drivers.values():
                 profile = PROFILES[value['binding']['driver_class']]
                 set_boolean(value['binding']['driver_registry_id'], profile['snapshot'])
+            set_boolean(owner_id, 'R52Snapshot')
             tree = registry()
             drivers = selected_drivers(tree, config)
+            owner = next(node for node, _ in nodes(tree)
+                         if node.get('IORegistryEntryID') == owner_id)
+            controller = dict(C.scalars(owner, ('r52-', 'r53-')), registry_id=owner_id)
+            domains = owner['r52-domains']
             lucy = next(d['node'] for d in drivers.values() if d['binding']['driver_class'] == 'RTL8125')
             rtl8111 = next(d['node'] for d in drivers.values() if d['binding']['driver_class'] == 'RTL8111')
             drained = (rtl8111.get('rtl8111-r53-tx-mapped-active') == 0 and
                        all(lucy.get(p + 'posted') is not None and
                            lucy.get(p + 'posted') == lucy.get(p + 'completed')
                            for p in ('rtl812x-r45-tso4-', 'rtl812x-r46-tso6-')))
-            if not drained:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError('selected native TX mappings/TSO completions did not drain')
-                time.sleep(.02)
-                continue
-            owners = [node for node, _ in nodes(tree) if node.get('r52-role') == 'controller']
-            if len(owners) != 1:
-                raise ValueError('expected one shared controller')
-            owner_id = owners[0]['IORegistryEntryID']
-            set_boolean(owner_id, 'R52Snapshot')
-            tree = registry()
-            owner = next(node for node, _ in nodes(tree)
-                         if node.get('IORegistryEntryID') == owner_id)
-            controller = dict(C.scalars(owner, ('r52-', 'r53-')), registry_id=owner_id)
-            domains = owner['r52-domains']
-            drivers = selected_drivers(tree, config)
-            rtl8111 = next(d['node'] for d in drivers.values()
-                           if d['binding']['driver_class'] == 'RTL8111')
             requester = next(d['binding']['requester'] for d in drivers.values()
                              if d['binding']['driver_class'] == 'RTL8111')
             probe = next((p for p in domains if p.get('r52-requester') == requester), None)
-            if probe is not None and rx_groups_consistent(rtl8111, live_records(probe)):
+            if drained and probe is not None and rx_groups_consistent(rtl8111, live_records(probe)):
                 break
             if time.monotonic() >= deadline:
+                if not drained:
+                    raise RuntimeError('selected native TX mappings/TSO completions did not drain')
                 raise RuntimeError('RTL8111 driver and mapper snapshots describe different RX rings')
             time.sleep(.02)
 
