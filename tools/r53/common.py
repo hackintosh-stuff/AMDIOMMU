@@ -154,13 +154,13 @@ def boot_mode(mode):
     return boot
 
 
-def live_addresses(probe):
-    """Decode the mapped IOVA of every live record a domain just published.
+def live_records(probe):
+    """Decode the mapped IOVA and length of every live record a domain published.
 
     The records travel as one opaque blob inside the domain dictionary, so the
     capture can join them to a driver snapshot without writing a file first.
-    An ABI2 record leads with handle, firstPA, mapAddress, so the map address is
-    the third 64-bit word.
+    An ABI2 record leads with handle, firstPA, mapAddress, mapLength and keeps
+    the byte length at the sixth 64-bit word.
     """
     raw = probe.get('r44-live-raw')
     count = probe.get('r44-live-maps')
@@ -168,7 +168,8 @@ def live_addresses(probe):
         return None
     if len(raw) != count * 616:
         return None
-    return [struct.unpack_from('<Q', raw, index * 616 + 16)[0] for index in range(count)]
+    return [(struct.unpack_from('<Q', raw, index * 616 + 16)[0],
+             struct.unpack_from('<Q', raw, index * 616 + 40)[0]) for index in range(count)]
 
 
 def rx_groups_consistent(driver, rows):
@@ -178,8 +179,9 @@ def rx_groups_consistent(driver, rows):
     asynchronous by nature: a base the driver exported a moment ago may already
     be retired, and the mapper may already hold its replacement. What must hold
     is the shape -- the mapper holds the driver's three fixed objects plus one
-    record per RX group -- and that the driver's own descriptors still name the
-    bases its export lists.
+    record per RX group -- and that every exported group base is still the
+    mapped span of a live record. Only then can the analyzer join the pair; a
+    single in-flight batch makes the join undecidable and must be retaken.
     """
     if not isinstance(driver.get('rtl8111-r53-live'), bytes) or not rows:
         return True
@@ -190,6 +192,9 @@ def rx_groups_consistent(driver, rows):
     if not groups:
         return True
     if len(rows) != len(groups) + len(fixed):
+        return False
+    mapped = set(rows)
+    if any((group['iova'], group['length']) not in mapped for group in groups.values()):
         return False
     addresses = driver.get('rtl8111-r53-rx-addresses')
     if not isinstance(addresses, bytes) or len(addresses) != 512 * 8:
@@ -241,7 +246,7 @@ def snapshot(parent, label, config, mode):
             requester = next(d['binding']['requester'] for d in drivers.values()
                              if d['binding']['driver_class'] == 'RTL8111')
             probe = next((p for p in domains if p.get('r52-requester') == requester), None)
-            if probe is not None and rx_groups_consistent(rtl8111, live_addresses(probe)):
+            if probe is not None and rx_groups_consistent(rtl8111, live_records(probe)):
                 break
             if time.monotonic() >= deadline:
                 raise RuntimeError('RTL8111 driver and mapper snapshots describe different RX rings')
