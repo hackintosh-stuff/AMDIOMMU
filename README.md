@@ -1,5 +1,31 @@
 # AMDIOMMU — authoritative source repository
 
+## Round65 / coordinated two-domain system PM — BLOCKED, failure evidence preserved
+
+Base: `8cfd4aca2ae8a7af1635e21583047d1b01e677ec` (accepted R64). The R65
+patch adds coordinated suspend/resume for two independent domains: each
+requester closes admission and fences its own domain, the last suspend stops
+the shared controller once, the first resume restarts it once, later resumes
+only fence their own domain, and admission reopens after each resume. A
+host model checks all four A/B callback orders. Only AMDMapperProbe 0.71.0
+was rebuilt; Lucy 1.1.241 and RTL8111 3.0.55 were retained.
+
+**Not accepted.** Four planned auto boots produced three complete 96 MiB
+dual-NIC runs, correct hashes, normal map/unmap, `r65-pm-domain-count = 2`
+and no fake suspend/resume counters. But each complete run recorded one real
+A/0x2700 IOMMU target fault during the A-down window, caused by an extra
+spurious `enable()` that restarts hardware while the rings are being torn
+down (enable-count 1 → 2 → 3 versus R64's 1 → 1 → 2). Zero target faults is
+a hard requirement, so the final analysis FAILs and `disarm-next` correctly
+refused. Fixes tried: capture whitelist for `r65-` keys, a bounded analyzer
+accommodation for the PM boot wake (R64/R63 re-analysis stays identical),
+and an `R65ArmSystemPM` gate that keeps ordinary boots out of dual-domain PM
+participation; none removed the fault. Evidence for all runs, captures and
+analyses is preserved. Failure recovery set the next boot to
+`amdiommu=off`, removed the finite job and left both NICs active without an
+extra reboot. Real system sleep/wake remains TODO(R47-PM-HARDWARE) for R66;
+ordinary interface down/up is not a sleep/wake test.
+
 ## Accepted Round64 / both NICs independently revoke and restore requester DMA access, PM hardware TODO
 
 Base: `e0f5ef93f8a665c9597c3989a9c8e92a34a9709d` (accepted R63). Only
