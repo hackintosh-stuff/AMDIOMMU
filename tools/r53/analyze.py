@@ -126,21 +126,27 @@ def ring_window(first, last):
 
 def requester_access(p, before, role, phase):
     if RUN.both_requester_access:
+        phases = ('before', 'down', 'after-up', 'b-down', 'b-after-up')
         park_phase, restore_phase = (('down', 'after-up') if role == 'a'
                                      else ('b-down', 'b-after-up'))
+        index = phases.index(phase)
         parked = phase == park_phase
         progressed = phase in (park_phase, restore_phase)
+        expected_parks = int(index >= phases.index(park_phase))
+        expected_restores = int(index >= phases.index(restore_phase))
     else:
         parked = role == 'a' and phase == 'down'
         progressed = role == 'a' and phase != 'before'
+        expected_parks = int(progressed)
+        expected_restores = int(progressed and not parked)
     permissions = (p['r44-dte0'] >> 61) & 3
     parks, restores = p['r63-park-count'], p['r63-restore-count']
     p0, r0 = before['r63-park-count'], before['r63-restore-count']
     need(p['r63-dma-parked'] == ('yes' if parked else 'no') and
          permissions == (0 if parked else 3) and
          parks - restores == int(parked) and
-         parks - p0 == int(progressed) and
-         restores - r0 == int(progressed and not parked) and
+         parks - p0 == expected_parks and
+         restores - r0 == expected_restores and
          (RUN.both_requester_access or role == 'a' or parks == restores == 0),
          phase + '/' + role + ': requester DMA access or transition counts differ')
     if progressed:
