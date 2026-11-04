@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Round62 candidate / cache the shared command ring's observed HEAD
+## Accepted Round62 / cache the shared command ring's observed HEAD, PM hardware TODO
 
 Base: `e4d61d84ae08e38ab79dce8330cc4f6aaca0b7fe` (accepted R61; deployed `e236625`). Its first auto boot
 completed twelve transfers / 96 MiB. Both domains submitted real split
@@ -18,7 +18,19 @@ and IOVA retirement still depend on the hardware semaphore.
 Build only AMDMapperProbe 0.69.0; retain Lucy 1.1.240 and RTL8111 3.0.54.
 The existing reciprocal test now reports successful cached reservations,
 actual MMIO HEAD reads and wraps over the same five-phase workload.
-The R62 Darwin build and hardware run are pending.
+
+**Accepted: all four mainline checks passed on the real Mac on the first auto
+boot.** The deployed implementation is `833e7bd`; only AMDMapperProbe was
+rebuilt (0.69.0, `776ECAFF-F168-3B5E-BA3F-D3280A2428A7`), retaining Lucy
+1.1.240 (`43C9BD33-…`) and RealtekRTL8111 3.0.54 (`3089E621-…`). The
+`before → b-after-up` ring window reported 11291 completed batches with
+11243 cached and 48 refreshed (`11243 + 48 = 11291`), only 48 MMIO HEAD
+reads and 48 wraps — both cache hits and real refreshes occurred while the
+tail crossed the ring end. The 96 MiB reciprocal workload kept both down
+windows busy, shared commands closed at 899 → 6956 → 8273 → 9749 → 12190,
+exact coverage held at the last phase (A 32310/32310 with 884 split batches,
+B 36866/36866 with 745), A ended 5608/5573 and B 6624/6613 map/unmap, and
+target faults stayed zero. PM remains TODO(R47-PM-HARDWARE).
 
 ## Accepted Round61 / exact leaf invalidations with one completion per mapping, PM hardware TODO
 
