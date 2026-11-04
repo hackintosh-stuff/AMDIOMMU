@@ -91,6 +91,26 @@ def native_resources(value, phase):
     return result
 
 
+def exact_range_counts(p, m):
+    batches = p['r50-inv-range-completed']
+    desc, splits = p['r61-range-descriptors'], p['r61-split-batches']
+    need(0 <= splits <= batches and desc >= batches + splits and (splits or desc == batches)
+         and p['r50-inv-range-pages'] == p['r60-inv-range-covered-pages'], 'bad range batch totals')
+    if splits:
+        raw = bytes.fromhex(p['r61-split-commands-hex'])
+        cursor, size = p['r61-split-address'], p['r61-split-bytes']
+        end = cursor + size
+        need(32 <= len(raw) <= 256 and len(raw) % 16 == 0 and
+             m['iovaBase'] <= cursor < end <= m['iovaBase'] + m['iovaBytes'] and
+             0 < p['r61-split-sequence'] <= p['r50-last-range-sequence'], 'bad split witness')
+        for words in struct.iter_unpack('<4I', raw):
+            start, length = R50.decode_range(words, p['r44-domain-id'])
+            need(start == cursor, 'split batch gap or overlap')
+            cursor += length
+        need(cursor == end, 'split batch ended outside the requested boundary')
+    return dict(rangeBatches=batches, rangeDescriptors=desc, splitBatches=splits)
+
+
 def analyze(cap):
     checks, states, controllers, phase_data, data = [], {}, {}, {}, {}
 
@@ -381,10 +401,14 @@ def analyze(cap):
                     words = [p['r50-last-range-command%d' % index] for index in range(4)]
                     start, size = R50.decode_range(words, p['r44-domain-id'])
                     address, requested = p['r50-last-range-address'], p['r50-last-range-bytes']
-                    need(m['iovaBase'] <= start <= address and
-                         address + requested <= start + size <= m['iovaBase'] + m['iovaBytes'] and
-                         requested > 0 and requested % 4096 == 0,
-                         'last completed range does not cover this domain IOVA mapping')
+                    if RUN.exact_ranges:
+                        need(m['iovaBase'] <= address <= start and start + size == address + requested
+                             <= m['iovaBase'] + m['iovaBytes'], 'wrong final range in batch')
+                    else:
+                        need(m['iovaBase'] <= start <= address and
+                             address + requested <= start + size <= m['iovaBase'] + m['iovaBytes'] and
+                             requested > 0 and requested % 4096 == 0,
+                             'last completed range does not cover this domain IOVA mapping')
                 counters[role] = {'mapOk': m['mapOk'], 'unmapOk': m['unmapOk'],
                                   'mapSkipped': skipped, 'domainCommands': p['r52-domain-cmd-completed']}
                 if RUN.reciprocal:
@@ -393,7 +417,12 @@ def analyze(cap):
                     need(covered_pages >= requested_pages >= p['r50-inv-range-completed'],
                          phase + '/' + role + ': range invalidation page totals differ')
                     counters[role].update(requestedPages=requested_pages, coveredPages=covered_pages)
+                if RUN.exact_ranges:
+                    counters[role].update(exact_range_counts(p, m))
             details[phase] = {'controllerCommands': completed, 'devices': counters}
+        if RUN.exact_ranges:
+            need(any(v['splitBatches'] for ph in details.values() for v in ph['devices'].values()),
+                 'no multi-descriptor invalidation observed')
         result = {'otherDeviceTrafficWhileTargetDown': True, 'sameConnectionAcrossTransition': 'not tested',
                   'targetFaults': 0, 'counters': details, 'nativeOffloadCounters': offloads}
         if RUN.reciprocal:

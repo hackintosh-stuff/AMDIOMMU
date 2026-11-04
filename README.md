@@ -1,5 +1,20 @@
 # AMDIOMMU — authoritative source repository
 
+## Round61 candidate / exact leaf invalidations with one completion per mapping
+
+Base: `562559ac04a5d921691a0150868b6b037332b0df` (accepted R60). At its last snapshot the two domains
+requested 74,628 pages of invalidation and the hardware command encodings
+covered 83,414. These are requested address ranges, not cache miss counts.
+
+Decompose each ordinary leaf range into contiguous aligned power-of-two blocks.
+Reserve all the invalidation descriptors and one CompletionWait in the shared
+ring before writing it. Publish the batch once and keep the IOVA owned until
+that wait completes. Activation, full-domain flushes and the NPCache skip
+keep their existing behavior. A per-domain witness records the actual words
+of the last completed split batch for independent capture-side decoding.
+Use the existing 96 MiB reciprocal NIC workload. Only AMDMapperProbe 0.68.0
+is rebuilt; the Darwin build and R61 hardware verification are pending.
+
 ## Accepted Round60 / aligned IOVA spans and reciprocal recovery, PM hardware TODO
 
 Base: `db18ba4b0e3f648980339ee182ad2d27be2205d5` (accepted R59; deployed `fdc6942`).
@@ -25,14 +40,14 @@ rebuilt (0.67.0, `BEB2CC99-EE9E-3DBE-AD58-C101D787D8F2`), retaining Lucy
 1.1.240 (`43C9BD33-…`) and RealtekRTL8111 3.0.54 (`3089E621-…`). All RX groups
 now sit naturally aligned — A 32/32 of 16 pages, B 8/8 of 128 pages — and the
 ABI3 descriptor PAs still match the walked page tables
-(`expectedLastPA == walkedLastPA`). The first auto boot died mid-first-upload
-(a boot-time link transient, no IOMMU fault, run and peer logs preserved); the
+(`expectedLastPA == walkedLastPA`). The first auto run timed out in the initial parallel phase. The A peer verified
+its upload; no A download receipt was recorded, and the cause is unresolved. The
 second auto boot (`auto2`) completed 96 MiB across 12 transfers: A and B each
 took exactly one disable/enable cycle, the other domain kept transferring
 through both down windows (`otherDeviceTrafficWhileTargetDown`), the parallel
 payloads overlapped 117.064/111.356 ms, shared commands closed at
 819 → 7777 → 9426 → 11001 → 12419 with covered pages ≥ requested pages
-(1573/1600 … 35664/39839), A ended 4704/4669 and B 4764/4753 map/unmap with
+(1573/1600 … 35664/39839), A ended 6317/6282 and B 6144/6133 map/unmap with
 deltas equal to the persistent maps, and target faults stayed zero. PM remains
 TODO(R47-PM-HARDWARE).
 

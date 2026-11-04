@@ -1351,22 +1351,24 @@ static inline const char *m2b2EventTypeName(UInt32 t) {
 }
 
 // ---- m2b2Submit (original lines 2987..3046) ----
-// 提交一条命令 + 一条 COMPL_WAIT，并等待完成信号。
+// Publish one or more commands followed by one COMPLETION_WAIT.
 //
 // 返回 true 表示硬件确实执行并回写了完成值。
 // 返回 false 时 ctx->failed 已置位，调用方**不得**继续实验。
-static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c,
-                       const char *label,
-                       UInt32 d0, UInt32 d1, UInt32 d2, UInt32 d3) {
+struct M2B2CmdWords { UInt32 d0, d1, d2, d3; };
+static_assert(sizeof(M2B2CmdWords) == 16, "AMD command size");
+
+static inline bool m2b2SubmitBatch(volatile UInt8 *base, M2B2CmdCtx *c, const char *label,
+                                   const M2B2CmdWords *cmd, UInt32 count) {
     if (c->failed) return false;
 
     // Hardware owns HEAD, this single serialized producer owns TAIL. Keep one
     // 16-byte slot empty so equal pointers always mean empty, never full.
-    // Reserve BOTH entries before touching command memory. Never reset HEAD
+    // Reserve the batch and its fence before touching command memory. Never reset HEAD
     // or grow/rebase the buffer to work around a stalled consumer.
     const UInt32 bytes = (UInt32)M23_CMD_BUF_SIZE;
     const UInt32 slots = bytes / 16;
-    if (bytes < 64 || (bytes & (bytes - 1)) ||
+    if (bytes < 64 || (bytes & (bytes - 1)) || !cmd || !count || count > slots - 2 ||
         c->tail >= bytes || (c->tail & 15) || c->idx != c->tail / 16 ||
         c->completionSequence == ~((UInt64)0)) {
         c->failed = true;
@@ -1382,7 +1384,7 @@ static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c,
             return false;
         }
         const UInt32 freeBytes = ((UInt32)head + bytes - c->tail - 16) & (bytes - 1);
-        if (freeBytes >= 32) { space = true; break; }
+        if (freeBytes >= (count + 1) * 16) { space = true; break; }
     }
     if (!space) {
         c->failed = true;
@@ -1390,8 +1392,12 @@ static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c,
         return false;
     }
 
-    m2b2WriteCmd(c->buf, c->idx, d0, d1, d2, d3);
-    const UInt32 completionIdx = (c->idx + 1) % slots;
+    UInt32 completionIdx = c->idx;
+    for (UInt32 i = 0; i < count; ++i) {
+        const auto &w = cmd[i];
+        m2b2WriteCmd(c->buf, completionIdx, w.d0, w.d1, w.d2, w.d3);
+        completionIdx = (completionIdx + 1) % slots;
+    }
 
     // 完成等待：data[0] = sem 物理地址 | STORE_MASK(0x01)
     //           data[1] = sem 高 32 位 | (type << 28)
@@ -1408,7 +1414,7 @@ static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c,
     c->idx = nextIdx;
     c->tail = nextIdx * 16;
     c->completionSequence = seq;
-    // Publish the complete pair only after both descriptors are DMA-visible.
+    // Publish once, after all commands and the sole completion descriptor are visible.
     OSSynchronizeIO();
     mmioWrite64(base, M2B2_OFF_CMD_TAIL, c->tail);
     OSSynchronizeIO();
@@ -1425,11 +1431,11 @@ static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c,
     c->lastSem = obs;
     c->lastLoops = loops;
 
-    // 逐条记录命令字、预期值、观测值与阶段
+    // The historical log records the leading command and completion of this batch.
     if (c->recordCount < M2B2_CMD_LOG_MAX) {
         M2B2CmdRecord *r = &c->records[c->recordCount++];
         r->label = label;
-        r->d0 = d0; r->d1 = d1; r->d2 = d2; r->d3 = d3;
+        r->d0 = cmd[0].d0; r->d1 = cmd[0].d1; r->d2 = cmd[0].d2; r->d3 = cmd[0].d3;
         r->expected = seq;
         r->observed = obs;
         r->loops = loops;
@@ -1444,6 +1450,12 @@ static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c,
     c->completed++;
     if (c->wraps) c->postWrapCompleted++;
     return true;
+}
+
+static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c, const char *label,
+                              UInt32 d0, UInt32 d1, UInt32 d2, UInt32 d3) {
+    const M2B2CmdWords cmd{d0, d1, d2, d3};
+    return m2b2SubmitBatch(base, c, label, &cmd, 1);
 }
 
 // ---- m2b2ReadBar64 (original lines 3048..3085) ----

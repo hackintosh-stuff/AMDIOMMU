@@ -26,6 +26,7 @@ class MixedRun(NamedTuple):
     build_lucy: bool = False
     retained_lucy_dependency: Optional[str] = None
     reciprocal: bool = False
+    exact_ranges: bool = False
 
 
 RUN = MixedRun(53, '2be76054f30e208d57658dc7efa3df79c9050f7c',
@@ -310,7 +311,9 @@ def snapshot(parent, label, config, mode):
             if (driver.get(prefix + 'mapper-id') != probe['r52-mapper-id'] or
                     driver.get(prefix + 'domain-id') != probe['r44-domain-id']):
                 raise ValueError('driver is bound to a different mapper')
-            value['probe'] = C.scalars(probe, ('r44-', 'r47-', 'r48-', 'r50-', 'r51-', 'r52-', 'r53-', 'r60-'))
+            value['probe'] = C.scalars(probe, ('r44-', 'r47-', 'r48-', 'r50-', 'r51-', 'r52-', 'r53-', 'r60-', 'r61-'))
+            if RUN.exact_ranges and probe.get('r61-split-batches'):
+                value['probe']['r61-split-commands-hex'] = probe['r61-split-commands'].hex()
             exports.update({name: probe[key] for key, name in C.C.EXPORTS.items()})
             if binding['driver_class'] == 'RTL8111':
                 exports.update({'driver-live.bin': driver['rtl8111-r53-live'],

@@ -45,6 +45,26 @@ bool r53ParseRequester(const char *text, UInt32 &requester) {
     return true;
 }
 constexpr UInt32 kR44TablePages = 16;
+constexpr UInt32 kR61MaxParts = 16;  // at most two blocks per size for a <=128-page interval
+static_assert(r44mapper::kMapPages <= 128, "revisit exact range command bound");
+
+// The caller has checked that address and bytes are page-aligned and inside the domain.
+UInt32 r61PlanRange(UInt32 opcode, UInt64 address, UInt64 bytes,
+                    M2B2CmdWords (&out)[kR61MaxParts], UInt64 &covered) {
+    UInt32 count = 0;
+    covered = 0;
+    while (bytes) {
+        if (count == kR61MaxParts) return 0;  // never publish a partial plan
+        UInt64 span = 4096;
+        while (span <= bytes / 2 && !(address & (2 * span - 1))) span *= 2;
+        const UInt64 encoded = r50InvRangeAddress(address, span);
+        out[count++] = {0, opcode, (UInt32)encoded, (UInt32)(encoded >> 32)};
+        covered += (encoded & 1) ? (2ULL << __builtin_ctzll(~(encoded >> 12))) : 1;
+        address += span;
+        bytes -= span;
+    }
+    return count;
+}
 // PCI IOMMU capability, not EFR: Linux v6.6 IOMMU_CAP_NPCACHE.
 constexpr UInt32 kR51NpCache = 1u << 26;
 constexpr UInt64 kR44Enabled = M2B2_CTRL_IOMMU_EN |
@@ -71,6 +91,9 @@ struct org_example_AMDMapperProbe::R52Domain {
     UInt64 invFullCompleted, invRangeCompleted, invRangePages, invRangeCoveredPages;
     UInt64 mapInvalidationSkipped;
     UInt64 lastRangeAddress, lastRangeBytes, lastRangeSequence;
+    UInt64 rangeDescriptors, splitBatches, splitAddress, splitBytes, splitSequence;
+    UInt32 splitCount;
+    M2B2CmdWords splitWords[kR61MaxParts];
     UInt32 lastRangeCommand[4];
     UInt64 lastInvDevSequence, lastInvPagesSequence;
     UInt64 targetFaults;
@@ -578,12 +601,17 @@ bool org_example_AMDMapperProbe::r52InvalidateLocked(
     }
     // First activation and power transitions still flush the complete domain
     // and PDE cache. Ordinary maps only edit leaves of the prebuilt IOVA tree.
-    const UInt64 encoded = full ? m2b2InvAddress() : r50InvRangeAddress(address, bytes);
-    const UInt32 d0 = 0;
-    const UInt32 d1 = d->domainID | ((UInt32)M2B2_CMD_INV_IOMMU_PAGES << 28);
-    const UInt32 d2 = (UInt32)encoded | (full ? M2B2_CMD_PDE_MASK : 0);
-    const UInt32 d3 = (UInt32)(encoded >> 32);
-    if (!m2b2Submit(c->base, &c->command, "r44-invalidate-pages", d0, d1, d2, d3)) {
+    M2B2CmdWords cmd[kR61MaxParts];
+    const UInt32 opcode = d->domainID | ((UInt32)M2B2_CMD_INV_IOMMU_PAGES << 28);
+    UInt32 count = 1;
+    UInt64 covered = 0;
+    if (full) {
+        const UInt64 encoded = m2b2InvAddress();
+        cmd[0] = {0, opcode, (UInt32)encoded | M2B2_CMD_PDE_MASK, (UInt32)(encoded >> 32)};
+    } else {
+        count = r61PlanRange(opcode, address, bytes, cmd, covered);
+    }
+    if (!count || !m2b2SubmitBatch(c->base, &c->command, "r44-invalidate-pages", cmd, count)) {
         d->state = "failed-page-invalidation";
         return false;
     }
@@ -593,14 +621,17 @@ bool org_example_AMDMapperProbe::r52InvalidateLocked(
     else {
         ++d->invRangeCompleted;
         d->invRangePages += bytes / 4096;
-        // In the submitted leaf command S=0 denotes one page; for S=1 the
-        // first zero bit in the encoded page number determines the envelope.
-        d->invRangeCoveredPages += (encoded & 1) ?
-            (2ULL << __builtin_ctzll(~(encoded >> 12))) : 1;
+        d->invRangeCoveredPages += covered;
+        d->rangeDescriptors += count;
+        if (count > 1) {
+            ++d->splitBatches;
+            d->splitAddress = address; d->splitBytes = bytes;
+            d->splitSequence = c->command.completionSequence; d->splitCount = count;
+            memcpy(d->splitWords, cmd, count * sizeof(cmd[0]));
+        }
         d->lastRangeAddress = address;
         d->lastRangeBytes = bytes;
-        d->lastRangeCommand[0] = d0; d->lastRangeCommand[1] = d1;
-        d->lastRangeCommand[2] = d2; d->lastRangeCommand[3] = d3;
+        memcpy(d->lastRangeCommand, &cmd[count - 1], sizeof(cmd[0]));
         d->lastRangeSequence = c->command.completionSequence;
     }
     if (!d->active) {
@@ -774,6 +805,14 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     number("r50-inv-range-completed", d->invRangeCompleted);
     number("r50-inv-range-pages", d->invRangePages);
     number("r60-inv-range-covered-pages", d->invRangeCoveredPages);
+    number("r61-range-descriptors", d->rangeDescriptors);
+    number("r61-split-batches", d->splitBatches);
+    if (d->splitCount) {
+        number("r61-split-address", d->splitAddress);
+        number("r61-split-bytes", d->splitBytes);
+        number("r61-split-sequence", d->splitSequence);
+        setProperty("r61-split-commands", d->splitWords, d->splitCount * sizeof(d->splitWords[0]));
+    }
     number("r50-last-range-address", d->lastRangeAddress);
     number("r50-last-range-bytes", d->lastRangeBytes);
     number("r50-last-range-sequence", d->lastRangeSequence);
