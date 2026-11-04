@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Candidate Round54 / explicit per-device requester claims
+## Accepted Round54 / explicit per-device requester claims, PM hardware TODO
 
 Base: `a798b47a9daaae98d5d4efe98285c1bfbee9da2d` (accepted R53 record).
 The effective R53 run used `49365e9792b848af435493d5cf86ac49c802514c`.
@@ -27,8 +27,23 @@ normal one-device down/up. Reuse the recorded R53 off baseline when the
 endpoint and network configuration still match. Keep the same two-domain
 limit, ABI2, NPCache policy and synchronous unmap. No PM expansion.
 
+**Accepted on the real Mac with Probe 0.61.0, RTL812xLucy 1.1.239 and
+RealtekRTL8111 3.0.54.** The deployed implementation is
+`b882f09`, built once and deployed once per attempt; the deployment build log
+is `runs/r54/r54-build.log`. All four mainline checks passed on the fifth auto
+boot (`auto5`): both domains reported
+`r44-parent = set-on-client-claim-before-pci-open` with their own requester
+(0x2700 RTL8111 domain 2, 0x2500 RTL8125 domain 1), mapper IDs and page-table
+roots, A holding 35 maps/517 pages and B 19/1037 with identity zero, the
+third candidate 0x2200 left passthrough. The 64 MiB load overlapped 119.908 ms
+(upload) and 102.100 ms (download), B completed traffic while A was down, A
+recovered after up, shared commands closed at 618 → 7591 → 9266, and target
+faults stayed zero. The off baseline is the accepted R53 one; no extra off boot
+was taken. Four capture/lifecycle defects were fixed in this branch (join gate,
+bounded window, single-pass publication, settled target lifecycle).
+
 Target: Probe **0.61.0**, RTL812xLucy **1.1.239**, project RealtekRTL8111
-**3.0.54**. R54 is a source candidate until the new binaries have been
+**3.0.54**. PM remains TODO(R47-PM-HARDWARE) and was new binaries have been
 built and the mixed-device workload has run on macOS.
 
 ## Accepted Round53 / mixed RTL8111 and RTL8127 device domains
