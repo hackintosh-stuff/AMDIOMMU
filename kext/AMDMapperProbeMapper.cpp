@@ -9,13 +9,15 @@ struct org_example_AMDMapperProbe::R44MapperState {
     struct Mapping {
         IOMemoryDescriptor *memory;
         IODMACommand *command;
-        r44mapper::Record record;
+        r44mapper::RecordHeader record;
     };
     IOLock *lock;
     volatile UInt64 *tables;
     volatile UInt64 *leaves[r44mapper::kPages / 512];
     amdtx::BoundedAllocator<r44mapper::kPages, r44mapper::kMapPages> allocator;
     Mapping mappings[r44mapper::kRecords];
+    // Expected PA from the descriptor walk, independent of the actual leaf PTE.
+    UInt64 physicalByPage[r44mapper::kPages];
     // Sole per-slot liveness state; accessed under the domain lock.
     amdtx::u64 liveSlots[(r44mapper::kRecords + 63) / 64];
     // Per-domain start index: zero means no mapping starts on this IOVA page.
@@ -45,20 +47,33 @@ struct org_example_AMDMapperProbe::R44MapperState {
         else word &= ~mask;
     }
 
+    void exportRecord(const r44mapper::RecordHeader &header, r44mapper::Record &out) const {
+        out.header = header;
+        const size_t used = header.pages * sizeof(out.physical[0]);
+        memcpy(out.physical, physicalByPage + header.basePage, used);
+        bzero(out.physical + header.pages, sizeof(out.physical) - used);
+    }
+
+    OSData *copyLiveRecords() const {
+        OSData *data = OSData::withCapacity((snapshot.liveCount ? snapshot.liveCount : 1) *
+                                            sizeof(r44mapper::Record));
+        if (!data) return nullptr;
+        r44mapper::Record row;
+        for (unsigned i = nextSlot(0, true); i < r44mapper::kRecords;
+             i = nextSlot(i + 1, true)) {
+            exportRecord(mappings[i].record, row);
+            if (!data->appendBytes(&row, sizeof(row))) {
+                data->release();
+                return nullptr;
+            }
+        }
+        return data;
+    }
+
     void capturePowerBoundary(OSData *&live, OSData *&pt) {
         if (live) { live->release(); live = nullptr; }
         if (pt) { pt->release(); pt = nullptr; }
-        live = OSData::withCapacity((snapshot.liveCount ? snapshot.liveCount : 1) *
-                                    sizeof(r44mapper::Record));
-        if (live) {
-            for (unsigned i = nextSlot(0, true); i < r44mapper::kRecords;
-                 i = nextSlot(i + 1, true)) {
-                if (!live->appendBytes(&mappings[i].record, sizeof(r44mapper::Record))) {
-                    live->release(); live = nullptr;
-                    break;
-                }
-            }
-        }
+        live = copyLiveRecords();
         pt = OSData::withBytes((const void *)tables, (unsigned)snapshot.ptBytes);
     }
 };
@@ -272,7 +287,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
             for (unsigned j = 0; j < run.pageBytes / 4096U; ++j) {
                 const unsigned localPage = (unsigned)(run.slot / 4096ULL) + j;
                 const UInt64 physical = (run.pa & ~4095ULL) + j * 4096ULL;
-                record.physical[localPage] = physical;
+                d->physicalByPage[basePage + localPage] = physical;
                 if (physical >= (1ULL << 32)) ++highPages;
                 d->leaf(basePage + localPage) = amdpte::makeDefaultLeaf(1, physical, permissions);
             }
@@ -294,7 +309,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
             ++s.invalidateFailures;
             d->accepting = false; s.flags |= r44mapper::kFailed;
             s.flags &= ~r44mapper::kAccepting;
-            s.lastMap = record;
+            d->exportRecord(record, s.lastMap);
             result = kIOReturnIOError; break;
         }
         record.tMapComplete = mach_absolute_time(); record.state |= r44mapper::kMapConfirmed;
@@ -307,7 +322,8 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         if (descriptorOffset) ++s.offsetMaps;
         if (layout.discontig) ++s.fragmentedMaps;
         if (!s.firstMapAt) s.firstMapAt = record.tMapComplete;
-        s.lastMapAt = record.tMapComplete; s.lastMap = record;
+        s.lastMapAt = record.tMapComplete;
+        d->exportRecord(record, s.lastMap);
         *mapAddress = address; *mapLength = returnedLength;
         result = kIOReturnSuccess;
     } while (false);
@@ -354,21 +370,21 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
             ++s.invalidateFailures;
             d->accepting = false; s.flags |= r44mapper::kFailed;
             s.flags &= ~r44mapper::kAccepting;
-            s.lastUnmap = record;
+            d->exportRecord(record, s.lastUnmap);
             result = kIOReturnIOError; break;
         }
         record.tUnmapComplete = mach_absolute_time(); record.state |= r44mapper::kUnmapConfirmed;
+        d->exportRecord(record, s.lastUnmap);
         // A cleared PTE alone is not retirement: pages become reusable only
         // after the INV_IOMMU_PAGES CompletionWait has returned successfully.
         if (!amdtx::release(d->allocator, record.basePage, record.pages)) {
             d->accepting = false; s.flags |= r44mapper::kFailed;
             s.flags &= ~r44mapper::kAccepting;
-            s.lastUnmap = record;
             result = kIOReturnInternalError; break;
         }
         d->slotByStartPage[page] = 0;
         --s.liveCount; ++s.unmapOk;
-        s.lastUnmapAt = record.tUnmapComplete; s.lastUnmap = record;
+        s.lastUnmapAt = record.tUnmapComplete;
         d->setSlotLive(slot, false);
         mapping.memory = nullptr; mapping.command = nullptr;
         result = kIOReturnSuccess;
@@ -404,12 +420,7 @@ void org_example_AMDMapperProbe::r44PublishMappings(OSDictionary **copy) {
     s.reusedAllocations = d->allocator.reusedAllocations;
     ++s.snapshotSequence; s.snapshotTime = mach_absolute_time();
     OSData *summary = OSData::withBytes(&s, sizeof(s));
-    OSData *active = OSData::withCapacity((s.liveCount ? s.liveCount : 1) * sizeof(r44mapper::Record));
-    if (active) {
-        for (unsigned i = d->nextSlot(0, true); i < r44mapper::kRecords;
-             i = d->nextSlot(i + 1, true))
-            active->appendBytes(&d->mappings[i].record, sizeof(r44mapper::Record));
-    }
+    OSData *active = d->copyLiveRecords();
     OSData *tables = OSData::withBytes((const void *)d->tables, (unsigned)s.ptBytes);
     if (summary && active && tables) {
         setProperty("r44-mapper-raw", summary);

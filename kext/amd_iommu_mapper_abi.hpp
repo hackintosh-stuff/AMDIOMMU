@@ -15,12 +15,15 @@ enum : uint32_t {
     kMapPublished = 1, kMapConfirmed = 2,
     kClearPublished = 4, kUnmapConfirmed = 8
 };
-struct Record {
+struct RecordHeader {
     uint64_t handle, firstPA, mapAddress, mapLength, descriptorOffset, length;
     // tMapComplete is map-ready: NP-cache-free hardware may need no map CW.
     // tUnmapComplete always follows the completed invalidation before reuse.
     uint64_t tPublish, tMapComplete, tClear, tUnmapComplete;
     uint32_t recordIndex, basePage, pages, runs, options, state;
+};
+struct Record {
+    RecordHeader header;
     // Physical page base for every allocated IOVA page, including the first
     // byte's containing page. Together with options this reconstructs its PTE.
     uint64_t physical[kMapPages];
@@ -41,6 +44,7 @@ struct Snapshot {
     // active mappings are exported separately in r44-live-raw.
     Record lastMap, lastUnmap;
 };
+static_assert(sizeof(RecordHeader) == 104, "ABI2 record prefix");
 static_assert(sizeof(Record) == 616, "R49 ordinary mapper record ABI2");
 static_assert(sizeof(Snapshot) == 1472, "R49 ordinary mapper snapshot ABI2");
 } // namespace r44mapper

@@ -1,5 +1,25 @@
 # AMDIOMMU — authoritative source repository
 
+## Round58 candidate / compact storage for expected physical pages
+
+Base: `231447265fb0d0283a5921a822a9f0760ac39d58`, the accepted R57 result. R57 deployed `c8cca04`;
+its first 64 MiB auto run passed all four groups with zero target faults.
+
+Store the expected physical addresses from the wired descriptor walk in
+one 4096-entry array per domain, indexed by the allocated IOVA page.
+A live record slot now holds only its 104-byte header. This replaces
+1024 private 64-entry PA arrays (512 KiB) with a 32 KiB array: 480 KiB
+less fixed mapper state per domain. Mapping capacity, the lowest-slot
+rule and the completion-before-reuse contract do not change.
+
+ABI2 still exports a full 616-byte record and a 1472-byte mapper snapshot.
+Live records and the saved last-map/last-unmap records materialize their
+PA slice before the backing pages can be reused; unused entries are zero.
+Expected PAs remain independent of the hardware page tables. The existing
+analyzer can compare the two directly. Build only AMDMapperProbe 0.65.0
+and retain the two R54 clients. The R58 Mac build and hardware run are
+pending; no throughput gain is claimed.
+
 ## Accepted Round57 / bitmap of live mapping-record slots, PM hardware TODO
 
 Base: `cc7bedff5abe77f2f2c97ab38bf223e7b3f49545` (accepted R56 record).
