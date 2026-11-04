@@ -1,5 +1,34 @@
 # AMDIOMMU — authoritative source repository
 
+## Accepted Round64 / both NICs independently revoke and restore requester DMA access, PM hardware TODO
+
+Base: `e0f5ef93f8a665c9597c3989a9c8e92a34a9709d` (accepted R63). Only
+RTL812xLucy was rebuilt (1.1.241, `6F935499-FCC0-3A8A-96E7-3CE0B1D647C8`);
+AMDMapperProbe 0.70.0 (`27269764-…`) and RealtekRTL8111 3.0.55
+(`DFBA1B95-…`) were retained. The Lucy client now calls the R63 requester
+DMA lifecycle: restore after opening the PCI provider but before hardware
+bring-up, park only after stopping hardware and `clearRxTxRings()`, with
+failures blocking enable or returned from disable. The 8 x 128-page RX
+groups, TX mappings and R47/R63 PM code are unchanged. Probe DTE, page
+tables, command ring and invalidation core were not rebuilt or modified.
+
+**Accepted: all four mainline checks passed on the real Mac on one planned
+auto boot.** Five-phase readback: A 1/1 → 0/0 at its down snapshot
+(park CW 3886/3887), back to 1/1 after up (restore CW 6848/6849); B stayed
+1/1 through A's cycle, went 0/0 at its own down (park CW 8490/8491) and
+back to 1/1 after up (restore CW 9973/9974). Each requester's park and
+restore has its own new device and domain CompletionWait; the other domain
+kept transferring through both down windows (96 MiB / 12 transfers, dual
+hashes, zero target faults). Exact range coverage held (A 32692/32692,
+B 35452/35452), the ring cached 10162 of 10206 batches with 44 refreshes
+and 44 wraps, and map/unmap closed at A 5350/5315, B 5731/5720. Two offline
+fixes were needed before acceptance: a Python 3.9 generator incompatibility
+and an impossible analyzer expectation for cumulative transition counts;
+the first failing analysis is preserved and R63 re-analysis still matches.
+Deployed binary corresponds to `361b5c1`; later implementation commits
+(`42d458d`, `1761255`) touch only the shared analyzer. PM remains
+TODO(R47-PM-HARDWARE); ordinary interface down/up is not a sleep/wake test.
+
 ## Accepted Round63 / revoke one requester's DMA permission while its NIC is down, PM hardware TODO
 
 Base: `4309a75855f67957284ec71909378b72fa132a05` (accepted R62; deployed `833e7bd`).
