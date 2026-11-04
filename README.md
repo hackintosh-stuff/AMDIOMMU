@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Round61 candidate / exact leaf invalidations with one completion per mapping
+## Accepted Round61 / exact leaf invalidations with one completion per mapping, PM hardware TODO
 
 Base: `562559ac04a5d921691a0150868b6b037332b0df` (accepted R60). At its last snapshot the two domains
 requested 74,628 pages of invalidation and the hardware command encodings
@@ -12,8 +12,24 @@ ring before writing it. Publish the batch once and keep the IOVA owned until
 that wait completes. Activation, full-domain flushes and the NPCache skip
 keep their existing behavior. A per-domain witness records the actual words
 of the last completed split batch for independent capture-side decoding.
-Use the existing 96 MiB reciprocal NIC workload. Only AMDMapperProbe 0.68.0
-is rebuilt; the Darwin build and R61 hardware verification are pending.
+Use the existing 96 MiB reciprocal NIC workload.
+
+**Accepted: all four mainline checks passed on the real Mac on the first auto
+boot.** The deployed implementation is `e236625`; only AMDMapperProbe was
+rebuilt (0.68.0, `540C103D-3D5B-3D42-B75D-C5BB2DD92784`), retaining Lucy
+1.1.240 (`43C9BD33-…`) and RealtekRTL8111 3.0.54 (`3089E621-…`). The split
+path really ran: at the last phase both domains showed cumulative covered
+pages equal to requested pages (A 35370/35370, B 38101/38101) with A at
+5896 batches / 7606 descriptors / 1576 split batches and B at 5540 / 6858 /
+1244. The per-domain witness exported a real split batch whose raw words
+decode through the R50 decoder contiguously — A: request `0x80218000`, five
+pages, segments 4 pages @`0x80218000` + 1 page @`0x8021c000`, completion
+sequence 9054; B: request `0x80010000`, five pages, 4 pages + 1 page,
+sequence 11337 — one CompletionWait per batch. The 96 MiB reciprocal
+workload kept both down windows busy (`otherDeviceTrafficWhileTargetDown`),
+the parallel payloads overlapped 141.266/127.795 ms, both NICs took exactly
+one disable/enable cycle, A ended 5931/5896 and B 5551/5540 map/unmap, and
+target faults stayed zero. PM remains TODO(R47-PM-HARDWARE).
 
 ## Accepted Round60 / aligned IOVA spans and reciprocal recovery, PM hardware TODO
 
