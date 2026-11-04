@@ -1,5 +1,42 @@
 # AMDIOMMU — authoritative source repository
 
+## Accepted Round66-2 / real dual-driver coordinated PM cycle, sustained wake business TODO(R67)
+
+Base: `971198f2f4053057b9a5740f24a75c5add0cf470` (blocked R66 record). R66-2
+unblocks the R66 failure: RealtekRTL8111 3.0.56 now carries real PM hooks
+(sleep action fences the mapper via R47PowerTransition(1) after the ordinary
+disable/TX reclaim/RX rebuild and only then enters D3; wake action does D0,
+then R47PowerTransition(2), and only unblocks DMA start after success; the
+initial D0 is not a fake wake and PM callbacks never call enable()). The
+mapped-mode TX-watchdog restart reuses the disable/enable path with MSI
+event quiescing and refuses to restart a down or PM-blocked interface. The
+second domain's resume only commits its invalidations once the shared
+controller is genuinely restored, per-domain PM fence sequences/counts are
+exported so PM invalidations stay out of the ordinary map/unmap accounting,
+and `tools/r66_2/pm.py` arms/captures/analyzes/disarms with participant
+capability checks.
+
+**Accepted.** Only AMDMapperProbe 0.74.0 (`D5282356-…`) and RealtekRTL8111
+3.0.56 (`9DC6859E-…`) were rebuilt; Lucy 1.1.241 retained. After two
+documented recovery boots (off, then auto — R66's powerFailed controller and
+downed NICs cleared) the candidate boot passed the ordinary regression 4/4
+with identical recompute: 12 transfers / 96 MiB dual hashes, A enable 1→1→2
+and chip 12→0→12, both requesters 11→00→11, `r66_2-restart-count=0`, zero
+faults. One controlled real sleep then ran inside that boot: armed,
+`pmset sleepnow` 08:51:10, GPIO-503 wake 08:52:23 (`Total Sleep/Wakes since
+boot :1`, boottime moved only by the ~1s post-wake RTC correction — the PM
+analyzer now tolerates that drift and treats a pre-sleep missing counter as
+0, commit `cf0a58a`, recomputed offline). PM analysis 4/4: controller
+suspend/resume exactly once with zero failures and restored registers; the
+completion chain B suspend 11571 < A suspend 11606 < A resume-dev 11607 <
+11608 < B resume-dev 11609 < 11610; per-domain suspend/resume live-raw and
+pt-raw hashes equal across the boundary; both drivers unblocked and back to
+`link-up`; target faults zero throughout. `disarm` succeeded (armed=no).
+SleepDisabled restored, finite job removed, next boot `amdiommu=off`, EFI
+unmounted, no extra reboot. Sustained post-wake business remains R67; this
+is the first hardware-validated dual-driver coordinated PM cycle
+(TODO(R47-PM-HARDWARE) narrows accordingly).
+
 ## Round66 / runtime-armed dual-domain sleep — BLOCKED, failure evidence preserved
 
 Base: `f6e2ed8d1c61776e02f9b2df60abe13fb12a945a` (accepted R68). The R66
