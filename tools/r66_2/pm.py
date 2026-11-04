@@ -87,9 +87,17 @@ def analyze(before, after):
         except (KeyError, TypeError, ValueError) as exc:
             checks.append({'id': name, 'ok': False, 'detail': str(exc)})
     def system():
-        need(before['boottime'] == after['boottime'], 'reboot occurred instead of same-boot wake')
-        need(isinstance(before['system_sleep_wakes'], int) and
-             after['system_sleep_wakes'] == before['system_sleep_wakes'] + 1,
+        # macOS re-reads the RTC at wake and nudges kern.boottime by the
+        # measured drift (observed ~1s). A real reboot moves boottime to the
+        # wake wall-clock, minutes later; only that magnitude proves a reboot.
+        def boot_sec(text):
+            m = re.search(r'sec = (\d+)', text)
+            return int(m.group(1)) if m else None
+        b0, b1 = boot_sec(before['boottime']), boot_sec(after['boottime'])
+        need(b0 is not None and b1 is not None and abs(b1 - b0) <= 15,
+             'reboot occurred instead of same-boot wake')
+        w0, w1 = before['system_sleep_wakes'], after['system_sleep_wakes']
+        need((w0 or 0) + 1 == w1,
              'pmset does not prove exactly one added system sleep/wake')
     check('same-boot-real-sleep-wake', system)
     def controller():
