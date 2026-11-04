@@ -1,5 +1,37 @@
 # AMDIOMMU — authoritative source repository
 
+## Round66 / runtime-armed dual-domain sleep — BLOCKED, failure evidence preserved
+
+Base: `f6e2ed8d1c61776e02f9b2df60abe13fb12a945a` (accepted R68). The R66
+patch keeps boot out of PM-capable mode (`pm_boot_wake=False`) and adds an
+explicit runtime arm: `tools/r66/pm.py arm` sets `R66ArmSystemPM` on the
+shared controller once both NICs are up, gating `r52PowerSupported` for two
+domains. Only AMDMapperProbe was rebuilt (0.73.0, `6C3331A1-…`); Lucy 1.1.241
+and RTL8111 3.0.55 were retained untouched.
+
+**Not accepted.** The ordinary baseline passed on the fourth planned auto
+boot (auto4: A enable 1→1→2, chip 12→0→12, both requesters 11→00→11, zero
+faults, analysis 4/4 with identical recompute). The first two boots carried
+one real IOMMU fault each from the RTL8111 TX-stall watchdog resetting the
+chipset at boot (confirmed once in the unified log:
+`Tx stalled? Resetting chipset. ISR=0x0`); that blocker is intermittent,
+upstream, and outside this round's driver freeze. The controlled real sleep
+then ran exactly once: armed, `pmset sleepnow` at 05:48:37, RTC backup woke
+the machine at 05:54:00 (`Total Sleep/Wakes since boot :1`, boottime
+unchanged). Lucy's suspend fence succeeded (`pm-suspend-ready=1`), but the
+accepted RTL8111 3.0.55 has no R47 PM hook, so the second domain never
+participated, the shared controller was never stopped, and on wake Lucy's
+resume-side device invalidation failed (`failed-pm-domain-resume-invalidation`),
+leaving the controller suspended+powerFailed. The fail-safe held: Lucy
+reported `enable-blocked`, both NICs stayed disabled, and target faults
+stayed zero. Per the stop rule there was no second sleep and no masking
+reboot; `disarm` is refused (`kIOReturnBusy`) while the controller is
+suspended and the armed flag is documented as inert behind `powerFailed`
+with the next boot at `amdiommu=off`. Real sleep/wake remains
+TODO(R47-PM-HARDWARE): it needs an RTL8111 build with the R47 PM hook or a
+revised coordination contract, plus resume-side recovery after the command
+interface returns.
+
 ## Accepted Round68 / restore the ordinary dual-NIC lifecycle, PM hardware TODO
 
 Base: `a7d09010133560fd5f6a2779a3c45a4321a25994` (blocked R65 record).
