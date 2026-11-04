@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Candidate Round56 / indexed unmap by starting IOVA page
+## Accepted Round56 / indexed unmap by starting IOVA page, PM hardware TODO
 
 Base: `b339d0ec39a365b063d2d4e8774d5ebeebcd6fad` (R55 accepted record);
 R55 deployed `54469ee61afa2143bc6c3848031ab2ad7d32730e`. Its first auto
@@ -20,7 +20,20 @@ throughput improvement has been measured.
 Build only AMDMapperProbe **0.63.0** with `sh tools/build-m1a.sh`. Keep the
 installed RTL812xLucy **1.1.239** and RealtekRTL8111 **3.0.54**. Use
 `python3 -B tools/r56/run.py <command> ...` for the same finite workload.
-R56 Darwin build, deployment and physical-device validation are pending.
+
+**Accepted: all four mainline checks passed on the real Mac on the first auto
+boot.** The deployed implementation is `0830a5a`; only AMDMapperProbe was
+rebuilt (0.63.0, `4689E1F1-DCBF-3FA2-8CF4-22D74D105598`) and the deployment
+listed it as the sole replaced bundle, retaining Lucy 1.1.239 (`3857B04F-…`)
+and RealtekRTL8111 3.0.54 (`3089E621-…`). Both domains again reported
+`set-on-client-claim-before-pci-open` with their own requester, mapper and
+page-table root — A/en1/0x2700 domain 2 (35 maps/517 pages), B/en2/0x2500
+domain 1 (19 maps/1037 pages), the third candidate 0x2200 left passthrough.
+The 64 MiB load overlapped 107.315 ms (upload) and 80.947 ms (download), B
+completed business while A was down, A recovered after up, shared commands
+closed at 831 → 8423 → 10303, A retired 4425 and B 5874 mappings with no
+rejected map/unmap or invalidation failure, and target faults stayed zero.
+The accepted R53 off baseline was reused; PM remains TODO(R47-PM-HARDWARE).
 
 ## Accepted Round55 / word-wise first-fit IOVA allocation, PM hardware TODO
 
