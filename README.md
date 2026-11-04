@@ -1,5 +1,35 @@
 # AMDIOMMU — authoritative source repository
 
+## Accepted Round67-2 / dual RTL8127 post-wake sustained traffic, one wake lineage
+
+Base: `40fae03007b49dbc5b29418f71635d8d732b1665` (blocked R67 record). R67-2
+adds only `tools/r67_2/`; no kext was rebuilt, deployed or re-signed — the
+accepted Probe 0.74.0 and Lucy 1.1.241 binaries were adopted verbatim
+(`adopt` preserves source-ref/expected-version/deployment from the R66-2
+capture). The selector moved to the two 10ec:8127 devices: nic_a =
+22:00.0/0x2200/en4 (down target), nic_b = 25:00.0/0x2500/en2; the board
+RTL8111 is outside the selector and untouched.
+
+**Accepted.** One documented selector boot; on that boot: the ordinary
+96 MiB five-phase regression passed 4/4 (dual-Lucy independent domain trees,
+8x128-page RX each, permissions 11→00→11, zero faults); one real system
+sleep/wake completed (GPIO-503 wake, `system_sleep_wakes` 0/None→1, boottime
+unchanged, controller suspend/resume once with zero failures, per-domain
+fence CWs 12766…12771, retained live/PT hashes equal, both NICs back to
+link-up, disarm clean); the 300 s four-stream sustained run then delivered
+49.98 GB with every block dual-end SHA256-verified, reconnections 0, watchdog
+restarts 0, faults 0; and the post-wake 96 MiB reciprocal down/up passed
+4/4. The overall five-check analysis (wake origin, same restored domains,
+persistent streams, post-wake down/up, continuous-to-lifecycle evidence
+chain) is ok and the independent recompute is byte-identical. Two analyzer
+fixes were made (`c7f284c` cross-process monotonic ordering replaced by
+domain-counter ordering; `193bb18` finish reseals without stale analysis
+outputs). Closure: next boot `amdiommu=off amdiommu_devices=2200,2500`,
+SleepDisabled=1, finite jobs removed, peers exited, both NICs active, no
+extra reboot. This proves the dual-RTL8127 scenario on one wake lineage
+only; the RTL8111 sustained-load blocker from R67 stands, and no claim is
+made beyond this topology.
+
 ## Round67 / sustained post-wake traffic — BLOCKED, failure evidence preserved
 
 Base: `a4778b12411cca8d96ea2dae5bedf4d78afaf966` (accepted R66-2). R67 adds
