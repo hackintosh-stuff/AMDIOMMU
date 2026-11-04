@@ -133,6 +133,53 @@ def boot_mode(mode):
     return boot
 
 
+def live_addresses(probe):
+    """Decode the mapped IOVA of every live record a domain just published.
+
+    The records travel as one opaque blob inside the domain dictionary, so the
+    capture can join them to a driver snapshot without writing a file first.
+    ABI2 records lead with handle, firstPA, mapAddress, so mapAddress is the
+    third 64-bit word.
+    """
+    raw = probe.get('r44-live-raw')
+    if not isinstance(raw, bytes):
+        return None
+    count = probe.get('r44-live-maps')
+    if not isinstance(count, int) or count <= 0 or len(raw) != count * 616:
+        return None
+    return [{'mapAddress': struct.unpack_from('<Q', raw, index * 616 + 16)[0]}
+            for index in range(count)]
+
+
+def rx_groups_consistent(driver, rows):
+    """Say whether a driver snapshot and that domain's mapper rows agree.
+
+    rxInterruptVTD() rewrites one batch of IOVAs at a time. A driver snapshot
+    and the mapper records taken at different instants then name different
+    bases for the same group, which is exactly the state that would let a NIC
+    write an IOVA the driver has already unmapped. The driver's own export
+    names the IOVA each group occupies now, so every exported base must be a
+    live mapping.
+    """
+    if not isinstance(driver.get('rtl8111-r53-live'), bytes) or not rows:
+        return True
+    live = [dict(zip(('kind', 'index', 'iova', 'length'), row))
+            for row in struct.iter_unpack('<IIQQ', driver['rtl8111-r53-live'])]
+    exported = {row['iova'] for row in live if row['kind'] == 4}
+    if not exported:
+        return True
+    mapped = {row['mapAddress'] for row in rows}
+    if not exported <= mapped:
+        return False
+    addresses = driver.get('rtl8111-r53-rx-addresses')
+    if not isinstance(addresses, bytes) or len(addresses) != 512 * 8:
+        return True
+    slots = struct.unpack('<512Q', addresses)
+    pages = PROFILES['RTL8111']['rx_pages']
+    groups = {row['index'] for row in live if row['kind'] == 4}
+    return all(slots[index * pages] in mapped for index in groups)
+
+
 def snapshot(parent, label, config, mode):
     out = parent / label
     out.mkdir(parents=True, exist_ok=False)
@@ -164,7 +211,28 @@ def snapshot(parent, label, config, mode):
         owner = next(node for node, _ in nodes(tree) if node.get('IORegistryEntryID') == owner_id)
         controller = dict(C.scalars(owner, ('r52-', 'r53-')), registry_id=owner_id)
         domains = owner['r52-domains']
-        drivers = selected_drivers(tree, config)
+        # A batch remap between the driver snapshot above and this mapper
+        # snapshot leaves a pair that describes two different rings. Re-take the
+        # pair until it is self-consistent, bounded by the same deadline.
+        for attempt in range(5):
+            tree = registry()
+            drivers = selected_drivers(tree, config)
+            rtl8111 = next(d['node'] for d in drivers.values()
+                           if d['binding']['driver_class'] == 'RTL8111')
+            requester = next(d['binding']['requester'] for d in drivers.values()
+                             if d['binding']['driver_class'] == 'RTL8111')
+            probe = next((p for p in domains if p.get('r52-requester') == requester), None)
+            if probe is None:
+                break
+            rows = live_addresses(probe)
+            if rows is None or rx_groups_consistent(rtl8111, rows):
+                break
+            if attempt == 4 or time.monotonic() >= deadline:
+                raise RuntimeError('RTL8111 driver and mapper snapshots describe different RX rings')
+            for value in drivers.values():
+                profile = PROFILES[value['binding']['driver_class']]
+                set_boolean(value['binding']['driver_registry_id'], profile['snapshot'])
+            time.sleep(.05)
     else:
         controller, domains = {}, []
     for role, selected in drivers.items():
