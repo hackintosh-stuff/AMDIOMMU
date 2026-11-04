@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Round59 candidate / 512 KiB ordinary DMA mappings
+## Accepted Round59 / 512 KiB ordinary DMA mappings (ABI3), PM hardware TODO
 
 Base: `63ca1bc0ced9c82f7b460559f8cd7917cdc8c0df` (R58 accepted). R58 deployed `3281ac6`;
 its first 64 MiB auto run passed all four groups with zero target faults.
@@ -18,6 +18,22 @@ existing slots. The same 4 MiB receive pool formerly needed sixteen
 the installed RealtekRTL8111 3.0.54 is retained. The R59 hardware run
 must show the eight full mappings and normal two-device business before
 the larger mapping size is accepted. No throughput gain is claimed.
+
+**Accepted: all four mainline checks passed on the real Mac on the first auto
+boot.** The deployed implementation is `fdc6942`; both RTL812xLucy 1.1.240
+(`43C9BD33-1BB2-3C6F-A339-A34DC3D0DAA9`) and AMDMapperProbe 0.66.0
+(`9CB136EC-75FE-3553-8C12-F54694F60C00`) were replaced, retaining
+RealtekRTL8111 3.0.54 (`3089E621-…`). Lucy now runs eight 128-page receive
+mappings (524,288 bytes each, 1024 slots): the B domain held 11 persistent
+maps (3 fixed + 8 RX) with 1037 pages, 11 tables and identity zero, and the
+ABI3 descriptor PAs match the walked page tables through page 128
+(`expectedLastPA == walkedLastPA == 15078797312`). A/en1/0x2700 domain 1 kept
+its own 32×16 shape (35 maps/517 pages). Shared commands closed at
+736 → 6871 → 8623 with A 3979/3944 and B 4686/4675 map/unmap, the 64 MiB load
+overlapped 91.528 ms (upload) and 41.166 ms (download), B completed business
+while A was down, A recovered after up, and target faults stayed zero. The
+R53 off baseline was reused as historical context only; PM remains
+TODO(R47-PM-HARDWARE).
 
 ## Accepted Round58 / compact storage for expected physical pages, PM hardware TODO
 
