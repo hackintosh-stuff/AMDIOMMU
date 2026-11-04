@@ -5,6 +5,8 @@
 #include <libkern/c++/OSString.h>
 
 namespace amd_iommu_policy {
+static constexpr const char *kOffer = "amdiommu-requester-offer";
+static constexpr const char *kClaim = "AMDIOMMUClaimRequesterV1";
 static constexpr const char *kProperty = "amdiommu-dma-policy";
 static constexpr const char *kSelected = "selected";
 static constexpr const char *kMapped = "mapped";
@@ -28,6 +30,15 @@ inline bool waitForMapper(IOService *device, UInt32 waitMs = 2000) {
         if (object) object->release();
         if (passthrough) return true;
         if (failed) return false;
+        // Claim before PCI open. Stop DMA in the driver before its first map.
+        OSObject *offer = device->copyProperty(kOffer);
+        if (offer) {
+            IOService *owner = OSDynamicCast(IOService, offer);
+            const bool ok = owner && owner->callPlatformFunction(kClaim, false, device,
+                nullptr, nullptr, nullptr) == kIOReturnSuccess;
+            offer->release();
+            return ok && device->getProperty("iommu-parent");
+        }
         if (device->getProperty("iommu-parent")) return true;
         if (elapsed != waitMs) IOSleep(1);
     }

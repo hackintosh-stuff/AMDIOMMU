@@ -5,7 +5,7 @@ import ipaddress
 import json
 import re
 import struct
-from common import (BASE_COMMIT, OFF_PHASES, PHASES, PROFILES, VERSIONS,
+from common import (BASE_COMMIT, OFF_PHASES, PHASES, PROFILES, RUN, VERSIONS,
                     configuration, module, project_path, protocol as P,
                     read_snapshot, roles, sha, validate_selector, write_json)
 
@@ -99,7 +99,7 @@ def analyze(cap):
         config = configuration(cap / 'endpoints.json')
         need(run['config'] == config, 'run endpoint configuration differs')
         mode = run['mode']
-        need(mode in ('auto', 'off') and manifest['scope'] == 'r53' and
+        need(mode in ('auto', 'off') and manifest['scope'] == 'r%d' % RUN.number and
              manifest['mode'] == mode and not manifest['errors'], 'capture is incomplete')
         for name, expected in manifest['files'].items():
             raw = (cap / name).read_bytes()
@@ -113,18 +113,18 @@ def analyze(cap):
                  'recorded boot mode differs')
             if mode == 'auto':
                 validate_selector(' '.join(boot), config)
-        loaded = (cap / 'r53-version-confirmation.txt').read_text().lower()
+        loaded = (cap / ('r%d-version-confirmation.txt' % RUN.number)).read_text().lower()
         if mode == 'auto':
             source, expected = json_file(cap / 'source-ref.json'), json_file(cap / 'expected-version.json')
             need(source['base_commit'] == BASE_COMMIT and source['commit'] != BASE_COMMIT and
-                 re.fullmatch(r'[0-9a-f]{40}', source['commit']), 'not a recorded R53 successor')
+                 re.fullmatch(r'[0-9a-f]{40}', source['commit']), 'not a recorded R%d successor' % RUN.number)
             for name, version in VERSIONS.items():
                 got = manifest['installed'][name]
                 need(got['version'] == version and got['codesign_returncode'] == 0 and
                      all(got[key] == expected[name][key] for key in ('version', 'sha256', 'uuid')) and
                      got['uuid'].lower() in loaded, 'installed/loaded identity differs: ' + name)
             need(all(manifest['installed']['RTL812xLucy'][name] is True for name in ('enableTSO4', 'enableTSO6')),
-                 'R53 Lucy offloads differ')
+                 'Lucy offloads differ')
         else:
             got = manifest['installed']['RTL812xLucy']
             need(got['codesign_returncode'] == 0 and got['uuid'].lower() in loaded,
@@ -172,6 +172,9 @@ def analyze(cap):
                 p, d, m = value['probe'], value['driver'], value['mapper']
                 ip = PROFILES[value['binding']['driver_class']]['identity_prefix']
                 need(value['binding']['dma_policy'] == 'mapped', 'selected PCI endpoint lacks mapped policy')
+                if RUN.parent:
+                    need(p.get('r44-parent') == RUN.parent,
+                         phase + '/' + role + ': missing pre-open client claim for this mapper')
                 ident = (p['r52-mapper-id'], p['r44-domain-id'], m['rootPA'])
                 need(all(v > 0 for v in ident) and
                      p['r52-requester'] == p['r44-target-devid'] == value['binding']['requester'] and
@@ -192,6 +195,8 @@ def analyze(cap):
                 identities.append(ident)
                 trees[role] = TREE.mapping_tree(value, iova_base=0x80000000, max_map_pages=64, max_runs=64)
                 trees[role]['nativeResources'] = native_resources(value, phase)
+                if RUN.parent:
+                    trees[role]['bindingPath'] = p['r44-parent']
                 leaves[role] = TREE.leaves(value)[0]
             need(all(identities[0][i] != identities[1][i] for i in range(3)),
                  'the devices share a mapper, domain ID, or page-table root')
@@ -342,7 +347,7 @@ def analyze(cap):
         check('interface-bound-ipv6-and-dual-end-hashes', traffic)
         if 'client' in data:
             check('one-device-down-other-device-business-and-retirement', lifecycle)
-    return {'scope': 'r53-mixed-drivers-shared-controller', 'mode': data.get('mode'),
+    return {'scope': 'r%d-mixed-drivers-shared-controller' % RUN.number, 'mode': data.get('mode'),
             'ok': len(checks) == 4 and all(row['state'] == 'ok' for row in checks), 'checks': checks,
             'limitations': ['One selected interface down/up; the other completes traffic while it is down.',
                             'No claim of one continuous connection across the transitions, system-wide IOMapper, PM or hot-unplug.']}

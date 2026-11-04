@@ -50,6 +50,7 @@ class org_example_AMDMapperProbe : public IOMapper {
 
 protected:
     bool initHardware(IOService *provider) override;
+    void free() override;
 
 public:
     bool start(IOService *provider) override;
@@ -101,6 +102,7 @@ private:
     UInt32 fR53Requesters[kR52MaxDomains] = {};
     UInt32 fR53RequesterCount = 0;
     bool r53ReadDeviceSelection();
+    IOService *fR54Offers[kR52MaxDomains] = {};  // retained by selector index
     struct R52Domain;
     R52Domain *fR52Domain = nullptr;
     void r52AttachExistingDevices();
@@ -115,7 +117,7 @@ private:
     struct R44MapperState;
     R44MapperState *fR44Mapper = nullptr;
     bool r44StartAuto();
-    bool r44AttachAuto(IOService *);
+    bool r44AttachAuto(IOService *, bool claim = false);
     bool r44StopAuto();
     bool r44Invalidate(bool invalidateDevice = false,
         UInt64 address = 0, UInt64 bytes = 0,

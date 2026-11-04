@@ -1,5 +1,36 @@
 # AMDIOMMU — authoritative source repository
 
+## Candidate Round54 / explicit per-device requester claims
+
+Base: `a798b47a9daaae98d5d4efe98285c1bfbee9da2d` (accepted R53 record).
+The effective R53 run used `49365e9792b848af435493d5cf86ac49c802514c`.
+Re-analysis of the original off and auto5 captures reproduced both saved
+4/4 outputs exactly. Keep the RTL8111 stop/drain before a whole-ring
+remap and the paired driver/mapper snapshot capture. Auto5 ran 64 MiB
+and recorded zero target faults; auto3 had one real RX write fault.
+
+An explicit `amdiommu_devices` match now offers the controller on the PCI
+nub instead of binding solely on PCI publication or a Realtek model ID.
+A cooperating client uses the shared `waitForMapper()` before PCI open
+to claim its own nub. The controller validates the offer and existing IVRS
+scope, then prepares the device mapper and publishes `iommu-parent`.
+The driver still stops DMA before the first mapping activates its DTE.
+Without an explicit list, the previous RTL8127 default remains available.
+This neither installs a system mapper nor opts arbitrary PCI drivers in.
+
+Use `sh tools/r54/build.sh <lucy-input> <rtl8111-input>` in the existing
+checkout and `python3 -B tools/r54/run.py <command> ...` for the finite run.
+The two original clients exercise the generic explicit-claim path.
+The existing four checks include the actual per-domain parent phase
+`set-on-client-claim-before-pci-open`; keep the R53 64 MiB load and
+normal one-device down/up. Reuse the recorded R53 off baseline when the
+endpoint and network configuration still match. Keep the same two-domain
+limit, ABI2, NPCache policy and synchronous unmap. No PM expansion.
+
+Target: Probe **0.61.0**, RTL812xLucy **1.1.239**, project RealtekRTL8111
+**3.0.54**. R54 is a source candidate until the new binaries have been
+built and the mixed-device workload has run on macOS.
+
 ## Accepted Round53 / mixed RTL8111 and RTL8127 device domains
 
 Base: `2be76054f30e208d57658dc7efa3df79c9050f7c`, the accepted R52 result

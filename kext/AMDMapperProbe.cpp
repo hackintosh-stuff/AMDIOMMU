@@ -5,6 +5,7 @@
 // function bodies are unchanged and in their original order.
 
 #include "AMDMapperProbe.hpp"
+#include "amd_iommu_device_policy.hpp"
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
@@ -160,8 +161,8 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
     fR44Auto = PE_parse_boot_argn("amdiommu", mode, sizeof(mode) - 1)
             && strcmp(mode, "auto") == 0;
     if (fR44Auto) {
-        // Prepare at PCI publication, before Lucy asks for its device mapper.
-        // This service owns the domain across ordinary interface down/up.
+        // Explicit clients claim at pre-open; this owner keeps their domains
+        // across ordinary interface down/up.
         return r44StartAuto();
     }
 
@@ -310,6 +311,11 @@ void org_example_AMDMapperProbe::r31RequestStop() {
 IOReturn org_example_AMDMapperProbe::callPlatformFunction(
     const OSSymbol *name, bool wait, void *target, void *operation,
     void *unused3, void *unused4) {
+    if (name && name->isEqualTo(amd_iommu_policy::kClaim)) {
+        if (!target || operation || unused3 || unused4) return kIOReturnBadArgument;
+        return r44AttachAuto(static_cast<IOService *>(target), true)
+            ? kIOReturnSuccess : kIOReturnNotReady;
+    }
     if (name && name->isEqualTo("R47PowerTransition")) {
         if (!fR44Auto || !fNicDevice) return kIOReturnNotReady;
         const uintptr_t op = (uintptr_t)operation;
@@ -777,7 +783,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.60.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.61.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

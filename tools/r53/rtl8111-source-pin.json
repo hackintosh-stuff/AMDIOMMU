@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Mieze/RTL8111_driver_for_OS_X",
   "commit": "a3dad34ed4f1e72805ce42f6d506f6917fdf79a0",
-  "version": "3.0.53",
+  "version": "3.0.54",
   "files": [
     {
       "path": "README.md",

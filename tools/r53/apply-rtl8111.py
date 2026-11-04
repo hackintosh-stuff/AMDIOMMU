@@ -475,16 +475,21 @@ def transform(files, version):
     for name, text in (("RealtekRTL8111.hpp", hpp), ("RealtekRTL8111.cpp", cpp),
                        ("RealtekRTL8111Setup.cpp", setup), ("RealtekRTL8111VTD.cpp", vtd)):
         out[name] = text.encode("utf-8")
-    plist_text = files["Info.plist"].decode("utf-8")
+    out["Info.plist"] = versioned_plist(files["Info.plist"], version)
+    return out
+
+
+def versioned_plist(data, version):
+    plist_text = data.decode("utf-8")
     for old, new in (("$" + "{EXECUTABLE_NAME}", "RealtekRTL8111"),
                      ("$" + "{PRODUCT_NAME:rfc1034identifier}", "RealtekRTL8111"),
-                     ("$" + "{PRODUCT_NAME}", "RealtekRTL8111"),
-                     ("$MODULE_VERSION", version), ("$MARKETING_VERSION", version)):
+                     ("$" + "{PRODUCT_NAME}", "RealtekRTL8111")):
         plist_text = plist_text.replace(old, new)
     info = plistlib.loads(plist_text.encode("utf-8"))
-    info["OSBundleLibraries"]["org.example.AMDMapperProbe"] = "0.60.0"
-    out["Info.plist"] = plistlib.dumps(info, sort_keys=False)
-    return out
+    info["CFBundleVersion"] = info["CFBundleShortVersionString"] = version
+    info["IOKitPersonalities"]["RTL8111 PCIe Adapter"]["DriverVersion"] = version
+    info["OSBundleLibraries"]["org.example.AMDMapperProbe"] = "0.61.0"
+    return plistlib.dumps(info, sort_keys=False)
 
 
 def git_blob(data):
@@ -493,6 +498,34 @@ def git_blob(data):
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+# Accepted R53 implementation 49365e9 (includes mapped RX ring drain).
+R53_GENERATOR = "0c54b0bb98f0ddac9fe40bccf6a882a8231eaaaa029eff9bc0defe3d4c6e4673"
+R53_FILE_CATALOG = "6059e6a26ee4e56ebfcd85bee8343c2e1f2404a48489caf2009ad58924c5edd1"
+
+
+def existing_updates(source, stamp, pin, fingerprint, policy):
+    hashes = stamp.get("files", {})
+    managed = {item["path"] for item in pin["files"]}
+    managed.add("RealtekRTL8111/amd_iommu_device_policy.hpp")
+    if stamp.get("upstream") != pin["commit"] or set(hashes) != managed:
+        raise SystemExit("fixed RTL8111 input or managed file list differs")
+    current = stamp.get("generator") == fingerprint and stamp.get("version") == pin["version"]
+    if not current:
+        catalog = digest(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode())
+        if (stamp.get("version") != "3.0.53" or stamp.get("generator") != R53_GENERATOR or
+                catalog != R53_FILE_CATALOG):
+            raise SystemExit("unrecognized RTL8111 generated input; no files changed")
+    for path, expected in hashes.items():
+        if digest((source / path).read_bytes()) != expected:
+            raise SystemExit("generated source changed: " + path)
+    if current:
+        return {}
+    # R54 leaves the accepted C++ and other pinned inputs byte-for-byte intact.
+    info = (source / "RealtekRTL8111/Info.plist").read_bytes()
+    return {"amd_iommu_device_policy.hpp": policy,
+            "Info.plist": versioned_plist(info, pin["version"])}
 
 
 def main():
@@ -508,29 +541,28 @@ def main():
     stamp_path = source / ".r53-generated.json"
     if stamp_path.exists():
         stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
-        if stamp.get("generator") != fingerprint or stamp.get("upstream") != pin["commit"]:
-            raise SystemExit("R53 generator/input version changed; restore the pinned dependency inputs before regenerating")
-        for path, expected in stamp["files"].items():
-            if digest((source / path).read_bytes()) != expected:
-                raise SystemExit("generated source changed: " + path)
-        print("RTL8111 R53 already current:", source)
-        return
-    originals = {}
-    hashes = {}
-    for item in pin["files"]:
-        data = (source / item["path"]).read_bytes()
-        if len(data) != item["bytes"] or git_blob(data) != item["git_blob"]:
-            raise SystemExit("pinned source mismatch: " + item["path"])
-        hashes[item["path"]] = digest(data)
-        if item["path"].startswith("RealtekRTL8111/"):
-            originals[Path(item["path"]).name] = data
-    # Confirm the upstream reset is before the existing DMA allocation path.
-    hardware = originals["RealtekRTL8111Hardware.cpp"].decode("utf-8")
-    init = hardware.split("bool RTL8111::initRTL8111()", 1)[1].split("void RTL8111::enableRTL8111()", 1)[0]
-    if "    exitOOB();\n    rtl8168_hw_init(tp);\n    rtl8168_nic_reset(tp);" not in init:
-        raise SystemExit("upstream initial reset contract changed")
-    generated = transform(originals, pin["version"])
-    generated["amd_iommu_device_policy.hpp"] = policy
+        generated = existing_updates(source, stamp, pin, fingerprint, policy)
+        if not generated:
+            print("RTL8111 already current:", pin["version"], source)
+            return
+        hashes = dict(stamp["files"])
+    else:
+        originals = {}
+        hashes = {}
+        for item in pin["files"]:
+            data = (source / item["path"]).read_bytes()
+            if len(data) != item["bytes"] or git_blob(data) != item["git_blob"]:
+                raise SystemExit("pinned source mismatch: " + item["path"])
+            hashes[item["path"]] = digest(data)
+            if item["path"].startswith("RealtekRTL8111/"):
+                originals[Path(item["path"]).name] = data
+        # Confirm the upstream reset is before the existing DMA allocation path.
+        hardware = originals["RealtekRTL8111Hardware.cpp"].decode("utf-8")
+        init = hardware.split("bool RTL8111::initRTL8111()", 1)[1].split("void RTL8111::enableRTL8111()", 1)[0]
+        if "    exitOOB();\n    rtl8168_hw_init(tp);\n    rtl8168_nic_reset(tp);" not in init:
+            raise SystemExit("upstream initial reset contract changed")
+        generated = transform(originals, pin["version"])
+        generated["amd_iommu_device_policy.hpp"] = policy
     for name, data in generated.items():
         target = driver / name
         if not target.exists() or target.read_bytes() != data:
@@ -539,7 +571,7 @@ def main():
     stamp_path.write_bytes((json.dumps({"upstream": pin["commit"], "generator": fingerprint,
                                        "version": pin["version"], "files": hashes},
                                       indent=2) + "\n").encode("utf-8"))
-    print("RTL8111 R53 generated:", pin["version"], source)
+    print("RTL8111 generated:", pin["version"], source)
 
 
 if __name__ == "__main__":

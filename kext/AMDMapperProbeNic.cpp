@@ -134,8 +134,8 @@ bool org_example_AMDMapperProbe::publishHandler(
         (org_example_AMDMapperProbe *)target;
     if (!self || !newService) return true;
     if (self->fR44Auto) {
-        // Auto mode applies the explicit requester policy to both supported
-        // consumer families, including a passthrough marker for excluded NICs.
+        // One path for explicit requester offers and the legacy default.
+        // It also marks known unselected clients for physical DMA.
         self->r44AttachAuto(newService);
         return true;
     }

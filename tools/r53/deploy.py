@@ -5,7 +5,7 @@ from pathlib import Path
 import plistlib
 import re
 import sys
-from common import (BASE_COMMIT, VERSIONS, configuration, module, project_path,
+from common import (BASE_COMMIT, RUN, VERSIONS, configuration, module, project_path,
                     roles, selected_drivers, registry, selector, write_json)
 
 HERE = Path(__file__).resolve().parent
@@ -20,7 +20,7 @@ PREVIOUSLY_ABSENT = []
 def require_offloads(info):
     params = info.get('IOKitPersonalities', {}).get('RTL8125', {}).get('Driver Parameters', {})
     if any(params.get(key) is not True for key in ('enableTSO4', 'enableTSO6')):
-        raise ValueError('R53 Lucy requires enableTSO4=true and enableTSO6=true')
+        raise ValueError('Lucy requires enableTSO4=true and enableTSO6=true')
     if info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != VERSIONS['AMDMapperProbe']:
         raise ValueError('Lucy Probe compatibility version differs')
 
@@ -95,7 +95,7 @@ def recovery_sources(aux, config, targets, jobs):
 
 def record_recovery_plan(backup, plan, sources, previous_boot_args):
     write_json(backup / 'recovery-plan.json', {
-        'round': 53, 'previous_boot_args': previous_boot_args,
+        'round': RUN.number, 'previous_boot_args': previous_boot_args,
         'previously_absent_targets': PREVIOUSLY_ABSENT,
         'efi_rtl8111_entries': EFI_INJECTIONS,
         'recovery_sources': [{'source': str(source), 'saved_as': source.name} for source in sources],
@@ -116,7 +116,7 @@ def write_boot_config(config, cfg, bootargs, _tokenarg):
             raise ValueError('RTL8111 EFI entry changed after the concrete deployment plan')
         row['Enabled'] = False
     cfg['NVRAM']['Add'][D.NVRAM_GUID]['boot-args'] = bootargs
-    temp = config.with_name(config.name + '.r53.tmp')
+    temp = config.with_name(config.name + '.r%d.tmp' % RUN.number)
     temp.write_bytes(plistlib.dumps(cfg, sort_keys=False))
     D.run(['plutil', '-lint', temp])
     temp.replace(config)
@@ -127,7 +127,7 @@ def write_boot_config(config, cfg, bootargs, _tokenarg):
 
 
 def round_plan():
-    return {'round': 53, 'transport': 'tcp6', 'config': CONFIG,
+    return {'round': RUN.number, 'transport': 'tcp6', 'config': CONFIG,
             'requester_selector': selector(CONFIG), 'transfer_bytes': 64 << 20,
             'mapper_abi': 2, 'domains': 2, 'drivers': ['RTL8111', 'RTL8125'],
             'controller': 'one shared device table, event buffer and command ring',
@@ -140,9 +140,12 @@ def round_plan():
 def daemon_plist(out, _unused_peer, _unused_port):
     config_path = out / 'endpoints.json'
     write_json(config_path, CONFIG)
-    return {'Label': 'org.example.round53load',
-            'ProgramArguments': ['/bin/sh', str(HERE / 'boot-load.sh'),
-                                 out.relative_to(ROOT).as_posix(), config_path.relative_to(ROOT).as_posix()],
+    out_arg, cfg_arg = out.relative_to(ROOT).as_posix(), config_path.relative_to(ROOT).as_posix()
+    argv = ([str(Path(sys.executable).resolve()), '-B', str(RUN.runner), 'load',
+             out_arg, '--config', cfg_arg, '--mode', 'auto'] if RUN.runner else
+            ['/bin/sh', str(HERE / 'boot-load.sh'), out_arg, cfg_arg])
+    return {'Label': 'org.example.round%dload' % RUN.number,
+            'ProgramArguments': argv,
             'WorkingDirectory': str(ROOT),
             'EnvironmentVariables': {'PYTHON': str(Path(sys.executable).resolve()),
                                      'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'},
@@ -150,11 +153,12 @@ def daemon_plist(out, _unused_peer, _unused_port):
             'StandardOutPath': str(out / 'launchd.out'), 'StandardErrorPath': str(out / 'launchd.err')}
 
 
-D.HERE, D.ROUND, D.BASE_COMMIT = HERE, 53, BASE_COMMIT
+D.HERE, D.ROUND, D.BASE_COMMIT = RUN.runner.parent if RUN.runner else HERE, RUN.number, BASE_COMMIT
 D.DRIVER_VERSION, D.PROBE_VERSION = VERSIONS['RTL812xLucy'], VERSIONS['AMDMapperProbe']
-D.DEFAULT_TOKEN, D.DEFAULT_PORT, D.DEFAULT_PEER = 0x53c0de53, 9120, 'endpoint-config'
+D.DEFAULT_TOKEN, D.DEFAULT_PORT, D.DEFAULT_PEER = RUN.token, 9120, 'endpoint-config'
 D.TSO4 = D.TSO6 = True
-D.ENTRY_POINTS = ('boot-load.sh', 'load.py', 'common.py', 'protocol.py', 'network.py')
+D.ENTRY_POINTS = (RUN.runner.name,) if RUN.runner else (
+    'boot-load.sh', 'load.py', 'common.py', 'protocol.py', 'network.py')
 D.kernel_bootarg = lambda token: 'amdiommu=auto'
 D.deployment_bundles, D.recovery_sources = deployment_bundles, recovery_sources
 D.updated_boot_args, D.write_boot_config = updated_boot_args, write_boot_config

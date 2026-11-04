@@ -237,8 +237,8 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
         IOLockFree(fR52AttachLock); fR52AttachLock = nullptr;
         return false;
     }
-    // Notifications prepare new nubs before their DMA driver starts. Replay every already
-    // published, unopened endpoint too; identical PCI IDs are not identities.
+    // Offer explicit requesters to pre-open clients; keep eager attach for the default.
+    // Replay published endpoints through the same path as the notification.
     r52AttachExistingDevices();
     r52PublishDomains();
     return true;
@@ -246,25 +246,50 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
+bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
     if (!fR44Auto || fR52Owner || !fR52AttachLock) return false;
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
-    if (!nic || nic->configRead16(kIOPCIConfigVendorID) != 0x10ec) return false;
-    const UInt16 device = nic->configRead16(kIOPCIConfigDeviceID);
-    if (device != 0x8127 && device != 0x8168) return false;
-    R52LockGuard attachment(fR52AttachLock);
+    if (!nic) return false;
     const UInt32 requester = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
-    bool selected = !fR53SelectionExplicit && device == 0x8127;
-    for (UInt32 i = 0; i < fR53RequesterCount; ++i)
-        if (fR53Requesters[i] == requester) selected = true;
-    if (!selected) {
-        nic->setProperty(amd_iommu_policy::kProperty,
-                         amd_iommu_policy::kPassthrough);
-        return false;
+    UInt32 match = 0;
+    while (match < fR53RequesterCount && fR53Requesters[match] != requester) ++match;
+    if (match == fR53RequesterCount) {
+        // Only the legacy default and known unselected clients need model IDs.
+        if (claim || nic->configRead16(kIOPCIConfigVendorID) != 0x10ec) return false;
+        const UInt16 device = nic->configRead16(kIOPCIConfigDeviceID);
+        if (device != 0x8127 && device != 0x8168) return false;
+        if (fR53SelectionExplicit || device != 0x8127) {
+            nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kPassthrough);
+            return false;
+        }
+    }
+    R52LockGuard attachment(fR52AttachLock);
+    if (fR52Stopping) return false;
+    if (fR53SelectionExplicit) {
+        IOService *&offered = fR54Offers[match];
+        if (!claim) {
+            if (offered) return offered == nic;  // first publish or replay
+            if (nic->isOpen() || nic->getProperty("iommu-parent")) {
+                setProperty("r52-attach-failure", "already-open-or-bound");
+                setProperty("r52-rejected-requester", requester, 32);
+                nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
+                return false;
+            }
+            if (!nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kSelected) ||
+                !nic->setProperty(amd_iommu_policy::kOffer, this)) {
+                nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
+                return false;
+            }
+            nic->retain();
+            offered = nic;
+            return true;  // no mapper, page table or translated DTE yet
+        }
+        if (offered != nic || nic->getProperty(amd_iommu_policy::kOffer) != this)
+            return false;
+        nic->removeProperty(amd_iommu_policy::kOffer);
     }
     R53AttachPolicy policy(nic);
-    if (fR52Stopping) return false;
     ++fPublishHits;
     setProperty("r44-notify-hits", (unsigned long long)fPublishHits, 64);
     UInt32 slot = kR52MaxDomains;
@@ -281,8 +306,8 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service) {
         setProperty("r52-attach-failure", "two-device-capacity");
         return false;
     }
-    if (nic->isOpen()) {
-        setProperty("r52-attach-failure", "too-late-open");
+    if (nic->isOpen() || (claim && nic->getProperty("iommu-parent"))) {
+        setProperty("r52-attach-failure", "already-open-or-bound");
         setProperty("r52-rejected-requester", requester, 32);
         return false;
     }
@@ -471,7 +496,8 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slo
     // Only first map activates this endpoint's DTE, after the endpoint driver's reset.
     r44PublishMappings();
     if (!nic->setProperty("iommu-parent", this)) return false;
-    setProperty("r44-parent", "set-before-driver-start");
+    setProperty("r44-parent", fR52Owner->fR53SelectionExplicit
+        ? "set-on-client-claim-before-pci-open" : "set-before-driver-start");
     return true;
 }
 #pragma clang diagnostic pop
@@ -845,11 +871,20 @@ bool org_example_AMDMapperProbe::r44StopAuto() {
         setProperty("r52-device-stop", "quiesced");
         return true;
     }
-    R44Controller *c = fR44Controller;
-    if (!fR52AttachLock) return !c;
+    if (!fR52AttachLock) return !fR44Controller;
     {
         R52LockGuard attachment(fR52AttachLock);
+        R44Controller *c = fR44Controller;
         fR52Stopping = true;
+        for (auto *&device : fR54Offers) {
+            if (!device) continue;
+            if (device->getProperty(amd_iommu_policy::kOffer) == this) {
+                device->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
+                device->removeProperty(amd_iommu_policy::kOffer);
+            }
+            device->release();
+            device = nullptr;
+        }
         for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
             auto *mapper = fR52Mappers[i];
             if (!mapper || mapper->r44QuiesceMappings()) continue;
@@ -884,7 +919,12 @@ bool org_example_AMDMapperProbe::r44StopAuto() {
             if (pinned) release();
         }
     }
-    IOLockFree(fR52AttachLock); fR52AttachLock = nullptr;
     setProperty("r44-state", "stopped");
     return true;
+}
+
+void org_example_AMDMapperProbe::free() {
+    // A pre-open claim pins the owner (and hence this lock) until it returns.
+    if (fR52AttachLock) IOLockFree(fR52AttachLock);
+    IOMapper::free();
 }

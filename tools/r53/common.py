@@ -8,10 +8,24 @@ import subprocess
 import time
 from pathlib import Path
 import importlib.util
+from typing import NamedTuple, Optional
 
 ROOT = Path(__file__).resolve().parents[2]
-BASE_COMMIT = '2be76054f30e208d57658dc7efa3df79c9050f7c'
-VERSIONS = {'RTL812xLucy': '1.1.238', 'AMDMapperProbe': '0.60.0', 'RealtekRTL8111': '3.0.53'}
+
+
+class MixedRun(NamedTuple):
+    number: int
+    base_commit: str
+    versions: dict
+    token: int
+    parent: Optional[str] = None
+    runner: Optional[Path] = None
+
+
+RUN = MixedRun(53, '2be76054f30e208d57658dc7efa3df79c9050f7c',
+               {'RTL812xLucy': '1.1.238', 'AMDMapperProbe': '0.60.0', 'RealtekRTL8111': '3.0.53'},
+               0x53c0de53)
+BASE_COMMIT, VERSIONS = RUN.base_commit, RUN.versions
 PHASES, OFF_PHASES = ('before', 'down', 'after-up'), ('before', 'after')
 MAX_MAP_PAGES = MAX_RUNS = 64
 RX_GROUPS, RX_GROUP_PAGES, PERSISTENT_MAPS = 16, 64, 19
@@ -41,6 +55,13 @@ project_path, sha, write_json = C.project_path, C.sha, C.write_json
 nodes, registry, set_boolean = C.nodes, C.registry, C.set_boolean
 active, identity = C.active, C.identity
 C.VERSIONS = VERSIONS
+
+
+def select_run(run):
+    """Set the single CLI process's profile before importing its entry point."""
+    global RUN, BASE_COMMIT, VERSIONS
+    RUN, BASE_COMMIT, VERSIONS = run, run.base_commit, run.versions
+    C.VERSIONS = VERSIONS  # R52 boot_mode reads the installed bundle profile
 
 
 def configuration(path):

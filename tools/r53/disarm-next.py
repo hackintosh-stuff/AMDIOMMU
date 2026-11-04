@@ -6,11 +6,11 @@ from pathlib import Path
 import plistlib
 import subprocess
 import sys
-from common import module, project_path
+from common import RUN, module, project_path
 
 D = module('_r53_disarm_deploy', 'tools/r53/deploy.py')
 A = module('_r53_disarm_analysis', 'tools/r53/analyze.py')
-JOB_LABEL = 'org.example.round53load'
+JOB_LABEL = 'org.example.round%dload' % RUN.number
 
 
 def main():
@@ -22,7 +22,7 @@ def main():
     saved = json.loads(project_path(args.analysis).read_text(encoding='utf-8'))
     fresh = json.loads(json.dumps(A.analyze(project_path(args.capture))))
     if fresh.get('mode') != 'auto' or not fresh.get('ok') or saved != fresh:
-        raise ValueError('R53 auto analysis must pass and exactly match recomputation')
+        raise ValueError('R%d auto analysis must pass and exactly match recomputation' % RUN.number)
     config, _, _ = D.require_efi(args.efi)
     current = D.output('nvram', 'boot-args').split(None, 1)[1].strip()
     cfg = plistlib.loads(config.read_bytes())
@@ -42,8 +42,8 @@ def main():
         subprocess.run(['sudo', '-n', 'launchctl', 'bootout', 'system', str(job)], check=False)
         D.run(['sudo', '-n', 'rm', '-f', job])
     if job.exists():
-        raise ValueError('R53 finite daemon remains')
-    print('R53 accepted; next boot off; finite job removed; current domains remain active. No reboot issued.')
+        raise ValueError('R%d finite daemon remains' % RUN.number)
+    print('R%d accepted; next boot off; finite job removed; current domains remain active. No reboot issued.' % RUN.number)
     return 0
 
 
