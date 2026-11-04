@@ -1,5 +1,28 @@
 # AMDIOMMU — authoritative source repository
 
+## Accepted Round68 / restore the ordinary dual-NIC lifecycle, PM hardware TODO
+
+Base: `a7d09010133560fd5f6a2779a3c45a4321a25994` (blocked R65 record).
+Dual-domain system PM is paused: `r52PowerSupported()` returns false for two
+domains, single-domain R47 behavior and the coordinated code are retained,
+and `R65ArmSystemPM` is removed. Only AMDMapperProbe was rebuilt (0.72.0,
+`70075D9F-4FFA-3810-9ED0-770046782296`); Lucy 1.1.241 and RTL8111 3.0.55
+were retained. The runner reuses R64's five-phase flow with
+`pm_boot_wake=False` — no enable-count or fault checks were relaxed.
+
+**Accepted: all four mainline checks passed on the real Mac on the first auto
+boot.** The R65 blocker is gone: A's enable-count is 1 → 1 → 2 with one
+enable per ifup, chip-command 12 → 0 → 12, and controller/per-domain target
+faults are zero in every phase (including 0x2700). Both requesters still
+park and restore independently: A 11 → 00 → 11 (park CW 4730/4731,
+restore 7522/7523), B 11 → 00 → 11 (park 9181/9182, restore 10611/10612).
+The 96 MiB / 12-transfer reciprocal workload kept both down windows busy
+with dual hashes, shared commands closed at 1167 → 7518 → 9158 → 10609 →
+12190, exact range coverage held (A 32457/32457, B 37421/37421), the ring
+cached 10975 of 11023 batches with 48 refreshes and 48 wraps, and map/unmap
+closed at A 5421/5386 and B 6803/6792. Real system sleep/wake remains
+TODO(R47-PM-HARDWARE); ordinary down/up is not a sleep/wake test.
+
 ## Round65 / coordinated two-domain system PM — BLOCKED, failure evidence preserved
 
 Base: `8cfd4aca2ae8a7af1635e21583047d1b01e677ec` (accepted R64). The R65
