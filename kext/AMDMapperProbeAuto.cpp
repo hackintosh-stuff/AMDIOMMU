@@ -680,10 +680,11 @@ bool org_example_AMDMapperProbe::r52PowerSupported() const {
     R44Controller *c = fR44Controller;
     if (!c || !fR52Domain) return false;
     R52LockGuard guard(c->lock);
-    // One requester retains the original R47 path. Two requesters may use
-    // coordinated PM only when both registered domains are present and active.
+    // One requester retains the original R47 path. Coordinated two-domain PM
+    // is armed only by R66's controlled sleep plan; ordinary boots and network
+    // down/up must keep the R64 admission and hardware-start timing.
     if (c->domainCount == 1) return true;
-    if (c->domainCount != 2) return false;
+    if (c->domainCount != 2 || !fR65PMArmed) return false;
     UInt32 present = 0;
     for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
         R52Domain *d = c->domains[i];

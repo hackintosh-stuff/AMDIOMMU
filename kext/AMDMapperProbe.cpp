@@ -336,6 +336,12 @@ IOReturn org_example_AMDMapperProbe::callPlatformFunction(
 
 IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
     OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    OSObject *arm = dict ? dict->getObject("R65ArmSystemPM") : nullptr;
+    if (arm) {
+        if (arm != kOSBooleanTrue && arm != kOSBooleanFalse) return kIOReturnBadArgument;
+        fR65PMArmed = (arm == kOSBooleanTrue);
+        return kIOReturnSuccess;
+    }
     OSObject *all = dict ? dict->getObject("R52Snapshot") : nullptr;
     if (fR44Auto && all) {
         if (all != kOSBooleanTrue) return kIOReturnBadArgument;
