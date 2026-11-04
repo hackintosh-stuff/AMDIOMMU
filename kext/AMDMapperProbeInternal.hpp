@@ -197,17 +197,19 @@ struct BoundedProbeLayout {
     bool     error;
     LayoutRun run[RunCapacity];
 };
-// Legacy callers keep the same 32-run storage and their explicit budgets.
-// Only the ordinary mapper instantiates 64 runs for its 256 KiB RX groups.
+// Legacy experiments retain their 32-run value result. The ordinary mapper
+// supplies reusable domain storage and holds its mapper lock throughout the walk.
 using ProbeLayout = BoundedProbeLayout<32>;
 
-template<unsigned RunCapacity = 32>
-static inline BoundedProbeLayout<RunCapacity> probeLayout(
-    IOMemoryDescriptor *memory, uint64_t offset, uint64_t length,
-    uint32_t maxRuns) {
-    BoundedProbeLayout<RunCapacity> L = {};
+template<unsigned RunCapacity>
+static inline void probeLayoutInto(BoundedProbeLayout<RunCapacity> &L,
+    IOMemoryDescriptor *memory, uint64_t offset, uint64_t length, uint32_t maxRuns) {
+    // Only [0,runs) is valid. Each run we expose is completely overwritten.
+    L.runs = L.pages = L.firstOffset = 0;
+    L.totalBytes = 0;
+    L.discontig = L.error = false;
     if (!memory || !length || !maxRuns || maxRuns > RunCapacity) {
-        L.error = true; return L;
+        L.error = true; return;
     }
     // 与 r18 的 probeSegmentRun 一样用公开的 getPhysicalSegment(
     // kIOMemoryMapperNone) 走查：mapper 到达时描述符必须已 wiring。这要求驱动
@@ -216,11 +218,11 @@ static inline BoundedProbeLayout<RunCapacity> probeLayout(
     // "IOGMD: not wired for the IODMACommand"，见 docs/m2-3d-round19-result.md）。
     uint64_t consumed = 0, slot = 0;
     while (consumed < length) {
-        if (L.runs == maxRuns) { L.error = true; return L; }
+        if (L.runs == maxRuns) { L.error = true; return; }
         IOByteCount segLen = 0;
         addr64_t pa = memory->getPhysicalSegment(
             (IOByteCount)(offset + consumed), &segLen, kIOMemoryMapperNone);
-        if (!pa || !segLen) { L.error = true; return L; }
+        if (!pa || !segLen) { L.error = true; return; }
         if (segLen > (length - consumed)) segLen = (IOByteCount)(length - consumed);
         const uint32_t align = (uint32_t)(pa & 4095ULL);
         const uint32_t pageBytes =
@@ -242,7 +244,13 @@ static inline BoundedProbeLayout<RunCapacity> probeLayout(
         consumed += segLen;
         L.totalBytes += (uint64_t)segLen;
     }
-    return L;
+}
+
+static inline ProbeLayout probeLayout(IOMemoryDescriptor *memory, uint64_t offset,
+                                     uint64_t length, uint32_t maxRuns) {
+    ProbeLayout layout = {};
+    probeLayoutInto(layout, memory, offset, length, maxRuns);
+    return layout;
 }
 
 // ---- kNicPaths (original lines 671..696) ----

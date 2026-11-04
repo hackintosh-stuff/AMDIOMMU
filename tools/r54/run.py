@@ -28,7 +28,7 @@ def main(run=RUN):
             round_id=run.number, default_token=run.token)
     if command == 'capture':
         return common.module('_mixed_capture', 'tools/r52/capture.py').main(
-            round_id=run.number, abi='mixed-RTL8111-RTL8125-mapper-ABI2')
+            round_id=run.number, abi='mixed-RTL8111-RTL8125-mapper-ABI%d' % run.abi)
     return common.module('_mixed_entry', 'tools/r53/' + command + '.py').main()
 
 

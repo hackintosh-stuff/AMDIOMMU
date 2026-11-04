@@ -5,7 +5,7 @@ import ipaddress
 import json
 import re
 import struct
-from common import (BASE_COMMIT, OFF_PHASES, PHASES, PROFILES, RUN, VERSIONS,
+from common import (BASE_COMMIT, MAX_MAP_PAGES, MAX_RUNS, OFF_PHASES, PHASES, PROFILES, RUN, VERSIONS,
                     configuration, module, project_path, protocol as P,
                     read_snapshot, roles, sha, validate_selector, write_json)
 
@@ -193,11 +193,22 @@ def analyze(cap):
                 stable.setdefault(role, identity)
                 need(stable[role] == identity, 'mapper/domain/controller changed across ordinary down/up')
                 identities.append(ident)
-                trees[role] = TREE.mapping_tree(value, iova_base=0x80000000, max_map_pages=64, max_runs=64)
+                trees[role] = TREE.mapping_tree(value, iova_base=0x80000000,
+                                                 max_map_pages=MAX_MAP_PAGES, max_runs=MAX_RUNS)
                 trees[role]['nativeResources'] = native_resources(value, phase)
                 if RUN.parent:
                     trees[role]['bindingPath'] = p['r44-parent']
                 leaves[role] = TREE.leaves(value)[0]
+                if RUN.abi == 3 and value['binding']['driver_class'] == 'RTL8125':
+                    # native_resources matched all eight 128-page RX groups; mapping_tree
+                    # independently matched every expected PA to the entire active PT.
+                    row = max(value['live'], key=lambda item: item['pages'])
+                    last = row['pages'] - 1
+                    iova = m['iovaBase'] + (row['basePage'] + last) * 4096
+                    trees[role]['rxMapExample'] = dict(
+                        pages=row['pages'], length=row['length'], mapAddress=row['mapAddress'],
+                        lastPageIOVA=iova, expectedLastPA=row['physical'][last],
+                        walkedLastPA=leaves[role][iova] & TREE.ADDRESS_MASK)
             need(all(identities[0][i] != identities[1][i] for i in range(3)),
                  'the devices share a mapper, domain ID, or page-table root')
             overlap = sorted(set(leaves['a']) & set(leaves['b']))

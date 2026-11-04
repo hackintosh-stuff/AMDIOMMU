@@ -16,6 +16,7 @@ rather than the machine.
 Usage:
     python3 tools/r21/abi.py            # print JSON
     python3 tools/r21/abi.py --check    # check current round25/26 decoder/header agreement
+    python3 tools/r21/abi.py --check-r59 # ordinary mapper ABI3 / 128-page decoder agreement
     python3 tools/r21/abi.py --check-r49 # ordinary mapper ABI2 / 64-page decoder agreement
 """
 import json
@@ -326,6 +327,20 @@ def check_r26():
 
 
 def main():
+    if sys.argv[1:] == ['--check-r59']:
+        want = abi()
+        layouts = runpy.run_path(str(ROOT / 'tools/r44/common.py'))['ABI_LAYOUTS']
+        expected = (2496, 1128, 128)
+        header = (want['ordinary_snapshot_bytes'], want['ordinary_record_bytes'],
+                  want['ordinary_max_pages'])
+        offsets = tuple(want[key] for key in ('ordinary_physical_offset',
+                        'ordinary_last_map_offset', 'ordinary_last_unmap_offset'))
+        if (want['ordinary_version'] != 3 or header != expected or layouts.get(3) != header
+                or want['ordinary_runs'] != 128 or offsets != (104, 240, 1368)):
+            raise ValueError('ABI3 header/decoder mismatch: %r, %r, %r' %
+                             (header, offsets, layouts.get(3)))
+        print('round59 ABI3: 128 pages/runs, record and snapshot layout match decoder')
+        return 0
     if len(sys.argv) > 1 and sys.argv[1] == '--check-r49':
         want = abi()
         pins = {'ordinary_version': 2, 'ordinary_snapshot_bytes': 1472, 'ordinary_record_bytes': 616,

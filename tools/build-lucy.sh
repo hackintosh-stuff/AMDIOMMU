@@ -19,7 +19,14 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
-[ "$#" -le 1 ] || { echo "usage: sh tools/build-lucy.sh [source-dir]"; exit 2; }
+LUCY_VERSION=1.1.239
+PROBE_DEP=0.61.0
+if [ "${1:-}" = "--r59" ]; then
+    shift
+    LUCY_VERSION=1.1.240
+    PROBE_DEP=0.66.0
+fi
+[ "$#" -le 1 ] || { echo "usage: sh tools/build-lucy.sh [--r59] [source-dir]"; exit 2; }
 SRC=${1:-}
 if [ -z "$SRC" ]; then
     SRC=$(ls -d RTL812xLucy-*/ 2>/dev/null | head -1)
@@ -30,6 +37,12 @@ DRV="$SRC/RTL812xLucy"
 SDK="$SRC/MacKernelSDK"
 W="build-lucy"
 [ -d "$DRV" ] || { echo "driver source dir not found: $DRV"; exit 1; }
+if [ "$LUCY_VERSION" = 1.1.240 ]; then
+    grep -qx '#define kRxMemBaseShift 7' "$DRV/RTL812xLucy.hpp" ||
+        { echo 'R59 requires the 128-page generated Lucy header' >&2; exit 1; }
+elif grep -qx '#define kRxMemBaseShift 7' "$DRV/RTL812xLucy.hpp"; then
+    echo '128-page input requires --r59' >&2; exit 1
+fi
 
 echo "== 环境 =="
 echo "source : $SRC"
@@ -132,7 +145,7 @@ done
 # xcodebuild 会跑 CreateKModInfo.perl 自动生成 kmod_info；我们绕开 Xcode，
 # 就必须自己提供，否则二进制没有 _kmod_info，kextload 会直接拒绝。
 echo "== kmod_info =="
-xcrun clang++ $CFLAGS -c tools/lucy-kmod-info.cpp -o "$W/lucy-kmod-info.o"
+xcrun clang++ $CFLAGS "-DLUCY_KMOD_VERSION=\"$LUCY_VERSION\"" -c tools/lucy-kmod-info.cpp -o "$W/lucy-kmod-info.o"
 OBJS="$OBJS $W/lucy-kmod-info.o"
 
 # ---- 链接 ----
@@ -184,7 +197,7 @@ echo "== Info.plist =="
 # 在普通 per-device IOMapper 路径上开启 IPv4 和 IPv6 TSO。
 # 一旦加入字典，缺省 µsPollTime2G 会由原 160000ns 变成 120000ns，
 # 因此同时写 160µs 保留原值；其余缺省值（ASPM/10G/5G）与无字典一致。
-cat > "$KEXT/Contents/Info.plist" <<'PLIST'
+cat > "$KEXT/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -202,9 +215,9 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.239</string>
+	<string>$LUCY_VERSION</string>
 	<key>CFBundleVersion</key>
-	<string>1.1.239</string>
+	<string>$LUCY_VERSION</string>
 	<key>IOKitPersonalities</key>
 	<dict>
 		<key>RTL8125</key>
@@ -252,9 +265,9 @@ cat > "$KEXT/Contents/Info.plist" <<'PLIST'
 		     The requested version must sit inside the provider's compatible
 		     range (OSBundleCompatibleVersion <= requested <= CFBundleVersion),
 		     otherwise kmutil cannot resolve the dependency at all.
-		     Round54 requires pre-open per-device claims in 0.61.0. -->
+		     Select the minimum needed by this client's RX grouping and pre-open claim. -->
 		<key>org.example.AMDMapperProbe</key>
-		<string>0.61.0</string>
+		<string>$PROBE_DEP</string>
 	</dict>
 	<key>OSBundleRequired</key>
 	<string>Network-Root</string>

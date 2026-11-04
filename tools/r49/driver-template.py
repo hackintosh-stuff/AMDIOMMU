@@ -10,11 +10,20 @@ SHIFT_OLD = '#define kRxMemBaseShift 4\n'
 SHIFT_NEW = '#define kRxMemBaseShift 6\n'
 
 
-def patch(hpp):
+SHIFT_128 = '#define kRxMemBaseShift 7\n'
+
+
+def patch(hpp, wide=False):
     if hpp.count(SHIFT_OLD) != 1:
         raise SystemExit('refused: round49 RX mapping batch shift anchor')
-    return hpp.replace(SHIFT_OLD, SHIFT_NEW, 1)
+    return hpp.replace(SHIFT_OLD, SHIFT_128 if wide else SHIFT_NEW, 1)
 
 
-def is_current(hpp):
-    return hpp.count(SHIFT_NEW) == 1 and SHIFT_OLD not in hpp
+def is_current(hpp, wide=False):
+    want = SHIFT_128 if wide else SHIFT_NEW
+    return hpp.count('#define kRxMemBaseShift ') == 1 and hpp.count(want) == 1
+
+
+def upgrade_128(hpp):
+    """Only upgrade the accepted 64-page header; leave unrelated edits alone."""
+    return hpp.replace(SHIFT_NEW, SHIFT_128, 1) if is_current(hpp) else hpp

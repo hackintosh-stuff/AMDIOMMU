@@ -16,13 +16,14 @@ RTL8111_ID = 'com.insanelymac.RealtekRTL8111'
 CONFIG, EFI_INJECTIONS = None, []
 PREVIOUSLY_ABSENT = []
 CLIENT_DEPENDENCY = RUN.installed_client_dependency or VERSIONS['AMDMapperProbe']
+LUCY_DEPENDENCY = VERSIONS['AMDMapperProbe'] if RUN.build_lucy else CLIENT_DEPENDENCY
 
 
 def require_offloads(info):
     params = info.get('IOKitPersonalities', {}).get('RTL8125', {}).get('Driver Parameters', {})
     if any(params.get(key) is not True for key in ('enableTSO4', 'enableTSO6')):
         raise ValueError('Lucy requires enableTSO4=true and enableTSO6=true')
-    if info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != CLIENT_DEPENDENCY:
+    if info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != LUCY_DEPENDENCY:
         raise ValueError('Lucy Probe compatibility version differs')
 
 
@@ -90,7 +91,7 @@ def check_endpoints(args):
 
 def deployment_bundles():
     installed = Path('/Library/Extensions')
-    lucy = installed if RUN.installed_client_dependency else ROOT / 'build-lucy'
+    lucy = ROOT / 'build-lucy' if RUN.build_lucy or not RUN.installed_client_dependency else installed
     rtl = installed if RUN.installed_client_dependency else ROOT / 'build-rtl8111'
     return [(lucy / 'RTL812xLucy.kext', VERSIONS['RTL812xLucy'], 'r47PublishPM'),
             (ROOT / 'build-m1a/AMDMapperProbe.kext', VERSIONS['AMDMapperProbe'], 'r52PublishDomains'),
@@ -141,7 +142,7 @@ def write_boot_config(config, cfg, bootargs, _tokenarg):
 def round_plan():
     return {'round': RUN.number, 'transport': 'tcp6', 'config': CONFIG,
             'requester_selector': selector(CONFIG), 'transfer_bytes': 64 << 20,
-            'mapper_abi': 2, 'domains': 2, 'drivers': ['RTL8111', 'RTL8125'],
+            'mapper_abi': RUN.abi, 'domains': 2, 'drivers': ['RTL8111', 'RTL8125'],
             'controller': 'one shared device table, event buffer and command ring',
             'lifecycle': 'RTL8111 down; RTL8125 completes traffic; RTL8111 up',
             'efi_rtl8111_entries_disabled': EFI_INJECTIONS,

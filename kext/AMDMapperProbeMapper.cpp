@@ -15,6 +15,9 @@ struct org_example_AMDMapperProbe::R44MapperState {
     volatile UInt64 *tables;
     volatile UInt64 *leaves[r44mapper::kPages / 512];
     amdtx::BoundedAllocator<r44mapper::kPages, r44mapper::kMapPages> allocator;
+    // Both scratch buffers are per-domain and used only while lock is held.
+    BoundedProbeLayout<r44mapper::kRuns> walkScratch;
+    r44mapper::Record exportScratch;
     Mapping mappings[r44mapper::kRecords];
     // Expected PA from the descriptor walk, independent of the actual leaf PTE.
     UInt64 physicalByPage[r44mapper::kPages];
@@ -54,11 +57,11 @@ struct org_example_AMDMapperProbe::R44MapperState {
         bzero(out.physical + header.pages, sizeof(out.physical) - used);
     }
 
-    OSData *copyLiveRecords() const {
+    OSData *copyLiveRecords() {
         OSData *data = OSData::withCapacity((snapshot.liveCount ? snapshot.liveCount : 1) *
                                             sizeof(r44mapper::Record));
         if (!data) return nullptr;
-        r44mapper::Record row;
+        auto &row = exportScratch;
         for (unsigned i = nextSlot(0, true); i < r44mapper::kRecords;
              i = nextSlot(i + 1, true)) {
             exportRecord(mappings[i].record, row);
@@ -229,8 +232,8 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         // Use the public wired-descriptor walk; the SDK deliberately makes
         // upl_page_info opaque. A pageList provides the first-offset check.
         ++s.walks;
-        const auto layout = probeLayout<r44mapper::kRuns>(
-            memory, descriptorOffset, length, r44mapper::kRuns);
+        auto &layout = d->walkScratch;
+        probeLayoutInto(layout, memory, descriptorOffset, length, r44mapper::kRuns);
         if (layout.error || !layout.runs || layout.totalBytes != length ||
             !layout.pages || layout.pages > r44mapper::kMapPages) break;
         if ((pageList && pageList->pageOffset != layout.firstOffset) ||

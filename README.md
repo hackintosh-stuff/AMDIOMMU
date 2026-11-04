@@ -1,5 +1,24 @@
 # AMDIOMMU — authoritative source repository
 
+## Round59 candidate / 512 KiB ordinary DMA mappings
+
+Base: `63ca1bc0ced9c82f7b460559f8cd7917cdc8c0df` (R58 accepted). R58 deployed `3281ac6`;
+its first 64 MiB auto run passed all four groups with zero target faults.
+The two domains ended with 3738 and 5370 successful unmaps respectively.
+
+R59 raises the per-request limit from 64 to 128 IOVA pages and physical
+runs (up to 512 KiB for a page-aligned buffer). The domain still has
+4096 IOVA pages and 1024 record slots. The wired descriptor walk uses
+per-domain scratch under the mapper lock. ABI3 exports all expected PAs,
+including the second half of a large mapping; ABI2 captures remain readable.
+
+RTL812xLucy 1.1.240 uses eight 128-page receive mappings for its 1024
+existing slots. The same 4 MiB receive pool formerly needed sixteen
+64-page mappings. AMDMapperProbe 0.66.0 and Lucy are rebuilt together;
+the installed RealtekRTL8111 3.0.54 is retained. The R59 hardware run
+must show the eight full mappings and normal two-device business before
+the larger mapping size is accepted. No throughput gain is claimed.
+
 ## Accepted Round58 / compact storage for expected physical pages, PM hardware TODO
 
 Base: `231447265fb0d0283a5921a822a9f0760ac39d58`, the accepted R57 result. R57 deployed `c8cca04`;

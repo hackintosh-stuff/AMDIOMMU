@@ -12,7 +12,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 VERSION, SNAPSHOT_BYTES, RECORD_BYTES = 1, 960, 360
-ABI_LAYOUTS = {1: (960, 360, 32), 2: (1472, 616, 64)}
+ABI_LAYOUTS = {1: (960, 360, 32), 2: (1472, 616, 64), 3: (2496, 1128, 128)}
 VERSIONS = {'RTL812xLucy': '1.1.229', 'AMDMapperProbe': '0.53.0'}
 PHASES = ('phase1', 'phase2', 'pre-down', 'down', 'after-up')
 EXPORTS = {'r44-mapper-raw': 'mapper.bin', 'r44-live-raw': 'live.bin',

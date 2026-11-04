@@ -21,6 +21,9 @@ class MixedRun(NamedTuple):
     parent: Optional[str] = None
     runner: Optional[Path] = None
     installed_client_dependency: Optional[str] = None
+    abi: int = 2
+    lucy_rx_pages: int = 64
+    build_lucy: bool = False
 
 
 RUN = MixedRun(53, '2be76054f30e208d57658dc7efa3df79c9050f7c',
@@ -57,13 +60,21 @@ nodes, registry, set_boolean = C.nodes, C.registry, C.set_boolean
 set_booleans = C.set_booleans
 active, identity = C.active, C.identity
 C.VERSIONS = VERSIONS
+RAW = C.C  # shared, versioned ordinary mapper decoder (tools/r44/common.py)
 
 
 def select_run(run):
     """Set the single CLI process's profile before importing its entry point."""
-    global RUN, BASE_COMMIT, VERSIONS
+    global RUN, BASE_COMMIT, VERSIONS, MAX_MAP_PAGES, MAX_RUNS
+    global RX_GROUPS, RX_GROUP_PAGES, PERSISTENT_MAPS
     RUN, BASE_COMMIT, VERSIONS = run, run.base_commit, run.versions
     C.VERSIONS = VERSIONS  # R52 boot_mode reads the installed bundle profile
+    MAX_MAP_PAGES = MAX_RUNS = RAW.ABI_LAYOUTS[run.abi][2]
+    lucy = PROFILES['RTL8125']
+    RX_GROUP_PAGES = run.lucy_rx_pages
+    RX_GROUPS = lucy['rx_slots'] // RX_GROUP_PAGES
+    PERSISTENT_MAPS = RX_GROUPS + len(lucy['fixed'])
+    lucy.update(rx_pages=RX_GROUP_PAGES, rx_groups=RX_GROUPS)
 
 
 def configuration(path):
@@ -161,17 +172,18 @@ def live_records(probe):
 
     The records travel as one opaque blob inside the domain dictionary, so the
     capture can join them to a driver snapshot without writing a file first.
-    An ABI2 record leads with handle, firstPA, mapAddress, mapLength and keeps
+    ABI2 and ABI3 use the same header. It leads with handle, firstPA, mapAddress, mapLength and keeps
     the byte length at the sixth 64-bit word.
     """
     raw = probe.get('r44-live-raw')
     count = probe.get('r44-live-maps')
     if not isinstance(raw, bytes) or not isinstance(count, int) or count <= 0:
         return None
-    if len(raw) != count * 616:
+    stride = RAW.ABI_LAYOUTS[RUN.abi][1]
+    if len(raw) != count * stride:
         return None
-    return [(struct.unpack_from('<Q', raw, index * 616 + 16)[0],
-             struct.unpack_from('<Q', raw, index * 616 + 40)[0]) for index in range(count)]
+    return [(struct.unpack_from('<Q', raw, offset + 16)[0],
+             struct.unpack_from('<Q', raw, offset + 40)[0]) for offset in range(0, len(raw), stride)]
 
 
 def rx_groups_consistent(driver, rows):
@@ -307,7 +319,7 @@ def read_snapshot(path):
     metadata = json.loads((path / 'snapshot.json').read_text(encoding='utf-8'))
     if not metadata.get('probe'):
         return metadata  # off baseline has registry identity, without mapper/native raw files.
-    value = C.read_snapshot(path)
+    value = RAW.read_snapshot(path, abi=RUN.abi)
     if value['binding']['driver_class'] == 'RTL8111':
         raw = (path / 'driver-live.bin').read_bytes()
         if len(raw) % 24:

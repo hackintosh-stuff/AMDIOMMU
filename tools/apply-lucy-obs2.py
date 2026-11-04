@@ -2373,9 +2373,12 @@ def replace_once(text, old, new, what):
 def main():
     argv = sys.argv[1:]
     positional, tx, rx = [], None, None
+    wide_rx = False
     i = 0
     while i < len(argv):
         a = argv[i]
+        if a == '--r59':
+            wide_rx = True; i += 1; continue
         if a == '--tx' and i + 1 < len(argv):
             tx = argv[i + 1]; i += 2; continue
         if a.startswith('--tx='):
@@ -2390,7 +2393,10 @@ def main():
             rx = a[4:]; i += 1; continue
         positional.append(a); i += 1
     if len(positional) != 1 or (tx is not None and tx not in TXR) or (rx is not None and rx not in ('15', '27', '28', '29', '30', '31', '32', '33', '34')):
-        print("usage: apply-lucy-obs2.py <RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33|34]")
+        print("usage: apply-lucy-obs2.py <RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33|34] [--r59]")
+        return 2
+    if wide_rx and (tx, rx) != ('21', '34'):
+        print('R59 requires --tx21 --rx34')
         return 2
     if tx is not None:
         select_tx(tx)
@@ -2454,6 +2460,7 @@ def main():
                 print("      # re-extract RTL812xLucy-<commit> from the tarball")
                 print("      python3 tools/apply-lucy-obs2.py <dir>")
                 return 1
+            candidate_hpp = hpp_text
             fresh, stale = body_is_current(cpp_text)
             if fresh and TX_SELECT == '21' and RX_SELECT == '34':
                 fresh = R44['is_current'](hpp_text, cpp_text,
@@ -2484,9 +2491,11 @@ def main():
                 if not fresh:
                     stale = 'round48 normal 32-bit DMA addresses'
             if fresh and TX_SELECT == '21' and RX_SELECT == '34':
-                fresh = R49['is_current'](hpp_text)
+                if wide_rx:
+                    candidate_hpp = R49['upgrade_128'](hpp_text)
+                fresh = R49['is_current'](candidate_hpp, wide_rx)
                 if not fresh:
-                    stale = 'round49 ordinary 64-page RX mappings'
+                    stale = 'ordinary RX mapping group size'
             if fresh and TX_SELECT == '21' and RX_SELECT == '34':
                 fresh = R52['is_current'](cpp_text)
                 if not fresh:
@@ -2513,6 +2522,11 @@ def main():
                 print("      # re-extract RTL812xLucy-<commit> from the tarball")
                 print("      python3 tools/apply-lucy-obs2.py <dir>")
                 return 1
+            # Do not rewrite the installed generator input before the full
+            # accepted-body checks above pass. Only the grouping macro changes.
+            if candidate_hpp != hpp_text:
+                write(hpp, candidate_hpp)
+                print('upgraded existing RX header to 8 groups of 128 pages')
             changed = sync_headers(drv)
             if changed:
                 print("already applied (the observation log is present); "
@@ -2632,7 +2646,7 @@ def main():
             hpp_text, cpp_text, read(hardware))
         cpp_text, setup_text, vtd_text = R48['patch'](
             cpp_text, setup_text, vtd_text)
-        hpp_text = R49['patch'](hpp_text)
+        hpp_text = R49['patch'](hpp_text, wide_rx)
         cpp_text = R52['patch'](cpp_text)
         cpp_text = R53['patch'](cpp_text)
         write(hardware, hardware_text)
