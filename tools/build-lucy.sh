@@ -21,12 +21,16 @@ cd "$ROOT"
 
 LUCY_VERSION=1.1.239
 PROBE_DEP=0.61.0
-if [ "${1:-}" = "--r59" ]; then
+if [ "$#" -gt 0 ] && [ "$1" = "--r64" ]; then
+    shift
+    LUCY_VERSION=1.1.241
+    PROBE_DEP=0.70.0
+elif [ "$#" -gt 0 ] && [ "$1" = "--r59" ]; then
     shift
     LUCY_VERSION=1.1.240
     PROBE_DEP=0.66.0
 fi
-[ "$#" -le 1 ] || { echo "usage: sh tools/build-lucy.sh [--r59] [source-dir]"; exit 2; }
+[ "$#" -le 1 ] || { echo "usage: sh tools/build-lucy.sh [--r59|--r64] [source-dir]"; exit 2; }
 SRC=${1:-}
 if [ -z "$SRC" ]; then
     SRC=$(ls -d RTL812xLucy-*/ 2>/dev/null | head -1)
@@ -37,9 +41,9 @@ DRV="$SRC/RTL812xLucy"
 SDK="$SRC/MacKernelSDK"
 W="build-lucy"
 [ -d "$DRV" ] || { echo "driver source dir not found: $DRV"; exit 1; }
-if [ "$LUCY_VERSION" = 1.1.240 ]; then
+if [ "$LUCY_VERSION" = 1.1.240 ] || [ "$LUCY_VERSION" = 1.1.241 ]; then
     grep -qx '#define kRxMemBaseShift 7' "$DRV/RTL812xLucy.hpp" ||
-        { echo 'R59 requires the 128-page generated Lucy header' >&2; exit 1; }
+        { echo 'R59/R64 requires the 128-page generated Lucy header' >&2; exit 1; }
 elif grep -qx '#define kRxMemBaseShift 7' "$DRV/RTL812xLucy.hpp"; then
     echo '128-page input requires --r59' >&2; exit 1
 fi

@@ -125,17 +125,23 @@ def ring_window(first, last):
 
 
 def requester_access(p, before, role, phase):
-    parked = role == 'a' and phase == 'down'
+    if RUN.both_requester_access:
+        park_phase, restore_phase = (('down', 'after-up') if role == 'a'
+                                     else ('b-down', 'b-after-up'))
+        parked = phase == park_phase
+        progressed = phase in (park_phase, restore_phase)
+    else:
+        parked = role == 'a' and phase == 'down'
+        progressed = role == 'a' and phase != 'before'
     permissions = (p['r44-dte0'] >> 61) & 3
     parks, restores = p['r63-park-count'], p['r63-restore-count']
     p0, r0 = before['r63-park-count'], before['r63-restore-count']
-    # Only the RTL8111 opts in. A may have earlier transitions before the finite load.
-    progressed = role == 'a' and phase != 'before'
     need(p['r63-dma-parked'] == ('yes' if parked else 'no') and
          permissions == (0 if parked else 3) and
          parks - restores == int(parked) and
-         parks - p0 == int(progressed) and restores - r0 == int(progressed and not parked) and
-         (role == 'a' or parks == restores == 0),
+         parks - p0 == int(progressed) and
+         restores - r0 == int(progressed and not parked) and
+         (RUN.both_requester_access or role == 'a' or parks == restores == 0),
          phase + '/' + role + ': requester DMA access or transition counts differ')
     if progressed:
         devcw, pagecw = p['r63-last-dev-cw'], p['r63-last-pages-cw']
@@ -416,8 +422,12 @@ def analyze(cap):
                 access, transitions = None, 0
                 if RUN.requester_access:
                     access = requester_access(p, states['before'][role]['probe'], role, phase)
-                    if role == 'a' and phase in ('down', 'after-up'):
-                        prev = states['before' if phase == 'down' else 'down'][role]['probe']
+                    transition_prev = {
+                        ('a', 'down'): 'before', ('a', 'after-up'): 'down',
+                        ('b', 'b-down'): 'after-up', ('b', 'b-after-up'): 'b-down'}
+                    previous_phase = transition_prev.get((role, phase))
+                    if previous_phase is not None:
+                        prev = states[previous_phase][role]['probe']
                         need(prev['r63-last-pages-cw'] < access['deviceCW'],
                              phase + ': permission change reused an earlier completion sequence')
                     transitions = access['parks'] + access['restores']
