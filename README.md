@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Candidate Round53 / mixed RTL8111 and RTL8127 device domains
+## Accepted Round53 / mixed RTL8111 and RTL8127 device domains
 
 Base: `2be76054f30e208d57658dc7efa3df79c9050f7c`, the accepted R52 result
 documentation successor. Re-analysis of the original R52 off and auto
@@ -13,14 +13,29 @@ overlapping IOVA page counts are corrected here to 1037 / 973 / 1028 for
 before / down / after-up. Consecutive translation examples use 4 KiB IOVA
 steps (`0x80000000`, `0x80001000`, `0x80002000`, `0x80003000`).
 
-R53 adds an independent RealtekRTL8111 driver as a standard DMA client,
-sharing the already accepted controller with one RTL8127. It does not
-publish a system mapper or increase the existing per-domain capacity.
-The `amdiommu_devices=HHHH,HHHH` boot argument selects the two actual
-segment-zero PCI requesters. PCI nubs publish `amdiommu-dma-policy` so
-selected clients wait for their own mapper and unselected clients can
-continue on the physical path. With no explicit selection, the prior
-two-RTL8127 behavior remains available.
+**Accepted: all four mainline groups passed on the real Mac with Lucy 1.1.238 /
+Probe 0.60.0 / RealtekRTL8111 3.0.53.** Implementation commits are the delivered
+patch as `0391aa8`, plus two real fixes this round: `e44a501` stops NIC RX DMA
+before the whole-batch IOVA remap (the first auto capture recorded one genuine
+IO_PAGE_FAULT on requester `0x2700`), and `49365e9` judges the driver/mapper
+snapshot pair by shape and retakes it when the two publications disagree. R53
+adds an independent RealtekRTL8111 driver as a standard DMA client, sharing the
+already accepted controller with one RTL8127. It does not publish a system
+mapper or increase the existing per-domain capacity. The
+`amdiommu_devices=HHHH,HHHH` boot argument selects the two actual segment-zero
+PCI requesters. PCI nubs publish `amdiommu-dma-policy` so selected clients wait
+for their own mapper and unselected clients continue on the physical path. With
+no explicit selection, the prior two-RTL8127 behavior remains available.
+
+Measured on the real machine: A = RTL8111 on `en1`, requester `0x2700`, domain 1,
+mapper 4294968539, page-table root 813498368, 35 persistent maps / 517 pages;
+B = RTL8125 on `en2`, requester `0x2500`, domain 2, mapper 4294968540, page-table
+root 815857664, 19 maps / 1037 pages. The off baseline completed 32 MiB (4/4) and
+the single auto workload completed 64 MiB in eight transfers (4/4), with real
+payload overlap of 108.331 ms (upload) and 116.824 ms (download). B finished its
+16 MiB inside the window in which A was down, A recovered after up, the shared
+command submits/completed/completion-sequence closed in every phase, and target
+faults were zero in all three phases.
 
 The RTL8111 input is pinned to the official Mieze repository commit
 `a3dad34ed4f1e72805ce42f6d506f6917fdf79a0`. Its virtual-descriptor physical-segment lookup assumes a global mapper,
@@ -29,13 +44,13 @@ The adaptation uses explicit `IODMACommand` objects with the device's
 actual mapper for packet buffers as well as rings and tally memory,
 gets descriptor IOVAs through `gen64IOVMSegments`, and clears each command
 before completing or reusing its memory descriptor. It retains the
-current 64-page/16 MiB bounds, stops NIC DMA before the first DTE
-activation, and publishes a small per-instance snapshot.
-Both drivers use the same controller/domain backend; descriptor, packet
-and receive-buffer logic remains in the driver that owns it.
+current 64-page/16 MiB bounds, stops NIC DMA before every whole-batch IOVA
+remap and before the first DTE activation, and publishes a small per-instance
+snapshot. Both drivers use the same controller/domain backend; descriptor,
+packet and receive-buffer logic remains in the driver that owns it.
 
 Use `tools/r53` with A=RTL8111 and B=RTL8125 in the explicit endpoint
-configuration. The off baseline is 32 MiB. The auto workload remains
+configuration. The off baseline is 32 MiB. The auto workload is
 64 MiB: concurrent normal traffic on both endpoints, B completing
 traffic while A is down, then A recovering after up. Four mainline
 analysis groups verify runtime identity, each driver's live DMA
@@ -47,13 +62,16 @@ Target versions: RTL812xLucy **1.1.238**, RealtekRTL8111 **3.0.53**
 (project R53 build), AMDMapperProbe **0.60.0**.
 Fetch the required pinned RTL8111 source files once into the fixed
 input directory with `tools/r53/fetch-rtl8111.py`, then build both fixed
-inputs with `sh tools/r53/build.sh <lucy-input> <rtl8111-input>`.
+inputs with `sh tools/r53/build.sh <lucy-input> <rtl8111-input>`
+(the Mac build log for this round is `runs/r53-build.log`, 2440 lines).
 Do not clone/copy the project or create another worktree for this round.
 
-This is a source candidate: actual macOS compilation and mixed-driver
-hardware validation remain to be performed. Keep ABI2, the R51 NPCache
-policy, synchronous unmap and the R52 shared command lock. Real system
-PM remains TODO; no PM or hot-plug test is added.
+Keep ABI2, the R51 NPCache policy, synchronous unmap and the R52 shared command
+lock. Real system PM is still not implemented and dual-device PM is explicitly
+unsupported in this stage; no PM, hot-plug or capacity-expansion test is added.
+The down/up result is limited to "B completes business while A is down and A
+recovers after up" and does not claim an existing TCP connection crossed the
+transition uninterrupted.
 
 ## Accepted Round52 / two device domains on one controller, PM hardware TODO
 
