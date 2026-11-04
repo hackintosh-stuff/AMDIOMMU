@@ -30,6 +30,7 @@ class MixedRun(NamedTuple):
     cached_ring_head: bool = False
     requester_access: bool = False
     both_requester_access: bool = False
+    pm_boot_wake: bool = False
 
 
 RUN = MixedRun(53, '2be76054f30e208d57658dc7efa3df79c9050f7c',

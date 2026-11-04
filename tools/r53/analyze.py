@@ -56,9 +56,15 @@ def native_resources(value, phase):
          all(row['pages'] == profile['rx_pages'] and row['length'] == profile['rx_pages'] * 4096
              for row in rx), 'native RX groups do not match live DMA records')
     if value['binding']['driver_class'] == 'RTL8111':
+        chip = d[prefix + 'chip-command'] & 12
+        # A PM-capable two-domain boot may take its before snapshot before the
+        # RTL8111 hardware start command reaches the chip. Only that phase and
+        # only that exact deferred value are accepted; every later phase is
+        # still checked against the live driver state.
+        deferred_start = (RUN.pm_boot_wake and phase == 'before' and enabled and chip == 0)
         need(d[prefix + 'rx-pages-per-group'] == profile['rx_pages'] and
              d[prefix + 'tx-mapped-active'] == 0 and
-             d[prefix + 'chip-command'] & 12 == (12 if enabled else 0), 'RTL8111 DMA state differs')
+             (chip == (12 if enabled else 0) or deferred_start), 'RTL8111 DMA state differs')
         resources = value['driver_live']
         need(len(resources) == expected_maps(value), 'RTL8111 resource export is incomplete')
         for index, kind in enumerate(('tx', 'rx', 'tally'), 1):
@@ -357,12 +363,18 @@ def analyze(cap):
                 prefix = PROFILES[before[role]['binding']['driver_class']]['prefix']
                 b, d, a = [phase[role]['driver'] for phase in (before, down, after)]
                 if role == target:
+                    # A PM-capable two-domain boot can add exactly one wake
+                    # enable before A's first down snapshot. Accept only that
+                    # single extra generation; the down/up transition itself
+                    # still needs one new disable and one new enable.
+                    pm_wake = (RUN.pm_boot_wake and target == 'a' and
+                               d[prefix + 'enable-count'] == b[prefix + 'enable-count'] + 1)
                     need(b[prefix + 'state'] == a[prefix + 'state'] == 'enabled' and
                          d[prefix + 'state'] == 'disabled' and
                          d[prefix + 'disable-count'] == b[prefix + 'disable-count'] + 1 and
-                         a[prefix + 'enable-count'] == b[prefix + 'enable-count'] + 1 and
-                         (not RUN.reciprocal or (d[prefix + 'enable-count'] == b[prefix + 'enable-count']
-                          and a[prefix + 'disable-count'] == d[prefix + 'disable-count'])),
+                         a[prefix + 'enable-count'] == d[prefix + 'enable-count'] + 1 and
+                         (not RUN.reciprocal or ((d[prefix + 'enable-count'] == b[prefix + 'enable-count']
+                          or pm_wake) and a[prefix + 'disable-count'] == d[prefix + 'disable-count'])),
                          iface + ': selected target did not complete one ordinary down/up')
                 else:
                     need(all(v[prefix + 'state'] == 'enabled' for v in (b, d, a)) and
