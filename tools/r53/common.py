@@ -53,6 +53,7 @@ C = module('_r53_existing_snapshot_helpers', 'tools/r52/common.py')
 protocol = module('_r53_tcp_protocol', 'tools/r53/protocol.py')
 project_path, sha, write_json = C.project_path, C.sha, C.write_json
 nodes, registry, set_boolean = C.nodes, C.registry, C.set_boolean
+set_booleans = C.set_booleans
 active, identity = C.active, C.identity
 C.VERSIONS = VERSIONS
 
@@ -220,10 +221,11 @@ def snapshot(parent, label, config, mode):
         owner_id = owners[0]['IORegistryEntryID']
         deadline = time.monotonic() + 30
         while True:
-            for value in drivers.values():
-                profile = PROFILES[value['binding']['driver_class']]
-                set_boolean(value['binding']['driver_registry_id'], profile['snapshot'])
-            set_boolean(owner_id, 'R52Snapshot')
+            entries = {value['binding']['driver_registry_id']:
+                       PROFILES[value['binding']['driver_class']]['snapshot']
+                       for value in drivers.values()}
+            entries[owner_id] = 'R52Snapshot'
+            set_booleans(entries)
             tree = registry()
             drivers = selected_drivers(tree, config)
             owner = next(node for node, _ in nodes(tree)
