@@ -1,5 +1,30 @@
 # AMDIOMMU — authoritative source repository
 
+## Round67 / sustained post-wake traffic — BLOCKED, failure evidence preserved
+
+Base: `a4778b12411cca8d96ea2dae5bedf4d78afaf966` (accepted R66-2). R67 adds
+only `tools/r67/`; no kext was rebuilt or replaced. `prepare` attached to the
+accepted R66-2 wake boot without build/deploy/reboot/sleep (identities,
+PM counts 1/1, armed=no, faults 0 verified; identity-start/provenance kept
+the original binary provenance).
+
+**Not accepted.** The 300 s four-stream sustained run tripped the zero-fault
+gate: the RTL8111 TX-stall watchdog fired twice under sustained load and
+although the R66-2 mapped-mode restart path completed both times
+(`restart-count=2`, `restart-error=0`, `pm-state=restart-complete`), each
+restart produced exactly one A-domain IOMMU target fault at `0x80004000`
+(the fixed tally-mapping region; flags 0x20500001). Controller faults went
+0 → 2. Peer B (Lucy) was flawless for the whole window — 5360 verified
+blocks, 33.85 GB up + 11.11 GB down, no unverified data; peer A broke after
+6 verified blocks (broken pipe, no auto-reconnect by design). Accounting
+stayed clean: ~3.065M controller commands, A map/unmap 13581/13546 (delta 35
+= persistent maps, no leak). The down/up lifecycle phase was not run. No
+reboot, no selective rerun, no relaxed criterion; faults=2 remain recorded
+live, both NICs active, PM disarmed, SleepDisabled=1 and next-boot
+`amdiommu=off` untouched. The fix belongs to a driver-side round (tally
+DMA timing inside the restart path); the sustained-load gap does not
+invalidate the R66-2 PM cycle or the ordinary-phase results.
+
 ## Accepted Round66-2 / real dual-driver coordinated PM cycle, sustained wake business TODO(R67)
 
 Base: `971198f2f4053057b9a5740f24a75c5add0cf470` (blocked R66 record). R66-2
