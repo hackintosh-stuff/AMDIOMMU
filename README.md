@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Round58 candidate / compact storage for expected physical pages
+## Accepted Round58 / compact storage for expected physical pages, PM hardware TODO
 
 Base: `231447265fb0d0283a5921a822a9f0760ac39d58`, the accepted R57 result. R57 deployed `c8cca04`;
 its first 64 MiB auto run passed all four groups with zero target faults.
@@ -17,8 +17,23 @@ Live records and the saved last-map/last-unmap records materialize their
 PA slice before the backing pages can be reused; unused entries are zero.
 Expected PAs remain independent of the hardware page tables. The existing
 analyzer can compare the two directly. Build only AMDMapperProbe 0.65.0
-and retain the two R54 clients. The R58 Mac build and hardware run are
-pending; no throughput gain is claimed.
+and retain the two R54 clients.
+
+**Accepted: all four mainline checks passed on the real Mac on the first auto
+boot.** The deployed implementation is `3281ac6`; only AMDMapperProbe was
+rebuilt (0.65.0, `593EF5F1-4DA6-34E5-9E29-8FB720E0CE3E`) and the deployment
+listed it as the sole replaced bundle, retaining Lucy 1.1.239 (`3857B04F-…`)
+and RealtekRTL8111 3.0.54 (`3089E621-…`). `abi.py --check-r49` passed and the
+ABI2 exports stayed 1472-byte snapshots with 616-byte records. Both domains
+again reported `set-on-client-claim-before-pci-open` with their own requester,
+mapper and page-table root — A/en1/0x2700 domain 2 (35 maps/517 pages), B/en2/
+0x2500 domain 1 (19 maps/1037 pages), the third candidate 0x2200 left
+passthrough. The 64 MiB load overlapped 108.179 ms (upload) and 102.103 ms
+(download), B completed business while A was down, A recovered after up,
+shared commands closed at 616 → 7405 → 9112, A retired 3738 and B 5370
+mappings with no rejected map/unmap or invalidation failure, and target
+faults stayed zero. The accepted R53 off baseline was reused; PM remains
+TODO(R47-PM-HARDWARE).
 
 ## Accepted Round57 / bitmap of live mapping-record slots, PM hardware TODO
 
