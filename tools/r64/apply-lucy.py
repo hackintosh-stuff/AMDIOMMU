@@ -22,8 +22,8 @@ def main():
         print('R64 Lucy lifecycle already current'); return
     if 'R47PowerTransition' not in text or 'r44NormalMapped' not in text:
         raise SystemExit('R64 requires R47/R63 ordinary mapped Lucy base')
-    updated=mod['patch'](text); cpp.write_text(updated,encoding='utf-8',newline=chr(10))
+    updated=mod['patch'](text); cpp.write_bytes(updated.encode('utf-8'))
     record={'version':VERSION,'template':fingerprint,'input_cpp_sha256':sha(text.encode()),'output_cpp_sha256':sha(updated.encode())}
-    stamp.write_text(json.dumps(record,indent=2)+chr(10),encoding='utf-8')
+    stamp.write_bytes((json.dumps(record,indent=2)+chr(10)).encode('utf-8'))
     print('R64 requester park/restore applied')
 if __name__=='__main__': main()
