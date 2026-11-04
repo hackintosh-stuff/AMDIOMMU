@@ -1,17 +1,21 @@
 #!/bin/sh
 # Build the pinned RTL8111 adapter with the already-present Lucy SDK/KernelSPI.
-# Usage: sh tools/r53/build-rtl8111.sh [--r63] <rtl8111-source> <lucy-source>
+# Usage: sh tools/r53/build-rtl8111.sh [--r63|--r66-2] <rtl8111-source> <lucy-source>
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT"
 RTL_VERSION=3.0.54
 GENERATOR=tools/r53/apply-rtl8111.py
-if [ "${1:-}" = "--r63" ]; then
+if [ "${1:-}" = "--r66-2" ]; then
+    shift
+    RTL_VERSION=3.0.56
+    GENERATOR=tools/r66_2/apply-rtl8111.py
+elif [ "${1:-}" = "--r63" ]; then
     shift
     RTL_VERSION=3.0.55
     GENERATOR=tools/r63/apply-rtl8111.py
 fi
-[ "$#" -eq 2 ] || { echo "usage: sh tools/r53/build-rtl8111.sh [--r63] <rtl8111-source> <lucy-source>" >&2; exit 2; }
+[ "$#" -eq 2 ] || { echo "usage: sh tools/r53/build-rtl8111.sh [--r63|--r66-2] <rtl8111-source> <lucy-source>" >&2; exit 2; }
 RTL_SRC=$(CDPATH= cd -- "$1" && pwd)
 LUCY_SRC=$(CDPATH= cd -- "$2" && pwd)
 DRV="$RTL_SRC/RealtekRTL8111"

@@ -99,6 +99,14 @@ struct org_example_AMDMapperProbe::R52Domain {
     UInt64 parkCount, restoreCount, gateDevSequence, gatePagesSequence;
     // R65: per-requester participation in a coordinated shared-controller PM cycle.
     bool pmSuspendReady, pmResumeReady;
+    // R66-2: retain this domain's PM evidence across later ordinary invalidations.
+    UInt64 pmSuspends, pmResumes, pmSuspendSequence;
+    UInt64 pmResumeDevSequence, pmResumePagesSequence;
+    void recordPMResume() {
+        ++pmResumes;
+        pmResumeDevSequence = lastInvDevSequence;
+        pmResumePagesSequence = lastInvPagesSequence;
+    }
     UInt64 targetFaults;
     UInt32 lastEvent[4];
     const char *state;
@@ -749,14 +757,19 @@ bool org_example_AMDMapperProbe::r47SuspendAuto() {
         // The final participant performs the single shared-controller stop.
         if (!r52InvalidateLocked(false, 0, 0, false, nullptr))
             return c->powerFailure("failed-pm-domain-suspend-fence");
+        ++d->pmSuspends;
+        d->pmSuspendSequence = c->command.completionSequence;
         d->pmSuspendReady = true;
         d->state = "pm-suspend-ready";
         bool allReady = true;
         for (UInt32 i = 0; i < kR52MaxDomains; ++i)
             if (c->domains[i] && !c->domains[i]->pmSuspendReady) allReady = false;
         if (!allReady) return true;
-    } else if (!r52InvalidateLocked(false, 0, 0, false, nullptr)) {
-        return c->powerFailure("failed-pm-suspend-fence");
+    } else {
+        if (!r52InvalidateLocked(false, 0, 0, false, nullptr))
+            return c->powerFailure("failed-pm-suspend-fence");
+        ++d->pmSuspends;
+        d->pmSuspendSequence = c->command.completionSequence;
     }
     c->suspendSequence = c->command.completionSequence;
     if (!c->stopHardware())
@@ -784,9 +797,13 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
         // The first requester restored the shared controller. Later requesters
         // only need to invalidate their own DTE/domain before reopening.
         if (c->domainCount == 2 && c->ready && !c->suspended &&
-            !c->powerFailed && !d->pmResumeReady) {
+            !c->powerFailed && !d->pmResumeReady && c->resumeRegistersRestored &&
+            c->suspendCount == c->resumeCount + 1) {
+            // This is the second requester only after the first has restored
+            // the engines. An incomplete suspend is NOT a restored controller.
             if (!r52InvalidateLocked(true, 0, 0, false, nullptr))
                 return c->powerFailure("failed-pm-domain-resume-invalidation");
+            d->recordPMResume();
             d->pmResumeReady = true;
             d->state = "pm-resume-ready";
             c->resumeDevSequence = d->lastInvDevSequence;
@@ -801,6 +818,8 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
             }
             return true;
         }
+        if (c->domainCount == 2 && !c->powerFailed)
+            return c->powerFailure("failed-pm-resume-before-controller-restore");
         return false;
     }
     if (c->domainCount == 2) {
@@ -864,6 +883,7 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
     // in retained memory. Do not overwrite the original startup timestamps.
     if (!r52InvalidateLocked(true, 0, 0, false, nullptr))
         return c->powerFailure("failed-pm-resume-invalidation");
+    d->recordPMResume();
     c->resumeDevSequence = d->lastInvDevSequence;
     c->resumePagesSequence = d->lastInvPagesSequence;
     c->suspended = false;
@@ -919,6 +939,11 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
         pmSuspendReady += c->domains[i]->pmSuspendReady ? 1 : 0;
         pmResumeReady += c->domains[i]->pmResumeReady ? 1 : 0;
     }
+    number("r66_2-pm-suspends", d->pmSuspends);
+    number("r66_2-pm-resumes", d->pmResumes);
+    number("r66_2-pm-suspend-cw", d->pmSuspendSequence);
+    number("r66_2-pm-resume-dev-cw", d->pmResumeDevSequence);
+    number("r66_2-pm-resume-pages-cw", d->pmResumePagesSequence);
     number("r65-pm-domain-count", c->domainCount);
     setProperty("r66-pm-armed", c->coordinatedPMArmed ? "yes" : "no");
     number("r65-pm-suspend-ready", pmSuspendReady);

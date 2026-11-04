@@ -451,6 +451,15 @@ def analyze(cap):
                         need(prev['r63-last-pages-cw'] < access['deviceCW'],
                              phase + ': permission change reused an earlier completion sequence')
                     transitions = access['parks'] + access['restores']
+                pm_suspends = pm_resumes = 0
+                if RUN.pm_lifecycle:
+                    pm_suspends, pm_resumes = p['r66_2-pm-suspends'], p['r66_2-pm-resumes']
+                    initial = states['before'][role]['probe']
+                    need(pm_suspends == pm_resumes and pm_suspends >= 0 and
+                         pm_suspends == initial['r66_2-pm-suspends'] and
+                         pm_resumes == initial['r66_2-pm-resumes'],
+                         phase + '/' + role + ': PM cycle changed inside ordinary workload')
+                pm_pages = pm_suspends + pm_resumes
                 need(p['r44-controller-ready'] == p['r44-dte-active'] == 'yes' and
                      p['r44-event-valid'] == 'yes' and
                      p['r51-npcache'] == ((p['r47-cap-header'] >> 26) & 1) and
@@ -459,9 +468,9 @@ def analyze(cap):
                      m['mapOk'] - m['unmapOk'] == expected_live and
                      m['mapRejected'] == m['unmapRejected'] == m['invalidateFailures'] == 0 and
                      skipped == expected_skip and m['invalidates'] == expected_inv and
-                     p['r44-inv-pages-completed'] == expected_inv + transitions and
-                     p['r52-domain-cmd-completed'] == expected_inv + 1 + 2 * transitions and
-                     p['r50-inv-full-completed'] == 1 + transitions and
+                     p['r44-inv-pages-completed'] == expected_inv + transitions + pm_pages and
+                     p['r52-domain-cmd-completed'] == expected_inv + 1 + 2 * transitions + pm_suspends + 2 * pm_resumes and
+                     p['r50-inv-full-completed'] == 1 + transitions + pm_pages and
                      p['r50-inv-range-completed'] == expected_inv - 1 and
                      p['r50-last-range-sequence'] <= p['r44-cmd-completed'] <= completed and
                      p['r44-target-faults'] == 0 and
