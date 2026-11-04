@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Round63 candidate / revoke one requester's DMA permission while its NIC is down
+## Accepted Round63 / revoke one requester's DMA permission while its NIC is down, PM hardware TODO
 
 Base: `4309a75855f67957284ec71909378b72fa132a05` (accepted R62; deployed `833e7bd`).
 R62 completed 11,291 batches in the measured window, refreshing the hardware
@@ -19,7 +19,23 @@ does not enable DMA. Lucy does not opt into the new callback.
 Build AMDMapperProbe 0.70.0 and RealtekRTL8111 3.0.55; retain Lucy 1.1.240.
 The existing 96 MiB two-device exercise now reads the DTE permission bits,
 the two completion sequences for each transition, and the surviving domain's
-traffic. R63 has not yet been built on Darwin or tested on hardware.
+traffic.
+
+**Accepted: all four mainline checks passed on the real Mac (second auto boot;
+the first died mid-first-upload as a boot-time link transient, run preserved).**
+The deployed implementation is `afafc8b`; AMDMapperProbe 0.70.0
+(`27269764-68AB-3C0F-A9B3-3B57BCE5280F`) and RealtekRTL8111 3.0.55
+(`DFBA1B95-3F09-3070-A56F-E4CCCA3D2752`) were replaced, retaining Lucy
+1.1.240 (`43C9BD33-…`). Five-phase `requesterAccess` readback: A went
+ir/iw 1/1 → 0/0 at its down snapshot with parks=1, deviceCW/pagesCW
+3799/3800; after up it returned to 1/1 with restores=1 and a fresh
+4813/4814 completion pair. B stayed 1/1 with parks/restores=0 through both
+its own down/up and A's. The 96 MiB reciprocal workload kept both down
+windows busy, shared commands closed at 960 → 4812 → 6455 → 7953 → 9066,
+exact coverage held (A 32837/32837, B 34234/34234), the ring cached 8069 of
+8106 batches with 37 refreshes and 37 wraps, A ended 5637/5602 and B
+3467/3456 map/unmap, and target faults stayed zero. PM remains
+TODO(R47-PM-HARDWARE).
 
 ## Accepted Round62 / cache the shared command ring's observed HEAD, PM hardware TODO
 
