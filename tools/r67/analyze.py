@@ -176,13 +176,18 @@ def analyze(out):
         cap = out / 'lifecycle-capture'
         run = read(cap / 'run.json')
         need(run['token'] == context['binding']['token'], 'native lifecycle token differs')
-        client = journal(cap / 'client.log')
-        starts = [r['start_ns'] for r in client if r.get('event') == 'transfer']
-        need(starts and min(starts) >= context['states']['steady-after']['monotonic_ns'],
-             'native down/up was not performed after sustained traffic')
+        # time.monotonic_ns() bases are per-process on this host, so client
+        # timestamps from two different processes cannot be compared. Order
+        # the native cycle after the sustained window by the domain command
+        # counters instead: the lifecycle before-snapshot must already include
+        # every mapping the sustained window created.
         for role in ('a', 'b'):
             snapshot = read(cap / 'snapshots/before' / role / 'snapshot.json')
             attached = context['states']['attached']['devices'][role]['probe']
+            steady_after = context['states']['steady-after']['devices'][role]['probe']
+            need(snapshot['probe']['r44-map-ok'] >= steady_after['r44-map-ok'] and
+                 snapshot['probe']['r44-unmap-ok'] >= steady_after['r44-unmap-ok'],
+                 'native down/up was not performed after sustained traffic')
             for key in ('r52-mapper-id', 'r44-root-pa', 'r66_2-pm-suspends', 'r66_2-pm-resumes',
                         'r66_2-pm-resume-pages-cw'):
                 need(snapshot['probe'][key] == attached[key], 'native cycle used a different restored domain')
