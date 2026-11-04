@@ -215,6 +215,12 @@ def sustain(args):
 def finish(args):
     out = C.project_path(args.out)
     config = C.configuration(out / 'endpoints.json')
+    # Analysis outputs are regenerated here; a previous finish attempt must
+    # not leave a stale copy for the manifest to seal against.
+    for stale in ('analysis.json', 'analysis-recomputed.json'):
+        stale_file = out / stale
+        if stale_file.exists():
+            stale_file.unlink()
     for role, value in [('a', args.peer_a_log), ('b', args.peer_b_log)]:
         target = out / 'steady' / ('peer-' + role + '.log')
         source = C.project_path(value)
