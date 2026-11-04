@@ -429,8 +429,10 @@ def analyze(cap):
                 if RUN.requester_access:
                     access = requester_access(p, states['before'][role]['probe'], role, phase)
                     transition_prev = {
-                        ('a', 'down'): 'before', ('a', 'after-up'): 'down',
-                        ('b', 'b-down'): 'after-up', ('b', 'b-after-up'): 'b-down'}
+                        ('a', 'down'): 'before', ('a', 'after-up'): 'down'}
+                    if RUN.both_requester_access:
+                        transition_prev.update({
+                            ('b', 'b-down'): 'after-up', ('b', 'b-after-up'): 'b-down'})
                     previous_phase = transition_prev.get((role, phase))
                     if previous_phase is not None:
                         prev = states[previous_phase][role]['probe']
