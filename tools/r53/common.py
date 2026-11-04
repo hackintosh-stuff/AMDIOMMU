@@ -32,6 +32,7 @@ class MixedRun(NamedTuple):
     both_requester_access: bool = False
     pm_boot_wake: bool = False
     pm_lifecycle: bool = False
+    dual_lucy: bool = False
 
 
 RUN = MixedRun(53, '2be76054f30e208d57658dc7efa3df79c9050f7c',
@@ -45,10 +46,12 @@ RX_GROUPS, RX_GROUP_PAGES, PERSISTENT_MAPS = 16, 64, 19
 PROFILES = {
     'RTL8111': {'vendor_id': 0x10ec, 'device_id': 0x8168, 'prefix': 'rtl8111-r53-',
                 'identity_prefix': 'rtl8111-r53-', 'snapshot': 'R53Snapshot',
+                'pm_prefix': 'rtl8111-r66_2-',
                 'rx_groups': 32, 'rx_pages': 16, 'rx_slots': 512,
                 'fixed': {'tx': 8192, 'rx': 8192, 'tally': 64}},
     'RTL8125': {'vendor_id': 0x10ec, 'device_id': 0x8127, 'prefix': 'rtl812x-r44-',
                 'identity_prefix': 'rtl812x-r52-', 'snapshot': 'R47Snapshot',
+                'pm_prefix': 'rtl812x-r47-',
                 'rx_groups': 16, 'rx_pages': 64, 'rx_slots': 1024,
                 'fixed': {'tx': 32768, 'rx': 16384, 'tally': 192}}
 }
@@ -103,13 +106,29 @@ def configuration(path):
                 raise ValueError('configured PCI identity differs from ' + kind)
             endpoint[key] = text.lower()
         classes.append(kind)
-    if set(classes) != set(PROFILES) or config['devices'][config['down_target']]['driver_class'] != 'RTL8111':
+    if RUN.dual_lucy:
+        if classes != ['RTL8125', 'RTL8125']:
+            raise ValueError('R67-2 requires two distinct RTL8127 / RTL8125 driver instances')
+    elif set(classes) != set(PROFILES) or config['devices'][config['down_target']]['driver_class'] != 'RTL8111':
         raise ValueError('select RTL8111 as down_target and one RTL8125 as the other endpoint')
     ACTIVE_CONFIG = config
     return config
 
 
 roles = C.roles
+
+
+def profile_for_state(value):
+    """Read driver identity, not role A/B; older captures have no class field."""
+    driver = value['driver']
+    kinds = [kind for kind, profile in PROFILES.items()
+             if profile['prefix'] + 'state' in driver]
+    if len(kinds) != 1:
+        raise ValueError('missing or ambiguous driver identity')
+    declared = value.get('driver_class', value.get('binding', {}).get('driver_class'))
+    if declared is not None and declared != kinds[0]:
+        raise ValueError('declared driver differs from its published properties')
+    return PROFILES[kinds[0]]
 
 
 def pci_number(node, name):
@@ -257,42 +276,44 @@ def snapshot(parent, label, config, mode):
                          if node.get('IORegistryEntryID') == owner_id)
             controller = dict(C.scalars(owner, ('r52-', 'r53-')), registry_id=owner_id)
             domains = owner['r52-domains']
-            lucy = next(d['node'] for d in drivers.values() if d['binding']['driver_class'] == 'RTL8125')
-            rtl8111 = next(d['node'] for d in drivers.values() if d['binding']['driver_class'] == 'RTL8111')
-            def tso_drained(prefix):
-                posted, completed = (lucy.get(prefix + name) for name in ('posted', 'completed'))
-                stopped = lucy.get(prefix + 'stop-retired') if RUN.reciprocal else 0
-                return (posted is not None and completed is not None and stopped is not None
-                        and posted == completed + stopped)
+            def retired(selected):
+                driver = selected['node']
+                if selected['binding']['driver_class'] == 'RTL8111':
+                    return driver.get('rtl8111-r53-tx-mapped-active') == 0
+                for prefix in ('rtl812x-r45-tso4-', 'rtl812x-r46-tso6-'):
+                    posted, completed = (driver.get(prefix + key) for key in ('posted', 'completed'))
+                    stopped = driver.get(prefix + 'stop-retired') if RUN.reciprocal else 0
+                    if (posted is None or completed is None or stopped is None or
+                            posted != completed + stopped):
+                        return False
+                return True
 
-            drained = (rtl8111.get('rtl8111-r53-tx-mapped-active') == 0 and
-                       all(tso_drained(p) for p in ('rtl812x-r45-tso4-', 'rtl812x-r46-tso6-')))
-            requester = next(d['binding']['requester'] for d in drivers.values()
-                             if d['binding']['driver_class'] == 'RTL8111')
-            probe = next((p for p in domains if p.get('r52-requester') == requester), None)
-            # The target must also hold one enable/disable generation for a whole
-            # iteration, so a snapshot taken while the link is still settling
-            # cannot be counted as the start of the down/up cycle.
-            lifecycle = (rtl8111.get('rtl8111-r53-state'),
-                         rtl8111.get('rtl8111-r53-enable-count'),
-                         rtl8111.get('rtl8111-r53-disable-count'))
-            if RUN.reciprocal:
-                lifecycle += tuple(lucy.get('rtl812x-r44-' + name)
-                                   for name in ('state', 'enable-count', 'disable-count'))
+            drained = all(retired(selected) for selected in drivers.values())
+            consistent = True
+            lifecycle = []
+            expected_states = []
+            for role in ('a', 'b'):
+                selected = drivers[role]
+                driver, binding = selected['node'], selected['binding']
+                prefix = PROFILES[binding['driver_class']]['prefix']
+                probe = next((p for p in domains if p.get('r52-requester') == binding['requester']), None)
+                consistent &= probe is not None and rx_groups_consistent(driver, live_records(probe))
+                lifecycle.append(tuple(driver.get(prefix + key)
+                                       for key in ('state', 'enable-count', 'disable-count')))
+                down_phase = 'down' if role == 'a' else 'b-down'
+                expected_states.append('disabled' if label == down_phase else 'enabled')
             settled = previous is not None and lifecycle == previous
             if RUN.reciprocal:
-                settled = (settled and lifecycle[0] == ('disabled' if label == 'down' else 'enabled')
-                           and lifecycle[3] == ('disabled' if label == 'b-down' else 'enabled'))
+                settled = settled and [row[0] for row in lifecycle] == expected_states
             previous = lifecycle
-            if (settled and drained and probe is not None and
-                    rx_groups_consistent(rtl8111, live_records(probe))):
+            if settled and drained and consistent:
                 break
             if time.monotonic() >= deadline:
                 if not drained:
                     raise RuntimeError('selected native TX mappings/TSO completions did not drain')
                 if RUN.reciprocal and not settled:
                     raise RuntimeError('driver state did not settle for ' + label)
-                raise RuntimeError('RTL8111 driver and mapper snapshots describe different RX rings')
+                raise RuntimeError('selected driver and mapper snapshots describe different RX rings')
             time.sleep(.02)
 
     else:

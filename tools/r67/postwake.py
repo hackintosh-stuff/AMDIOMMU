@@ -21,9 +21,13 @@ import threading
 import time
 
 HERE = Path(__file__).resolve()
-ENTRY = runpy.run_path(str(HERE.with_name('run.py')))
+ENTRY = globals().get('ROUND_ENTRY') or runpy.run_path(str(HERE.with_name('run.py')))
+SCOPE = ENTRY.get('SCOPE', 'r67-postwake')
+LABEL = ENTRY.get('LABEL', 'R67')
+IDENTITY_SCOPE = ENTRY.get('IDENTITY_SCOPE', 'r67')
 C = ENTRY['SHARED']['common']
-PM = runpy.run_path(str(HERE.parents[1] / 'r66_2/pm.py'))
+PM = runpy.run_path(str(HERE.parents[1] / 'r66_2/pm.py'),
+                    init_globals={'ROUND_ENTRY': ENTRY})
 C.select_run(ENTRY['RUN'])
 T = runpy.run_path(str(HERE.with_name('transport.py')))
 N = C.module('_r67_network', 'tools/r52/network.py')
@@ -75,14 +79,16 @@ def assert_same_wake(reference, current):
             key = 'r47-resume-' + suffix
             need(old['pm_raw_sha256'][key] == new['pm_raw_sha256'][key],
                  role + ': retained PM boundary was replaced')
-        prefix = 'rtl8111-r66_2-' if role == 'a' else 'rtl812x-r47-'
+        prefix = C.profile_for_state(new)['pm_prefix']
         driver = new['driver']
         need(driver[prefix + 'pm-blocked'] == driver[prefix + 'last-error'] == 0,
              role + ': driver PM blocked')
         for k in ('sleep-count', 'wake-count', 'wake-restored-at'):
             need(driver[prefix + k] == old['driver'][prefix + k], role + ': driver PM generation changed')
-    need(current['devices']['a']['driver']['rtl8111-r66_2-restart-error'] == 0,
-         'RTL8111 watchdog restart failed')
+    for value in current['devices'].values():
+        if C.profile_for_state(value)['pm_prefix'] == 'rtl8111-r66_2-':
+            need(value['driver']['rtl8111-r66_2-restart-error'] == 0,
+                 'RTL8111 watchdog restart failed')
     for key in ('r52-controller-cmd-completed', 'r52-controller-cmd-wraps'):
         need(current['controller'][key] >= reference['controller'][key], 'controller counters regressed')
 
@@ -110,8 +116,8 @@ def runtime_identity(folder, expected):
     folder.mkdir(parents=True, exist_ok=False)
     helper = C.module('_r67_identity', 'tools/r27/capture.py')
     got = helper.collect_system(folder, datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                                ENTRY['RUN'].versions, 'r67')
-    loaded = (folder / 'r67-version-confirmation.txt').read_text(encoding='utf-8').lower()
+                                ENTRY['RUN'].versions, IDENTITY_SCOPE)
+    loaded = (folder / (IDENTITY_SCOPE + '-version-confirmation.txt')).read_text(encoding='utf-8').lower()
     for name, version in ENTRY['RUN'].versions.items():
         need(got[name]['version'] == version and got[name]['codesign_returncode'] == 0 and
              all(got[name][k] == expected[name][k] for k in ('version', 'uuid', 'sha256')) and
@@ -149,11 +155,11 @@ def prepare(args):
     native.mkdir()
     for name in ('source-ref.json', 'expected-version.json', 'deployment.json'):
         shutil.copyfile(provenance / name, native / name)
-    write(out / 'binding.json', dict(scope='r67-postwake', kernel_rebuilt=False,
+    write(out / 'binding.json', dict(scope=SCOPE, kernel_rebuilt=False,
           tool_commit=subprocess.check_output(['git', '-C', str(C.ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
           binary_source=source, token=ENTRY['RUN'].token,
           origin_sha256={label: sha(provenance / label / 'state.json') for label in ('pm-before', 'pm-after')}))
-    print('R67 attached to the accepted wake; no build/deploy/reboot/sleep was performed.')
+    print(LABEL + ' attached to the accepted wake; no build/deploy/reboot/sleep was performed.')
 
 
 def sustain(args):
@@ -223,8 +229,9 @@ def finish(args):
     # reruns the native 96 MiB checks and reads both sides of every TCP block.
     files = {p.relative_to(out).as_posix(): {'bytes': p.stat().st_size, 'sha256': sha(p)}
              for p in sorted(out.rglob('*')) if p.is_file() and p.name != 'manifest.json'}
-    write(out / 'manifest.json', dict(scope='r67-postwake', files=files))
-    analyzer = runpy.run_path(str(HERE.with_name('analyze.py')))
+    write(out / 'manifest.json', dict(scope=SCOPE, files=files))
+    analyzer = runpy.run_path(str(HERE.with_name('analyze.py')),
+                             init_globals={'ROUND_ENTRY': ENTRY})
     result = analyzer['analyze'](out)
     write(out / 'analysis.json', result)
     print(json.dumps(result, indent=2))
@@ -247,5 +254,5 @@ def main(action):
         result = {'prepare': prepare, 'sustain': sustain, 'finish': finish}[action](args)
         return result or 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-        print('R67 failed:', exc)
+        print(LABEL + ' failed:', exc)
         return 1

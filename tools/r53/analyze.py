@@ -207,10 +207,11 @@ def analyze(cap):
             got = manifest['installed']['RTL812xLucy']
             need(got['codesign_returncode'] == 0 and got['uuid'].lower() in loaded,
                  'baseline Lucy installed/loaded identity missing')
-            # The unmodified RTL8111 may be injected from EFI, without an L/E file.
-            found = re.search(r'com\.insanelymac\.realtekrtl8111\s+\(([^)\n]+)\)', loaded)
-            need(found is not None, 'baseline RTL8111 is not present in kmutil loaded identity')
-            data['baselineRTL8111Version'] = found.group(1)
+            if not RUN.dual_lucy:
+                # The unmodified RTL8111 may be injected from EFI, without an L/E file.
+                found = re.search(r'com\.insanelymac\.realtekrtl8111\s+\(([^)\n]+)\)', loaded)
+                need(found is not None, 'baseline RTL8111 is not present in kmutil loaded identity')
+                data['baselineRTL8111Version'] = found.group(1)
         for phase in PHASES if mode == 'auto' else OFF_PHASES:
             phase_dir = cap / 'snapshots' / phase
             phase_data[phase] = json_file(phase_dir / 'phase.json')
@@ -519,12 +520,15 @@ def analyze(cap):
     check('capture-and-runtime-identity', evidence)
     expected_phases = PHASES if data.get('mode') == 'auto' else OFF_PHASES
     if len(states) == len(expected_phases):
-        check('mixed-driver-resources-and-independent-domain-trees', domains)
+        check('dual-lucy-resources-and-independent-domain-trees' if RUN.dual_lucy else
+              'mixed-driver-resources-and-independent-domain-trees', domains)
         check('interface-bound-ipv6-and-dual-end-hashes', traffic)
         if 'client' in data:
             check('two-device-reciprocal-down-up-and-retirement' if RUN.reciprocal else
                   'one-device-down-other-device-business-and-retirement', lifecycle)
-    return {'scope': 'r%d-mixed-drivers-shared-controller' % RUN.number, 'mode': data.get('mode'),
+    scope = ('r67-2-dual-lucy-shared-controller' if RUN.dual_lucy else
+             'r%d-mixed-drivers-shared-controller' % RUN.number)
+    return {'scope': scope, 'mode': data.get('mode'),
             'ok': len(checks) == 4 and all(row['state'] == 'ok' for row in checks), 'checks': checks,
             'limitations': [('One down/up per selected interface; the other carries traffic in each window.'
                              if RUN.reciprocal and data.get('mode') == 'auto' else

@@ -10,8 +10,9 @@ import subprocess
 from pathlib import Path
 
 HERE = Path(__file__).resolve()
-ENTRY = runpy.run_path(str(HERE.with_name('run.py')))
-C = ENTRY['R64']['previous']['shared']['common']
+ENTRY = globals().get('ROUND_ENTRY') or runpy.run_path(str(HERE.with_name('run.py')))
+SHARED = ENTRY.get('SHARED') or ENTRY['R64']['previous']['shared']
+C = SHARED['common']
 C.select_run(ENTRY['RUN'])
 SESSION = runpy.run_path(str(HERE.parents[1] / 'r31/session.py'))
 
@@ -39,6 +40,7 @@ def read_state(config):
         p = domains[0]
         state['devices'][role] = {
             'requester': requester,
+            'driver_class': value['binding']['driver_class'],
             'driver': C.C.scalars(value['node'], ('rtl8111-', 'rtl812x-')),
             'probe': C.C.scalars(p, ('r44-', 'r47-', 'r52-', 'r63-', 'r65-', 'r66-', 'r66_2-')),
             'pm_raw_sha256': {k: hashlib.sha256(v).hexdigest() for k, v in p.items()
@@ -55,19 +57,29 @@ def require_participants(state):
     c = state['controller']
     need(c['r52-controller-ready'] == 'yes' and c['r52-controller-target-faults'] == 0,
          'controller is not ready and fault-free')
-    a, b = (state['devices'][r]['driver'] for r in ('a', 'b'))
-    need(a.get('rtl8111-r66_2-pm-hooks') == 1, 'RTL8111 3.0.56 PM hooks are missing')
-    need('rtl812x-r47-sleep-count' in b, 'Lucy R47 PM hooks are missing')
-    for role, driver, prefix in (('a', a, 'rtl8111-r53-'), ('b', b, 'rtl812x-r44-')):
-        p = state['devices'][role]['probe']
-        need(driver.get(prefix + 'state') == 'enabled' and p['r63-dma-parked'] == 'no'
-             and p['r44-dte-active'] == 'yes' and p['r44-target-faults'] == 0,
-             role + ': requester is not active and fault-free')
+    need(c['r52-domain-count'] == 2 and len(state['devices']) == 2 and
+         len({v['requester'] for v in state['devices'].values()}) == 2,
+         'expected two distinct requester domains')
+    for role in ('a', 'b'):
+        value = state['devices'][role]
+        profile, driver = C.profile_for_state(value), value['driver']
+        expected = 'RTL8125' if C.RUN.dual_lucy or role == 'b' else 'RTL8111'
+        need(profile == C.PROFILES[expected], role + ': wrong driver for this run profile')
+        if expected == 'RTL8111':
+            need(driver.get('rtl8111-r66_2-pm-hooks') == 1, 'RTL8111 PM hooks are missing')
+        else:
+            need('rtl812x-r47-sleep-count' in driver, role + ': Lucy R47 PM hooks are missing')
+        p = value['probe']
+        need(driver.get(profile['prefix'] + 'state') == 'enabled' and
+             p['r63-dma-parked'] == 'no' and p['r44-dte-active'] == 'yes' and
+             p['r44-target-faults'] == 0, role + ': requester is not active and fault-free')
 
 
 def capture(folder, config):
     tree, state, _ = read_state(config)
     state['boottime'] = subprocess.check_output(['sysctl', '-n', 'kern.boottime'], text=True).strip()
+    state['boot_session_uuid'] = subprocess.check_output(
+        ['sysctl', '-n', 'kern.bootsessionuuid'], text=True).strip()
     log = subprocess.check_output(['pmset', '-g', 'log'], text=True)
     counts = re.findall(r'Total Sleep/Wakes since boot[^\n]*:\s*(\d+)', log)
     state['system_sleep_wakes'] = int(counts[-1]) if counts else None
@@ -87,6 +99,9 @@ def analyze(before, after):
         except (KeyError, TypeError, ValueError) as exc:
             checks.append({'id': name, 'ok': False, 'detail': str(exc)})
     def system():
+        if before.get('boot_session_uuid') or after.get('boot_session_uuid'):
+            need(before.get('boot_session_uuid') == after.get('boot_session_uuid'),
+                 'boot session UUID changed during sleep/wake')
         # macOS re-reads the RTC at wake and nudges kern.boottime by the
         # measured drift (observed ~1s). A real reboot moves boottime to the
         # wake wall-clock, minutes later; only that magnitude proves a reboot.
@@ -125,7 +140,8 @@ def analyze(before, after):
         for suffix in ('live-raw', 'pt-raw'):
             need(hashes['r47-suspend-' + suffix] == hashes['r47-resume-' + suffix],
                  role + ': retained mapping/PT bytes changed across the PM boundary')
-        prefix = 'rtl8111-r66_2-' if role == 'a' else 'rtl812x-r47-'
+        prefix = C.profile_for_state(new)['pm_prefix']
+        need(C.profile_for_state(old)['pm_prefix'] == prefix, role + ': driver identity changed')
         d0, d1 = old['driver'], new['driver']
         need(d1[prefix + 'sleep-count'] == d0[prefix + 'sleep-count'] + 1 and
              d1[prefix + 'wake-count'] == d0[prefix + 'wake-count'] + 1,

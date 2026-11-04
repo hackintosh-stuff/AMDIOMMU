@@ -8,7 +8,8 @@ from pathlib import Path
 import runpy
 
 HERE = Path(__file__).resolve()
-W = runpy.run_path(str(HERE.with_name('postwake.py')))
+W = runpy.run_path(str(HERE.with_name('postwake.py')),
+                   init_globals={'ROUND_ENTRY': globals().get('ROUND_ENTRY')})
 C, T, PM = W['C'], W['T'], W['PM']
 read, need = W['read'], W['need']
 
@@ -94,7 +95,7 @@ def analyze(out):
 
     def evidence():
         manifest = read(out / 'manifest.json')
-        need(manifest['scope'] == 'r67-postwake', 'wrong evidence scope')
+        need(manifest['scope'] == W['SCOPE'], 'wrong evidence scope')
         for path, record in manifest['files'].items():
             file = out / path
             need(file.is_file() and file.stat().st_size == record['bytes'] and
@@ -110,7 +111,7 @@ def analyze(out):
         expected = read(out / 'provenance/expected-version.json')
         for label in ('identity-start', 'identity-end'):
             identities = read(out / label / 'installed.json')
-            loaded = (out / label / 'r67-version-confirmation.txt').read_text(encoding='utf-8').lower()
+            loaded = (out / label / (W['IDENTITY_SCOPE'] + '-version-confirmation.txt')).read_text(encoding='utf-8').lower()
             for name, version in W['ENTRY']['RUN'].versions.items():
                 row = identities[name]
                 need(row['version'] == version and row['codesign_returncode'] == 0 and
@@ -131,7 +132,7 @@ def analyze(out):
         progress = {}
         for role in ('a', 'b'):
             a, b = first['devices'][role], last['devices'][role]
-            prefix = 'rtl8111-r53-' if role == 'a' else 'rtl812x-r44-'
+            prefix = C.profile_for_state(a)['prefix']
             for k in ('enable-count', 'disable-count'):
                 need(a['driver'][prefix + k] == b['driver'][prefix + k],
                      role + ': NIC restarted during continuous traffic')
@@ -143,9 +144,11 @@ def analyze(out):
                  p['r44-live-maps'] == q['r44-live-maps'] and
                  p['r44-live-pages'] == q['r44-live-pages'], role + ': mapping progress/retirement differs')
             progress[role] = {key: q[key] - p[key] for key in ('r44-map-ok', 'r44-unmap-ok')}
-        need(last['devices']['a']['driver']['rtl8111-r66_2-restart-count'] ==
-             first['devices']['a']['driver']['rtl8111-r66_2-restart-count'],
-             'watchdog recovery occurred in the sustained window')
+        for role in ('a', 'b'):
+            if C.profile_for_state(first['devices'][role])['pm_prefix'] == 'rtl8111-r66_2-':
+                need(last['devices'][role]['driver']['rtl8111-r66_2-restart-count'] ==
+                     first['devices'][role]['driver']['rtl8111-r66_2-restart-count'],
+                     'watchdog recovery occurred in the sustained window')
         need(last['controller']['r52-controller-cmd-wraps'] >
              first['controller']['r52-controller-cmd-wraps'], 'no command ring wrap under traffic')
         context['states'] = states
@@ -185,7 +188,7 @@ def analyze(out):
                 need(snapshot['probe'][key] == attached[key], 'native cycle used a different restored domain')
             last = read(cap / 'snapshots/b-after-up' / role / 'snapshot.json')
             final = context['states']['final']['devices'][role]
-            prefix = 'rtl8111-r53-' if role == 'a' else 'rtl812x-r44-'
+            prefix = C.profile_for_state(final)['prefix']
             for key in ('enable-count', 'disable-count'):
                 need(last['driver'][prefix + key] == final['driver'][prefix + key],
                      'another NIC restart followed the accepted native cycle')
@@ -199,7 +202,7 @@ def analyze(out):
         check('postwake-96mib-reciprocal-down-up', lifecycle)
         if context.get('states') and context.get('native'):
             check('continuous-to-lifecycle-evidence-chain', bridge)
-    return {'scope': 'r67-postwake-sustained-traffic',
+    return {'scope': W['ENTRY'].get('RESULT_SCOPE', 'r67-postwake-sustained-traffic'),
             'ok': len(checks) == 5 and all(r['ok'] for r in checks), 'checks': checks,
             'limits': 'One wake lineage; no multi-sleep stress test or peak-throughput claim.'}
 
