@@ -17,6 +17,9 @@ struct org_example_AMDMapperProbe::R44MapperState {
     volatile UInt64 *leaves[r44mapper::kPages / 512];
     amdtx::BoundedAllocator<r44mapper::kPages, r44mapper::kMapPages> allocator;
     Mapping mappings[r44mapper::kRecords];
+    // Per-domain start index: zero means no mapping starts on this IOVA page.
+    static_assert(r44mapper::kRecords <= 0xffffU, "slot + 1 must fit in UInt16");
+    UInt16 slotByStartPage[r44mapper::kPages];
     r44mapper::Snapshot snapshot;
     OSData *suspendLive, *suspendPT, *resumeLive, *resumePT;
     UInt64 nextHandle;
@@ -230,7 +233,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
                          returnedLength > (1ULL << bits) - address)) {
             amdtx::release(d->allocator, basePage, layout.pages); break;
         }
-        bool empty = true;
+        bool empty = d->slotByStartPage[basePage] == 0;
         for (unsigned i = 0; i < layout.pages; ++i)
             if (d->leaf(basePage + i)) empty = false;
         if (!empty) {
@@ -248,6 +251,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         record.mapAddress = address; record.mapLength = returnedLength;
         record.descriptorOffset = descriptorOffset; record.length = length;
         record.recordIndex = slot; record.basePage = basePage;
+        d->slotByStartPage[basePage] = static_cast<UInt16>(slot + 1);
         record.pages = layout.pages; record.runs = layout.runs; record.options = mapOptions;
         UInt32 highPages = 0;
         for (unsigned i = 0; i < layout.runs; ++i) {
@@ -315,10 +319,15 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
         return kIOReturnNotReady;
     }
     IOReturn result = kIOReturnBadArgument;
-    for (unsigned slot = 0; slot < r44mapper::kRecords; ++slot) {
-        auto &mapping = d->mappings[slot];
+    do {
+        if (mapAddress < r44mapper::kBase) break;
+        const UInt64 page = (mapAddress - r44mapper::kBase) / 4096;
+        if (page >= r44mapper::kPages) break;
+        const UInt16 owner = d->slotByStartPage[page];
+        if (!owner || owner > r44mapper::kRecords) break;
+        auto &mapping = d->mappings[owner - 1U];
         auto &record = mapping.record;
-        if (!mapping.live || record.mapAddress != mapAddress) continue;
+        if (!mapping.live || record.basePage != page || record.mapAddress != mapAddress) break;
         if (mapping.memory != memory || mapping.command != dmaCommand ||
             record.mapLength != mapLength ||
             record.state != (r44mapper::kMapPublished | r44mapper::kMapConfirmed)) break;
@@ -337,13 +346,18 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
         record.tUnmapComplete = mach_absolute_time(); record.state |= r44mapper::kUnmapConfirmed;
         // A cleared PTE alone is not retirement: pages become reusable only
         // after the INV_IOMMU_PAGES CompletionWait has returned successfully.
-        amdtx::release(d->allocator, record.basePage, record.pages);
+        if (!amdtx::release(d->allocator, record.basePage, record.pages)) {
+            d->accepting = false; s.flags |= r44mapper::kFailed;
+            s.flags &= ~r44mapper::kAccepting;
+            s.lastUnmap = record;
+            result = kIOReturnInternalError; break;
+        }
+        d->slotByStartPage[page] = 0;
         --s.liveCount; ++s.unmapOk;
         s.lastUnmapAt = record.tUnmapComplete; s.lastUnmap = record;
         mapping.live = false; mapping.memory = nullptr; mapping.command = nullptr;
         result = kIOReturnSuccess;
-        break;
-    }
+    } while (false);
     if (result != kIOReturnSuccess) ++s.unmapRejected;
     IOLockUnlock(d->lock);
     return result;

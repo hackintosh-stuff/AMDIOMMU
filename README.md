@@ -1,5 +1,27 @@
 # AMDIOMMU — authoritative source repository
 
+## Candidate Round56 / indexed unmap by starting IOVA page
+
+Base: `b339d0ec39a365b063d2d4e8774d5ebeebcd6fad` (R55 accepted record);
+R55 deployed `54469ee61afa2143bc6c3848031ab2ad7d32730e`. Its first auto
+boot passed the existing four groups: 8 transfers / 64 MiB, independent
+pre-open claims, B completing business while A was down, and zero target
+faults. The final snapshots recorded 4,664 and 5,167 successful unmaps.
+
+R56 changes the record lookup in the ordinary mapper's unmap path. Each
+domain indexes only the first page of a mapping with a 16-bit slot plus
+one (8 KiB per domain). The exact IOVA including its offset, length,
+descriptor, command, state and live owner are still checked. The owner
+survives an invalidation failure and is removed only after completion and
+successful allocator release. R55 first-fit allocation and ABI2 exports
+are unchanged. This reduces record lookup work; no hardware timing or
+throughput improvement has been measured.
+
+Build only AMDMapperProbe **0.63.0** with `sh tools/build-m1a.sh`. Keep the
+installed RTL812xLucy **1.1.239** and RealtekRTL8111 **3.0.54**. Use
+`python3 -B tools/r56/run.py <command> ...` for the same finite workload.
+R56 Darwin build, deployment and physical-device validation are pending.
+
 ## Accepted Round55 / word-wise first-fit IOVA allocation, PM hardware TODO
 
 Base: `30395d3572b36457b68dca2f37e9cdb027407017`, accepted R54 record.
