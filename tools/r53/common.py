@@ -212,7 +212,7 @@ def snapshot(parent, label, config, mode):
     if mode == 'auto':
         # Both sides publish independently, so take the pair repeatedly until it
         # is judgeable, bounded in time.
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 30
         while True:
             for value in drivers.values():
                 profile = PROFILES[value['binding']['driver_class']]
@@ -250,7 +250,7 @@ def snapshot(parent, label, config, mode):
                 break
             if time.monotonic() >= deadline:
                 raise RuntimeError('RTL8111 driver and mapper snapshots describe different RX rings')
-            time.sleep(.05)
+            time.sleep(.02)
 
     else:
         controller, domains = {}, []
