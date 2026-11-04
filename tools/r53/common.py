@@ -28,6 +28,7 @@ class MixedRun(NamedTuple):
     reciprocal: bool = False
     exact_ranges: bool = False
     cached_ring_head: bool = False
+    requester_access: bool = False
 
 
 RUN = MixedRun(53, '2be76054f30e208d57658dc7efa3df79c9050f7c',
@@ -312,7 +313,7 @@ def snapshot(parent, label, config, mode):
             if (driver.get(prefix + 'mapper-id') != probe['r52-mapper-id'] or
                     driver.get(prefix + 'domain-id') != probe['r44-domain-id']):
                 raise ValueError('driver is bound to a different mapper')
-            value['probe'] = C.scalars(probe, ('r44-', 'r47-', 'r48-', 'r50-', 'r51-', 'r52-', 'r53-', 'r60-', 'r61-'))
+            value['probe'] = C.scalars(probe, ('r44-', 'r47-', 'r48-', 'r50-', 'r51-', 'r52-', 'r53-', 'r60-', 'r61-', 'r63-'))
             if RUN.exact_ranges and probe.get('r61-split-batches'):
                 value['probe']['r61-split-commands-hex'] = probe['r61-split-commands'].hex()
             exports.update({name: probe[key] for key, name in C.C.EXPORTS.items()})

@@ -37,7 +37,7 @@ def bundle_identity(bundle, version, symbol):
         if (info.get('CFBundleIdentifier') != RTL8111_ID or
                 info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != CLIENT_DEPENDENCY):
             raise ValueError('RTL8111 bundle identity or mapper startup dependency differs')
-    if bundle.stem == 'AMDMapperProbe' and RUN.installed_client_dependency:
+    if bundle.stem == 'AMDMapperProbe' and (RUN.installed_client_dependency or RUN.retained_lucy_dependency):
         info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
         compatible = info.get('OSBundleCompatibleVersion', version)
         # These project versions are numeric major.minor.patch values.
@@ -93,7 +93,8 @@ def check_endpoints(args):
 
 def deployment_bundles():
     installed = Path('/Library/Extensions')
-    lucy = ROOT / 'build-lucy' if RUN.build_lucy or not RUN.installed_client_dependency else installed
+    keep_lucy = (RUN.retained_lucy_dependency or RUN.installed_client_dependency) and not RUN.build_lucy
+    lucy = installed if keep_lucy else ROOT / 'build-lucy'
     rtl = installed if RUN.installed_client_dependency else ROOT / 'build-rtl8111'
     return [(lucy / 'RTL812xLucy.kext', VERSIONS['RTL812xLucy'], 'r47PublishPM'),
             (ROOT / 'build-m1a/AMDMapperProbe.kext', VERSIONS['AMDMapperProbe'], 'r52PublishDomains'),

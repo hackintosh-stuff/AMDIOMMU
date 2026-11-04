@@ -1,5 +1,26 @@
 # AMDIOMMU — authoritative source repository
 
+## Round63 candidate / revoke one requester's DMA permission while its NIC is down
+
+Base: `4309a75855f67957284ec71909378b72fa132a05` (accepted R62; deployed `833e7bd`).
+R62 completed 11,291 batches in the measured window, refreshing the hardware
+HEAD 48 times. Both NICs recovered, but both device-table entries kept
+read and write permission even in their disabled snapshots.
+
+The updated RTL8111 client now asks its own mapper to clear the DTE read
+and write bits after stopping the NIC and rebuilding its RX rings. Keep
+the live page tables, domain ID and mapping owners. Reject new maps while
+parked; allow teardown of existing mappings. Before re-enabling the NIC,
+restore the DTE permissions. Both operations must finish a device-entry
+invalidation and a full-domain page invalidation before reporting success.
+If the restore cannot be confirmed the client closes its PCI provider and
+does not enable DMA. Lucy does not opt into the new callback.
+
+Build AMDMapperProbe 0.70.0 and RealtekRTL8111 3.0.55; retain Lucy 1.1.240.
+The existing 96 MiB two-device exercise now reads the DTE permission bits,
+the two completion sequences for each transition, and the surviving domain's
+traffic. R63 has not yet been built on Darwin or tested on hardware.
+
 ## Accepted Round62 / cache the shared command ring's observed HEAD, PM hardware TODO
 
 Base: `e4d61d84ae08e38ab79dce8330cc4f6aaca0b7fe` (accepted R61; deployed `e236625`). Its first auto boot

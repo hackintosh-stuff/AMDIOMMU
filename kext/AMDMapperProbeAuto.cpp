@@ -96,6 +96,7 @@ struct org_example_AMDMapperProbe::R52Domain {
     M2B2CmdWords splitWords[kR61MaxParts];
     UInt32 lastRangeCommand[4];
     UInt64 lastInvDevSequence, lastInvPagesSequence;
+    UInt64 parkCount, restoreCount, gateDevSequence, gatePagesSequence;
     UInt64 targetFaults;
     UInt32 lastEvent[4];
     const char *state;
@@ -591,7 +592,7 @@ bool org_example_AMDMapperProbe::r52InvalidateLocked(
         dte[d->deviceID * 4 + 1] = d->domainID;
         dte[d->deviceID * 4] = (d->tablePA & M2B2_PTE_ADDR_MASK) |
             ((UInt64)M2B2_PAGE_MODE_4_LEVEL << M2B2_DEV_ENTRY_MODE_SHIFT) |
-            DTE_V | DTE_TV | DTE_IR | DTE_IW;
+            DTE_V | DTE_TV | (fR63DMAParked ? 0 : (DTE_IR | DTE_IW));
         OSSynchronizeIO();
         if (!m2b2Submit(c->base, &c->command, "r44-activate-device", d->deviceID,
                 ((UInt32)M2B2_CMD_INV_DEV_ENTRY << 28), 0, 0)) {
@@ -644,6 +645,34 @@ bool org_example_AMDMapperProbe::r52InvalidateLocked(
     return true;
 }
 
+
+// Caller holds its mapper lock. A shared-controller lock serializes the DTE
+// write and both fences with ordinary submissions from either requester.
+IOReturn org_example_AMDMapperProbe::r63SwitchRequesterDMA(bool park) {
+    auto *c = fR44Controller;
+    auto *d = fR52Domain;
+    if (!c || !d) return kIOReturnNotReady;
+    R52LockGuard guard(c->lock);
+    if (c->command.failed) return kIOReturnIOError;
+    if (!c->ready || c->suspended) return kIOReturnNotReady;
+    if (!d->active) return kIOReturnNotReady;
+    if (fR63DMAParked == park) return kIOReturnSuccess; // active on first enable
+    fR63DMAParked = park;
+    if (!r52InvalidateLocked(true, 0, 0, false, nullptr)) {
+        // Do not start DMA or release backing after an unconfirmed transition.
+        // With a failed queue, a deny in table memory is not proof of eviction.
+        fR63DMAParked = true;
+        auto *dte = (volatile UInt64 *)c->devices->getBytesNoCopy();
+        dte[d->deviceID * 4] &= ~(DTE_IR | DTE_IW);
+        OSSynchronizeIO();
+        d->state = "failed-requester-access";
+        return kIOReturnIOError;
+    }
+    if (park) ++d->parkCount; else ++d->restoreCount;
+    d->gateDevSequence = d->lastInvDevSequence;
+    d->gatePagesSequence = d->lastInvPagesSequence;
+    return kIOReturnSuccess;
+}
 
 bool org_example_AMDMapperProbe::r52PowerSupported() const {
     R44Controller *c = fR44Controller;
@@ -800,6 +829,11 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     number("r44-event-pa", c->eventPA);
     number("r44-controller-ready-time", c->readyTime);
     number("r44-dte-active-time", d->activeTime);
+    setProperty("r63-dma-parked", c->command.failed ? "unknown" : (fR63DMAParked ? "yes" : "no"));
+    number("r63-park-count", d->parkCount);
+    number("r63-restore-count", d->restoreCount);
+    number("r63-last-dev-cw", d->gateDevSequence);
+    number("r63-last-pages-cw", d->gatePagesSequence);
     number("r44-inv-dev-completed", d->invDevCompleted);
     number("r44-inv-pages-completed", d->invPagesCompleted);
     number("r51-npcache", (c->hardware.capabilityHeader & kR51NpCache) ? 1 : 0);

@@ -111,6 +111,9 @@ private:
     bool r52ReleaseDomain();
     void r52PublishDomains();
     bool r52PowerSupported() const;
+    bool fR63DMAParked = false; // writes hold both the mapper and controller locks
+    IOReturn r63SetRequesterDMA(bool park);
+    IOReturn r63SwitchRequesterDMA(bool park);
     bool r52InvalidateLocked(bool, UInt64, UInt64, bool, bool *);
     struct R44Controller;
     R44Controller *fR44Controller = nullptr;

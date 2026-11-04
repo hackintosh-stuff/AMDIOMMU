@@ -180,6 +180,20 @@ IOReturn org_example_AMDMapperProbe::r47PowerTransition(UInt32 operation) {
     return ok ? kIOReturnSuccess : kIOReturnIOError;
 }
 
+IOReturn org_example_AMDMapperProbe::r63SetRequesterDMA(bool park) {
+    auto *m = fR44Mapper;
+    if (!m) return kIOReturnNotReady;
+    IOLockLock(m->lock);
+    const IOReturn result = m->accepting ? r63SwitchRequesterDMA(park) : kIOReturnNotReady;
+    if (result == kIOReturnIOError) {
+        m->accepting = false;
+        m->snapshot.flags |= r44mapper::kFailed;
+        m->snapshot.flags &= ~r44mapper::kAccepting;
+    }
+    IOLockUnlock(m->lock);
+    return result;
+}
+
 UInt32 org_example_AMDMapperProbe::r44LiveMappings() const {
     auto *d = fR44Mapper;
     if (!d) return 0;
@@ -220,7 +234,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
     ++s.mapCalls;
     IOReturn result = kIOReturnUnsupported;
     do {
-        if (!d->accepting) { result = kIOReturnNotReady; break; }
+        if (!d->accepting || fR63DMAParked) { result = kIOReturnNotReady; break; }
         if (!memory || !mapAddress || !mapLength || !length ||
             descriptorOffset > memory->getLength() ||
             length > memory->getLength() - descriptorOffset) {

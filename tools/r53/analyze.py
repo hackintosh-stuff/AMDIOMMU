@@ -124,6 +124,27 @@ def ring_window(first, last):
                 mmioHeadReads=reads, wraps=wraps)
 
 
+def requester_access(p, before, role, phase):
+    parked = role == 'a' and phase == 'down'
+    permissions = (p['r44-dte0'] >> 61) & 3
+    parks, restores = p['r63-park-count'], p['r63-restore-count']
+    p0, r0 = before['r63-park-count'], before['r63-restore-count']
+    # Only the RTL8111 opts in. A may have earlier transitions before the finite load.
+    progressed = role == 'a' and phase != 'before'
+    need(p['r63-dma-parked'] == ('yes' if parked else 'no') and
+         permissions == (0 if parked else 3) and
+         parks - restores == int(parked) and
+         parks - p0 == int(progressed) and restores - r0 == int(progressed and not parked) and
+         (role == 'a' or parks == restores == 0),
+         phase + '/' + role + ': requester DMA access or transition counts differ')
+    if progressed:
+        devcw, pagecw = p['r63-last-dev-cw'], p['r63-last-pages-cw']
+        need(0 < devcw and pagecw == devcw + 1 and pagecw <= p['r44-cmd-completed'],
+             phase + ': requester access change missing completed device and domain fences')
+    return dict(ir=permissions & 1, iw=permissions >> 1, parks=parks, restores=restores,
+                deviceCW=p['r63-last-dev-cw'], pagesCW=p['r63-last-pages-cw'])
+
+
 def analyze(cap):
     checks, states, controllers, phase_data, data = [], {}, {}, {}, {}
 
@@ -392,6 +413,14 @@ def analyze(cap):
                 skipped = p['r51-map-invalidation-skipped']
                 expected_skip = 0 if p['r51-npcache'] else m['mapOk'] - 1
                 expected_inv = m['mapOk'] + m['unmapOk'] - skipped
+                access, transitions = None, 0
+                if RUN.requester_access:
+                    access = requester_access(p, states['before'][role]['probe'], role, phase)
+                    if role == 'a' and phase in ('down', 'after-up'):
+                        prev = states['before' if phase == 'down' else 'down'][role]['probe']
+                        need(prev['r63-last-pages-cw'] < access['deviceCW'],
+                             phase + ': permission change reused an earlier completion sequence')
+                    transitions = access['parks'] + access['restores']
                 need(p['r44-controller-ready'] == p['r44-dte-active'] == 'yes' and
                      p['r44-event-valid'] == 'yes' and
                      p['r51-npcache'] == ((p['r47-cap-header'] >> 26) & 1) and
@@ -399,9 +428,11 @@ def analyze(cap):
                      m['mapCalls'] == m['mapOk'] and m['unmapCalls'] == m['unmapOk'] and
                      m['mapOk'] - m['unmapOk'] == expected_live and
                      m['mapRejected'] == m['unmapRejected'] == m['invalidateFailures'] == 0 and
-                     skipped == expected_skip and m['invalidates'] == p['r44-inv-pages-completed'] == expected_inv and
-                     p['r52-domain-cmd-completed'] == expected_inv + 1 and
-                     p['r50-inv-full-completed'] == 1 and p['r50-inv-range-completed'] == expected_inv - 1 and
+                     skipped == expected_skip and m['invalidates'] == expected_inv and
+                     p['r44-inv-pages-completed'] == expected_inv + transitions and
+                     p['r52-domain-cmd-completed'] == expected_inv + 1 + 2 * transitions and
+                     p['r50-inv-full-completed'] == 1 + transitions and
+                     p['r50-inv-range-completed'] == expected_inv - 1 and
                      p['r50-last-range-sequence'] <= p['r44-cmd-completed'] <= completed and
                      p['r44-target-faults'] == 0 and
                      p['r44-command-failed'] == 'no' and p['r44-event-overflow'] == 'no',
@@ -430,6 +461,8 @@ def analyze(cap):
                     need(covered_pages >= requested_pages >= p['r50-inv-range-completed'],
                          phase + '/' + role + ': range invalidation page totals differ')
                     counters[role].update(requestedPages=requested_pages, coveredPages=covered_pages)
+                if access is not None:
+                    counters[role]['requesterAccess'] = access
                 if RUN.exact_ranges:
                     counters[role].update(exact_range_counts(p, m))
             details[phase] = {'controllerCommands': completed, 'devices': counters}

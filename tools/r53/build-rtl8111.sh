@@ -1,10 +1,17 @@
 #!/bin/sh
 # Build the pinned RTL8111 adapter with the already-present Lucy SDK/KernelSPI.
-# Usage: sh tools/r53/build-rtl8111.sh <rtl8111-source> <lucy-source>
+# Usage: sh tools/r53/build-rtl8111.sh [--r63] <rtl8111-source> <lucy-source>
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT"
-[ "$#" -eq 2 ] || { echo "usage: sh tools/r53/build-rtl8111.sh <rtl8111-source> <lucy-source>" >&2; exit 2; }
+RTL_VERSION=3.0.54
+GENERATOR=tools/r53/apply-rtl8111.py
+if [ "${1:-}" = "--r63" ]; then
+    shift
+    RTL_VERSION=3.0.55
+    GENERATOR=tools/r63/apply-rtl8111.py
+fi
+[ "$#" -eq 2 ] || { echo "usage: sh tools/r53/build-rtl8111.sh [--r63] <rtl8111-source> <lucy-source>" >&2; exit 2; }
 RTL_SRC=$(CDPATH= cd -- "$1" && pwd)
 LUCY_SRC=$(CDPATH= cd -- "$2" && pwd)
 DRV="$RTL_SRC/RealtekRTL8111"
@@ -13,7 +20,7 @@ SDK="$LUCY_SRC/MacKernelSDK"
 [ -d "$LUCY_SRC/KernelSPI" ] || { echo "missing existing KernelSPI overlay" >&2; exit 1; }
 [ -f "$SDK/Library/x86_64/libkmod.a" ] || { echo "missing libkmod.a" >&2; exit 1; }
 [ -f "$SDK/Library/universal/libkmodc++.a" ] || { echo "missing libkmodc++.a" >&2; exit 1; }
-python3 tools/r53/apply-rtl8111.py "$RTL_SRC"
+python3 -B "$GENERATOR" "$RTL_SRC"
 
 W="$ROOT/build-rtl8111"
 rm -rf "$W"
@@ -23,7 +30,7 @@ mkdir -p "$W/objects" "$KEXT/Contents/MacOS" "$KEXT/Contents/Resources"
 
 compile() {
     xcrun clang++ -arch x86_64 -mkernel -fapple-kext -mno-red-zone \
-        -nostdinc++ -std=gnu++17 -O0 \
+        -nostdinc++ -std=gnu++17 -O0 "-DRTL8111_KMOD_VERSION=\"$RTL_VERSION\"" \
         -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -D__APPLE_KEXT__ \
         -fno-builtin -fno-common -fno-exceptions -fno-rtti \
         -fstack-protector -fno-threadsafe-statics \
@@ -62,4 +69,4 @@ plutil -lint "$KEXT/Contents/Info.plist"
 codesign --force --sign - --timestamp=none "$KEXT"
 codesign --verify --strict "$KEXT"
 printf '%s\n' "$KEXT" > "$ROOT/latest-rtl8111-build.txt"
-echo "BUILD OK: $KEXT (RealtekRTL8111 3.0.54)"
+echo "BUILD OK: $KEXT (RealtekRTL8111 $RTL_VERSION)"
