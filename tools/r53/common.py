@@ -24,13 +24,16 @@ class MixedRun(NamedTuple):
     abi: int = 2
     lucy_rx_pages: int = 64
     build_lucy: bool = False
+    retained_lucy_dependency: Optional[str] = None
+    reciprocal: bool = False
 
 
 RUN = MixedRun(53, '2be76054f30e208d57658dc7efa3df79c9050f7c',
                {'RTL812xLucy': '1.1.238', 'AMDMapperProbe': '0.60.0', 'RealtekRTL8111': '3.0.53'},
                0x53c0de53)
 BASE_COMMIT, VERSIONS = RUN.base_commit, RUN.versions
-PHASES, OFF_PHASES = ('before', 'down', 'after-up'), ('before', 'after')
+FIRST_CYCLE, OFF_PHASES = ('before', 'down', 'after-up'), ('before', 'after')
+PHASES = FIRST_CYCLE
 MAX_MAP_PAGES = MAX_RUNS = 64
 RX_GROUPS, RX_GROUP_PAGES, PERSISTENT_MAPS = 16, 64, 19
 PROFILES = {
@@ -66,7 +69,9 @@ RAW = C.C  # shared, versioned ordinary mapper decoder (tools/r44/common.py)
 def select_run(run):
     """Set the single CLI process's profile before importing its entry point."""
     global RUN, BASE_COMMIT, VERSIONS, MAX_MAP_PAGES, MAX_RUNS
-    global RX_GROUPS, RX_GROUP_PAGES, PERSISTENT_MAPS
+    global RX_GROUPS, RX_GROUP_PAGES, PERSISTENT_MAPS, PHASES
+    PHASES = FIRST_CYCLE + (('b-down', 'b-after-up') if run.reciprocal else ())
+    protocol.select_cycles(run.reciprocal)
     RUN, BASE_COMMIT, VERSIONS = run, run.base_commit, run.versions
     C.VERSIONS = VERSIONS  # R52 boot_mode reads the installed bundle profile
     MAX_MAP_PAGES = MAX_RUNS = RAW.ABI_LAYOUTS[run.abi][2]
@@ -248,10 +253,14 @@ def snapshot(parent, label, config, mode):
             domains = owner['r52-domains']
             lucy = next(d['node'] for d in drivers.values() if d['binding']['driver_class'] == 'RTL8125')
             rtl8111 = next(d['node'] for d in drivers.values() if d['binding']['driver_class'] == 'RTL8111')
+            def tso_drained(prefix):
+                posted, completed = (lucy.get(prefix + name) for name in ('posted', 'completed'))
+                stopped = lucy.get(prefix + 'stop-retired') if RUN.reciprocal else 0
+                return (posted is not None and completed is not None and stopped is not None
+                        and posted == completed + stopped)
+
             drained = (rtl8111.get('rtl8111-r53-tx-mapped-active') == 0 and
-                       all(lucy.get(p + 'posted') is not None and
-                           lucy.get(p + 'posted') == lucy.get(p + 'completed')
-                           for p in ('rtl812x-r45-tso4-', 'rtl812x-r46-tso6-')))
+                       all(tso_drained(p) for p in ('rtl812x-r45-tso4-', 'rtl812x-r46-tso6-')))
             requester = next(d['binding']['requester'] for d in drivers.values()
                              if d['binding']['driver_class'] == 'RTL8111')
             probe = next((p for p in domains if p.get('r52-requester') == requester), None)
@@ -261,7 +270,13 @@ def snapshot(parent, label, config, mode):
             lifecycle = (rtl8111.get('rtl8111-r53-state'),
                          rtl8111.get('rtl8111-r53-enable-count'),
                          rtl8111.get('rtl8111-r53-disable-count'))
+            if RUN.reciprocal:
+                lifecycle += tuple(lucy.get('rtl812x-r44-' + name)
+                                   for name in ('state', 'enable-count', 'disable-count'))
             settled = previous is not None and lifecycle == previous
+            if RUN.reciprocal:
+                settled = (settled and lifecycle[0] == ('disabled' if label == 'down' else 'enabled')
+                           and lifecycle[3] == ('disabled' if label == 'b-down' else 'enabled'))
             previous = lifecycle
             if (settled and drained and probe is not None and
                     rx_groups_consistent(rtl8111, live_records(probe))):
@@ -269,6 +284,8 @@ def snapshot(parent, label, config, mode):
             if time.monotonic() >= deadline:
                 if not drained:
                     raise RuntimeError('selected native TX mappings/TSO completions did not drain')
+                if RUN.reciprocal and not settled:
+                    raise RuntimeError('driver state did not settle for ' + label)
                 raise RuntimeError('RTL8111 driver and mapper snapshots describe different RX rings')
             time.sleep(.02)
 
@@ -293,7 +310,7 @@ def snapshot(parent, label, config, mode):
             if (driver.get(prefix + 'mapper-id') != probe['r52-mapper-id'] or
                     driver.get(prefix + 'domain-id') != probe['r44-domain-id']):
                 raise ValueError('driver is bound to a different mapper')
-            value['probe'] = C.scalars(probe, ('r44-', 'r47-', 'r48-', 'r50-', 'r51-', 'r52-', 'r53-'))
+            value['probe'] = C.scalars(probe, ('r44-', 'r47-', 'r48-', 'r50-', 'r51-', 'r52-', 'r53-', 'r60-'))
             exports.update({name: probe[key] for key, name in C.C.EXPORTS.items()})
             if binding['driver_class'] == 'RTL8111':
                 exports.update({'driver-live.bin': driver['rtl8111-r53-live'],

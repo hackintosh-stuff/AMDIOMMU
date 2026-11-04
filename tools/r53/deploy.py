@@ -16,7 +16,8 @@ RTL8111_ID = 'com.insanelymac.RealtekRTL8111'
 CONFIG, EFI_INJECTIONS = None, []
 PREVIOUSLY_ABSENT = []
 CLIENT_DEPENDENCY = RUN.installed_client_dependency or VERSIONS['AMDMapperProbe']
-LUCY_DEPENDENCY = VERSIONS['AMDMapperProbe'] if RUN.build_lucy else CLIENT_DEPENDENCY
+LUCY_DEPENDENCY = (VERSIONS['AMDMapperProbe'] if RUN.build_lucy else
+                   RUN.retained_lucy_dependency or CLIENT_DEPENDENCY)
 
 
 def require_offloads(info):
@@ -42,7 +43,8 @@ def bundle_identity(bundle, version, symbol):
         # These project versions are numeric major.minor.patch values.
         def parts(value):
             return tuple(map(int, value.split('.')))
-        if not parts(compatible) <= parts(CLIENT_DEPENDENCY) <= parts(version):
+        if not all(parts(compatible) <= parts(required) <= parts(version)
+                   for required in (CLIENT_DEPENDENCY, LUCY_DEPENDENCY)):
             raise ValueError("new Probe excludes the installed clients' declared dependency")
     return BASE_BUNDLE_IDENTITY(bundle, version, symbol)
 
@@ -141,10 +143,11 @@ def write_boot_config(config, cfg, bootargs, _tokenarg):
 
 def round_plan():
     return {'round': RUN.number, 'transport': 'tcp6', 'config': CONFIG,
-            'requester_selector': selector(CONFIG), 'transfer_bytes': 64 << 20,
+            'requester_selector': selector(CONFIG), 'transfer_bytes': (96 if RUN.reciprocal else 64) << 20,
             'mapper_abi': RUN.abi, 'domains': 2, 'drivers': ['RTL8111', 'RTL8125'],
             'controller': 'one shared device table, event buffer and command ring',
-            'lifecycle': 'RTL8111 down; RTL8125 completes traffic; RTL8111 up',
+            'lifecycle': ('each interface down and back up, with traffic on the other interface'
+                          if RUN.reciprocal else 'RTL8111 down; RTL8125 completes traffic; RTL8111 up'),
             'efi_rtl8111_entries_disabled': EFI_INJECTIONS,
             'previously_absent_targets': PREVIOUSLY_ABSENT,
             'source_snapshots_in_evidence': False, 'pm_validation': 'not scheduled'}

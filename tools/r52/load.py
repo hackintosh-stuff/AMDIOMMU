@@ -68,7 +68,7 @@ def before_traffic(endpoints, token):
         return [record for role in ('a', 'b') for record in futures[role].result()]
 
 
-def main(round_id=52, default_token=0x52c0de52):
+def main(round_id=52, default_token=0x52c0de52, reciprocal=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('out')
     parser.add_argument('--config', required=True)
@@ -91,6 +91,32 @@ def main(round_id=52, default_token=0x52c0de52):
     ok = False
     with (out / 'client.log').open('x', encoding='utf-8', newline='\n') as log:
         emit = lambda value: print(json.dumps(value, sort_keys=True), file=log, flush=True)
+
+        def cycle(target, survivor, live_phase, resumed_phase, down_label, up_label):
+            # The finite local job owns the entire transition, including restoration.
+            iface = endpoints[target]['interface']
+            def event(name):
+                emit({'event': name, 'interface': iface, 'time_ns': time.monotonic_ns()})
+
+            def traffic(role, selected):
+                for phase, direction, size in P.transfers('auto', role):
+                    if phase == selected:
+                        emit(transfer(endpoints[role], token, phase, direction, size))
+
+            event('ifdown-begin')
+            try:
+                subprocess.run(['ifconfig', iface, 'down'], check=True)
+                event('ifdown-done')
+                traffic(survivor, live_phase)
+                snapshot(out / 'snapshots', down_label, config, args.mode)
+            finally:
+                try:
+                    event('ifup-requested')
+                finally:
+                    subprocess.run(['ifconfig', iface, 'up'], check=True)
+            traffic(target, resumed_phase)
+            snapshot(out / 'snapshots', up_label, config, args.mode)
+
         try:
             boot = boot_mode(args.mode)
             (out / 'running-boot-args.txt').write_text(boot + '\n', encoding='utf-8')
@@ -102,20 +128,9 @@ def main(round_id=52, default_token=0x52c0de52):
             for record in before_traffic(endpoints, token):
                 emit(record)
             if args.mode == 'auto':
-                iface = endpoints['a']['interface']
-                emit({'event': 'ifdown-begin', 'interface': iface, 'time_ns': time.monotonic_ns()})
-                try:
-                    subprocess.run(['ifconfig', iface, 'down'], check=True)
-                    emit({'event': 'ifdown-done', 'interface': iface, 'time_ns': time.monotonic_ns()})
-                    for phase, direction, size in P.TRANSFERS[4:6]:
-                        emit(transfer(endpoints['b'], token, phase, direction, size))
-                    snapshot(out / 'snapshots', 'down', config, args.mode)
-                finally:
-                    emit({'event': 'ifup-requested', 'interface': iface, 'time_ns': time.monotonic_ns()})
-                    subprocess.run(['ifconfig', iface, 'up'], check=True)
-                for phase, direction, size in P.TRANSFERS[6:]:
-                    emit(transfer(endpoints['a'], token, phase, direction, size))
-                snapshot(out / 'snapshots', 'after-up', config, args.mode)
+                cycle('a', 'b', 'b-during-down', 'a-after-up', 'down', 'after-up')
+                if reciprocal:
+                    cycle('b', 'a', 'a-during-b-down', 'b-after-up', 'b-down', 'b-after-up')
             else:
                 snapshot(out / 'snapshots', 'after', config, args.mode)
             ok = True

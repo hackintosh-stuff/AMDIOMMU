@@ -1,5 +1,25 @@
 # AMDIOMMU — authoritative source repository
 
+## Round60 candidate / align ordinary IOVA allocations to their invalidation span
+
+Base: `db18ba4b0e3f648980339ee182ad2d27be2205d5` (accepted R59; deployed `fdc6942`).
+The R59 dual-NIC run used eight 512 KiB Lucy RX mappings. In the A-down
+snapshot, the most recent hardware range command covered 64 pages for
+a 16-page unmap. All eight Lucy RX groups in the final snapshot also
+straddled a natural 128-page boundary.
+
+Prefer a naturally aligned block for a multi-page ordinary DMA mapping.
+If that block is unavailable, fall back to the existing allocator with the
+caller's required alignment. Domain size, ABI3, page permissions and the
+synchronous invalidation before IOVA reuse stay unchanged. Compare the
+requested and encoded range in pages; these counts do not measure speed.
+
+Build only AMDMapperProbe 0.67.0; retain Lucy 1.1.240 and RealtekRTL8111
+3.0.54. The finite R60 auto run exercises both interface lifecycles using
+the original two links: A down while B transfers, then B down while A
+transfers, with traffic after each recovery (12 transfers / 96 MiB).
+The R60 Mac build and hardware run are pending.
+
 ## Accepted Round59 / 512 KiB ordinary DMA mappings (ABI3), PM hardware TODO
 
 Base: `63ca1bc0ced9c82f7b460559f8cd7917cdc8c0df` (R58 accepted). R58 deployed `3281ac6`;

@@ -68,7 +68,7 @@ struct org_example_AMDMapperProbe::R52Domain {
     UInt64 tablePA, activeTime;
     UInt32 deviceID, domainID;
     UInt64 invDevCompleted, invPagesCompleted;
-    UInt64 invFullCompleted, invRangeCompleted, invRangePages;
+    UInt64 invFullCompleted, invRangeCompleted, invRangePages, invRangeCoveredPages;
     UInt64 mapInvalidationSkipped;
     UInt64 lastRangeAddress, lastRangeBytes, lastRangeSequence;
     UInt32 lastRangeCommand[4];
@@ -593,6 +593,10 @@ bool org_example_AMDMapperProbe::r52InvalidateLocked(
     else {
         ++d->invRangeCompleted;
         d->invRangePages += bytes / 4096;
+        // In the submitted leaf command S=0 denotes one page; for S=1 the
+        // first zero bit in the encoded page number determines the envelope.
+        d->invRangeCoveredPages += (encoded & 1) ?
+            (2ULL << __builtin_ctzll(~(encoded >> 12))) : 1;
         d->lastRangeAddress = address;
         d->lastRangeBytes = bytes;
         d->lastRangeCommand[0] = d0; d->lastRangeCommand[1] = d1;
@@ -769,6 +773,7 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     number("r50-inv-full-completed", d->invFullCompleted);
     number("r50-inv-range-completed", d->invRangeCompleted);
     number("r50-inv-range-pages", d->invRangePages);
+    number("r60-inv-range-covered-pages", d->invRangeCoveredPages);
     number("r50-last-range-address", d->lastRangeAddress);
     number("r50-last-range-bytes", d->lastRangeBytes);
     number("r50-last-range-sequence", d->lastRangeSequence);

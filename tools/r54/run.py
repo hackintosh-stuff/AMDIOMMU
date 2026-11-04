@@ -25,7 +25,7 @@ def main(run=RUN):
         return common.module('_mixed_peer', 'tools/r52/peer.py').main(default_token=run.token)
     if command == 'load':
         return common.module('_mixed_load', 'tools/r52/load.py').main(
-            round_id=run.number, default_token=run.token)
+            round_id=run.number, default_token=run.token, reciprocal=run.reciprocal)
     if command == 'capture':
         return common.module('_mixed_capture', 'tools/r52/capture.py').main(
             round_id=run.number, abi='mixed-RTL8111-RTL8125-mapper-ABI%d' % run.abi)

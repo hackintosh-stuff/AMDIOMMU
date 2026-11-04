@@ -8,14 +8,15 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.66.0</string>
-    <key>CFBundleVersion</key><string>0.66.0</string>
+    <key>CFBundleShortVersionString</key><string>0.67.0</string>
+    <key>CFBundleVersion</key><string>0.67.0</string>
     <!-- Client requests must fit [OSBundleCompatibleVersion, CFBundleVersion].
          Existing mapper ABI1 clients remain compatible with 0.53.0;
          Round54 clients require 0.61.0 for a pre-open claim on their selected PCI requester. -->
     <key>OSBundleCompatibleVersion</key><string>0.53.0</string>
     <!--
       版本历史：
+        0.67.0 第60轮：普通多页 DMA 优先选择自然对齐的 IOVA，碎片下保留原分配路径；统计失效命令覆盖页。
         0.66.0 第59轮：单次普通 DMA 映射支持 128 页及 128 个物理段，按 ABI3 导出全部页。
         0.65.0 第58轮：按域内 IOVA 页保存描述符给出的物理地址，活动与历史快照保持原有 ABI2 格式。
         0.64.0 第57轮：映射记录槽由每域占用位图统一管理；保留最低空槽选择、起始页索引和同步回收。

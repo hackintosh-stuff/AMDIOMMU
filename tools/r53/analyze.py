@@ -79,10 +79,16 @@ def native_resources(value, phase):
                     address = value['rx_addresses'][group['index'] * profile['rx_pages'] + slot]
                     need(address == group['iova'] + slot * 4096,
                          'RTL8111 RX descriptor is not its mapped group IOVA')
-    return {'driver': value['binding']['driver_class'], 'persistentMaps': expected_maps(value),
+    result = {'driver': value['binding']['driver_class'], 'persistentMaps': expected_maps(value),
             'rxGroups': profile['rx_groups'], 'rxPagesPerGroup': profile['rx_pages'],
             'fixedIOVAs': {kind: row['mapAddress'] for kind, row in fixed.items()},
-            'tallyRegister': d[prefix + 'tally-register']}
+              'tallyRegister': d[prefix + 'tally-register']}
+    if RUN.reciprocal:
+        # Report the selected IOVA against the RX object's actual size. Under
+        # fragmentation other objects may legitimately use the first-fit fallback.
+        result['naturallyAlignedRxGroups'] = sum(
+            row['mapAddress'] % (row['pages'] * 4096) == 0 for row in rx)
+    return result
 
 
 def analyze(cap):
@@ -218,6 +224,11 @@ def analyze(cap):
             details[phase] = {'devices': trees, 'identities': identities,
                               'overlappingIOVAPages': len(overlap), 'independentWalkExamples': examples,
                               'unselectedCandidates': phase_data[phase]['unselected_candidates']}
+        if RUN.reciprocal and data['mode'] == 'auto':
+            for role in ('a', 'b'):
+                need(any(phase['devices'][role]['nativeResources']['naturallyAlignedRxGroups']
+                         for phase in details.values()),
+                     role + ': no live RX group witnessed the preferred natural alignment')
         return details
 
     def traffic():
@@ -268,41 +279,70 @@ def analyze(cap):
         if data['mode'] == 'off':
             return {'baseline': 'both explicit endpoints completed short physical-DMA IPv6 TCP',
                     'mapperRequired': False}
-        before, down, after = (states[name] for name in PHASES)
+        cycles = [('a', 'b', 'before', 'down', 'after-up', 'b-during-down', 'a-after-up')]
+        if RUN.reciprocal:
+            cycles.append(('b', 'a', 'after-up', 'b-down', 'b-after-up',
+                           'a-during-b-down', 'b-after-up'))
+        windows = []
+        for target, other, pre, stopped, post, held_phase, recovery_phase in cycles:
+            before, down, after = (states[phase] for phase in (pre, stopped, post))
+            iface = data['roles'][target]['interface']
+            for role in (target, other):
+                prefix = PROFILES[before[role]['binding']['driver_class']]['prefix']
+                b, d, a = [phase[role]['driver'] for phase in (before, down, after)]
+                if role == target:
+                    need(b[prefix + 'state'] == a[prefix + 'state'] == 'enabled' and
+                         d[prefix + 'state'] == 'disabled' and
+                         d[prefix + 'disable-count'] == b[prefix + 'disable-count'] + 1 and
+                         a[prefix + 'enable-count'] == b[prefix + 'enable-count'] + 1 and
+                         (not RUN.reciprocal or (d[prefix + 'enable-count'] == b[prefix + 'enable-count']
+                          and a[prefix + 'disable-count'] == d[prefix + 'disable-count'])),
+                         iface + ': selected target did not complete one ordinary down/up')
+                else:
+                    need(all(v[prefix + 'state'] == 'enabled' for v in (b, d, a)) and
+                         len({v[prefix + 'disable-count'] for v in (b, d, a)}) == 1 and
+                         len({v[prefix + 'enable-count'] for v in (b, d, a)}) == 1,
+                         iface + ': other interface was reset during this down/up')
+            events = {name: [row['time_ns'] for row in data['client']
+                             if row.get('event') == name and row.get('interface') == iface]
+                      for name in ('ifdown-done', 'ifup-requested')}
+            need(all(len(v) == 1 for v in events.values()), iface + ': missing down/up window')
+            begin, end = events['ifdown-done'][0], events['ifup-requested'][0]
+            held = [row for row in data['transfers'] if row['phase'] == held_phase]
+            recovered = [row for row in data['transfers'] if row['phase'] == recovery_phase]
+            need(len(held) == 2 and all(begin < row['start_ns'] < row['end_ns'] < end for row in held)
+                 and len(recovered) == 2 and all(end < row['start_ns'] for row in recovered),
+                 iface + ': transfers did not occur during the down window and after recovery')
+            need(down[other]['mapper']['mapOk'] > before[other]['mapper']['mapOk'] and
+                 down[other]['mapper']['unmapOk'] > before[other]['mapper']['unmapOk'] and
+                 after[target]['mapper']['mapOk'] > down[target]['mapper']['mapOk'],
+                 iface + ': traffic did not exercise both domain map/unmap paths')
+            if windows:
+                need(windows[-1]['recoveryEndNS'] < begin, 'device down windows were not sequential')
+            windows.append({'downRole': target, 'downInterface': iface, 'activeRole': other,
+                            'activeInterface': data['roles'][other]['interface'],
+                            'downNS': begin, 'upRequestedNS': end,
+                            'heldBytes': sum(row['bytes'] for row in held),
+                            'recoveryBytes': sum(row['bytes'] for row in recovered),
+                            'recoveryEndNS': max(row['end_ns'] for row in recovered)})
         offloads = {}
         for role in ('a', 'b'):
-            kind = before[role]['binding']['driver_class']
-            prefix = PROFILES[kind]['prefix']
-            b, d, a = [values[role]['driver'] for values in (before, down, after)]
-            if role == 'a':
-                need(d[prefix + 'state'] == 'disabled' and a[prefix + 'state'] == 'enabled' and
-                     d[prefix + 'disable-count'] == b[prefix + 'disable-count'] + 1 and
-                     a[prefix + 'enable-count'] == b[prefix + 'enable-count'] + 1,
-                     'selected down target did not complete one ordinary down/up')
-            else:
-                need(all(v[prefix + 'state'] == 'enabled' for v in (b, d, a)) and
-                     len({v[prefix + 'disable-count'] for v in (b, d, a)}) == 1 and
-                     len({v[prefix + 'enable-count'] for v in (b, d, a)}) == 1,
-                     'the other interface was reset/disabled during the selected lifecycle')
+            kind = states['before'][role]['binding']['driver_class']
+            drivers = [phase[role]['driver'] for phase in states.values()]
+            last = drivers[-1]
             if kind == 'RTL8125':
                 tso = 'rtl812x-r46-tso6-'
-                need(a[tso + 'posted'] > b[tso + 'posted'] and
-                     all(v[tso + 'posted'] == v[tso + 'completed'] for v in (b, d, a)),
-                     'Lucy IPv6 TSO work did not complete')
-                offloads[role] = {'tso6Posted': a[tso + 'posted'], 'tso6Completed': a[tso + 'completed']}
+                # Normal interface disable can retire a posted packet after the
+                # hardware has stopped. Do not count stop reclamations as completions.
+                need(last[tso + 'completed'] > drivers[0][tso + 'completed'] and
+                     all(v[tso + 'posted'] == v[tso + 'completed'] +
+                         (v[tso + 'stop-retired'] if RUN.reciprocal else 0) for v in drivers),
+                     'Lucy IPv6 TSO work did not drain')
+                offloads[role] = {'tso6Posted': last[tso + 'posted'], 'tso6Completed': last[tso + 'completed']}
+                if RUN.reciprocal:
+                    offloads[role]['tso6StopRetired'] = last[tso + 'stop-retired']
             else:
-                offloads[role] = {'tso6CommandCalls': a[prefix + 'tso6-count']}
-        events = {name: [row for row in data['client'] if row.get('event') == name]
-                  for name in ('ifdown-done', 'ifup-requested')}
-        need(all(len(value) == 1 for value in events.values()), 'ordinary lifecycle timestamps missing')
-        begin, end = (events[name][0]['time_ns'] for name in ('ifdown-done', 'ifup-requested'))
-        held = [row for row in data['transfers'] if row['phase'] == 'b-during-down']
-        need(len(held) == 2 and all(begin < row['start_ns'] < row['end_ns'] < end for row in held),
-             'other-domain byte-verified transfers did not finish while the target was down')
-        need(down['b']['mapper']['mapOk'] > before['b']['mapper']['mapOk'] and
-             down['b']['mapper']['unmapOk'] > before['b']['mapper']['unmapOk'] and
-             after['a']['mapper']['mapOk'] > down['a']['mapper']['mapOk'],
-             'real traffic did not exercise both domain map/unmap paths')
+                offloads[role] = {'tso6CommandCalls': last[PROFILES[kind]['prefix'] + 'tso6-count']}
         details = {}
         for phase, devices in states.items():
             controller = controllers[phase]
@@ -347,9 +387,18 @@ def analyze(cap):
                          'last completed range does not cover this domain IOVA mapping')
                 counters[role] = {'mapOk': m['mapOk'], 'unmapOk': m['unmapOk'],
                                   'mapSkipped': skipped, 'domainCommands': p['r52-domain-cmd-completed']}
+                if RUN.reciprocal:
+                    requested_pages = p['r50-inv-range-pages']
+                    covered_pages = p['r60-inv-range-covered-pages']
+                    need(covered_pages >= requested_pages >= p['r50-inv-range-completed'],
+                         phase + '/' + role + ': range invalidation page totals differ')
+                    counters[role].update(requestedPages=requested_pages, coveredPages=covered_pages)
             details[phase] = {'controllerCommands': completed, 'devices': counters}
-        return {'otherDeviceTrafficWhileTargetDown': True, 'sameConnectionAcrossTransition': 'not tested',
-                'targetFaults': 0, 'counters': details, 'nativeOffloadCounters': offloads}
+        result = {'otherDeviceTrafficWhileTargetDown': True, 'sameConnectionAcrossTransition': 'not tested',
+                  'targetFaults': 0, 'counters': details, 'nativeOffloadCounters': offloads}
+        if RUN.reciprocal:
+            result['downWindows'] = windows
+        return result
 
     check('capture-and-runtime-identity', evidence)
     expected_phases = PHASES if data.get('mode') == 'auto' else OFF_PHASES
@@ -357,10 +406,13 @@ def analyze(cap):
         check('mixed-driver-resources-and-independent-domain-trees', domains)
         check('interface-bound-ipv6-and-dual-end-hashes', traffic)
         if 'client' in data:
-            check('one-device-down-other-device-business-and-retirement', lifecycle)
+            check('two-device-reciprocal-down-up-and-retirement' if RUN.reciprocal else
+                  'one-device-down-other-device-business-and-retirement', lifecycle)
     return {'scope': 'r%d-mixed-drivers-shared-controller' % RUN.number, 'mode': data.get('mode'),
             'ok': len(checks) == 4 and all(row['state'] == 'ok' for row in checks), 'checks': checks,
-            'limitations': ['One selected interface down/up; the other completes traffic while it is down.',
+            'limitations': [('One down/up per selected interface; the other carries traffic in each window.'
+                             if RUN.reciprocal and data.get('mode') == 'auto' else
+                             'One selected interface down/up; the other completes traffic while it is down.'),
                             'No claim of one continuous connection across the transitions, system-wide IOMapper, PM or hot-unplug.']}
 
 

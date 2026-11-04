@@ -37,6 +37,17 @@ struct org_example_AMDMapperProbe::R44MapperState {
 
     volatile UInt64 &leaf(unsigned page) { return leaves[page / 512][page % 512]; }
 
+    // A naturally placed span fits the smallest AMD range command for its
+    // length. Reserve only the requested pages. A failed first-fit search
+    // does not modify the allocator, so fragmented pools keep their capacity.
+    bool allocateRange(unsigned pages, unsigned &base, unsigned required) {
+        unsigned preferred = required; // caller supplied a nonzero power of two
+        while (preferred < pages) preferred <<= 1;
+        if (preferred != required && amdtx::allocate(allocator, pages, base, preferred))
+            return true;
+        return amdtx::allocate(allocator, pages, base, required);
+    }
+
     unsigned nextSlot(unsigned from, bool occupied) const {
         return amdtx::findNextBitmapPage(liveSlots, from, r44mapper::kRecords, occupied);
     }
@@ -250,7 +261,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         if (slot == r44mapper::kRecords) { result = kIOReturnNoResources; break; }
         const unsigned alignmentPages = alignment > 4096 ? (unsigned)(alignment / 4096) : 1;
         unsigned basePage = 0;
-        if (!amdtx::allocate(d->allocator, layout.pages, basePage, alignmentPages)) {
+        if (!d->allocateRange(layout.pages, basePage, alignmentPages)) {
             result = kIOReturnNoResources; break;
         }
         const UInt64 address = r44mapper::kBase + basePage * 4096ULL + layout.firstOffset;
