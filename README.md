@@ -1,5 +1,30 @@
 # AMDIOMMU — authoritative source repository
 
+## Candidate Round57 / bitmap of live mapping-record slots
+
+Base: `cc7bedff5abe77f2f2c97ab38bf223e7b3f49545` (accepted R56 record).
+R56 deployed `0830a5a13f00973e3c08b0a8d886730bd9fa9471`. Its first auto
+boot passed all four groups with 64 MiB, 10,353 successful maps, 10,299
+successful unmaps and zero target faults. Only the Probe changed.
+
+Ordinary map still chooses the lowest free record slot. It now finds that
+slot in sixteen 64-bit words, instead of reading a live flag in each record.
+This bitmap replaces the private per-record live flag. Unmap verifies the
+bit for the slot found by R56's starting-page index; a failed invalidation
+retains ownership. Both live-record exporters enumerate occupied slots in
+the same ascending order as before. The IOVA allocator, record and snapshot
+ABI, and invalidation-before-reuse contract are unchanged.
+
+With the R56 before/A and before/B snapshot occupancies as input, one more
+allocation selects slots 35 and 19 respectively. The old search reads 36 and
+20 slot flags; both answers are in the first bitmap word. These are search
+operation counts on captured layouts, not timing measurements.
+
+Build AMDMapperProbe **0.64.0** only: `sh tools/build-m1a.sh`. Retain the
+installed RTL812xLucy **1.1.239** and RealtekRTL8111 **3.0.54**. Use
+`python3 -B tools/r57/run.py <command> ...` for the existing finite run.
+R57 has not yet been built, loaded or exercised on macOS.
+
 ## Accepted Round56 / indexed unmap by starting IOVA page, PM hardware TODO
 
 Base: `b339d0ec39a365b063d2d4e8774d5ebeebcd6fad` (R55 accepted record);

@@ -8,14 +8,15 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.63.0</string>
-    <key>CFBundleVersion</key><string>0.63.0</string>
+    <key>CFBundleShortVersionString</key><string>0.64.0</string>
+    <key>CFBundleVersion</key><string>0.64.0</string>
     <!-- Client requests must fit [OSBundleCompatibleVersion, CFBundleVersion].
          Existing mapper ABI1 clients remain compatible with 0.53.0;
          Round54 clients require 0.61.0 for a pre-open claim on their selected PCI requester. -->
     <key>OSBundleCompatibleVersion</key><string>0.53.0</string>
     <!--
       版本历史：
+        0.64.0 第57轮：映射记录槽由每域占用位图统一管理；保留最低空槽选择、起始页索引和同步回收。
         0.63.0 第56轮：普通 unmap 按本域起始 IOVA 页定位记录，保持完整所有权检查与同步失效后回收。
         0.62.0 第55轮：IOVA 位图按 64 位字查找最低对齐空闲区间；保留 R54 驱动 ABI 与同步回收。
         0.61.0 第54轮：显式 requester 由客户端在 PCI open 前申请设备域；普通 DMA 与按设备失效路径沿用 R53。

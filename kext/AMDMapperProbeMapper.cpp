@@ -10,13 +10,14 @@ struct org_example_AMDMapperProbe::R44MapperState {
         IOMemoryDescriptor *memory;
         IODMACommand *command;
         r44mapper::Record record;
-        bool live;
     };
     IOLock *lock;
     volatile UInt64 *tables;
     volatile UInt64 *leaves[r44mapper::kPages / 512];
     amdtx::BoundedAllocator<r44mapper::kPages, r44mapper::kMapPages> allocator;
     Mapping mappings[r44mapper::kRecords];
+    // Sole per-slot liveness state; accessed under the domain lock.
+    amdtx::u64 liveSlots[(r44mapper::kRecords + 63) / 64];
     // Per-domain start index: zero means no mapping starts on this IOVA page.
     static_assert(r44mapper::kRecords <= 0xffffU, "slot + 1 must fit in UInt16");
     UInt16 slotByStartPage[r44mapper::kPages];
@@ -31,15 +32,28 @@ struct org_example_AMDMapperProbe::R44MapperState {
 
     volatile UInt64 &leaf(unsigned page) { return leaves[page / 512][page % 512]; }
 
+    unsigned nextSlot(unsigned from, bool occupied) const {
+        return amdtx::findNextBitmapPage(liveSlots, from, r44mapper::kRecords, occupied);
+    }
+    bool slotLive(unsigned slot) const {
+        return (liveSlots[slot / 64] & (1ULL << (slot % 64))) != 0;
+    }
+    void setSlotLive(unsigned slot, bool live) {
+        const amdtx::u64 mask = 1ULL << (slot % 64);
+        auto &word = liveSlots[slot / 64];
+        if (live) word |= mask;
+        else word &= ~mask;
+    }
+
     void capturePowerBoundary(OSData *&live, OSData *&pt) {
         if (live) { live->release(); live = nullptr; }
         if (pt) { pt->release(); pt = nullptr; }
         live = OSData::withCapacity((snapshot.liveCount ? snapshot.liveCount : 1) *
                                     sizeof(r44mapper::Record));
         if (live) {
-            for (unsigned i = 0; i < r44mapper::kRecords; ++i) {
-                if (mappings[i].live &&
-                    !live->appendBytes(&mappings[i].record, sizeof(r44mapper::Record))) {
+            for (unsigned i = nextSlot(0, true); i < r44mapper::kRecords;
+                 i = nextSlot(i + 1, true)) {
+                if (!live->appendBytes(&mappings[i].record, sizeof(r44mapper::Record))) {
                     live->release(); live = nullptr;
                     break;
                 }
@@ -214,9 +228,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         }
         if (!physicalValid) break;
 
-        unsigned slot = r44mapper::kRecords;
-        for (unsigned i = 0; i < r44mapper::kRecords; ++i)
-            if (!d->mappings[i].live) { slot = i; break; }
+        const unsigned slot = d->nextSlot(0, false);
         if (slot == r44mapper::kRecords) { result = kIOReturnNoResources; break; }
         const unsigned alignmentPages = alignment > 4096 ? (unsigned)(alignment / 4096) : 1;
         unsigned basePage = 0;
@@ -245,7 +257,8 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
 
         auto &mapping = d->mappings[slot];
         bzero(&mapping, sizeof(mapping));
-        mapping.memory = memory; mapping.command = dmaCommand; mapping.live = true;
+        mapping.memory = memory; mapping.command = dmaCommand;
+        d->setSlotLive(slot, true);
         auto &record = mapping.record;
         record.handle = ++d->nextHandle; record.firstPA = layout.run[0].pa;
         record.mapAddress = address; record.mapLength = returnedLength;
@@ -325,9 +338,10 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
         if (page >= r44mapper::kPages) break;
         const UInt16 owner = d->slotByStartPage[page];
         if (!owner || owner > r44mapper::kRecords) break;
-        auto &mapping = d->mappings[owner - 1U];
+        const unsigned slot = owner - 1U;
+        auto &mapping = d->mappings[slot];
         auto &record = mapping.record;
-        if (!mapping.live || record.basePage != page || record.mapAddress != mapAddress) break;
+        if (!d->slotLive(slot) || record.basePage != page || record.mapAddress != mapAddress) break;
         if (mapping.memory != memory || mapping.command != dmaCommand ||
             record.mapLength != mapLength ||
             record.state != (r44mapper::kMapPublished | r44mapper::kMapConfirmed)) break;
@@ -355,7 +369,8 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
         d->slotByStartPage[page] = 0;
         --s.liveCount; ++s.unmapOk;
         s.lastUnmapAt = record.tUnmapComplete; s.lastUnmap = record;
-        mapping.live = false; mapping.memory = nullptr; mapping.command = nullptr;
+        d->setSlotLive(slot, false);
+        mapping.memory = nullptr; mapping.command = nullptr;
         result = kIOReturnSuccess;
     } while (false);
     if (result != kIOReturnSuccess) ++s.unmapRejected;
@@ -391,9 +406,9 @@ void org_example_AMDMapperProbe::r44PublishMappings(OSDictionary **copy) {
     OSData *summary = OSData::withBytes(&s, sizeof(s));
     OSData *active = OSData::withCapacity((s.liveCount ? s.liveCount : 1) * sizeof(r44mapper::Record));
     if (active) {
-        for (unsigned i = 0; i < r44mapper::kRecords; ++i)
-            if (d->mappings[i].live)
-                active->appendBytes(&d->mappings[i].record, sizeof(r44mapper::Record));
+        for (unsigned i = d->nextSlot(0, true); i < r44mapper::kRecords;
+             i = d->nextSlot(i + 1, true))
+            active->appendBytes(&d->mappings[i].record, sizeof(r44mapper::Record));
     }
     OSData *tables = OSData::withBytes((const void *)d->tables, (unsigned)s.ptBytes);
     if (summary && active && tables) {
