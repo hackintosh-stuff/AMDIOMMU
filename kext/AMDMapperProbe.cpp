@@ -336,6 +336,12 @@ IOReturn org_example_AMDMapperProbe::callPlatformFunction(
 
 IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
     OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    OSObject *pmArm = dict ? dict->getObject("R66ArmSystemPM") : nullptr;
+    if (pmArm) {
+        if (pmArm != kOSBooleanTrue && pmArm != kOSBooleanFalse)
+            return kIOReturnBadArgument;
+        return r66SetSystemPM(pmArm == kOSBooleanTrue);
+    }
     OSObject *all = dict ? dict->getObject("R52Snapshot") : nullptr;
     if (fR44Auto && all) {
         if (all != kOSBooleanTrue) return kIOReturnBadArgument;
@@ -790,7 +796,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.72.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.73.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

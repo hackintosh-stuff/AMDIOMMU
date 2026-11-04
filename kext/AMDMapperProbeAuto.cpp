@@ -130,6 +130,7 @@ struct org_example_AMDMapperProbe::R44Controller {
     bool configured, ready, pinned, restored;
     bool eventOverflow, eventInvalid;
     bool suspended, powerFailed, resumeRegistersRestored;
+    bool coordinatedPMArmed = false;
 
     // The driver has already stopped DMA. Stop the hardware producers before
     // changing their ring pointers or returning the controller to firmware.
@@ -676,13 +677,46 @@ IOReturn org_example_AMDMapperProbe::r63SwitchRequesterDMA(bool park) {
     return kIOReturnSuccess;
 }
 
+IOReturn org_example_AMDMapperProbe::r66SetSystemPM(bool armed) {
+    R44Controller *c = fR44Controller;
+    if (!fR44Auto || fR52Owner || !c) return kIOReturnBadArgument;
+    R52LockGuard guard(c->lock);
+    if (armed) {
+        if (!c->ready || c->suspended || c->powerFailed || c->domainCount != 2)
+            return kIOReturnNotReady;
+        UInt32 present = 0;
+        for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
+            R52Domain *domain = c->domains[i];
+            if (!domain) continue;
+            ++present;
+            if (!domain->active) return kIOReturnNotReady;
+        }
+        if (present != 2) return kIOReturnNotReady;
+        c->coordinatedPMArmed = true;
+    } else {
+        if (c->suspended) return kIOReturnBusy;
+        c->coordinatedPMArmed = false;
+    }
+    setProperty("r66-pm-armed", c->coordinatedPMArmed ? "yes" : "no");
+    return kIOReturnSuccess;
+}
+
 bool org_example_AMDMapperProbe::r52PowerSupported() const {
     R44Controller *c = fR44Controller;
     if (!c || !fR52Domain) return false;
     R52LockGuard guard(c->lock);
-    // R68: retain the proven single-domain R47 path. Coordinated multi-domain
-    // system PM is deferred because this AMD platform cannot validate sleep.
-    return c->domainCount == 1;
+    // Single-domain behavior remains unchanged. Two-domain PM is enabled
+    // only by an explicit runtime arm after both NICs are fully initialized.
+    if (c->domainCount == 1) return true;
+    if (c->domainCount != 2 || !c->coordinatedPMArmed) return false;
+    UInt32 present = 0;
+    for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
+        R52Domain *domain = c->domains[i];
+        if (!domain) continue;
+        ++present;
+        if (!domain->active) return false;
+    }
+    return present == 2;
 }
 
 // TODO(R47-PM-HARDWARE): validate the real suspend/resume sequence once this
@@ -886,6 +920,7 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
         pmResumeReady += c->domains[i]->pmResumeReady ? 1 : 0;
     }
     number("r65-pm-domain-count", c->domainCount);
+    setProperty("r66-pm-armed", c->coordinatedPMArmed ? "yes" : "no");
     number("r65-pm-suspend-ready", pmSuspendReady);
     number("r65-pm-resume-ready", pmResumeReady);
     setProperty("r47-resume-registers-restored",

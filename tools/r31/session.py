@@ -107,8 +107,8 @@ def find_probe_entry(io, target=SERVICE):
     return entry
 
 
-def set_boolean_property(name, service_class=None):
-    """Send one true-valued probe property RPC.
+def set_boolean_property(name, service_class=None, value=True):
+    """Send one boolean-valued probe property RPC.
 
     Frameworks load only here, so importing the module and host-side protocol
     checks do not require macOS or any compiled Python extension.
@@ -146,10 +146,10 @@ def set_boolean_property(name, service_class=None):
         key = cf.CFStringCreateWithCString(None, name.encode('ascii'), 0x08000100)
         if not key:
             raise RuntimeError('cannot create probe property key')
-        true_value = ptr.in_dll(cf, 'kCFBooleanTrue')
+        boolean_value = ptr.in_dll(cf, 'kCFBooleanTrue' if value else 'kCFBooleanFalse')
         # The key and global boolean remain alive for this synchronous RPC.
         properties = cf.CFDictionaryCreate(None, (ptr * 1)(key),
-                                           (ptr * 1)(true_value.value), 1, None, None)
+                                           (ptr * 1)(boolean_value.value), 1, None, None)
         if not properties:
             raise RuntimeError('cannot create probe property dictionary')
         result = io.IORegistryEntrySetCFProperties(service, properties)

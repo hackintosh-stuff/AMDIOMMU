@@ -111,6 +111,7 @@ private:
     bool r52ReleaseDomain();
     void r52PublishDomains();
     bool r52PowerSupported() const;
+    IOReturn r66SetSystemPM(bool armed);
     bool fR63DMAParked = false; // writes hold both the mapper and controller locks
     IOReturn r63SetRequesterDMA(bool park);
     IOReturn r63SwitchRequesterDMA(bool park);
