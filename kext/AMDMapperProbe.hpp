@@ -111,7 +111,6 @@ private:
     bool r52ReleaseDomain();
     void r52PublishDomains();
     bool r52PowerSupported() const;
-    bool fR65PMArmed = false; // R66 arms coordinated system PM before a controlled sleep
     bool fR63DMAParked = false; // writes hold both the mapper and controller locks
     IOReturn r63SetRequesterDMA(bool park);
     IOReturn r63SwitchRequesterDMA(bool park);

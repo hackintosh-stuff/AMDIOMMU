@@ -680,19 +680,9 @@ bool org_example_AMDMapperProbe::r52PowerSupported() const {
     R44Controller *c = fR44Controller;
     if (!c || !fR52Domain) return false;
     R52LockGuard guard(c->lock);
-    // One requester retains the original R47 path. Coordinated two-domain PM
-    // is armed only by R66's controlled sleep plan; ordinary boots and network
-    // down/up must keep the R64 admission and hardware-start timing.
-    if (c->domainCount == 1) return true;
-    if (c->domainCount != 2 || !fR65PMArmed) return false;
-    UInt32 present = 0;
-    for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
-        R52Domain *d = c->domains[i];
-        if (!d) continue;
-        ++present;
-        if (!d->active) return false;
-    }
-    return present == 2;
+    // R68: retain the proven single-domain R47 path. Coordinated multi-domain
+    // system PM is deferred because this AMD platform cannot validate sleep.
+    return c->domainCount == 1;
 }
 
 // TODO(R47-PM-HARDWARE): validate the real suspend/resume sequence once this
