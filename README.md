@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Candidate Round57 / bitmap of live mapping-record slots
+## Accepted Round57 / bitmap of live mapping-record slots, PM hardware TODO
 
 Base: `cc7bedff5abe77f2f2c97ab38bf223e7b3f49545` (accepted R56 record).
 R56 deployed `0830a5a13f00973e3c08b0a8d886730bd9fa9471`. Its first auto
@@ -20,10 +20,21 @@ allocation selects slots 35 and 19 respectively. The old search reads 36 and
 20 slot flags; both answers are in the first bitmap word. These are search
 operation counts on captured layouts, not timing measurements.
 
-Build AMDMapperProbe **0.64.0** only: `sh tools/build-m1a.sh`. Retain the
-installed RTL812xLucy **1.1.239** and RealtekRTL8111 **3.0.54**. Use
-`python3 -B tools/r57/run.py <command> ...` for the existing finite run.
-R57 has not yet been built, loaded or exercised on macOS.
+**Accepted: all four mainline checks passed on the real Mac on the first auto
+boot.** The deployed implementation is `c8cca04`; only AMDMapperProbe was
+rebuilt (0.64.0, `4440B59A-9175-3FDC-AA36-E31725D649D6`) and the deployment
+listed it as the sole replaced bundle, retaining Lucy 1.1.239 (`3857B04F-…`)
+and RealtekRTL8111 3.0.54 (`3089E621-…`). Both domains again reported
+`set-on-client-claim-before-pci-open` with their own requester, mapper and
+page-table root — A/en1/0x2700 domain 1 (35 maps/517 pages), B/en2/0x2500
+domain 2 (19 maps/1037 pages), the third candidate 0x2200 left passthrough.
+The 64 MiB load overlapped 97.145 ms (upload) and 49.586 ms (download), B
+completed business while A was down, A recovered after up, shared commands
+closed at 636 → 7050 → 8794, A retired 4351 and B 4439 mappings with zero
+target faults. Live exports stayed ascending and unique in slot order: A
+occupied slots 0–34 and B 0–21 while handles grew to 4381/4443, showing
+allocation, release and reuse on the same slots. The accepted R53 off
+baseline was reused; PM remains TODO(R47-PM-HARDWARE).
 
 ## Accepted Round56 / indexed unmap by starting IOVA page, PM hardware TODO
 
