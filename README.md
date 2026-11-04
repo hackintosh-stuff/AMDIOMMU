@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Round60 candidate / align ordinary IOVA allocations to their invalidation span
+## Accepted Round60 / aligned IOVA spans and reciprocal recovery, PM hardware TODO
 
 Base: `db18ba4b0e3f648980339ee182ad2d27be2205d5` (accepted R59; deployed `fdc6942`).
 The R59 dual-NIC run used eight 512 KiB Lucy RX mappings. In the A-down
@@ -18,7 +18,23 @@ Build only AMDMapperProbe 0.67.0; retain Lucy 1.1.240 and RealtekRTL8111
 3.0.54. The finite R60 auto run exercises both interface lifecycles using
 the original two links: A down while B transfers, then B down while A
 transfers, with traffic after each recovery (12 transfers / 96 MiB).
-The R60 Mac build and hardware run are pending.
+
+**Accepted: all four mainline checks passed on the real Mac (reciprocal
+down/up).** The deployed implementation is `32edc71`; only AMDMapperProbe was
+rebuilt (0.67.0, `BEB2CC99-EE9E-3DBE-AD58-C101D787D8F2`), retaining Lucy
+1.1.240 (`43C9BD33-…`) and RealtekRTL8111 3.0.54 (`3089E621-…`). All RX groups
+now sit naturally aligned — A 32/32 of 16 pages, B 8/8 of 128 pages — and the
+ABI3 descriptor PAs still match the walked page tables
+(`expectedLastPA == walkedLastPA`). The first auto boot died mid-first-upload
+(a boot-time link transient, no IOMMU fault, run and peer logs preserved); the
+second auto boot (`auto2`) completed 96 MiB across 12 transfers: A and B each
+took exactly one disable/enable cycle, the other domain kept transferring
+through both down windows (`otherDeviceTrafficWhileTargetDown`), the parallel
+payloads overlapped 117.064/111.356 ms, shared commands closed at
+819 → 7777 → 9426 → 11001 → 12419 with covered pages ≥ requested pages
+(1573/1600 … 35664/39839), A ended 4704/4669 and B 4764/4753 map/unmap with
+deltas equal to the persistent maps, and target faults stayed zero. PM remains
+TODO(R47-PM-HARDWARE).
 
 ## Accepted Round59 / 512 KiB ordinary DMA mappings (ABI3), PM hardware TODO
 
