@@ -14,6 +14,7 @@ MEMBERS = r'''
     bool r53NormalMapped;
     bool r53ResourcesReady;
     UInt64 r53EnableCount, r53DisableCount, r53Tso6Count, r53SnapshotSerial;
+    UInt64 r53RingDrainCount;
     const char *r53State;
     void r53SelectMapper();
     void r53Snapshot();
@@ -101,6 +102,7 @@ void RTL8111::r53Snapshot()
     setProperty("rtl8111-r53-enable-count", r53EnableCount, 64);
     setProperty("rtl8111-r53-disable-count", r53DisableCount, 64);
     setProperty("rtl8111-r53-tso6-count", r53Tso6Count, 64);
+    setProperty("rtl8111-r53-ring-drain-count", r53RingDrainCount, 64);
     setProperty("rtl8111-r53-tx-mapped-active",
         UInt64(useAppleVTD && txMapInfo ? kNumTxMemDesc - txMapInfo->txNumFreeMem : 0), 64);
     setProperty("rtl8111-r53-chip-command", UInt64(ReadReg8(ChipCmd)), 64);
@@ -268,6 +270,44 @@ def payload_commands(hpp, cpp, setup, vtd):
         dmaCmd->clearMemoryDescriptor();
         md->complete();
 """, "runtime RX command before descriptor reuse")
+    # rxMapBuffers() clears the batch command -- a synchronous unmap plus
+    # invalidation -- before it maps the batch again. Under physical addressing
+    # the re-map returns the same address, so an in-flight RX write was
+    # harmless. Under IOVA the new pages are different, so a descriptor the NIC
+    # has not retired yet would write to an unmapped IOVA and raise a real
+    # IO_PAGE_FAULT. Stop RX DMA through the ordinary driver path first and wait
+    # for the completions already in flight, then rewrite the ring.
+    setup = once(setup, """void RTL8111::clearDescriptors()
+{
+    IOMemoryDescriptor *md;
+    mbuf_t m;
+    UInt64 word1;
+    UInt32 lastIndex = kTxLastDesc;
+    UInt32 i;
+""", """void RTL8111::clearDescriptors()
+{
+    IOMemoryDescriptor *md;
+    mbuf_t m;
+    UInt64 word1;
+    UInt32 lastIndex = kTxLastDesc;
+    UInt32 i;
+
+    /* R53: the ring rewrite below unmaps and remaps every RX batch to different
+     * IOVAs. Descriptors still owned by the NIC would then point into
+     * invalidated pages, so RX DMA must be stopped and drained first. This is
+     * the driver's own disable path, not a test hook. */
+    if (useAppleVTD) {
+        UInt16 mask = ReadReg16(IntrMask);
+        WriteReg16(IntrMask, 0);
+        WriteReg8(ChipCmd, ReadReg8(ChipCmd) & ~(CmdRxEnb | CmdTxEnb));
+        OSSynchronizeIO();
+        setProperty("rtl8111-r53-drain-command", UInt64(ReadReg8(ChipCmd)), 64);
+        IOSleep(20);
+        WriteReg16(IntrStatus, ReadReg16(IntrStatus));
+        WriteReg16(IntrMask, mask);
+        ++r53RingDrainCount;
+    }
+""", "stop RX DMA before remap")
     prepared = """        if (md->prepare() != kIOReturnSuccess) {
             IOLog("Failed to prepare rx IOMemoryDescriptor.\\n");
             goto done;
@@ -322,6 +362,7 @@ def transform(files, version):
         mapper = NULL;
         r53NormalMapped = r53ResourcesReady = false;
         r53EnableCount = r53DisableCount = r53Tso6Count = r53SnapshotSerial = 0;
+        r53RingDrainCount = 0;
         r53State = "initializing";
 """, "initialization")
     cpp = once(cpp, "    pciDevice->retain();\n", """    pciDevice->retain();
