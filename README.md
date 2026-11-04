@@ -1,6 +1,6 @@
 # AMDIOMMU — authoritative source repository
 
-## Candidate Round55 / word-wise first-fit IOVA allocation
+## Accepted Round55 / word-wise first-fit IOVA allocation, PM hardware TODO
 
 Base: `30395d3572b36457b68dca2f37e9cdb027407017`, accepted R54 record.
 The effective R54 deployment used `b882f091a50080969ccb69bb9748113cb3d3e0cb`.
@@ -25,7 +25,20 @@ installed R54 clients: RTL812xLucy **1.1.239**, RealtekRTL8111 **3.0.54**.
 They request Probe 0.61.0, within the new bundle's 0.53.0–0.62.0 compatibility
 range. Use `python3 -B tools/r55/run.py <command> ...` for the existing
 two-interface workload. The accepted R54 client binaries and fixed upstream
-inputs do not need to be rebuilt. R55 macOS build and hardware run are pending.
+inputs do not need to be rebuilt.
+
+**Accepted: all four mainline checks passed on the real Mac on the first auto
+boot.** The deployed implementation is `54469ee`; only AMDMapperProbe was
+rebuilt (0.62.0, `882258A2-0B10-3433-88D3-CC5696E7217E`) and the deployment
+listed it as the sole replaced bundle, with RTL812xLucy 1.1.239
+(`3857B04F-…`) and RealtekRTL8111 3.0.54 (`3089E621-…`) retained from R54.
+Both domains again reported `set-on-client-claim-before-pci-open` with their own
+requester, mapper and page-table root — A/en1/0x2700 domain 1 (35 maps/517
+pages), B/en2/0x2500 domain 2 (19 maps/1037 pages), the third candidate 0x2200
+left passthrough. The 64 MiB load overlapped 118.914 ms (upload) and 103.458 ms
+(download), B completed traffic while A was down, A recovered after up, shared
+commands closed at 901 → 8106 → 9835, and target faults stayed zero. The
+accepted R53 off baseline was reused; PM remains TODO(R47-PM-HARDWARE).
 
 ## Accepted Round54 / explicit per-device requester claims, PM hardware TODO
 
