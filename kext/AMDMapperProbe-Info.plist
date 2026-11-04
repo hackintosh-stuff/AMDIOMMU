@@ -8,14 +8,14 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.70.0</string>
-    <key>CFBundleVersion</key><string>0.70.0</string>
+    <key>CFBundleShortVersionString</key><string>0.71.0</string>
+    <key>CFBundleVersion</key><string>0.71.0</string>
     <!-- Client requests must fit [OSBundleCompatibleVersion, CFBundleVersion].
          Existing mapper ABI1 clients remain compatible with 0.53.0;
          Round54 clients require 0.61.0 for a pre-open claim on their selected PCI requester. -->
     <key>OSBundleCompatibleVersion</key><string>0.53.0</string>
     <!--
-      版本历史：
+      0.71.0 第65轮：两个设备域分别完成PM准备与恢复失效，由共享Controller协调一次暂停和重启。\n      版本历史：
         0.70.0 第63轮：设备停用时撤回其 DTE 读写授权；恢复须先完成设备和域失效。
         0.69.0 第62轮：共享命令环复用上次读回的 HEAD，仅在预留空间不足时刷新硬件寄存器。
         0.68.0 第61轮：普通页范围精确分段失效，每批共用一次完成等待，确认后才回收。

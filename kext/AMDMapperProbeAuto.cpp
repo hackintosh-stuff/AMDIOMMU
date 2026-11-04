@@ -97,6 +97,8 @@ struct org_example_AMDMapperProbe::R52Domain {
     UInt32 lastRangeCommand[4];
     UInt64 lastInvDevSequence, lastInvPagesSequence;
     UInt64 parkCount, restoreCount, gateDevSequence, gatePagesSequence;
+    // R65: per-requester participation in a coordinated shared-controller PM cycle.
+    bool pmSuspendReady, pmResumeReady;
     UInt64 targetFaults;
     UInt32 lastEvent[4];
     const char *state;
@@ -678,9 +680,18 @@ bool org_example_AMDMapperProbe::r52PowerSupported() const {
     R44Controller *c = fR44Controller;
     if (!c || !fR52Domain) return false;
     R52LockGuard guard(c->lock);
-    // A per-NIC callback is not authority to suspend a shared IOMMU.
-    // Coordinated multi-device system PM remains a later hardware milestone.
-    return c->domainCount == 1;
+    // One requester retains the original R47 path. Two requesters may use
+    // coordinated PM only when both registered domains are present and active.
+    if (c->domainCount == 1) return true;
+    if (c->domainCount != 2) return false;
+    UInt32 present = 0;
+    for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
+        R52Domain *d = c->domains[i];
+        if (!d) continue;
+        ++present;
+        if (!d->active) return false;
+    }
+    return present == 2;
 }
 
 // TODO(R47-PM-HARDWARE): validate the real suspend/resume sequence once this
@@ -689,14 +700,39 @@ bool org_example_AMDMapperProbe::r47SuspendAuto() {
     // The mapper lock is held and admission is closed. Lucy's PM gate has
     // already completed the network family's disable/clearRxTxRings path.
     R44Controller *c = fR44Controller;
-    if (!c || !fR52Domain) return false;
+    R52Domain *d = fR52Domain;
+    if (!c || !d) return false;
     R52LockGuard guard(c->lock);
-    if (c->domainCount != 1 || !c->ready || c->suspended || c->powerFailed)
+    if ((c->domainCount != 1 && c->domainCount != 2) ||
+        !c->ready || c->suspended || c->powerFailed)
         return false;
     c->resumeRegistersRestored = false;
     c->sleepControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
-    if ((c->sleepControl & kR44Enabled) != kR44Enabled || !r52InvalidateLocked(false, 0, 0, false, nullptr))
+    if ((c->sleepControl & kR44Enabled) != kR44Enabled)
+        return c->powerFailure("failed-pm-suspend-controller-not-enabled");
+    if (c->domainCount == 2) {
+        if (d->pmSuspendReady) return false;
+        if (d->pmResumeReady) {
+            bool allResumed = true;
+            for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+                if (c->domains[i] && !c->domains[i]->pmResumeReady) allResumed = false;
+            if (!allResumed) return false;
+            for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+                if (c->domains[i]) c->domains[i]->pmResumeReady = false;
+        }
+        // Fence this requester's own DTE/domain before publishing readiness.
+        // The final participant performs the single shared-controller stop.
+        if (!r52InvalidateLocked(false, 0, 0, false, nullptr))
+            return c->powerFailure("failed-pm-domain-suspend-fence");
+        d->pmSuspendReady = true;
+        d->state = "pm-suspend-ready";
+        bool allReady = true;
+        for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+            if (c->domains[i] && !c->domains[i]->pmSuspendReady) allReady = false;
+        if (!allReady) return true;
+    } else if (!r52InvalidateLocked(false, 0, 0, false, nullptr)) {
         return c->powerFailure("failed-pm-suspend-fence");
+    }
     c->suspendSequence = c->command.completionSequence;
     if (!c->stopHardware())
         return c->powerFailure("failed-pm-suspend-controller");
@@ -715,9 +751,38 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
     // The PCI parent and Lucy's D0 transition are complete, but its normal
     // enable has not run. All tables, DMA objects and mapping records survive.
     R44Controller *c = fR44Controller;
-    if (!c || !fR52Domain) return false;
+    R52Domain *d = fR52Domain;
+    if (!c || !d) return false;
     R52LockGuard guard(c->lock);
-    if (c->domainCount != 1 || !c->suspended || c->powerFailed) return false;
+    if ((c->domainCount != 1 && c->domainCount != 2) ||
+        !c->suspended || c->powerFailed) {
+        // The first requester restored the shared controller. Later requesters
+        // only need to invalidate their own DTE/domain before reopening.
+        if (c->domainCount == 2 && c->ready && !c->suspended &&
+            !c->powerFailed && !d->pmResumeReady) {
+            if (!r52InvalidateLocked(true, 0, 0, false, nullptr))
+                return c->powerFailure("failed-pm-domain-resume-invalidation");
+            d->pmResumeReady = true;
+            d->state = "pm-resume-ready";
+            c->resumeDevSequence = d->lastInvDevSequence;
+            c->resumePagesSequence = d->lastInvPagesSequence;
+            bool allReady = true;
+            for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+                if (c->domains[i] && !c->domains[i]->pmResumeReady) allReady = false;
+            if (allReady) {
+                c->resumeTime = mach_absolute_time();
+                ++c->resumeCount;
+                c->state = "ready-all-domains";
+            }
+            return true;
+        }
+        return false;
+    }
+    if (c->domainCount == 2) {
+        for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+            if (c->domains[i] && !c->domains[i]->pmSuspendReady)
+                return c->powerFailure("failed-pm-resume-incomplete-suspend-barrier");
+    }
     if (c->hardware.pciEfrSupported &&
         mmioRead64(c->base, M21_OFF_EXT_FEAT) != c->startupEfr)
         return c->powerFailure("failed-pm-resume-identity");
@@ -774,12 +839,29 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
     // in retained memory. Do not overwrite the original startup timestamps.
     if (!r52InvalidateLocked(true, 0, 0, false, nullptr))
         return c->powerFailure("failed-pm-resume-invalidation");
-    c->resumeDevSequence = fR52Domain->lastInvDevSequence;
-    c->resumePagesSequence = fR52Domain->lastInvPagesSequence;
-    c->resumeTime = mach_absolute_time();
-    ++c->resumeCount;
+    c->resumeDevSequence = d->lastInvDevSequence;
+    c->resumePagesSequence = d->lastInvPagesSequence;
     c->suspended = false;
-    c->state = "ready-shared-controller";
+    if (c->domainCount == 2) {
+        d->pmResumeReady = true;
+        d->state = "pm-resume-ready";
+        for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+            if (c->domains[i]) c->domains[i]->pmSuspendReady = false;
+        bool allReady = true;
+        for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+            if (c->domains[i] && !c->domains[i]->pmResumeReady) allReady = false;
+        if (allReady) {
+            c->resumeTime = mach_absolute_time();
+            ++c->resumeCount;
+            c->state = "ready-all-domains";
+        } else {
+            c->state = "ready-awaiting-domain-resume";
+        }
+    } else {
+        c->resumeTime = mach_absolute_time();
+        ++c->resumeCount;
+        c->state = "ready-shared-controller";
+    }
     return true;
 }
 
@@ -806,6 +888,15 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     setProperty("r44-command-failed", c->command.failed ? "yes" : "no");
     setProperty("r47-pm-state", c->powerFailed ? "failed" :
                 (c->suspended ? "suspended" : "awake"));
+    UInt32 pmSuspendReady = 0, pmResumeReady = 0;
+    for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
+        if (!c->domains[i]) continue;
+        pmSuspendReady += c->domains[i]->pmSuspendReady ? 1 : 0;
+        pmResumeReady += c->domains[i]->pmResumeReady ? 1 : 0;
+    }
+    number("r65-pm-domain-count", c->domainCount);
+    number("r65-pm-suspend-ready", pmSuspendReady);
+    number("r65-pm-resume-ready", pmResumeReady);
     setProperty("r47-resume-registers-restored",
                 c->resumeRegistersRestored ? "yes" : "no");
     number("r47-suspend-count", c->suspendCount);
