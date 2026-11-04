@@ -220,6 +220,7 @@ def snapshot(parent, label, config, mode):
             raise ValueError('expected one shared controller')
         owner_id = owners[0]['IORegistryEntryID']
         deadline = time.monotonic() + 30
+        previous = None
         while True:
             entries = {value['binding']['driver_registry_id']:
                        PROFILES[value['binding']['driver_class']]['snapshot']
@@ -241,7 +242,16 @@ def snapshot(parent, label, config, mode):
             requester = next(d['binding']['requester'] for d in drivers.values()
                              if d['binding']['driver_class'] == 'RTL8111')
             probe = next((p for p in domains if p.get('r52-requester') == requester), None)
-            if drained and probe is not None and rx_groups_consistent(rtl8111, live_records(probe)):
+            # The target must also hold one enable/disable generation for a whole
+            # iteration, so a snapshot taken while the link is still settling
+            # cannot be counted as the start of the down/up cycle.
+            lifecycle = (rtl8111.get('rtl8111-r53-state'),
+                         rtl8111.get('rtl8111-r53-enable-count'),
+                         rtl8111.get('rtl8111-r53-disable-count'))
+            settled = previous is not None and lifecycle == previous
+            previous = lifecycle
+            if (settled and drained and probe is not None and
+                    rx_groups_consistent(rtl8111, live_records(probe))):
                 break
             if time.monotonic() >= deadline:
                 if not drained:
