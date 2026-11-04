@@ -1,5 +1,25 @@
 # AMDIOMMU — authoritative source repository
 
+## Round62 candidate / cache the shared command ring's observed HEAD
+
+Base: `e4d61d84ae08e38ab79dce8330cc4f6aaca0b7fe` (accepted R61; deployed `e236625`). Its first auto boot
+completed twelve transfers / 96 MiB. Both domains submitted real split
+invalidations: 2,820 split batches cumulatively; 73,471 requested pages
+matched 73,471 pages of encoded coverage. From before to b-after-up the
+shared ring completed 11,194 batches and wrapped 50 times.
+
+Use the last validated value read from the hardware HEAD register to
+reserve an entire batch plus its CompletionWait. The serialized producer
+cannot cross the reserved empty slot, so an old HEAD is conservative.
+Refresh from hardware when the known space is insufficient. Invalidate
+the cached position if the hardware ring is initialized again. Completion
+and IOVA retirement still depend on the hardware semaphore.
+
+Build only AMDMapperProbe 0.69.0; retain Lucy 1.1.240 and RTL8111 3.0.54.
+The existing reciprocal test now reports successful cached reservations,
+actual MMIO HEAD reads and wraps over the same five-phase workload.
+The R62 Darwin build and hardware run are pending.
+
 ## Accepted Round61 / exact leaf invalidations with one completion per mapping, PM hardware TODO
 
 Base: `562559ac04a5d921691a0150868b6b037332b0df` (accepted R60). At its last snapshot the two domains

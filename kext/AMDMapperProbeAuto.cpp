@@ -121,6 +121,7 @@ struct org_example_AMDMapperProbe::R44Controller {
     UInt64 resumeDevSequence, resumePagesSequence;
     UInt64 suspendCount, resumeCount, powerFailures;
     UInt32 lastEvent[4];
+    M2B2HeadCache headCache;
     M2B2CmdCtx command;
     const char *state;
     bool configured, ready, pinned, restored;
@@ -441,6 +442,7 @@ bool org_example_AMDMapperProbe::r52PrepareController(const R47HardwareInfo &har
     c->command.buf = (volatile UInt32 *)c->commands->getBytesNoCopy();
     c->command.sem = (volatile UInt64 *)c->semaphore->getBytesNoCopy();
     c->command.semPA = c->semaphorePA;
+    c->command.headCache = &c->headCache;
     c->command.pageMode = M2B2_PAGE_MODE_4_LEVEL;
 
     OSSynchronizeIO();
@@ -699,6 +701,7 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
     // must remain monotonic, so an old semaphore value cannot complete a new CW.
     bzero(c->commands->getBytesNoCopy(), M23_CMD_BUF_SIZE);
     bzero(c->events->getBytesNoCopy(), M2B2_EVT_BUFFER_SIZE);
+    c->headCache.valid = false; // no cached position survives a hardware ring reset
     c->command.idx = 0;
     c->command.tail = 0;
     OSSynchronizeIO();
@@ -894,6 +897,8 @@ void org_example_AMDMapperProbe::r52PublishDomains() {
     number("r52-controller-cmd-completed", c->command.completed);
     number("r52-controller-cmd-completion-sequence", c->command.completionSequence);
     number("r52-controller-cmd-wraps", c->command.wraps);
+    number("r52-controller-cmd-head-reads", c->headCache.reads);
+    number("r52-controller-cmd-cached-batches", c->headCache.cachedBatches);
     number("r52-controller-event-entries", c->eventEntries);
     number("r52-controller-target-faults", c->targetFaults);
     setProperty("r52-controller-ready", c->ready ? "yes" : "no");

@@ -27,6 +27,7 @@ class MixedRun(NamedTuple):
     retained_lucy_dependency: Optional[str] = None
     reciprocal: bool = False
     exact_ranges: bool = False
+    cached_ring_head: bool = False
 
 
 RUN = MixedRun(53, '2be76054f30e208d57658dc7efa3df79c9050f7c',

@@ -1053,7 +1053,14 @@ struct M2B2CmdRecord {
 };
 
 // ---- struct M2B2CmdCtx (original lines 2966..2985) ----
+struct M2B2HeadCache {
+    UInt32 head;
+    bool valid;
+    UInt64 reads, cachedBatches;
+};
+
 struct M2B2CmdCtx {
+    struct M2B2HeadCache *headCache = nullptr; // opt-in for the shared auto controller
     volatile UInt32 *buf;
     volatile UInt64 *sem;
     UInt64 semPA;        // 完成信号物理地址（命令里要用）
@@ -1375,16 +1382,23 @@ static inline bool m2b2SubmitBatch(volatile UInt8 *base, M2B2CmdCtx *c, const ch
         c->failReason = "cmd-ring-state";
         return false;
     }
-    bool space = false;
-    for (UInt32 wait = 0; wait < M2B1_LOOP_TIMEOUT; ++wait) {
+    auto hasRoom = [&](UInt32 head) {
+        return ((head + bytes - c->tail - 16) & (bytes - 1)) >= (count + 1) * 16;
+    };
+    auto *cache = c->headCache;
+    // Never advance TAIL past the reserved slot before this observed HEAD.
+    const bool hit = cache && cache->valid && hasRoom(cache->head);
+    bool space = hit;
+    for (UInt32 wait = 0; !space && wait < M2B1_LOOP_TIMEOUT; ++wait) {
         const UInt64 head = mmioRead64(base, M2B2_OFF_CMD_HEAD);
+        if (cache) ++cache->reads;
         if (head >= bytes || (head & 15)) {
             c->failed = true;
             c->failReason = "cmd-ring-head";
             return false;
         }
-        const UInt32 freeBytes = ((UInt32)head + bytes - c->tail - 16) & (bytes - 1);
-        if (freeBytes >= (count + 1) * 16) { space = true; break; }
+        if (cache) { cache->head = (UInt32)head; cache->valid = true; }
+        space = hasRoom((UInt32)head);
     }
     if (!space) {
         c->failed = true;
@@ -1448,6 +1462,7 @@ static inline bool m2b2SubmitBatch(volatile UInt8 *base, M2B2CmdCtx *c, const ch
         return false;
     }
     c->completed++;
+    if (hit) ++cache->cachedBatches;
     if (c->wraps) c->postWrapCompleted++;
     return true;
 }

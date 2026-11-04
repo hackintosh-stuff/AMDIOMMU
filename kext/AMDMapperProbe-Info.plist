@@ -8,14 +8,15 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.68.0</string>
-    <key>CFBundleVersion</key><string>0.68.0</string>
+    <key>CFBundleShortVersionString</key><string>0.69.0</string>
+    <key>CFBundleVersion</key><string>0.69.0</string>
     <!-- Client requests must fit [OSBundleCompatibleVersion, CFBundleVersion].
          Existing mapper ABI1 clients remain compatible with 0.53.0;
          Round54 clients require 0.61.0 for a pre-open claim on their selected PCI requester. -->
     <key>OSBundleCompatibleVersion</key><string>0.53.0</string>
     <!--
       版本历史：
+        0.69.0 第62轮：共享命令环复用上次读回的 HEAD，仅在预留空间不足时刷新硬件寄存器。
         0.68.0 第61轮：普通页范围精确分段失效，每批共用一次完成等待，确认后才回收。
         0.67.0 第60轮：普通多页 DMA 优先选择自然对齐的 IOVA，碎片下保留原分配路径；统计失效命令覆盖页。
         0.66.0 第59轮：单次普通 DMA 映射支持 128 页及 128 个物理段，按 ABI3 导出全部页。

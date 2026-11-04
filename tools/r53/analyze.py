@@ -111,6 +111,19 @@ def exact_range_counts(p, m):
     return dict(rangeBatches=batches, rangeDescriptors=desc, splitBatches=splits)
 
 
+def ring_window(first, last):
+    """Successful reservations from either source; MMIO reads also include repeat polls."""
+    def delta(name):
+        key = 'r52-controller-cmd-' + name
+        return last[key] - first[key]
+    completed, hits = delta('completed'), delta('cached-batches')
+    reads, wraps = delta('head-reads'), delta('wraps')
+    need(0 < hits < completed and reads >= completed - hits and wraps > 0,
+         'command ring did not exercise cached reservations and HEAD refresh across wrap')
+    return dict(completedBatches=completed, cachedBatches=hits, refreshedBatches=completed - hits,
+                mmioHeadReads=reads, wraps=wraps)
+
+
 def analyze(cap):
     checks, states, controllers, phase_data, data = [], {}, {}, {}, {}
 
@@ -420,6 +433,8 @@ def analyze(cap):
                 if RUN.exact_ranges:
                     counters[role].update(exact_range_counts(p, m))
             details[phase] = {'controllerCommands': completed, 'devices': counters}
+        if RUN.cached_ring_head:
+            details['b-after-up']['ringWindow'] = ring_window(controllers['before'], controllers['b-after-up'])
         if RUN.exact_ranges:
             need(any(v['splitBatches'] for ph in details.values() for v in ph['devices'].values()),
                  'no multi-descriptor invalidation observed')
