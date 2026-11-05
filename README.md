@@ -17,20 +17,28 @@ arena arithmetic; `93cb810` adds the ceiling profile, the peak counters and
 
 **Not accepted.** The S3 measurement boot (Probe injected through OpenCore
 `Kernel > Add`, `amdiommu=auto-attach amdiommu_devices=2200,2500
-amdiommu_profile=rl-10g-max`) reached `loginwindow USER_PROCESS console` at
-18:03:33 and then stopped responding. There is **no new panic** file (the
-newest remains R69's 17:25:14), the 18:03–18:05 window is absent from the
-persisted unified log, and both the NanoKVM management bridge and the two
-measured ports went unreachable. Recovery was manual: power cycle into the
-Debian OCRESCUE environment, then an ESP rollback from
-`config.plist.bak_r69_20261104_180225` (12 `Add` entries, probe kext deleted,
-boot-args rewritten to `amdiommu=off` with a `NVRAM > Delete` entry), and a
-reboot back to macOS at 18:21. No capacity data was collected; nothing in the
-acceptance criteria was relaxed and no code changed after the hang. The hang is
-not the R69 exhaustion signature, so it is recorded as a new, unlocalised
-blocker: the next attempt should use `rl-10g` (not max), add IOLog breadcrumbs
-per prepare stage, and optionally a hold mode that builds the domain without
-publishing `iommu-parent` until armed.
+amdiommu_profile=rl-10g-max`) reached the login window at 18:03:33 and then
+panicked at uptime 52.0 s with the R69 string
+`"rl:34:0:0:0:tx: segment prepare error 0xe00002be"` — but the panic's backtrace
+lists only IOSkywalkFamily and **no AMDMapperProbe frame**, so the failing
+`IODMACommand` had a NULL mapper and returned `NoResources` before our code ran.
+The domain was never published for 22:00.0/25:00.0; the most likely cause is
+`r44Allocate` failing for the 516-page (≈2.1 MB) contiguous page-table area at
+first publish, which makes `r52PrepareDomain` return false and writes no
+`iommu-parent`. That falsifies the R69 gap-analysis assumption that a missing
+mapper degrades silently to physical DMA: **refusing admission is itself
+fatal** for this client. The panic halted the machine instead of rebooting
+(it looked like a hang), so recovery was manual: power cycle into the Debian
+OCRESCUE environment, ESP rollback from `config.plist.bak_r69_20261104_180225`
+(12 `Add` entries, probe kext deleted, boot-args rewritten to `amdiommu=off`
+with a `NVRAM > Delete` entry), reboot to macOS at 18:21, which then wrote the
+panic report. No capacity data was collected; no criterion was relaxed and no
+code changed after the panic. Next round must (1) stop depending on a 2.1 MB
+contiguous table allocation (block-wise leaf tables, or 512 MiB first),
+(2) make an admission failure a self-identifying `panic` with the reason
+instead of handing Apple a NULL mapper, and (3) add IOLog breadcrumbs per
+prepare stage plus a hold mode that builds the domain without publishing
+`iommu-parent` until armed.
 
 ## Round69 / AppleEthernetRL on the AMD mapper — BLOCKED, panic preserved
 
