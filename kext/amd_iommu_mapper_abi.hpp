@@ -116,4 +116,18 @@ inline const Profile *profileForName(const char *name) {
     if (sameProfileName(name, kProfileRl10g.name)) return &kProfileRl10g;
     return nullptr;
 }
+
+// S2 admission: the vendor/device policy. Only Apple's own Ethernet client
+// (AppleEthernetRL, 10ec:8124-8127) takes the pool-sized profile, and only on
+// the auto-attach path, because that is the one client that cannot call our
+// private claim. Lucy, the board RTL8111 and every claim-based path keep the
+// accepted ABI3 arena. The caller applies a boot-arg override beforehand.
+inline const Profile *profileForDevice(uint32_t vendor, uint32_t device,
+                                       bool appleClientPath) {
+    if (!appleClientPath) return &kProfileLegacy;
+    const uint32_t vendor16 = vendor & 0xffffU, device16 = device & 0xffffU;
+    if (vendor16 == 0x10ecU && device16 >= 0x8124U && device16 <= 0x8127U)
+        return &kProfileRl10g;
+    return &kProfileLegacy;
+}
 } // namespace r44mapper

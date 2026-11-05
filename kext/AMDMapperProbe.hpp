@@ -121,8 +121,11 @@ private:
     // S1 capacity profile (docs/m2-3az-round69-capacity-model.md). The legacy
     // entry is the default and reproduces the accepted ABI3 arena exactly; a
     // domain may only be prepared after the profile's page-table area exists.
+    // S2 derives the profile per device; a boot argument forces it for all.
     r44mapper::Profile fR44Profile = r44mapper::kProfileLegacy;
+    bool fR44ProfileForced = false;
     bool r44SelectProfile();
+    const r44mapper::Profile *r44ProfileForDevice(IOPCIDevice *nic) const;
     struct R52Domain;
     R52Domain *fR52Domain = nullptr;
     void r52AttachExistingDevices();
@@ -154,7 +157,8 @@ private:
     IOReturn r47PowerTransition(UInt32);
     bool r47SuspendAuto();
     bool r47ResumeAuto();
-    bool r44PrepareMappings(volatile UInt64 *, UInt64, UInt32, UInt32);
+    bool r44PrepareMappings(volatile UInt64 *, UInt64, UInt32, UInt32,
+                            const r44mapper::Profile &);
     bool r44QuiesceMappings();
     bool r44ReleaseMappings();
     UInt32 r44LiveMappings() const;

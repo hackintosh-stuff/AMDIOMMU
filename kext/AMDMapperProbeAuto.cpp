@@ -109,6 +109,10 @@ struct org_example_AMDMapperProbe::R52Domain {
     }
     UInt64 targetFaults;
     UInt32 lastEvent[4];
+    // S2: the admission record for this domain. Shown per device so a refused
+    // or legacy domain cannot be mistaken for a pool-sized one.
+    const char *profileName;
+    UInt32 profileRecords, profilePages, tablePages;
     const char *state;
     bool active;
 };
@@ -260,18 +264,49 @@ bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
 bool org_example_AMDMapperProbe::r44SelectProfile() {
     char requested[24] = {};
     fR44Profile = r44mapper::kProfileLegacy;
+    fR44ProfileForced = false;
     bool accepted = true;
     if (PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1)) {
         const r44mapper::Profile *picked = r44mapper::profileForName(requested);
         setProperty("r44-profile-request", requested);
-        if (picked) fR44Profile = *picked;
+        if (picked) { fR44Profile = *picked; fR44ProfileForced = true; }
         else accepted = false;
     }
-    setProperty("r44-profile", accepted ? fR44Profile.name : "unsupported-name");
-    setProperty("r44-profile-records", fR44Profile.records, 32);
-    setProperty("r44-profile-pages", fR44Profile.pages, 32);
-    setProperty("r44-profile-table-pages", fR44Profile.tablePages, 32);
+    setProperty("r44-profile-mode", fR44ProfileForced ? "forced" : "per-device");
+    setProperty("r44-profile", accepted
+        ? (fR44ProfileForced ? fR44Profile.name : "per-device")
+        : "unsupported-name");
+    if (fR44ProfileForced) {
+        setProperty("r44-profile-records", fR44Profile.records, 32);
+        setProperty("r44-profile-pages", fR44Profile.pages, 32);
+        setProperty("r44-profile-table-pages", fR44Profile.tablePages, 32);
+    }
     return accepted;
+}
+
+// Vendor/device IDs come from the device-tree properties OpenCore already
+// publishes, so S2 never touches PCI config space before admission.
+static bool pciIdProperty(IORegistryEntry *entry, const char *key, UInt32 &value) {
+    OSData *data = OSDynamicCast(OSData, entry->getProperty(key));
+    if (!data || data->getLength() < sizeof(UInt32)) return false;
+    value = *(const UInt32 *)data->getBytesNoCopy();
+    return true;
+}
+
+// S2 admission input: which capacity does this device need *before* a domain
+// exists? Only Apple's AppleEthernetRL (10ec:8124-8127 under auto-attach, i.e.
+// a client that cannot call AMDIOMMUClaimRequesterV1) gets the pool-sized
+// profile. Lucy/RTL8111 keep the accepted ABI3 window, so R67-2 behaviour is
+// unchanged. A boot-arg profile overrides both for measurement rounds.
+const r44mapper::Profile *org_example_AMDMapperProbe::r44ProfileForDevice(
+    IOPCIDevice *nic) const {
+    if (fR44ProfileForced) return &fR44Profile;
+    if (!fR69AutoAttach || !nic) return &r44mapper::kProfileLegacy;
+    UInt32 vendor = 0, device = 0;
+    if (!pciIdProperty(nic, "vendor-id", vendor) ||
+        !pciIdProperty(nic, "device-id", device))
+        return &r44mapper::kProfileLegacy;
+    return r44mapper::profileForDevice(vendor, device, true);
 }
 
 bool org_example_AMDMapperProbe::r44StartAuto() {
@@ -548,14 +583,38 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slo
     d->deviceID = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
     d->state = "preparing";
-    // The profile decides the page-table area before the domain exists; a
-    // profile that cannot reserve its own tables is refused here, not at the
-    // first map (docs/m2-3az-round69-capacity-model.md S1).
-    const UInt32 tablePages = fR44Profile.tablePages;
-    if (!r44Allocate(d->tables, tablePages * M2B2_PAGE_SIZE, d->tablePA) ||
-        !r44PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
-            d->tablePA, tablePages, M2B2_PAGE_MODE_4_LEVEL))
+    // S2 admission: decide capacity BEFORE the domain exists and before any
+    // iommu-parent is published (docs/m2-3az-round69-capacity-model.md §5).
+    // A refusal leaves the device on passthrough; it must never surface later
+    // as a runtime kIOReturnNoResources, which is what panicked R69.
+    const r44mapper::Profile *profile = r44ProfileForDevice(nic);
+    if (!profile) profile = &r44mapper::kProfileLegacy;
+    const UInt32 tablePages = profile->tablePages;
+    const UInt64 arenaBytes = r44mapper::arenaBytesFor(*profile);
+    const bool capacityOk = arenaBytes && arenaBytes <= r44mapper::kMaxArenaBytes &&
+        tablePages >= profile->pages / 512 + 2;
+    const bool tablesOk = capacityOk &&
+        r44Allocate(d->tables, tablePages * M2B2_PAGE_SIZE, d->tablePA);
+    if (!tablesOk) {
+        nic->setProperty("r69-admission", "refused-insufficient-capacity");
+        nic->setProperty("r69-admission-need-records", profile->records, 32);
+        nic->setProperty("r69-admission-need-pages", profile->pages, 32);
+        nic->setProperty("r69-admission-need-table-bytes",
+                         (unsigned long long)tablePages * M2B2_PAGE_SIZE, 64);
         return false;
+    }
+    if (!r44PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
+            d->tablePA, tablePages, M2B2_PAGE_MODE_4_LEVEL, *profile)) {
+        nic->setProperty("r69-admission", "refused-arena-prepare-failed");
+        return false;
+    }
+    d->profileName = profile->name;
+    d->profileRecords = profile->records;
+    d->profilePages = profile->pages;
+    d->tablePages = tablePages;
+    nic->setProperty("r44-profile", profile->name);
+    nic->setProperty("r69-admission", profile == &r44mapper::kProfileRl10g
+        ? "granted-rl-10g" : "granted-native-legacy");
     if (!fR52Owner->r52PrepareController(hardware)) return false;
     R44Controller *c = fR52Owner->fR44Controller;
     fR44Controller = c;
@@ -626,7 +685,7 @@ bool org_example_AMDMapperProbe::r52InvalidateLocked(
     R52Domain *d = fR52Domain;
     if (!c || !d || !c->ready || c->command.failed) return false;
     const bool full = !d->active || invalidateDevice || !bytes;
-    const UInt64 windowBytes = (UInt64)fR44Profile.pages * 4096ULL;
+    const UInt64 windowBytes = (UInt64)d->profilePages * 4096ULL;
     if (!full && (((address | bytes) & 4095ULL) ||
         address < r44mapper::kBase ||
         address - r44mapper::kBase >= windowBytes ||
@@ -1012,7 +1071,10 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     number("r44-domain-id", d->domainID);
     number("r44-root-pa", d->tablePA);
     number("r44-table-pa", d->tablePA);
-    number("r44-table-bytes", (UInt64)fR44Profile.tablePages * M2B2_PAGE_SIZE);
+    number("r44-table-bytes", (UInt64)d->tablePages * M2B2_PAGE_SIZE);
+    setProperty("r44-domain-profile", d->profileName ? d->profileName : "unknown");
+    number("r44-domain-profile-records", d->profileRecords);
+    number("r44-domain-profile-pages", d->profilePages);
     number("r44-device-table-pa", c->devicePA);
     number("r44-command-pa", c->commandPA);
     number("r44-event-pa", c->eventPA);

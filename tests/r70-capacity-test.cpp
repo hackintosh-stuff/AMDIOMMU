@@ -128,6 +128,31 @@ void arenaArithmetic() {
     check(r44mapper::kMappingBytes == 120, "record slot size changed");
 }
 
+void devicePolicy() {
+    // S2 admission input: only AppleEthernetRL on the auto-attach path widens.
+    check(r44mapper::profileForDevice(0x10ec, 0x8124, true) ==
+              &r44mapper::kProfileRl10g,
+          "AppleEthernetRL 8124 must take the pool profile");
+    check(r44mapper::profileForDevice(0x10ec, 0x8127, true) ==
+              &r44mapper::kProfileRl10g,
+          "AppleEthernetRL 8127 must take the pool profile");
+    check(r44mapper::profileForDevice(0x10ec, 0x8123, true) ==
+              &r44mapper::kProfileLegacy,
+          "device below the Apple RL range must keep the legacy window");
+    check(r44mapper::profileForDevice(0x10ec, 0x8128, true) ==
+              &r44mapper::kProfileLegacy,
+          "device above the Apple RL range must keep the legacy window");
+    check(r44mapper::profileForDevice(0x10ec, 0x8168, true) ==
+              &r44mapper::kProfileLegacy,
+          "the board RTL8111 must keep the accepted ABI3 arena");
+    check(r44mapper::profileForDevice(0x8086, 0x8127, true) ==
+              &r44mapper::kProfileLegacy,
+          "a foreign vendor must not inherit the Apple profile");
+    check(r44mapper::profileForDevice(0x10ec, 0x8127, false) ==
+              &r44mapper::kProfileLegacy,
+          "the claim path (Lucy) must keep the accepted ABI3 arena");
+}
+
 void capacitySemantics() {
     // The allocator must grant exactly poolPages 1-page spans and then refuse:
     // that is the difference between a ring-sized arena and a pool-sized one.
@@ -152,6 +177,7 @@ int main() {
     allocationEquivalence();
     profileTable();
     arenaArithmetic();
+    devicePolicy();
     capacitySemantics();
     if (failures) {
         std::printf("R70_CAPACITY_FAILURES=%d\n", failures);

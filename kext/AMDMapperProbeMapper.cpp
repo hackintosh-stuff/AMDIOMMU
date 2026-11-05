@@ -98,8 +98,8 @@ struct org_example_AMDMapperProbe::R44MapperState {
 };
 
 bool org_example_AMDMapperProbe::r44PrepareMappings(
-    volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel) {
-    const r44mapper::Profile &profile = fR44Profile;
+    volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel,
+    const r44mapper::Profile &profile) {
     if (fR44Mapper || !tables || !tablePA || (tablePA & 4095ULL) ||
         (rootLevel != 3 && rootLevel != 4)) return false;
     // Capacity is decided before the domain exists: the caller must have
