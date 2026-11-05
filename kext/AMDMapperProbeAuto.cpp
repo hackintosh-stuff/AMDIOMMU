@@ -239,6 +239,14 @@ bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
     fR53SelectionExplicit = PE_parse_boot_argn("amdiommu_devices", selection,
                                               sizeof(selection) - 1);
     fR53RequesterCount = 0;
+    // R70-S5e: the boot-args value may carry invisible separators (the config
+    // history contains embedded newlines), so capture exactly what the kernel
+    // handed us before parsing.
+    if (fR44Provider) {
+        fR44Provider->setProperty("amdmapper-selection-raw", selection);
+        fR44Provider->setProperty("amdmapper-selection-explicit",
+                                  fR53SelectionExplicit ? "yes" : "no");
+    }
     if (!fR53SelectionExplicit) {
         setProperty("r53-device-selection", "default-rtl8127");
         return true;
@@ -262,11 +270,12 @@ bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
         }
         fR53Requesters[fR53RequesterCount++] = id;
         cursor += 4;
-        if (*cursor == ',') ++cursor;
-        else if (*cursor) {
-            setProperty("r44-state", "failed-device-selection");
-            return false;
-        }
+        // Skip every separator (comma, space, newline): the boot-args string
+        // has carried embedded whitespace before, and a stray byte after the
+        // digits used to fail the whole selection.
+        while (*cursor && !(((*cursor >= '0') && (*cursor <= '9')) ||
+                            ((*cursor >= 'a') && (*cursor <= 'f')) ||
+                            ((*cursor >= 'A') && (*cursor <= 'F')))) ++cursor;
     }
     if (!fR53RequesterCount) {
         setProperty("r44-state", "failed-device-selection");
