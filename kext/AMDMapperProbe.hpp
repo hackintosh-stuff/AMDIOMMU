@@ -95,7 +95,7 @@ private:
     bool fR44Auto = false;
     // R52: the root owns the hardware; auto-device instances own one mapper.
     // fR52Owner is set before start() and must survive initHardware().
-    static constexpr UInt32 kR52MaxDomains = 2;
+    static constexpr UInt32 kR52MaxDomains = 3;
     org_example_AMDMapperProbe *fR52Owner = nullptr;
     org_example_AMDMapperProbe *fR52Mappers[kR52MaxDomains] = {};
     IOLock *fR52AttachLock = nullptr;

@@ -330,7 +330,7 @@ def main():
     if sys.argv[1:] == ['--check-r59']:
         want = abi()
         layouts = runpy.run_path(str(ROOT / 'tools/r44/common.py'))['ABI_LAYOUTS']
-        expected = (2496, 1128, 128)
+        expected = (4544, 2152, 256)
         header = (want['ordinary_snapshot_bytes'], want['ordinary_record_bytes'],
                   want['ordinary_max_pages'])
         offsets = tuple(want[key] for key in ('ordinary_physical_offset',

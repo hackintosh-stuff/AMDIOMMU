@@ -46,8 +46,8 @@ bool r53ParseRequester(const char *text, UInt32 &requester) {
     return true;
 }
 // The page-table area is profile-driven: r44mapper::Profile::tablePages.
-constexpr UInt32 kR61MaxParts = 16;  // at most two blocks per size for a <=128-page interval
-static_assert(r44mapper::kMapPages <= 128, "revisit exact range command bound");
+constexpr UInt32 kR61MaxParts = 16;  // power-of-two split fits a 1 MiB range
+static_assert(r44mapper::kMapPages <= 512, "revisit exact range command bound");
 
 // The caller has checked that address and bytes are page-aligned and inside the domain.
 UInt32 r61PlanRange(UInt32 opcode, UInt64 address, UInt64 bytes,
@@ -243,17 +243,35 @@ bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
         setProperty("r53-device-selection", "default-rtl8127");
         return true;
     }
-    // One or two four-hex-digit segment-zero requester IDs, no saved BDFs.
-    const size_t length = strlen(selection);
-    if ((length != 4 && length != 9) ||
-        !r53ParseRequester(selection, fR53Requesters[0]) ||
-        (length == 9 && (selection[4] != ',' ||
-          !r53ParseRequester(selection + 5, fR53Requesters[1]) ||
-          fR53Requesters[0] == fR53Requesters[1]))) {
+    // One to kR52MaxDomains four-hex-digit segment-zero requester IDs, no
+    // saved BDFs. The third slot is reserved for a ConnectX-4 Lx next to the
+    // two RTL8127 ports; the selected-pair semantics are unchanged.
+    const char *cursor = selection;
+    while (*cursor) {
+        UInt32 id = 0;
+        if (fR53RequesterCount == kR52MaxDomains ||
+            !r53ParseRequester(cursor, id)) {
+            setProperty("r44-state", "failed-device-selection");
+            return false;
+        }
+        for (UInt32 i = 0; i < fR53RequesterCount; ++i) {
+            if (fR53Requesters[i] == id) {
+                setProperty("r44-state", "failed-device-selection");
+                return false;
+            }
+        }
+        fR53Requesters[fR53RequesterCount++] = id;
+        cursor += 4;
+        if (*cursor == ',') ++cursor;
+        else if (*cursor) {
+            setProperty("r44-state", "failed-device-selection");
+            return false;
+        }
+    }
+    if (!fR53RequesterCount) {
         setProperty("r44-state", "failed-device-selection");
         return false;
     }
-    fR53RequesterCount = length == 9 ? 2 : 1;
     setProperty("r53-device-selection", selection);
     setProperty("r53-selected-count", fR53RequesterCount, 32);
     return true;
@@ -431,7 +449,7 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
         }
     }
     if (slot == kR52MaxDomains) {
-        setProperty("r52-attach-failure", "two-device-capacity");
+        setProperty("r52-attach-failure", "domain-capacity");
         return false;
     }
     if (nic->isOpen() || (claim && nic->getProperty("iommu-parent"))) {
