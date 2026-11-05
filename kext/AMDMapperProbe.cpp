@@ -159,7 +159,13 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
 
     char mode[32] = {};
     fR44Auto = PE_parse_boot_argn("amdiommu", mode, sizeof(mode) - 1)
-            && strcmp(mode, "auto") == 0;
+            && (strcmp(mode, "auto") == 0 ||
+                strcmp(mode, "auto-attach") == 0);
+    // R69: "auto-attach" additionally publishes iommu-parent at first publish,
+    // because Apple's own kexts only call IOMapper::copyMapperForDevice() and
+    // can never invoke the AMDIOMMUClaimRequesterV1 handshake. Plain "auto"
+    // keeps the R54..R67 claim protocol and its analysis exactly as validated.
+    fR69AutoAttach = fR44Auto && strcmp(mode, "auto-attach") == 0;
     if (fR44Auto) {
         // Explicit clients claim at pre-open; this owner keeps their domains
         // across ordinary interface down/up.
