@@ -15,31 +15,30 @@ indistinguishable from the compile-time one over 20,000 operations and pins the
 arena arithmetic; `93cb810` adds the ceiling profile, the peak counters and
 `tools/r70/measure.py`. Probe 0.78.0 builds clean; `R70_CAPACITY_OK`.
 
-**Not accepted.** Three measurement boots (0.78.0, then 0.79.0 twice) panicked
-with the R69 signature `"rl:34:0:0:0:tx: segment prepare error 0xe00002be"` at
-uptime **52.0 / 61.8 / 63.2 s**; each panic halted the machine instead of
-rebooting, so every recovery needed a manual power cycle into the Debian
-OCRESCUE environment. Live readback 21 s into the second boot gave the cause:
-the controller instance reported `r44-profile=rl-10g-max` and
-`r44-profile-mode=forced`, the parent was published
-(`r44-parent=set-at-first-publish-autoattach`) and both domains were built
-(`r44-state=ready-passthrough`), yet both `10ec:8127` devices carried
-`r69-admission=granted-native-legacy`. `r44AttachAuto` gives every device its
-own mapper instance, and the admission path consulted a member flag that the
-instance had not been given, so the domains were built with the legacy 16 MiB
-arena and the Skywalk pool exhausted it within a minute. It was therefore
-neither a NULL mapper nor a missing domain; the absence of AMDMapperProbe
-frames in the panic backtrace is expected because the failing map call had
-already returned. Fix `afb6021` (Probe 0.80.0) resolves the boot argument on
-every admission (`r44ForcedProfile()`), keeps the S3b fallback chain
-(requested -> rl-10g -> legacy, refusing only with a self-identifying panic),
-and publishes `r44-attach-forced` / `r44-attach-instance` so the next boot can
-prove the override was seen within 30 s. No capacity data was collected and no
-criterion was relaxed; both rollbacks restored the ESP to 12 `Add` entries with
-`amdiommu=off` and a `NVRAM > Delete` entry. Next attempt: inject 0.80.0 with
-`rl-10g-max`, verify `r44-attach-forced=yes` and `granted-rl-10g-max` in the
-first 30 s, then measure. If the 516-page contiguous table allocation is what
-fails, the fallback will show `granted-rl-10g` with `r44-profile-fallback=yes`.
+**Measured.** The first three measurement boots (0.78.0, then 0.79.0 twice)
+panicked with the R69 signature
+`"rl:34:0:0:0:tx: segment prepare error 0xe00002be"` at uptime
+**52.0 / 61.8 / 63.2 s** and halted instead of rebooting, so each recovery
+needed a manual power cycle into the Debian OCRESCUE environment. Live readback
+21 s into the second boot gave the cause: the controller instance reported
+`r44-profile=rl-10g-max`, the parent was published and both domains were built,
+yet both `10ec:8127` devices carried `r69-admission=granted-native-legacy`.
+`r44AttachAuto` gives every device its own mapper instance, and admission
+consulted a member flag that instance never received, so the domains were built
+with the legacy 16 MiB arena. Fix `afb6021` (0.80.0) resolves
+`amdiommu_profile` on every admission and publishes `r44-attach-forced`; `5f7a7c5`
+(0.81.0) publishes the capacity counters when they change; `e6b1bf7`/`31b66eb`
+(0.82.0) read live IOVA pages from the allocator instead of the stale snapshot.
+
+On the fixed build (`rl-10g-max`, 65535 records / 1 GiB, 516-page tables) both
+domains reported `granted-rl-10g-max` with zero faults, and a 2 GB single flow
+on en4 (1 GbE, 18.5 s, ~930 Mb/s) produced peak **279 concurrent mappings and
+4419 IOVA pages (~17.3 MiB)**, zero rejects. That peak exceeds the legacy 4096
+page bound — the quantitative explanation for all three panics — while
+`rl-10g` (512 MiB) retains 29.7x page headroom and `rl-10g-max` 59.3x. The
+10 GbE port (en2) had no carrier during the run, so its peak remains
+**unmeasured**; the rounds' conclusion is limited to the measured 1 GbE path.
+Closure: probe ejected from the ESP, EFI and NVRAM back to `amdiommu=off`.
 
 ## Round69 / AppleEthernetRL on the AMD mapper — BLOCKED, panic preserved
 
