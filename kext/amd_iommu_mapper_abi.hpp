@@ -82,10 +82,6 @@ static constexpr Profile kProfileRl10g = {
 // cannot repeat R69's exhaustion; the final rl-10g numbers come from it.
 static constexpr Profile kProfileRl10gMax = {
     "rl-10g-max", 65535, 262144, kMapPages, kRuns, 516};
-// ConnectX-4 Lx / Apple's MLX5 client: same 1 GiB arena as the measured
-// ceiling, kept under its own name so admission evidence says what it is.
-static constexpr Profile kProfileConnectX = {
-    "connectx-25g", 65535, 262144, kMapPages, kRuns, 516};
 static_assert(kProfileLegacy.records == kRecords && kProfileLegacy.pages == kPages,
               "legacy profile must not change the accepted window");
 static_assert(kProfileRl10g.pages % 512 == 0, "leaf tables cover 2 MiB each");
@@ -131,7 +127,6 @@ inline const Profile *profileForName(const char *name) {
     if (sameProfileName(name, kProfileLegacy.name)) return &kProfileLegacy;
     if (sameProfileName(name, kProfileRl10g.name)) return &kProfileRl10g;
     if (sameProfileName(name, kProfileRl10gMax.name)) return &kProfileRl10gMax;
-    if (sameProfileName(name, kProfileConnectX.name)) return &kProfileConnectX;
     return nullptr;
 }
 
@@ -143,14 +138,15 @@ inline const Profile *profileForName(const char *name) {
 inline const Profile *profileForDevice(uint32_t vendor, uint32_t device,
                                        bool appleClientPath) {
     const uint32_t vendor16 = vendor & 0xffffU, device16 = device & 0xffffU;
-    // Mellanox ConnectX-4 Lx / ConnectX-6 Dx (Apple MLX5 client). No claim
-    // path exists for these devices, so the decision happens before the
-    // client-path gate. R70-S5 showed the dext command queue times out with
-    // no mapper at all, so admission is what makes the next test possible.
+    // Mellanox adapters driven by Apple's MLX5 client. No claim path exists
+    // for these devices, so the decision happens before the client-path gate.
+    // R70-S5 showed the dext command queue times out with no mapper at all,
+    // so admission is what makes the next test possible. They use the same
+    // 1 GiB ceiling as the measured 10 GbE profile.
     if (vendor16 == 0x15b3U &&
         (device16 == 0x1015U || device16 == 0x1017U || device16 == 0x1019U ||
          device16 == 0x101bU || device16 == 0x101dU))
-        return &kProfileConnectX;
+        return &kProfileRl10gMax;
     if (!appleClientPath) return &kProfileLegacy;
     // R70 measured 52,227 IOVA pages on a saturated 10 GbE flow, so the
     // 512 MiB profile would leave only 2.5x headroom. The 1 GiB profile keeps

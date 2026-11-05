@@ -256,7 +256,7 @@ bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
         return true;
     }
     // One to kR52MaxDomains four-hex-digit segment-zero requester IDs, no
-    // saved BDFs. The third slot is reserved for a ConnectX-4 Lx next to the
+    // saved BDFs. The third slot is reserved for a Mellanox adapter next to the
     // two RTL8127 ports; the selected-pair semantics are unchanged.
     // R70-S5f: values are written with a non-hex prefix (n3400) because the
     // kernel converts an all-digit boot-arg value into a 32-bit integer
@@ -693,13 +693,11 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slo
     nic->setProperty("r44-profile", profile->name);
     nic->setProperty("r44-profile-requested", requested->name);
     nic->setProperty("r44-profile-fallback", profile == requested ? "no" : "yes");
-    const char *admission = profile == &r44mapper::kProfileConnectX
-        ? "granted-connectx-25g"
-        : (profile == &r44mapper::kProfileRl10g
-               ? "granted-rl-10g"
-               : (profile == &r44mapper::kProfileRl10gMax
-                      ? "granted-rl-10g-max"
-                      : "granted-native-legacy"));
+    const char *admission = profile == &r44mapper::kProfileRl10g
+        ? "granted-rl-10g"
+        : (profile == &r44mapper::kProfileRl10gMax
+               ? "granted-rl-10g-max"
+               : "granted-native-legacy");
     nic->setProperty("r69-admission", admission);
     IOLog("AMDMapperProbe: domain %u ready profile=%s records=%u pages=%u tables=%u\n",
           slot, profile->name, profile->records, profile->pages, profile->tablePages);

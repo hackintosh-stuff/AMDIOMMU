@@ -21,7 +21,6 @@ Two build variants exist and accept different boot-args:
 | `amdiommu_profile=<name>` | `native-legacy` | Accepted ABI3 window (1024 records / 16 MiB). Default. |
 | | `rl-10g` | 16384 records / 131072 pages, 260 table pages. |
 | | `rl-10g-max` | 65535 records / 262144 pages (1 GiB), 516 table pages. |
-| | `connectx-25g` | Same 1 GiB arena, kept under its own name so admission evidence names the client. |
 | | unknown name | Does **not** widen the arena: falls back to legacy and records `r44-profile=unsupported-name`. |
 
 When omitted, `amdiommu_profile` is derived per device (`r44ProfileForDevice`);
@@ -31,7 +30,7 @@ removed — `amdiommu=auto-attach` is the only switch.
 Current example (CX4 Lx on this machine):
 
 ```
-amdiommu=auto-attach amdiommu_devices=n2300,n2301 amdiommu_profile=connectx-25g
+amdiommu=auto-attach amdiommu_devices=n2300,n2301 amdiommu_profile=rl-10g-max
 ```
 
 `serial=5`, `io=0xffffffff`, `debug=` and `-v` are XNU/OpenCore arguments, **not**

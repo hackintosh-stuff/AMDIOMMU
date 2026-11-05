@@ -163,17 +163,17 @@ void devicePolicy() {
               &r44mapper::kProfileLegacy,
           "the claim path (Lucy) must keep the accepted ABI3 arena");
     check(r44mapper::profileForDevice(0x15b3, 0x1015, false) ==
-              &r44mapper::kProfileConnectX,
-          "ConnectX-4 Lx must be admitted with the 1 GiB arena");
+              &r44mapper::kProfileRl10gMax,
+          "Mellanox 0x1015 must be admitted with the 1 GiB arena");
     check(r44mapper::profileForDevice(0x15b3, 0x1015, true) ==
-              &r44mapper::kProfileConnectX,
-          "ConnectX-4 Lx admission must not depend on the claim path");
+              &r44mapper::kProfileRl10gMax,
+          "Mellanox admission must not depend on the claim path");
     check(r44mapper::profileForDevice(0x15b3, 0x101d, false) ==
-              &r44mapper::kProfileConnectX,
-          "ConnectX-6 Dx must be admitted with the 1 GiB arena");
-    check(r44mapper::profileForName("connectx-25g") ==
-              &r44mapper::kProfileConnectX,
-          "connectx-25g profile lookup failed");
+              &r44mapper::kProfileRl10gMax,
+          "Mellanox 0x101d must be admitted with the 1 GiB arena");
+    check(r44mapper::profileForName("rl-10g-max") ==
+              &r44mapper::kProfileRl10gMax,
+          "rl-10g-max profile lookup failed");
 }
 
 void capacitySemantics() {

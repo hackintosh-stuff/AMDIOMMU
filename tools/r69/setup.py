@@ -8,7 +8,7 @@ config; it never touches a kext, the kernel collection or a disk.
 
 Usage (on the Mac, with the EFI mounted):
     python3 tools/r69/setup.py apply  --efi /Volumes/EFI --plist ~/r69/AERL.plist \
-        --args 'amdiommu=auto-attach amdiommu_devices=n2200,n2500 amdiommu_profile=connectx-25g'
+        --args 'amdiommu=auto-attach amdiommu_devices=n2200,n2500 amdiommu_profile=rl-10g-max'
     python3 tools/r69/setup.py status --efi /Volumes/EFI
     python3 tools/r69/setup.py remove --efi /Volumes/EFI --args 'amdiommu=off'
 """
