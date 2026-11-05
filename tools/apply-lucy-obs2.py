@@ -64,8 +64,37 @@ Detach. Evidence records and the command budget stay finite; the DMA owner does
 not. See tools/r17/driver-template.py and RTL812xTxMapNative.hpp. The default
 remains 16 so the archived round-16 build stays reproducible.
 
+Round 33 keeps 1024 owned RX spares to standard mapper IOVAs
+and reuses them cyclically until hold/disarm and drain restore the physical
+ring buffers before standard unmap. It uses the dynamic TX arena and reserves
+TX admission before dequeue. Its service-owned device domain survives the
+setup worker. Select --tx 21 --rx 33 (--rx33 also works);
+--rx 27..32 alias the same canonical cyclic template. The original physical
+RX15 path remains the default.
+
+Round 34 uses driver-owned virtual MD/command pairs for the normal RX
+replaceOrCopyPacket path. Each completed slot unmaps before mbuf delivery and
+remaps its current buffer before the next OWN store. Stop restores the current
+physical ring before release. Round35 uses Lucy's ordinary ring without an experimental pool; Round36
+batches confirmed invalidations. Round38 retires initial RX identity mappings
+once every slot has posted IOVA OWN. Round37 exports the driver's three owned
+physical DMA spans for sparse4K bootstrap. Round39 stops NIC DMA locally,
+retires the remaining RX OWN entries and resumes physical traffic without
+peer drain packets. Round40 maps the three fixed DMA objects through standard
+MD/command pairs and removes their bootstrap identity aliases after takeover.
+Round41 masks/acks pending NIC status before rearming the entry MSI source.
+Round42 publishes all initial RX IOVAs while the NIC is stopped, then retires
+bootstrap identity mappings before the first hardware enable.
+Round43 stops NIC DMA before the DTE switch and uses an IOVA-only domain
+through entry, normal RX and local stop. Native RX ABI5 adds the pre-DTE stop
+control and pre-enable active snapshot callback with unchanged record sizes.
+Round44 selects Lucy's ordinary mapped TX/RX path from the actual per-device
+IOMapper on x86 as well as arm64. The auto mapper uses the existing 64 RX
+groups and three fixed commands; normal down/up retains these resources.
+Select --tx 21 --rx 34.
+
 Usage:
-    py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16|17]
+    py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33|34]
 Exit 0 = applied (or already applied). Non-zero = refused, with the reason.
 """
 import os
@@ -1769,8 +1798,8 @@ IOReturn RTL8125::r15PoolControl(r15pool::Request *request)
             p->snap.entries[i].kind = r15pool::kEntryRing;
         }
         /* Bounded high-first selection, with NO exclusion of low addresses.
-         * At most 64 candidates plus one being considered are held at once;
-         * at most 512 mbuf + 64 ordinary-VM descriptor attempts are made.
+         * At most kSpareCount candidates plus one being considered are held;
+         * the matching pool ABI budgets 2048 mbuf + 1024 IOBuffer attempts.
          * Nothing allocated here is posted before mapping authorization.
          * Descriptor allocation may block: this is gated thread-context Prepare
          * before DTE switching, never interrupt level or an OS simple lock. */
@@ -2090,6 +2119,14 @@ TX20 = runpy.run_path(os.path.join(HERE, 'r20', 'driver-template.py'))
 # behaviour, and leaving r20 selectable is what lets the archived round-20
 # evidence stay reproducible byte-for-byte.
 TX21 = runpy.run_path(os.path.join(HERE, 'r21', 'driver-template.py'))
+R44 = runpy.run_path(os.path.join(HERE, 'r44', 'driver-template.py'))
+R45 = runpy.run_path(os.path.join(HERE, 'r45', 'driver-template.py'))
+R46 = runpy.run_path(os.path.join(HERE, 'r46', 'driver-template.py'))
+R47 = runpy.run_path(os.path.join(HERE, 'r47', 'driver-template.py'))
+R48 = runpy.run_path(os.path.join(HERE, 'r48', 'driver-template.py'))
+R49 = runpy.run_path(os.path.join(HERE, 'r49', 'driver-template.py'))
+R52 = runpy.run_path(os.path.join(HERE, 'r52', 'driver-template.py'))
+R53 = runpy.run_path(os.path.join(HERE, 'r53', 'driver-template.py'))
 # round -> (module, [headers written into the driver tree, in include order])
 TXR = {'16': (TX16, ['RTL812xTxMap.hpp']),
        '17': (TX17, ['RTL812xTxMapNative.hpp']),
@@ -2101,8 +2138,17 @@ TX_SELECT = '16'
 TX, TXMAP_NAMES = TXR[TX_SELECT]
 TXMAP_NAME = TXMAP_NAMES[0]
 TXMAP_SRC = os.path.join(HERE, 'lucy-obs', TXMAP_NAME)
+RX_SELECT = '15'
+RX = None
+RXMAP_NAMES = []
 _HPP_INCLUDE_BASE = HPP_INCLUDE_NEW
 _HPP_MEMBERS_BASE = HPP_MEMBERS_NEW
+_POOL_METHODS_BASE = POOL_METHODS
+_RX_BIZ_BASE = RX_BIZ_NEW
+_RX_REARM_BASE = RX_NEW
+_RX_DECL_BASE = RX_DECL_NEW
+_RX_CAPTURE_BASE = RX_CAPTURE_NEW
+_POOL_RX_BASE = POOL_RX_NEW
 HPP_INCLUDE_NEW += ''.join('#include "%s"\n' % n for n in TXMAP_NAMES)
 HPP_MEMBERS_NEW += TX['MEMBERS']
 
@@ -2118,9 +2164,39 @@ def select_tx(round_no):
     TXMAP_NAME = TXMAP_NAMES[0]
     TXMAP_SRC = os.path.join(HERE, 'lucy-obs', TXMAP_NAME)
     HPP_INCLUDE_NEW = _HPP_INCLUDE_BASE + ''.join(
-        '#include "%s"\n' % n for n in TXMAP_NAMES)
-    HPP_MEMBERS_NEW = _HPP_MEMBERS_BASE + TX['MEMBERS']
+        '#include "%s"\n' % n for n in TXMAP_NAMES + RXMAP_NAMES)
+    HPP_MEMBERS_NEW = _HPP_MEMBERS_BASE + TX['MEMBERS'] + (RX['MEMBERS'] if RX else '')
     return TX
+
+
+def select_rx(round_no):
+    """Opt in to standard-mapped RX without rewriting historical TX."""
+    global RX_SELECT, RX, RXMAP_NAMES, POOL_METHODS, RX_BIZ_NEW
+    global RX_NEW, RX_DECL_NEW, RX_CAPTURE_NEW, POOL_RX_NEW
+    if round_no not in ('15', '27', '28', '29', '30', '31', '32', '33', '34'):
+        raise SystemExit('unsupported RX module round: %r' % (round_no,))
+    RX_SELECT = round_no
+    RX = runpy.run_path(os.path.join(HERE, 'r34' if round_no == '34' else 'r27',
+                                   'driver-template.py')) if round_no != '15' else None
+    RXMAP_NAMES = RX['HEADERS'] if RX else []
+    POOL_METHODS = RX['pool_methods'](_POOL_METHODS_BASE) if RX else _POOL_METHODS_BASE
+    if RX:
+        # Current cyclic RX accepts deadline=0 until explicit Disarm; a finite
+        # request still has the 120-second bound. Historical RX15 stays finite.
+        POOL_METHODS = POOL_METHODS.replace('10000000000ULL, &maxWindow',
+                                            '120000000000ULL, &maxWindow')
+        POOL_METHODS = POOL_METHODS.replace(
+            'request->deadline <= now ||\n'
+            '            request->deadline - now > maxWindow ||',
+            '(request->deadline && (request->deadline <= now ||\n'
+            '             request->deadline - now > maxWindow)) ||')
+    RX_BIZ_NEW = RX['rx_business'](_RX_BIZ_BASE) if RX else _RX_BIZ_BASE
+    RX_NEW = RX['rx_rearm'](_RX_REARM_BASE) if RX else _RX_REARM_BASE
+    RX_DECL_NEW = RX['rx_decl'](_RX_DECL_BASE) if RX else _RX_DECL_BASE
+    RX_CAPTURE_NEW = RX['rx_capture'](_RX_CAPTURE_BASE) if RX else _RX_CAPTURE_BASE
+    POOL_RX_NEW = RX['pool_receive'](_POOL_RX_BASE) if RX and 'pool_receive' in RX else _POOL_RX_BASE
+    select_tx(TX_SELECT)
+    return RX
 
 
 # The round-16 template predates this hook list and is kept byte-identical, so
@@ -2135,7 +2211,14 @@ TX_HOOKS = {
 
 
 def tx_hooks():
-    return TX.get('HOOKS') or TX_HOOKS[TX_SELECT]
+    hooks = TX.get('HOOKS') or TX_HOOKS[TX_SELECT]
+    if TX_SELECT == '21' and RX_SELECT == '34':
+        # The ordinary mapped path adds command-pool backpressure to this
+        # existing result hook. Check the final generated form, not R21's.
+        old_result = R45['RESULT_OLD'].strip().split(' ? ', 1)[0]
+        hooks = tuple(R45['RESULT_NEW'].strip() if h == old_result else h
+                      for h in hooks)
+    return hooks
 
 
 def sync_headers(drv):
@@ -2146,11 +2229,17 @@ def sync_headers(drv):
     header the driver was built from" the same file.
     """
     changed = 0
-    for src, name in ((HDR_SRC, "RTL812xObsLog.hpp"),
-                      (WRITE_SRC, "RTL812xObsWrite.hpp"),
-                      (RXPOST_SRC, "RTL812xRxPost.hpp"),
-                      (POOL_SRC, "RTL812xRxPool.hpp"),
-                      (TXMAP_SRC, TXMAP_NAME)):
+    pairs = [(HDR_SRC, "RTL812xObsLog.hpp"),
+             (WRITE_SRC, "RTL812xObsWrite.hpp"),
+             (RXPOST_SRC, "RTL812xRxPost.hpp"),
+             (POOL_SRC, "RTL812xRxPool.hpp")]
+    pairs += [(os.path.join(HERE, 'lucy-obs', name), name)
+              for name in TXMAP_NAMES + RXMAP_NAMES]
+    if TX_SELECT == '21' and RX_SELECT == '34':
+        pairs.append((os.path.join(HERE, '..', 'kext',
+                                   'amd_iommu_device_policy.hpp'),
+                      'amd_iommu_device_policy.hpp'))
+    for src, name in pairs:
         want = read(src)
         dst = os.path.join(drv, name)
         have = read(dst) if os.path.isfile(dst) else None
@@ -2197,13 +2286,22 @@ def body_is_current(cpp_text):
                                                  'R%sTxState' % TX_SELECT)
     module_mark = 'IOReturn RTL8125::%s' % TX.get('CONFIG_NAME',
                                                   'r%sTxConfigure' % TX_SELECT)
-    tx_struct = TX['METHODS'][TX['METHODS'].index(state_mark):]
-    tx_struct = tx_struct[:tx_struct.index('\n};') + 3]
+    state_start = TX['METHODS'].index(state_mark)
+    state_end = TX['METHODS'].index('\n};', state_start) + 3
+    struct_start = TX['METHODS'].find('struct RTL8125::R17Gen {')
+    if struct_start < 0 or struct_start > state_start:
+        struct_start = state_start
+    # The generated prefix includes the generation type and the Round32
+    # admission guard; both must match along with the state that uses them.
+    tx_struct = TX['METHODS'][struct_start:state_end]
     for block, label in ((tx_struct, 'round%s TX state' % TX_SELECT),
                          (TX['METHODS'].split(module_mark)[1],
                           'round%s TX module' % TX_SELECT),
                          (POOL_RX_NEW, 'round15 copy hook'),
-                         (RX_NEW, 'round15 rearm hook')):
+                         (RX_NEW, 'round15 rearm hook'),
+                         (RX_BIZ_NEW, 'RX business observer'),
+                         (RX_DECL_NEW, 'RX locals'),
+                         (RX_CAPTURE_NEW, 'RX capture reset')):
         if norm_pool(block) not in norm_pool(cpp_text):
             return False, label
     for name in ('obsWrite', 'obsPublish', 'rxpostInit', 'rxpostFree',
@@ -2211,8 +2309,15 @@ def body_is_current(cpp_text):
                  'rxpostRecordRearm', 'rxpostPublish', 'r15PoolControl',
                  'r15PoolCopy', 'r15PoolRearm', 'r15PoolPosted',
                  'r15PoolInvalidate', 'r15PoolFree', 'r15PoolAction',
-                 'r15PoolObserve'):
-        m = re.search(r'^(?:void|bool|IOReturn|mbuf_t) RTL8125::%s\(.*?\)\s*\{' % name,
+                 'r15PoolObserve') + (('r27RxAction', 'r27RxControl',
+                 'r27RxRearm', 'r27RxPosted', 'r27RxActive', 'r27RxParse') if RX else ()) + (('r34RxBinding', 'r34RxMapSlot',
+                 'r34RxUnmapSlot', 'r34RxComplete', 'r34RxRearm', 'r34RxPosted',
+                 'r34RxControl', 'r34RxAction', 'r34RxFree', 'r34RxParse',
+                 'r34RxCanReplace', 'r34RxCopy', 'r34RxObserve',
+                 'r34RxInvalidate', 'r34RxPrepareSlot', 'r34RxFinishMapSlot',
+                 'r34RxRecordDone', 'r36RxBatchCall', 'r36RxBeginBatch',
+                 'r36RxPublish') if RX_SELECT == '34' else ()):
+        m = re.search(r'^(?:void|bool|IOReturn|mbuf_t) RTL8125::%s\(.*?\)\s*(?:const\s*)?\{' % name,
                       OBS_METHODS + RXPOST_METHODS + POOL_METHODS, re.M | re.S)
         if not m:
             return True, None          # cannot judge -> do not block
@@ -2230,7 +2335,7 @@ def body_is_current(cpp_text):
             i += 1
         want = tmpl[start:i + 1]
 
-        m2 = re.search(r'^(?:void|bool|IOReturn|mbuf_t) RTL8125::%s\(.*?\)\s*\{' % name,
+        m2 = re.search(r'^(?:void|bool|IOReturn|mbuf_t) RTL8125::%s\(.*?\)\s*(?:const\s*)?\{' % name,
                        cpp_text, re.M | re.S)
         if not m2:
             return False, name
@@ -2267,22 +2372,39 @@ def replace_once(text, old, new, what):
 
 def main():
     argv = sys.argv[1:]
-    positional, tx = [], None
+    positional, tx, rx = [], None, None
+    wide_rx = False
     i = 0
     while i < len(argv):
         a = argv[i]
+        if a == '--r59':
+            wide_rx = True; i += 1; continue
         if a == '--tx' and i + 1 < len(argv):
             tx = argv[i + 1]; i += 2; continue
         if a.startswith('--tx='):
             tx = a.split('=', 1)[1]; i += 1; continue
         if a.startswith('--tx'):
             tx = a[4:]; i += 1; continue
+        if a == '--rx' and i + 1 < len(argv):
+            rx = argv[i + 1]; i += 2; continue
+        if a.startswith('--rx='):
+            rx = a.split('=', 1)[1]; i += 1; continue
+        if a.startswith('--rx'):
+            rx = a[4:]; i += 1; continue
         positional.append(a); i += 1
-    if len(positional) != 1 or (tx is not None and tx not in TXR):
-        print("usage: apply-lucy-obs2.py <RTL812xLucy-commit-dir> [--tx 16|17]")
+    if len(positional) != 1 or (tx is not None and tx not in TXR) or (rx is not None and rx not in ('15', '27', '28', '29', '30', '31', '32', '33', '34')):
+        print("usage: apply-lucy-obs2.py <RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33|34] [--r59]")
+        return 2
+    if wide_rx and (tx, rx) != ('21', '34'):
+        print('R59 requires --tx21 --rx34')
         return 2
     if tx is not None:
         select_tx(tx)
+    if rx is not None:
+        select_rx(rx)
+    if RX_SELECT in ('27', '28', '29', '30', '31', '32', '33', '34') and TX_SELECT != '21':
+        print("refused: cyclic RX requires the current --tx 21 module")
+        return 2
     root = positional[0]
     drv = os.path.join(root, "RTL812xLucy")
     if not os.path.isdir(drv):
@@ -2338,7 +2460,50 @@ def main():
                 print("      # re-extract RTL812xLucy-<commit> from the tarball")
                 print("      python3 tools/apply-lucy-obs2.py <dir>")
                 return 1
+            candidate_hpp = hpp_text
             fresh, stale = body_is_current(cpp_text)
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R44['is_current'](hpp_text, cpp_text,
+                    read(os.path.join(drv, 'RTL812xLucySetup.cpp')))
+                if not fresh:
+                    stale = 'round44 normal mapped DMA'
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R45['is_current'](hpp_text, cpp_text,
+                    read(os.path.join(drv, 'RTL812xLucySetup.cpp')),
+                    read(os.path.join(drv, 'RTL812xLucyVTD.cpp')),
+                    lambda text: R53['rewrite'](R47['rewrite'](R46['rewrite'](text))))
+                if not fresh:
+                    stale = 'round45 normal mapped TCP/TSO'
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R46['is_current'](hpp_text, cpp_text,
+                    read(os.path.join(drv, 'RTL812xLucySetup.cpp')))
+                if not fresh:
+                    stale = 'round46 normal mapped IPv6 TSO'
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R47['is_current'](hpp_text, cpp_text,
+                    read(os.path.join(drv, 'RTL812xLucyHardware.cpp')))
+                if not fresh:
+                    stale = 'round47 mapped PM implementation (hardware TODO)'
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R48['is_current'](cpp_text,
+                    read(os.path.join(drv, 'RTL812xLucySetup.cpp')),
+                    read(os.path.join(drv, 'RTL812xLucyVTD.cpp')))
+                if not fresh:
+                    stale = 'round48 normal 32-bit DMA addresses'
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                if wide_rx:
+                    candidate_hpp = R49['upgrade_128'](hpp_text)
+                fresh = R49['is_current'](candidate_hpp, wide_rx)
+                if not fresh:
+                    stale = 'ordinary RX mapping group size'
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R52['is_current'](cpp_text)
+                if not fresh:
+                    stale = 'round52 per-device mapper identity'
+            if fresh and TX_SELECT == '21' and RX_SELECT == '34':
+                fresh = R53['is_current'](cpp_text)
+                if not fresh:
+                    stale = 'round53 selected or passthrough startup'
             if not fresh:
                 print("REFUSED: the tree is patched but its %s() body is STALE."
                       % stale)
@@ -2357,6 +2522,11 @@ def main():
                 print("      # re-extract RTL812xLucy-<commit> from the tarball")
                 print("      python3 tools/apply-lucy-obs2.py <dir>")
                 return 1
+            # Do not rewrite the installed generator input before the full
+            # accepted-body checks above pass. Only the grouping macro changes.
+            if candidate_hpp != hpp_text:
+                write(hpp, candidate_hpp)
+                print('upgraded existing RX header to 8 groups of 128 pages')
             changed = sync_headers(drv)
             if changed:
                 print("already applied (the observation log is present); "
@@ -2383,10 +2553,15 @@ def main():
     pool_dst = os.path.join(drv, "RTL812xRxPool.hpp")
     write(pool_dst, read(POOL_SRC))
     print("wrote  %s" % pool_dst)
-    for name in TXMAP_NAMES:
+    for name in TXMAP_NAMES + RXMAP_NAMES:
         src = os.path.join(HERE, 'lucy-obs', name)
         write(os.path.join(drv, name), read(src))
         print("wrote  %s" % os.path.join(drv, name))
+
+    if TX_SELECT == '21' and RX_SELECT == '34':
+        name = 'amd_iommu_device_policy.hpp'
+        write(os.path.join(drv, name),
+              read(os.path.join(HERE, '..', 'kext', name)))
 
     # 2. the class
     hpp_text = replace_once(hpp_text, HPP_INCLUDE_OLD, HPP_INCLUDE_NEW,
@@ -2459,10 +2634,31 @@ def main():
                             "the methods insertion point")
 
     cpp_text = TX['patch_cpp'](cpp_text)
+    if RX and 'pause_entries' in RX:
+        cpp_text = RX['pause_entries'](cpp_text)
+    if TX_SELECT == '21' and RX_SELECT == '34':
+        hpp_text, cpp_text, setup_text = R44['patch'](hpp_text, cpp_text, setup_text)
+        hpp_text, cpp_text, setup_text, vtd_text = R45['patch'](
+            hpp_text, cpp_text, setup_text, vtd_text)
+        hpp_text, cpp_text, setup_text = R46['patch'](hpp_text, cpp_text, setup_text)
+        hardware = os.path.join(drv, 'RTL812xLucyHardware.cpp')
+        hpp_text, cpp_text, hardware_text = R47['patch'](
+            hpp_text, cpp_text, read(hardware))
+        cpp_text, setup_text, vtd_text = R48['patch'](
+            cpp_text, setup_text, vtd_text)
+        hpp_text = R49['patch'](hpp_text, wide_rx)
+        cpp_text = R52['patch'](cpp_text)
+        cpp_text = R53['patch'](cpp_text)
+        write(hardware, hardware_text)
+        write(hpp, hpp_text)
+        write(setup, setup_text)
+        write(vtd, vtd_text)
     write(cpp, cpp_text)
     print("patched %s" % cpp)
-    print("applied observation v2, RX post set, round-15 RX pool and round-%s explicit TX mapping"
-          % TX_SELECT)
+    rx_label = ('normal device IOMapper path / legacy native RX ABI5' if RX_SELECT == '34'
+                else 'round-%s RX pool' % RX_SELECT)
+    print("applied observation v2, RX post set, %s and round-%s explicit TX mapping"
+          % (rx_label, TX_SELECT))
     return 0
 
 

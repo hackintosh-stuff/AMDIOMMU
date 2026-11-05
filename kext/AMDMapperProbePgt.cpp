@@ -54,6 +54,76 @@
 
 #include "AMDMapperProbeInternal.hpp"
 
+OSDefineMetaClassAndStructors(R27ProbeTimer, IOTimerEventSource);
+
+R27ProbeTimer *R27ProbeTimer::create(OSObject *owner, Action action) {
+    R27ProbeTimer *timer = new R27ProbeTimer;
+    if (timer && !timer->init(owner, action)) {
+        timer->release();
+        timer = nullptr;
+    }
+    return timer;
+}
+
+// The service owns these objects while the device translates through them.
+// Active TX/RX callbacks borrow the table/MMIO pointers; the setup stack owns
+// none of their lifetime after the Round33 handoff.
+struct org_example_AMDMapperProbe::R33DeviceDomain {
+    bool resourcesReleased;
+    IOBufferMemoryDescriptor *ptMem;
+    IOBufferMemoryDescriptor *tbl;
+    IOBufferMemoryDescriptor *cmdBufMd;
+    IOBufferMemoryDescriptor *semMd;
+    IOBufferMemoryDescriptor *evtMd;
+    IOMemoryDescriptor *md;
+    IOMemoryMap *map;
+    IOMemoryMap *postMap;
+    volatile UInt8 *base;
+    volatile UInt64 *pt;
+    volatile UInt64 *dte;
+    volatile UInt64 *root;
+    volatile UInt64 *l2;
+    volatile UInt64 *sem;
+    volatile UInt32 *evtBuf;
+    UInt64 ptPA;
+    UInt64 tblPA;
+    UInt64 cmdPA;
+    UInt64 semPA;
+    UInt64 evtPA;
+    UInt64 ptBytes;
+    UInt64 rootPA;
+    UInt64 l2PA;
+    UInt64 origDT;
+    UInt64 origCmd;
+    UInt64 origEvt;
+    UInt64 origCtrl;
+    UInt32 ptPageCount;
+    UInt32 tgt;
+    UInt32 tailAfterRaw;
+    UInt32 cloAfterRaw;
+    bool preWindowRan;
+    bool mainWindowRan;
+    bool hwStopped;
+    bool cmdBufStopped;
+    bool evtLogStopped;
+    bool regsRestored;
+    bool safeToFree;
+    bool evtResetOk;
+    bool invAllOk;
+    bool invDevOk;
+    bool invPagesOk;
+    bool controlDone;
+    bool tailAfterOk;
+    bool cloAfterOk;
+    bool postSampleDone;
+    const char *firstFailStage;
+    const char *firstFailReason;
+    // Setup/final diagnostic snapshot only. After r17SyncCommand, the active
+    // R17Domain owns the sole producer cursor until r17Export returns it.
+    M2B2CmdCtx ctx;
+    M2b2PostSample postSample;
+};
+
 // ===== AMDMapperProbePgt.cpp (original lines 5206..5278) =====
 bool org_example_AMDMapperProbe::scheduleM22b2() {
     if (!parsePgtBootArg()) {
@@ -74,6 +144,15 @@ bool org_example_AMDMapperProbe::scheduleM22b2() {
     fM22b2Hold  = parsePgtHoldBootArg();
     fM22b2SleepOnly = parsePgtSleepBootArg();
     fM22b2Use3L = parsePgt3lBootArg();
+    fR31Session = r31SessionRequested();
+    if (fR31Session) {
+        setProperty("m2-3l-session-mode", "explicit-stop");
+        setProperty("m2-3l-session-state", "preparing");
+        setProperty("m2-3n-domain-mode", "service-owned");
+        setProperty("m2-3n-domain-state", "preparing");
+        setHexProperty(this, "m2-3n-setup-worker-active", 0);
+        setHexProperty(this, "m2-3n-install-count", 0);
+    }
     setProperty("m2-b2-leaf-mode-src",
         fM22b2Use4K ? "amdiommu=pgt4k" : "amdiommu=pgt");
     setProperty("m2-b2-hold-mode",
@@ -101,7 +180,7 @@ bool org_example_AMDMapperProbe::scheduleM22b2() {
         return false;
     }
 
-    fM22b2Timer = IOTimerEventSource::timerEventSource(
+    fM22b2Timer = R27ProbeTimer::create(
         this, &org_example_AMDMapperProbe::m22b2TimerFired);
     if (!fM22b2Timer) {
         setProperty("m2-b2-verdict", "FAIL-no-timer");
@@ -140,9 +219,114 @@ void org_example_AMDMapperProbe::m22b2TimerFired(
     // 定时器是一次性的：触发后不再重排。
     self->setProperty("m2-b2-schedule", "fired");
 
-    // 在 workloop 上下文里跑。这里可以 IOSleep（会短暂阻塞 workloop），
-    // 但整个探测本来就有 2 秒观察窗口，且只跑一次，代价可接受。
+    if (self->fR31Session) {
+        UInt32 inactive = 0;
+        if (!__atomic_compare_exchange_n(&self->fR31WorkerActive, &inactive,
+                1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+        setHexProperty(self, "m2-3n-setup-worker-active", 1);
+        self->retain();
+        thread_t worker = THREAD_NULL;
+        const kern_return_t kr = kernel_thread_start(
+            &org_example_AMDMapperProbe::r31SessionWorker, self, &worker);
+        if (kr != KERN_SUCCESS) {
+            self->setProperty("m2-3l-session-state", "failed");
+            self->setProperty("m2-3n-domain-state", "failed");
+            setHexProperty(self, "m2-3n-setup-worker-active", 0);
+            setHexProperty(self, "m2-3l-worker-error", (UInt64)kr);
+            __atomic_store_n(&self->fR31WorkerActive, 0u, __ATOMIC_RELEASE);
+            self->release();
+            return;
+        }
+        // kernel_thread_start returns a caller-owned reference. The worker
+        // holds the probe separately and exits after the ownership handoff.
+        thread_deallocate(worker);
+        return;
+    }
+
+    // Legacy finite experiments keep their existing workloop scheduling.
     self->runM22b2PageTableProbe();
+}
+
+void org_example_AMDMapperProbe::r31SessionWorker(
+    void *parameter, wait_result_t result) {
+    (void)result;
+    org_example_AMDMapperProbe *self =
+        static_cast<org_example_AMDMapperProbe *>(parameter);
+    self->runM22b2PageTableProbe();
+    if (!__atomic_load_n(&self->fR33Domain, __ATOMIC_ACQUIRE)) {
+        self->setProperty("m2-3l-session-state", "failed");
+        self->setProperty("m2-3n-domain-state", "failed");
+    }
+    setHexProperty(self, "m2-3n-setup-worker-exit-time", mach_absolute_time());
+    setHexProperty(self, "m2-3n-setup-worker-active", 0);
+    __atomic_store_n(&self->fR31WorkerActive, 0u, __ATOMIC_RELEASE);
+    // stop() also waits for the service-owned domain, so this handoff cannot
+    // allow provider teardown between the two short-lived workers.
+    if (__atomic_load_n(&self->fR31StopRequested, __ATOMIC_ACQUIRE))
+        self->r33ScheduleDomainStop();
+    self->release();
+    thread_terminate(current_thread());
+}
+
+bool org_example_AMDMapperProbe::r33DomainStopPending() const {
+    return __atomic_load_n(&fR33Domain, __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&fR33TeardownState, __ATOMIC_ACQUIRE) != 2;
+}
+
+void org_example_AMDMapperProbe::r33ScheduleDomainStop() {
+    if (!fR31Session ||
+        !__atomic_load_n(&fR31StopRequested, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&fR33Domain, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&fR33TeardownState, __ATOMIC_ACQUIRE)) return;
+    UInt32 inactive = 0;
+    if (!__atomic_compare_exchange_n(&fR31WorkerActive, &inactive, 1u,
+            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+    UInt32 unstarted = 0;
+    if (!__atomic_compare_exchange_n(&fR33TeardownState, &unstarted, 1u,
+            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&fR31WorkerActive, 0u, __ATOMIC_RELEASE);
+        return;
+    }
+    retain();
+    thread_t worker = THREAD_NULL;
+    const kern_return_t kr = kernel_thread_start(
+        &org_example_AMDMapperProbe::r33DomainStopWorker, this, &worker);
+    if (kr != KERN_SUCCESS) {
+        setProperty("m2-3l-session-state", "failed");
+        setProperty("m2-3n-domain-state", "failed");
+        setHexProperty(this, "m2-3n-teardown-worker-error", (UInt64)kr);
+        __atomic_store_n(&fR33TeardownState, 2u, __ATOMIC_RELEASE);
+        __atomic_store_n(&fR31WorkerActive, 0u, __ATOMIC_RELEASE);
+        release();
+        return;
+    }
+    thread_deallocate(worker);
+}
+
+void org_example_AMDMapperProbe::r33DomainStopWorker(
+    void *parameter, wait_result_t result) {
+    (void)result;
+    auto *self = static_cast<org_example_AMDMapperProbe *>(parameter);
+    R33DeviceDomain *domain = __atomic_load_n(&self->fR33Domain, __ATOMIC_ACQUIRE);
+    setHexProperty(self, "m2-3n-teardown-start", mach_absolute_time());
+    self->setProperty("m2-3n-domain-state", "stopping");
+    self->finishM22b2PageTableProbe(domain, true);
+    // R33 DOMAIN RELEASE: hardware restore and resource release precede the
+    // driver's final owner release. Failed drain/restore retains the context.
+    const bool completed = domain->resourcesReleased && self->fR31SessionCompleted;
+    if (domain->resourcesReleased) {
+        __atomic_store_n(&self->fR33Domain, (R33DeviceDomain *)nullptr, __ATOMIC_RELEASE);
+        self->m2b2R15Release();
+        IOFree(domain, sizeof(*domain));
+    }
+    setHexProperty(self, "m2-3n-teardown-end", mach_absolute_time());
+    setHexProperty(self, "m2-3l-session-end", mach_absolute_time());
+    self->setProperty("m2-3l-session-state", completed ? "stopped" : "failed");
+    self->setProperty("m2-3n-domain-state", completed ? "stopped" : "failed");
+    __atomic_store_n(&self->fR33TeardownState, 2u, __ATOMIC_RELEASE);
+    __atomic_store_n(&self->fR31WorkerActive, 0u, __ATOMIC_RELEASE);
+    self->release();
+    thread_terminate(current_thread());
 }
 
 // ===== AMDMapperProbePgt.cpp (original lines 5310..7405) =====
@@ -150,9 +334,21 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     setProperty("m2-b2-stage", "0-start");
     fR15Service = nullptr;
     bzero(&fR15Request, sizeof(fR15Request));
+    fR15PoolRpcCalls = 0;
+    if (fR31Session) setHexProperty(this, "m2-3p-rx-pool-rpcs", 0);
     fR15MapTicks = 0;
     fR15InvTicks = 0;
     R15Scope r15Scope = {this};
+    R33DeviceDomain *domain = (R33DeviceDomain *)IOMalloc(sizeof(R33DeviceDomain));
+    if (!domain) {
+        setProperty("m2-b2-stage", "2-FAIL-domain-context");
+        return;
+    }
+    bzero(domain, sizeof(*domain));
+    struct ContextScope {
+        R33DeviceDomain *owned;
+        ~ContextScope() { if (owned) IOFree(owned, sizeof(*owned)); }
+    } contextScope = {domain};
 
     // 门控已在 scheduleM22b2() 里检查过（只有 amdiommu=pgt 才会走到这里）。
     // 这里不再重复 parsePgtBootArg()，避免两处逻辑漂移。
@@ -197,13 +393,6 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     const char *firstFailStage = nullptr;
     const char *firstFailReason = nullptr;
 
-    // Round22: did the device table entry actually get switched to our page
-    // table? This decides what the failure path is allowed to do. If it did,
-    // the table is live and may only be freed after the DTE is restored and
-    // read back; if it did not, there is nothing to protect and the IOMMU
-    // programming must still be restored.
-    bool dteFlipped = false;
-
     setProperty("m2-b2-pre-window-ran", "no");
     setProperty("m2-b2-main-window-ran", "no");
 
@@ -217,12 +406,14 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     //
     // 2 MiB 模式：1 根 + 1 L2 + 16 叶子 + 1 空根 = 19 页 = 76 KiB
     // 4 KiB 模式：1 根 + 1 L2 + 32 叶子 + 1 空根 = 35 页 = 140 KiB
-    const UInt32 basePtPageCount =
+    const bool nativeSparse = fR31Session && !fM22b2SleepOnly;
+    const UInt32 legacyBasePtPageCount =
         fM22b2Use4K ? M2B2_4K_TOTAL_PAGES
                     : (fM22b2Use3L ? M2B2_3L_TOTAL_PAGES : M2B2_TOTAL_PAGES);
-    // Bounded extra arena for sparse 4KiB mappings of actual retained RX
-    // allocations. This is table capacity, NOT an identity-mapped RAM limit.
-    const UInt32 ptPageCount = basePtPageCount + 128u;
+    // Native starts with only the root and an independent empty reserve page.
+    // Keep the existing allocation capacity for the native IOVA tables.
+    const UInt32 basePtPageCount = nativeSparse ? 2u : legacyBasePtPageCount;
+    const UInt32 ptPageCount = legacyBasePtPageCount + 256u + M2B2_IOVA_RESERVED_PAGES;
     const UInt64 ptBytes = (UInt64)ptPageCount * M2B2_PAGE_SIZE;
 
     IOBufferMemoryDescriptor *ptMem =
@@ -332,7 +523,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // 物理地址换算：页号 → 物理地址
     // ptPA 是这块连续内存的物理基址，第 n 页的物理地址 = ptPA + n*4096
     const UInt64 rootPA = (UInt64)ptPA + rootPageIdx * M2B2_PAGE_SIZE;
-    const UInt64 l2PA   = (UInt64)ptPA + l2PageBase  * M2B2_PAGE_SIZE;
+    UInt64 l2PA = (UInt64)ptPA + l2PageBase * M2B2_PAGE_SIZE;
 
     volatile UInt64 *root = pt + rootPageIdx * M2B2_PTE_COUNT;
     volatile UInt64 *l2   = pt + l2PageBase  * M2B2_PTE_COUNT;
@@ -342,11 +533,14 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // 4 KiB 模式：只映射 64 MiB，同样 idx3 = 0。
     // 【3 级模式】根表本身就是"第 2 级"，**没有 L2 这一层**：
     //   根表项直接指向叶子表，所以这里不能写 root[0] = TablePte(3,...)。
-    if (!fM22b2Use3L) {
+    if (!nativeSparse && !fM22b2Use3L) {
         root[0] = m2b2TablePte(3, l2PA);
     }
 
-    if (fM22b2Use3L) {
+    if (nativeSparse) {
+        // The native root stays empty until standard IOVA maps are requested.
+        // r34RxPrepareMap validates the unchanged physical ring manifest.
+    } else if (fM22b2Use3L) {
         // ---- 3 级 + 2 MiB 大页：root(2) → 叶子(1)，覆盖 16 GiB ----
         //
         // PAGE_MODE_3_LEVEL = 3 → 根表是第 2 级，每项覆盖 1 GiB。
@@ -425,31 +619,43 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         }
     }
 
-    // Establish the driver's complete finite allocation domain BEFORE the
-    // DTE can switch. The driver becomes copy-only until explicitly authorized;
-    // all ordinary replacement allocations are excluded for this transaction.
+    // Freeze the current RX ring BEFORE the DTE can switch. Native sessions
+    // borrow Lucy's existing buffers; the historical finite path uses R15.
+    // Native preparation stays copy-only; the NIC stops before DTE entry.
     if (!fM22b2SleepOnly &&
-        (!m2b2R15PrepareMap(pt, (UInt64)ptPA, ptPageCount - 4, basePtPageCount) ||
+        (!m2b2R15PrepareMap(pt, (UInt64)ptPA,
+                           nativeSparse ? ptPageCount : ptPageCount - M2B2_IOVA_RESERVED_PAGES,
+                           basePtPageCount) ||
          !r17Prepare(pt, (UInt64)ptPA, ptPageCount))) {
-        setProperty("m2-b2-verdict", "FAIL-r15-owned-pre-map");
+        setProperty("m2-b2-verdict", fR31Session ? "FAIL-native-ring-pre-map"
+                                               : "FAIL-r15-owned-pre-map");
         setProperty("m2-b2-stage", "3b-abort-owned-map");
         ptMem->release(); tbl->release(); cmdBufMd->release();
         semMd->release(); evtMd->release();
         return;
     }
-    setProperty("m2-b2-pt", "built-4level-identity");
-    setProperty("m2-b2-leaf-mode", fM22b2Use4K ? "4KiB" : "2MiB");
+    if (nativeSparse) {
+        // The IOVA helper allocated the actual child after the empty page.
+        // Carry that address into the service-owned domain and later dumps.
+        l2PA = fM22b2Use3L ? rootPA : root[0] & M2B2_PTE_ADDR_MASK;
+        l2 = pt + (l2PA - (UInt64)ptPA) / sizeof(UInt64);
+    }
+    setProperty("m2-b2-pt", nativeSparse ? "built-iova-only" : "built-4level-identity");
+    setProperty("m2-b2-leaf-mode", (nativeSparse || fM22b2Use4K) ? "4KiB" : "2MiB");
+    if (nativeSparse) setProperty("m2-b2-leaf-mode-src", "native-iova-only");
     setHexProperty(this, "m2-b2-map-limit",
-                   fM22b2Use4K ? M2B2_4K_MAP_LIMIT : M2B2_IDENTITY_LIMIT);
+                   nativeSparse ? 0 : (fM22b2Use4K ? M2B2_4K_MAP_LIMIT : M2B2_IDENTITY_LIMIT));
     setHexProperty(this, "m2-b2-pt-root-pa", rootPA);
     setHexProperty(this, "m2-b2-pt-l2-pa", l2PA);
-    setHexProperty(this, "m2-b2-leaf-pages",
-                   fM22b2Use4K ? M2B2_4K_LEAF_PAGES : M2B2_LEAF_PAGES);
-    setHexProperty(this, "m2-b2-leaf-ptes",
-                   fM22b2Use4K ? M2B2_4K_LEAF_PTES : M2B2_LEAF_PTE_COUNT);
-    setHexProperty(this, "m2-b2-l2-pages", M2B2_L2_PAGES);
-    setHexProperty(this, "m2-b2-l1-pages",
-                   fM22b2Use4K ? M2B2_4K_L1_PAGES : 0);
+    if (!nativeSparse) {
+        setHexProperty(this, "m2-b2-leaf-pages",
+                       fM22b2Use4K ? M2B2_4K_LEAF_PAGES : M2B2_LEAF_PAGES);
+        setHexProperty(this, "m2-b2-leaf-ptes",
+                       fM22b2Use4K ? M2B2_4K_LEAF_PTES : M2B2_LEAF_PTE_COUNT);
+        setHexProperty(this, "m2-b2-l2-pages", M2B2_L2_PAGES);
+        setHexProperty(this, "m2-b2-l1-pages",
+                       fM22b2Use4K ? M2B2_4K_L1_PAGES : 0);
+    }
 
     // ---- 第 4 步：页表自检（软件走表，不碰硬件）----
     //
@@ -463,7 +669,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // 现在改成调用 amdpte::walkPageTable()，它要求逐级携带表级，
     // 并把"扩展页大小必须严格大于本级默认值"这条规范规则编进解码器。
     // 于是"构表错 + 自检错"这种共同错误会在自检阶段就被抓住。
-    {
+    if (!nativeSparse) {
         bool walkOk = true;
         UInt32 walkBad = 0;
         UInt64 walkFirstBad = 0;
@@ -843,6 +1049,61 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     bool postSampleDone = false;
     IOMemoryMap *postMap = nullptr;
 
+    // No captured closure escapes this function. Only the pointed-to hardware
+    // objects and plain recovery state transfer into the service context.
+    auto saveDomain = [&]() {
+        domain->ptMem = ptMem;
+        domain->tbl = tbl;
+        domain->cmdBufMd = cmdBufMd;
+        domain->semMd = semMd;
+        domain->evtMd = evtMd;
+        domain->md = md;
+        domain->map = map;
+        domain->postMap = postMap;
+        domain->base = base;
+        domain->pt = pt;
+        domain->dte = dte;
+        domain->root = root;
+        domain->l2 = l2;
+        domain->sem = sem;
+        domain->evtBuf = evtBuf;
+        domain->ptPA = ptPA;
+        domain->tblPA = tblPA;
+        domain->cmdPA = cmdPA;
+        domain->semPA = semPA;
+        domain->evtPA = evtPA;
+        domain->ptBytes = ptBytes;
+        domain->rootPA = rootPA;
+        domain->l2PA = l2PA;
+        domain->origDT = origDT;
+        domain->origCmd = origCmd;
+        domain->origEvt = origEvt;
+        domain->origCtrl = origCtrl;
+        domain->ptPageCount = ptPageCount;
+        domain->tgt = tgt;
+        domain->tailAfterRaw = tailAfterRaw;
+        domain->cloAfterRaw = cloAfterRaw;
+        domain->preWindowRan = preWindowRan;
+        domain->mainWindowRan = mainWindowRan;
+        domain->hwStopped = hwStopped;
+        domain->cmdBufStopped = cmdBufStopped;
+        domain->evtLogStopped = evtLogStopped;
+        domain->regsRestored = regsRestored;
+        domain->safeToFree = safeToFree;
+        domain->evtResetOk = evtResetOk;
+        domain->invAllOk = invAllOk;
+        domain->invDevOk = invDevOk;
+        domain->invPagesOk = invPagesOk;
+        domain->controlDone = controlDone;
+        domain->tailAfterOk = tailAfterOk;
+        domain->cloAfterOk = cloAfterOk;
+        domain->postSampleDone = postSampleDone;
+        domain->firstFailStage = firstFailStage;
+        domain->firstFailReason = firstFailReason;
+        domain->ctx = ctx;
+        domain->postSample = postSample;
+    };
+
     // 窗口记录（winPre / winMain）已在函数开头初始化，见那里的说明。
 
     // ---- 第 11 步：按规范重置事件日志 ----
@@ -997,6 +1258,14 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
             setProperty("m2-3e-enter", "FAIL-not-stopped-dte-not-flipped");
             goto recover;
         }
+        // Native physical descriptors remain unchanged during preparation.
+        // Stop and verify the actual NIC before switching to an IOVA-only
+        // table; no physical bootstrap mapping is needed while DMA is off.
+        if (fR31Session && !r34RxStopBeforeDte()) {
+            firstFailStage = "14b-abort-native-nic-stop";
+            firstFailReason = "native NIC did not stop before the DTE flip";
+            goto recover;
+        }
         setProperty("m2-3e-enter", "stopped-before-dte");
 
         dte[tgt * 4 + 0] = dteRoot;
@@ -1007,7 +1276,6 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         setHexProperty(this, "m2-b2-dte-domid", dte[tgt * 4 + 1]);
         setProperty("m2-b2-dte", "switched-to-translation");
         OSSynchronizeIO();
-        dteFlipped = true;
         // 【第九轮】DTE 写入完成的时刻。这只是"写下去了"，不等于翻译已生效：
         // 失效命令还没提交，TLB 里可能仍是旧表项。真正的生效起点在
         // 第 15 步两条失效命令都收到完成之后记为 tInvComplete。
@@ -1094,9 +1362,11 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     //   无法把某个包归到窗口内，也无法排除统计发布延迟。
     //
     //   本步只读：不写设备寄存器，不改变 DMA 路径。
-    observeDeviceDma();
-    setProperty("m2-b2-dma-obs-before-window",
-                fM22b2Dma.ran ? "yes" : "no");
+    if (!fR31Session) {
+        observeDeviceDma();
+        setProperty("m2-b2-dma-obs-before-window",
+                    fM22b2Dma.ran ? "yes" : "no");
+    }
 
     // ---- 第 15c 步：绑定本次驱动实例（必须在窗口之前）----
     //
@@ -1108,11 +1378,13 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // 【第十轮为什么没有这一步】
     //   读侧把 want.epoch 写成 0，而 0 表示"不检查"。整条保护因此从未
     //   生效：驱动重载后同一块卡的新实例会被当成旧的。
-    m2b2BindDriverInstance();
-    setHexProperty(this, "m2-b2-epoch-bound-at-window",
-                   (UInt64)fM22b2Dma.epochBound);
-    setHexProperty(this, "m2-b2-epoch-bound-before-window",
-                   fM22b2Dma.tWinStart);
+    if (!fR31Session) {
+        m2b2BindDriverInstance();
+        setHexProperty(this, "m2-b2-epoch-bound-at-window",
+                       (UInt64)fM22b2Dma.epochBound);
+        setHexProperty(this, "m2-b2-epoch-bound-before-window",
+                       fM22b2Dma.tWinStart);
+    }
 
     // ---- 第 15d 步：RX 投递缓冲区集合的**水位**（必须在窗口之前）----
     //
@@ -1129,7 +1401,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     //   悄悄变小，而"全部覆盖"仍然成立。这正是本轮要消除的失效形态。
     //
     // 本步只读属性，不写设备寄存器，也不改变 DMA 路径。
-    m2b2RxSetRead(true);
+    if (!fR31Session) m2b2RxSetRead(true);
     // Replacements are impossible until both mapping and invalidation have
     // completed. Authorization accepts no new DMA addresses from the probe.
     setHexProperty(this, "m2-b2-r15-flood-token",
@@ -1157,24 +1429,55 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     // the first controlled map would append at a consumed slot and its
     // CompletionWait would never be signalled.
     r17SyncCommand(&ctx);
-    if (!r17EnterComplete(fM22b2Dma.tTranslateOn)) {
+    // Round32: exercise ordinary variable-size mappings while TX admission is
+    // still closed. Probe mappings remain in the cumulative domain accounting.
+    if (fR31Session && !r32CapacityProbe()) {
+        firstFailStage = "15e-abort-dynamic-capacity";
+        firstFailReason = "normal dynamic IOVA capacity probe failed";
+        goto recover;
+    }
+    if (!fR31Session && !r17EnterComplete(fM22b2Dma.tTranslateOn)) {
         firstFailStage = "15e-abort-enter-resume";
         firstFailReason = "admission refused to reopen after the DTE flip";
         goto recover;
     }
-    if (!m2b2R15Authorize()) {
-        firstFailStage = "15e-abort-pool-authorize";
-        firstFailReason = "finite RX domain rejected authorization";
+    // Native Install maps the fixed objects and RX while the NIC is stopped.
+    // Authorize captures the initial IOVA table, then restarts with fixed IOVA
+    // bases and confirms link/DMA recovery. Packet TX remains closed here.
+    if (!r27RxBegin()) {
+        firstFailStage = "15e-abort-rx-standard-map";
+        firstFailReason = "standard RX mappings or ring binding failed";
         goto recover;
     }
+    if (!m2b2R15Authorize()) {
+        firstFailStage = "15e-abort-rx-authorize";
+        firstFailReason = "RX domain rejected authorization";
+        goto recover;
+    }
+    if (fR31Session) {
+        // The entry reset rebuilt indices and the RX baseline. Sample these
+        // actual rings after the fixed-address switch, using PA for CPU reads.
+        observeDeviceDma();
+        setProperty("m2-b2-dma-obs-before-window", fM22b2Dma.ran ? "yes" : "no");
+        m2b2BindDriverInstance();
+        setHexProperty(this, "m2-b2-epoch-bound-at-window", (UInt64)fM22b2Dma.epochBound);
+        setHexProperty(this, "m2-b2-epoch-bound-before-window", fM22b2Dma.tWinStart);
+        m2b2RxSetRead(true);
+        if (!r17EnterComplete(fM22b2Dma.tTranslateOn)) {
+            firstFailStage = "15e-abort-enter-resume";
+            firstFailReason = "admission refused after fixed DMA and RX entry";
+            goto recover;
+        }
+    }
+    r27RxReady();
 
     // ---- 第 16 步：稳态观察窗口（唯一的功能判据窗口）----
     //
     // 严格按规范消费事件环：只推进 HEAD，绝不写 TAIL，不清空缓冲。
-    // 窗口有效性由 m2b2SampleEvents 判定；无效即"无法判定"，不是 0 事件。
+    // 窗口有效性由 Begin/End 判定；无效即"无法判定"，不是 0 事件。
     //
     // 【第九轮】窗口前先把后置采样需要的 BAR2 映射准备好，并把采样函数
-    // 交给 m2b2SampleEvents()。这样采样发生在窗口**内部**，而不是窗口
+    // 交给 m2b2EndEventWindow()。这样采样发生在窗口**内部**，而不是窗口
     // 返回之后。映射失败时 postSampleDone 保持 false，后面的边界判定
     // 会如实报"没有后置采样"，而不是用一个更宽的区间充数。
     {
@@ -1221,20 +1524,102 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         }
     }
 
-    m2b2SampleEvents(base, evtBuf, M2B2_MAIN_MEAS_SECS, tgt, &winMain,
-                     postSampleDone ? m2b2DoPostSample : nullptr,
-                     postSampleDone ? &postSample : nullptr);
+    if (!m2b2BeginEventWindow(base, &winMain)) {
+        firstFailStage = "16-abort-event-window";
+        firstFailReason = winMain.invalidReason;
+        goto recover;
+    }
+    saveDomain();
+    if (fR31Session) {
+        // R33 DOMAIN HANDOFF: resources and the existing driver/pool reference
+        // now belong to the service. Returning must not Disarm the RX pool.
+        contextScope.owned = nullptr;
+        r15Scope.transferred = true;
+        __atomic_store_n(&fR33Domain, domain, __ATOMIC_RELEASE);
+        setHexProperty(this, "m2-3n-root-pa", domain->rootPA);
+        setHexProperty(this, "m2-3n-dt-pa", domain->tblPA);
+        setHexProperty(this, "m2-3n-command-pa", domain->cmdPA);
+        setHexProperty(this, "m2-3n-install-count", ++fR33InstallCount);
+        setHexProperty(this, "m2-3l-session-start", mach_absolute_time());
+        setProperty("m2-3l-session-state", "active");
+        setProperty("m2-3n-domain-state", "active");
+        return;
+    }
+    IOSleep(M2B2_MAIN_MEAS_SECS * 1000);
+    finishM22b2PageTableProbe(domain, true);
+    return;
+
+recover:
+    saveDomain();
+    finishM22b2PageTableProbe(domain, false);
+}
+
+void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
+    R33DeviceDomain *domain, bool finishWindow) {
+    auto &winPre = fM22b2WinPre;
+    auto &winMain = fM22b2WinMain;
+    auto &ptMem = domain->ptMem;
+    auto &tbl = domain->tbl;
+    auto &cmdBufMd = domain->cmdBufMd;
+    auto &semMd = domain->semMd;
+    auto &evtMd = domain->evtMd;
+    auto &md = domain->md;
+    auto &map = domain->map;
+    auto &postMap = domain->postMap;
+    auto &base = domain->base;
+    auto &pt = domain->pt;
+    auto &dte = domain->dte;
+    auto &root = domain->root;
+    auto &evtBuf = domain->evtBuf;
+    auto &ptPA = domain->ptPA;
+    auto &tblPA = domain->tblPA;
+    auto &cmdPA = domain->cmdPA;
+    auto &semPA = domain->semPA;
+    auto &evtPA = domain->evtPA;
+    auto &ptBytes = domain->ptBytes;
+    auto &rootPA = domain->rootPA;
+    auto &l2PA = domain->l2PA;
+    auto &origDT = domain->origDT;
+    auto &origCmd = domain->origCmd;
+    auto &origEvt = domain->origEvt;
+    auto &origCtrl = domain->origCtrl;
+    auto &ptPageCount = domain->ptPageCount;
+    auto &tgt = domain->tgt;
+    auto &tailAfterRaw = domain->tailAfterRaw;
+    auto &cloAfterRaw = domain->cloAfterRaw;
+    auto &preWindowRan = domain->preWindowRan;
+    auto &mainWindowRan = domain->mainWindowRan;
+    auto &hwStopped = domain->hwStopped;
+    auto &cmdBufStopped = domain->cmdBufStopped;
+    auto &evtLogStopped = domain->evtLogStopped;
+    auto &regsRestored = domain->regsRestored;
+    auto &safeToFree = domain->safeToFree;
+    auto &evtResetOk = domain->evtResetOk;
+    auto &invAllOk = domain->invAllOk;
+    auto &invDevOk = domain->invDevOk;
+    auto &invPagesOk = domain->invPagesOk;
+    auto &controlDone = domain->controlDone;
+    auto &tailAfterOk = domain->tailAfterOk;
+    auto &cloAfterOk = domain->cloAfterOk;
+    auto &postSampleDone = domain->postSampleDone;
+    auto &firstFailStage = domain->firstFailStage;
+    auto &firstFailReason = domain->firstFailReason;
+    auto &ctx = domain->ctx;
+    auto &postSample = domain->postSample;
+
+    if (!finishWindow) goto recover;
+    m2b2EndEventWindow(base, evtBuf, tgt, &winMain,
+                      postSampleDone ? m2b2DoPostSample : nullptr,
+                      postSampleDone ? &postSample : nullptr);
+    if (fR31Session) {
+        setHexProperty(this, "m2-3l-stop-request-time",
+            __atomic_load_n(&fR31StopRequestTime, __ATOMIC_ACQUIRE));
+        setProperty("m2-3l-session-state", "stop-requested");
+    }
     mainWindowRan = true;
     setProperty("m2-b2-main-window-ran", "yes");
-
-    // 【第九轮】把窗口边界存成成员，供驱动日志的窗口内配对使用。
-    // 这一步必须在这里完成：m2b2ReadDriverObs() 要用它过滤记录，而那一步
-    // 早于第 19 步对 winMain.valid 的最终判定。
     fM22b2Dma.tWinStart = winMain.tStart;
     fM22b2Dma.tWinEnd = winMain.tEnd;
-
-    // 采样用的映射在窗口关闭后立即释放：之后的扫描用另外的映射，
-    // 这样"窗口内读过寄存器"这件事只发生在窗口内部。
     if (postMap) {
         postMap->release();
         postMap = nullptr;
@@ -1251,8 +1636,8 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     //   跨度 3.00785 秒包住窗口 3.00018 秒。这个方向只能证明"完成发生在
     //   窗口结束之前或之后"，不能证明"完成发生在零事件窗口内"。
     //
-    //   现在后置采样由 m2b2SampleEvents() 在 IOSleep 返回之后、tEnd 记录
-    //   之前调用 m2b2DoPostSample() 完成，所以
+    //   后置采样由 m2b2EndEventWindow() 在记录 tEnd 之前调用
+    //   m2b2DoPostSample() 完成，所以
     //
     //       tWinStart <= tCloAfter <= tTailAfter <= tWinEnd
     //
@@ -1349,12 +1734,15 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     if (fM22b2Dma.ran && fM22b2Dma.haveTxRing && tailAfterOk) {
         const UInt64 bytes = 1024ULL * amdobs::TX_DESC_STRIDE;
         const char *why = nullptr;
-        if (amdobs::plausibleRingBase(fM22b2Dma.txRingBase, bytes,
+        UInt64 ringReadPA = fM22b2Dma.txRingBase;
+        if ((!fR31Session || r40FixedReadPA(r40fixed::kTxRing,
+                 fM22b2Dma.txRingBase, bytes, &ringReadPA)) &&
+            amdobs::plausibleRingBase(ringReadPA, bytes,
                                       M2B2_IDENTITY_LIMIT, &why) &&
-            amdobs::readVerdictDeviceReported(fM22b2Dma.txRingBase, bytes,
+            amdobs::readVerdictDeviceReported(ringReadPA, bytes,
                                 fM22b2Policy) == amdobs::RD_OK) {
             IOMemoryDescriptor *winMd = IOMemoryDescriptor::withPhysicalAddress(
-                fM22b2Dma.txRingBase, bytes, kIODirectionIn);
+                ringReadPA, bytes, kIODirectionIn);
             if (winMd) {
                 IOMemoryMap *m = winMd->map(kIOMapInhibitCache | kIOMapReadOnly);
                 if (m) {
@@ -1780,16 +2168,16 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         setHexProperty(this, "m2-b2-dump-l2-pa", l2PA);
         setHexProperty(this, "m2-b2-dump-page-mode", (UInt64)ctx.pageMode);
         setHexProperty(this, "m2-b2-dump-pt-pages", (UInt64)ptPageCount);
-        const UInt64 dumpLimit = fM22b2Use4K ? M2B2_4K_MAP_LIMIT
-                                             : M2B2_IDENTITY_LIMIT;
+        const UInt64 dumpLimit = fR31Session ? 0 :
+            (fM22b2Use4K ? M2B2_4K_MAP_LIMIT : M2B2_IDENTITY_LIMIT);
         setHexProperty(this, "m2-b2-dump-map-limit", dumpLimit);
         const unsigned dumpRootLevel =
             fM22b2Use3L ? amdpte::LEVEL_1G : amdpte::LEVEL_512G;
         setHexProperty(this, "m2-b2-dump-root-level",
                        (UInt64)dumpRootLevel);
         setProperty("m2-b2-dump-leaf-encoding",
-                    fM22b2Use4K ? "NextLevel0-4KiB-default"
-                                : "NextLevel0-2MiB-default");
+                    (fR31Session || fM22b2Use4K) ? "NextLevel0-4KiB-default"
+                                               : "NextLevel0-2MiB-default");
 
         // 根表内容仍然导出（便于核对 root[0] 的编码），但**不再**用它
         // 推断下层内容。推断与观测必须分开。
@@ -2031,35 +2419,52 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     m2b2PublishRxSet();
 
 recover:
-    // ---- 第 17e 步：退出窗口的前半段（round22）----
-    //
-    // 【顺序】停止接纳 → 等已获准的提交写完 OWN → 排空硬件持有的 TX →
-    // 强制采退出快照。这几步都发生在翻译**仍然生效**的时候：硬件此刻可能
-    // 还持有描述符，它们必须继续被正确翻译，所以这里绝不能先改 DTE。
-    //
-    // 【失败即钉住】排空失败时不做 Disarm、不做 Detach、不恢复 DTE，把表、
-    // 命令缓冲和 backend 全部留在原处，并如实报告。第 21 轮的失败路径是
-    // "drained=false 仍然 Disarm/Detach → 返回失败"，结果是翻译留在原地、
-    // 而 Disarm 顺手打开了普通提交：普通包在没有 cover 的表上被放行。
+    if (postMap) {
+        postMap->release();
+        postMap = nullptr;
+        postSample.bar = nullptr;
+        postSample.haveBar = false;
+    }
+    if (fR31Session) setProperty("m2-3l-session-state", "draining");
     const bool hadWindow = r17Installed();
-    if (hadWindow) {
+    // Stop admission and drain every accepted TX while translation and the
+    // command engine remain active. Native RX then stops the NIC itself;
+    // the finite pool still needs TX open until its peer tail has finished.
+    auto stopTxAtExit = [&]() -> bool {
+        if (!hadWindow) return true;
         const bool stopped = r17StopSubmit(2000, "exit");
-        // 退出记录就在这一步取：排空成功与否都要取，失败时记录里的占用
-        // 正是"为什么被钉住"的证据。
         r17SampleExit(r20tx::kStageExit);
-        if (!stopped && dteFlipped) {
+        if (!stopped) {
             setProperty("m2-3b-cleanup", "PINNED-outstanding-no-DTE-restore");
             setProperty("m2-b2-verdict", "INVALID-TX-outstanding-pinned");
             setProperty("m2-b2-stage", "17e-pinned-outstanding");
             r17Export(&ctx);
+        }
+        return stopped;
+    };
+    if (fR31Session && !stopTxAtExit()) return;
+
+    // Native RX confirms the hardware stop, unmaps every current slot and
+    // restores its physical address without peer traffic. The same standard
+    // unmaps and physical cover callbacks still finish under translation.
+    const bool rxDrained = r27RxFinish(15000);
+    if (!rxDrained) {
+        // No DTE restoration, command stop, detach or table free.
+        setProperty("m2-3b-cleanup", "PINNED-RX-no-DTE-restore");
+        setProperty("m2-b2-verdict", "INVALID-RX-outstanding-or-unmap-pinned");
+        setProperty("m2-b2-stage", "17e-pinned-RX");
+        r17Export(&ctx);
+        return;
+    }
+    if (!fR31Session) {
+        if (!r29WaitTailDone(5000)) {
+            setProperty("m2-3b-cleanup", "PINNED-tail-no-DTE-restore");
+            setProperty("m2-b2-verdict", "INVALID-tail-not-confirmed");
+            setProperty("m2-b2-stage", "17e-pinned-tail");
+            r17Export(&ctx);
             return;
         }
-        if (!stopped) {
-            // DTE 从未切换：翻译不是本次实验装的，没有需要保护的表。仍然
-            // 必须把 IOMMU 编程还原（它指向我们的命令缓冲/设备表），所以
-            // 继续走第 18 步；只是把"没排空"这件事记下来。
-            setProperty("m2-3e-exit-drain", "TIMEOUT-before-dte-flip");
-        }
+        if (!stopTxAtExit()) return;
     }
     // ---- 第 18 步：恢复（状态机，任何一步失败都阻止释放）----
     //
@@ -2229,6 +2634,16 @@ recover:
         setHexProperty(this, "m2-b2-dma-t-translate-off", fM22b2Dma.tTranslateOff);
         setProperty("m2-3e-translate-off", "confirmed-by-register-readback");
         r17SetTranslateOff(fM22b2Dma.tTranslateOff);
+        // Native RX has stopped DMA and restored the current physical ring.
+        // Only after translation is restored may Lucy restart the NIC. Keep
+        // its control context alive until real link/RX/TX recovery is confirmed.
+        if (fR31Session && !r34RxResumePhysical()) {
+            setProperty("m2-3b-cleanup", "PINNED-native-RX-resume-refused");
+            setProperty("m2-b2-verdict", "INVALID-native-RX-resume-refused");
+            setProperty("m2-b2-stage", "18b-pinned-native-RX-resume");
+            r17Export(&ctx);
+            return;
+        }
     }
     if (hadWindow) {
         if (!regsRestored) {
@@ -2263,8 +2678,8 @@ recover:
         r17Release();
         setProperty("m2-3b-cleanup", "no-window-installed");
     }
-    // Stop swaps after translation is off; installed RX objects remain retained
-    // and copy-only, never freed while the NIC can still reach them.
+    // The finite pool stays copy-only. Native sessions resumed above through
+    // their own control after register restoration.
     m2b2R15Finish();
 
     // ---- 第 19 步：判定 ----
@@ -2568,7 +2983,13 @@ recover:
         cmdBufMd->release();
         semMd->release();
         evtMd->release();
+        domain->resourcesReleased = true;
         setProperty("m2-b2-cleanup", "done");
+        if (fR31Session) {
+            fR31SessionCompleted = mainWindowRan && winMain.valid &&
+                !firstFailStage && !ctx.failed &&
+                __atomic_load_n(&fR31StopRequested, __ATOMIC_ACQUIRE);
+        }
     } else {
         // 不释放：硬件可能仍引用这些地址。宁可泄漏，也不要让 IOMMU
         // 继续按已被回收的内存翻译全系统 DMA（2026-10-30 就是这样

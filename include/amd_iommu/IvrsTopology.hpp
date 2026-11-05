@@ -1,8 +1,6 @@
 #pragma once
 
 #include "amd_iommu/Ivrs.hpp"
-#include <cstddef>
-#include <cstdint>
 
 namespace amd_iommu {
 

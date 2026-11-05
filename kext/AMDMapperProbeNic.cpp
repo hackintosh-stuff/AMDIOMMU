@@ -133,8 +133,19 @@ bool org_example_AMDMapperProbe::publishHandler(
     org_example_AMDMapperProbe *self =
         (org_example_AMDMapperProbe *)target;
     if (!self || !newService) return true;
+    IOLog("AMDMapperProbe: publish name=%s\n", newService->getName());
+    self->fR44NotifyTotal++;
+    if (self->fR44Provider)
+        self->fR44Provider->setProperty("amdmapper-notify-total",
+                                        self->fR44NotifyTotal, 32);
+    if (self->fR44Auto) {
+        // One path for explicit requester offers and the legacy default.
+        // It also marks known unselected clients for physical DMA.
+        self->r44AttachAuto(newService);
+        return true;
+    }
 
-    // 只处理我们的靶子：device-id == 0x8127
+    // Legacy experiments keep their original RTL8127-only target.
     OSData *did = OSDynamicCast(OSData, newService->copyProperty("device-id"));
     bool isTarget = false;
     if (did && did->getLength() >= 2) {
@@ -146,6 +157,7 @@ bool org_example_AMDMapperProbe::publishHandler(
     if (!isTarget) return true;     // 不是网卡，继续等
 
     self->fPublishHits++;
+    self->setProperty("r44-notify-hits", (unsigned long long)self->fPublishHits, 64);
 
     // 已经挂过就不再重复（gIOFirstPublishNotification 每实例只投一次，
     // 但 kIOServiceSynchronous 下可能在同一实例上重复触发）
@@ -314,5 +326,49 @@ IOService *org_example_AMDMapperProbe::findNicServiceOnly() {
         }
         e->release();
     }
-    return nullptr;
+    // The path list only resolves once the entry is attached in that plane.
+    // The nub itself already exists and is published by the time this kext
+    // starts, so enumerating IOPCIDevice and checking the config IDs finds it
+    // without depending on either plane's spelling: on this machine the nub is
+    // named "ethernet", not "pci10ec,8127", so a name match would miss it.
+    OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
+    if (!matching) return nullptr;
+    OSIterator *it = IOService::getMatchingServices(matching);
+    matching->release();
+    if (!it) return nullptr;
+    IOService *result = nullptr;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    OSObject *obj;
+    while ((obj = it->getNextObject())) {
+        IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, obj);
+        if (!pci) continue;
+        if (pci->configRead16(kIOPCIConfigVendorID) != 0x10ec ||
+            pci->configRead16(kIOPCIConfigDeviceID) != 0x8127) continue;
+        pci->retain();
+        result = pci;
+        break;
+    }
+#pragma clang diagnostic pop
+    it->release();
+    return result;
+}
+
+
+// R52 auto mode enumerates endpoints, never a first match or a saved NIC path.
+// The first-publish callback uses the same per-requester attach routine.
+void org_example_AMDMapperProbe::r52AttachExistingDevices() {
+    OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
+    if (!matching) return;
+    OSIterator *it = IOService::getMatchingServices(matching);
+    matching->release();
+    if (!it) return;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    while (OSObject *object = it->getNextObject()) {
+        IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, object);
+        if (pci) r44AttachAuto(pci);
+    }
+#pragma clang diagnostic pop
+    it->release();
 }

@@ -54,6 +54,7 @@ MEMBERS = r'''
      * helpers below take it, and defined with R17TxState so a gen's state and
      * its objects are always travelled together. */
     struct R17Gen;
+    struct R32TxAdmission;
     /* ---- round 22: the submission barrier -------------------------------
      * ONE word, valid for the whole driver lifetime (not only while a window
      * is installed), because the race it closes exists BEFORE Install too: an
@@ -73,6 +74,7 @@ MEMBERS = r'''
     UInt32 r17TxRefs();
     UInt32 r17TxRingOwn();
     bool r17TxOutputReady();
+    bool r32TxDequeue(IONetworkInterface *interface, mbuf_t *packet);
     void r17TxWakeOutput();
     bool r17TxMap(mbuf_t m, IOPhysicalSegment *segments, UInt32 &count);
     bool r17TxMapAdmitted(mbuf_t m, IOPhysicalSegment *segments, UInt32 &count);
@@ -80,7 +82,8 @@ MEMBERS = r'''
                         IOPhysicalSegment *segments, UInt32 &count);
     bool r17TxMapStd(R17TxState *p, R17Gen *g, mbuf_t m,
                      IOPhysicalSegment *segments, UInt32 &count);
-    bool r17TxStdRollback(R17TxState *p, R17Gen *g, mbuf_t m, IOReturn unmap);
+    IOReturn r17TxStdComplete(R17TxState *p, R17Gen *g);
+    bool r17TxStdRollback(R17TxState *p, R17Gen *g, mbuf_t m);
     bool r17TxCover(R17TxState *p, IOPhysicalSegment *segments, UInt32 count);
     void r17TxRetire(R17TxState *p, R17Gen *g, UInt64 handle);
     UInt64 r17TxStdMark();
@@ -129,10 +132,22 @@ struct RTL8125::R17Gen {
     IOMemoryDescriptor *stdMD;
     IODMACommand *stdCmd;
     bool stdWired;
+    bool stdCompleteAttempted; /* complete() may discard failed unmap bookkeeping */
+    IOReturn stdRetireResult;  /* API result plus per-handle backend confirmation */
     UInt64 stdHandle;           /* probe handle, 0 until one is published */
     r17tx::Request request;
     r17tx::Witness current;
     r18std::Witness stdW;
+};
+/* The queue keeps ownership while admission is closed. Once dequeued, this
+ * guard covers the existing outputStart early exits until Posted takes over. */
+struct RTL8125::R32TxAdmission {
+    RTL8125 *driver;
+    explicit R32TxAdmission(RTL8125 *d) : driver(d) {}
+    ~R32TxAdmission() { if (driver) driver->r17TxLeave(); }
+    void handoff() { driver = nullptr; }
+    R32TxAdmission(const R32TxAdmission &) = delete;
+    R32TxAdmission &operator=(const R32TxAdmission &) = delete;
 };
 struct RTL8125::R17TxState {
     UInt32 token, bdf;
@@ -171,7 +186,7 @@ struct RTL8125::R17TxState {
     UInt32 stdLastSig;
     r18std::Snapshot stdSnap;
     /* Round25: absolute retirement record cursor. History writes at cursor%32;
-     * it never bounds the cumulative counter or the four live generations. */
+     * it never bounds the cumulative counter or the live generations. */
     UInt32 stdRecordCursor;
     /* ---- round 20: blocked-ring record and cover accounting ---- */
     r20tx::Block blockSnap;
@@ -220,7 +235,8 @@ IOReturn RTL8125::r17TxConfigure(r17tx::Configure *c)
          * costs a reboot to repeat. */
         if (useAppleVTD || !workLoop || !pciDevice || !c->callback ||
             !c->context || !c->owner || !c->token ||
-            c->deadline <= mach_absolute_time()) {
+            (c->deadline ? c->deadline <= mach_absolute_time()
+                         : c->mode != r17tx::kModeAllStandard)) {
             IOLog("r17 install rejected: vtd=%d wl=%d pci=%d cb=%d ctx=%d "
                   "own=%d tok=%u dl=%llu now=%llu\n", (int)useAppleVTD,
                   workLoop != 0, pciDevice != 0, c->callback != 0,
@@ -248,7 +264,7 @@ IOReturn RTL8125::r17TxConfigure(r17tx::Configure *c)
             IOLog("r17 install rejected: standard mode without a mapper\n");
             return kIOReturnBadArgument;
         }
-        /* Four pages per live slot do not support large TSO super-packets.
+        /* This round retains the measured non-TSO traffic contract.
          * These fields feed getFeatures() during driver setup: changing them
          * here would not renegotiate the stack's advertised capabilities. The
          * all-TX run must start with both offloads already disabled. */
@@ -333,7 +349,6 @@ IOReturn RTL8125::r17TxConfigure(r17tx::Configure *c)
          * mappings exist. */
         c->state = __atomic_load_n(&p->ctrl, __ATOMIC_ACQUIRE);
         r17TxReport(c);
-        c->held = r17TxLiveGens();
         c->mapped = __atomic_load_n(&p->mapped, __ATOMIC_RELAXED);
         c->completed = __atomic_load_n(&p->completed, __ATOMIC_RELAXED);
         c->retired = __atomic_load_n(&p->retired, __ATOMIC_RELAXED);
@@ -366,6 +381,7 @@ IOReturn RTL8125::r17TxConfigure(r17tx::Configure *c)
     c->retired = __atomic_load_n(&p->retired, __ATOMIC_RELAXED);
     c->dropped = __atomic_load_n(&p->dropped, __ATOMIC_RELAXED);
     c->held = __atomic_load_n(&p->held, __ATOMIC_RELAXED);
+    c->modeReserved = r17TxLiveGens();
     c->maxHeld = __atomic_load_n(&p->maxHeld, __ATOMIC_RELAXED);
     c->evidenceUsed = c->retired;
     c->rejected = __atomic_load_n(&p->rejected, __ATOMIC_RELAXED);
@@ -454,9 +470,8 @@ IOReturn RTL8125::r17TxConfigure(r17tx::Configure *c)
  * they exist is that the probe must be able to say "no descriptor is between
  * outputStart and the hardware" without trusting thread scheduling:
  *
- *   r17TxEnter()  is called on every packet that reached the commit point,
- *                 BEFORE the backend is even looked at (so it also covers the
- *                 output thread that read "no backend" before Install);
+ *   r17TxEnter()  is called BEFORE dequeue and before the backend is looked at
+ *                 (so it also covers ordinary output before Install);
  *   r17TxLeave()  is called after the OWN bit is set, or on every refusal.
  *
  * While an admission is outstanding, the probe's kQuiesce cannot conclude
@@ -517,25 +532,21 @@ UInt32 RTL8125::r17TxRingOwn()
     return (txNextDescIndex - txDirtyDescIndex) & kTxDescMask;
 }
 
-/* true: the caller may submit m. false: consumed (freed or pinned), MUST skip.
- * Called only after the frame's length is known and before ANY OWN.
- *
- * Round22 splits this in two: this wrapper owns the admission reference, and
- * r17TxMapAdmitted() is the round-17..21 body unchanged. A `false` from the
- * body means the packet never reaches an OWN bit, so the reference is released
- * here; a `true` means outputStart will set OWN and call r17TxPosted(), which
- * releases it. There is no third exit from outputStart between those two
- * points (verified against the generated source by tools/r21/test-driver.py). */
 /* The interface has ONE output thread. Test capacity BEFORE dequeue: the
- * interface queue remains the sole mbuf owner; no fifth packet reaches Map.
+ * interface queue remains the sole mbuf owner when live records are full.
  * Publish waiting BEFORE scanning slots. Retirement may race either side of
  * the scan, but the timer repeats a level-triggered wake until output consumes
  * it, so a signal just before the output thread sleeps cannot be lost. */
 bool RTL8125::r17TxOutputReady()
 {
     R17TxState *p = __atomic_load_n(&r17Tx, __ATOMIC_ACQUIRE);
-    if (!p) return true;
+    const bool closed = (__atomic_load_n(&r17Admit, __ATOMIC_ACQUIRE) & 0x80000000u) != 0;
+    if (!p) return !closed;
     UInt32 was = __atomic_exchange_n(&p->outputWaiting, 1u, __ATOMIC_ACQ_REL);
+    if (closed) {
+        if (!was) __atomic_fetch_add(&p->outputWaits, 1u, __ATOMIC_RELAXED);
+        return false;
+    }
     for (UInt32 k = 0; k < r17tx::kSlots; k++) {
         if (__atomic_load_n(&p->gens[k].state, __ATOMIC_ACQUIRE) == r17tx::kIdle) {
             __atomic_store_n(&p->outputWaiting, 0u, __ATOMIC_RELEASE);
@@ -547,10 +558,29 @@ bool RTL8125::r17TxOutputReady()
     return false;
 }
 
+bool RTL8125::r32TxDequeue(IONetworkInterface *interface, mbuf_t *packet)
+{
+    if (!r17TxOutputReady()) return false;
+    // Reserve before dequeue. Quiesce may close admission after the capacity
+    // check, but then the packet is still owned by the interface queue.
+    if (!r17TxEnter()) {
+        R17TxState *p = __atomic_load_n(&r17Tx, __ATOMIC_ACQUIRE);
+        if (p && !__atomic_exchange_n(&p->outputWaiting, 1u, __ATOMIC_ACQ_REL))
+            __atomic_fetch_add(&p->outputWaits, 1u, __ATOMIC_RELAXED);
+        return false;
+    }
+    if (interface->dequeueOutputPackets(1, packet, NULL, NULL, NULL) != kIOReturnSuccess) {
+        r17TxLeave();
+        return false;
+    }
+    return true; // outputStart's R32TxAdmission guard now owns the reference
+}
+
 void RTL8125::r17TxWakeOutput()
 {
     R17TxState *p = __atomic_load_n(&r17Tx, __ATOMIC_ACQUIRE);
     if (!p) return;
+    if (__atomic_load_n(&r17Admit, __ATOMIC_ACQUIRE) & 0x80000000u) return;
     if (__atomic_load_n(&p->outputWaiting, __ATOMIC_ACQUIRE)) {
         for (UInt32 k = 0; k < r17tx::kSlots; k++) {
             if (__atomic_load_n(&p->gens[k].state, __ATOMIC_ACQUIRE) == r17tx::kIdle) {
@@ -568,6 +598,9 @@ void RTL8125::r17TxWakeOutput()
     setProperty("R24TxWakes", (UInt64)__atomic_load_n(&p->outputWakes, __ATOMIC_RELAXED), 32);
 }
 
+/* Retained entry for callers that already own a packet. Production outputStart
+ * reserves before dequeue, then calls MapAdmitted with an R32TxAdmission guard.
+ * The wrapper keeps the older ownership contract for direct diagnostic calls. */
 bool RTL8125::r17TxMap(mbuf_t m, IOPhysicalSegment *segments, UInt32 &count)
 {
     if (!r17TxEnter()) {
@@ -660,7 +693,7 @@ bool RTL8125::r17TxMapAdmitted(mbuf_t m, IOPhysicalSegment *segments,
      * always admitted after translation is confirmed; a close that happens
      * after admission is exactly what the reference protects. */
     const bool base = !useAppleVTD && __atomic_load_n(&p->enabled, __ATOMIC_ACQUIRE)
-        && p->callback && mach_absolute_time() < p->deadline;
+        && p->callback && (!p->deadline || mach_absolute_time() < p->deadline);
     /* Round25: historical evidence capacity never gates live mapping owners. */
     if (!base) {
         __atomic_fetch_add(&p->rejected, 1u, __ATOMIC_RELAXED);
@@ -673,6 +706,7 @@ bool RTL8125::r17TxMapAdmitted(mbuf_t m, IOPhysicalSegment *segments,
     g->current.cumulative = txTailPtr0;
     g->current.firstSlot = txNextDescIndex;
     g->packet = NULL; g->stdMD = NULL; g->stdCmd = NULL; g->stdWired = false;
+    g->stdCompleteAttempted = false; g->stdRetireResult = kIOReturnNotReady;
     g->stdHandle = 0; g->lastSlot = 0;
     bzero(&g->request, sizeof(g->request));
     g->request.version = r17tx::kVersion; g->request.bytes = sizeof(g->request);
@@ -810,8 +844,8 @@ bool RTL8125::r17TxCover(R17TxState *p, IOPhysicalSegment *segments, UInt32 coun
  * read back what the framework decided, and decide whether that is usable.
  *
  * The chain is bounded by kMbufs and the returned DMA runs by kSegments. The
- * mapper independently enforces the four-page capacity of a live slot before
- * it writes PTEs; kMaxBytes alone does not establish that a layout fits. */
+ * mapper independently bounds and allocates the pages each mapping needs
+ * before it writes PTEs; kMaxBytes alone does not establish that a layout fits. */
 bool RTL8125::r17TxMapStd(R17TxState *p, R17Gen *g, mbuf_t m,
                           IOPhysicalSegment *segments, UInt32 &count)
 {
@@ -981,7 +1015,7 @@ bool RTL8125::r17TxMapStd(R17TxState *p, R17Gen *g, mbuf_t m,
             0, &plen0, kIOMemoryMapperNone);
         if (kr == kIOReturnSuccess && pa0 && segs[0].fIOVMAddr == (UInt64)pa0)
             g->stdW.flags |= r18std::kIdentity;
-        return r17TxStdRollback(p, g, m, cmd->complete(true, false));
+        return r17TxStdRollback(p, g, m);
     }
     g->stdW.mapAddress = segs[0].fIOVMAddr;
     /* Logical bytes covered by the mapping. The length IOKit hands back to
@@ -1009,8 +1043,42 @@ bool RTL8125::r17TxMapStd(R17TxState *p, R17Gen *g, mbuf_t m,
     return true;
 }
 
+/* Round29: complete() is still the only standard API that initiates unmap, but
+ * its return value does not carry every mapper/CompletionWait failure. Query
+ * the backend's confirmed record for THIS stamped handle before any release.
+ * Never issue complete twice: the framework may already have discarded its
+ * own mapping bookkeeping even when the backend retained the owner. */
+IOReturn RTL8125::r17TxStdComplete(R17TxState *p, R17Gen *g)
+{
+    if (g->stdCompleteAttempted) return g->stdRetireResult;
+    g->stdCompleteAttempted = true;
+    g->stdW.tCompleteBegin = mach_absolute_time();
+    const IOReturn result = g->stdCmd ? g->stdCmd->complete(true, false)
+                                    : kIOReturnNotReady;
+    g->stdW.tCompleteEnd = mach_absolute_time();
+    g->stdW.completeResult = (UInt32)result; /* keep the actual framework result */
+    g->stdRetireResult = result;
+    if (result != kIOReturnSuccess) return result;
+    r17tx::Request ack = g->request;
+    /* Standard mode does not populate Request::handle. The mapper mark taken
+     * around prepare() is the source of this generation's backend identity. */
+    ack.handle = g->stdHandle;
+    ack.tRetire = 0;
+    if (!ack.handle || !p->callback) {
+        g->stdRetireResult = kIOReturnNotReady;
+        return g->stdRetireResult;
+    }
+    IOReturn confirmed = p->callback(p->context, r17tx::kRetireAck, &ack);
+    if (confirmed == kIOReturnSuccess &&
+        (ack.handle != g->stdHandle || !ack.tRetire))
+        confirmed = kIOReturnIOError;
+    if (confirmed == kIOReturnSuccess) g->request.tRetire = ack.tRetire;
+    g->stdRetireResult = confirmed;
+    return confirmed;
+}
+
 /* The single rollback exit for "the standard map was published, then found
- * unusable". Only the unmap result decides what happens next:
+ * unusable". Both API completion and backend confirmation decide the ending:
  *
  *   confirmed -> the translation is gone. Release this generation's descriptor,
  *     command and packet, clear the generation handle AND the owner state, so
@@ -1023,16 +1091,12 @@ bool RTL8125::r17TxMapStd(R17TxState *p, R17Gen *g, mbuf_t m,
  *     complete(): the archived XNU IOMemoryDescriptor::dmaUnmap clears its own
  *     mapping bookkeeping even when the mapper fails, so a second complete()
  *     would report success without unmapping anything. */
-bool RTL8125::r17TxStdRollback(R17TxState *p, R17Gen *g, mbuf_t m,
-                               IOReturn unmap)
+bool RTL8125::r17TxStdRollback(R17TxState *p, R17Gen *g, mbuf_t m)
 {
-    g->stdW.completeResult = (UInt32)unmap;
-    g->stdW.tCompleteBegin = g->stdW.tCompleteBegin ? g->stdW.tCompleteBegin
-                                                    : mach_absolute_time();
-    g->stdW.tCompleteEnd = mach_absolute_time();
-    if (g->stdCmd) g->stdCmd->clearMemoryDescriptor();
+    const IOReturn unmap = r17TxStdComplete(p, g);
     if (unmap == kIOReturnSuccess) {
-        if (g->stdCmd) { g->stdCmd->release(); g->stdCmd = nullptr; }
+        if (g->stdCmd) { g->stdCmd->clearMemoryDescriptor(false);
+                         g->stdCmd->release(); g->stdCmd = nullptr; }
         if (g->stdMD && g->stdWired) g->stdMD->complete(kIODirectionOut);
         if (g->stdMD) { g->stdMD->release(); g->stdMD = nullptr; }
         g->stdWired = false;
@@ -1214,6 +1278,9 @@ IOReturn RTL8125::r17TxGate(bool quiesce)
         p->tEdge = mach_absolute_time();
         p->tResume = p->tEdge;
         __atomic_store_n(&p->gate, 0u, __ATOMIC_RELEASE);
+        // A queue stalled for a table transition resumes even after Detach,
+        // when no mapping retirement remains to trigger a capacity wake.
+        if (netif) netif->signalOutputThread();
         /* Round22: the resume does NOT take a block sample.
          *
          * It is a window edge, so round 21's rule ("only an edge may replace a
@@ -1266,6 +1333,8 @@ void RTL8125::r17TxReport(r17tx::Configure *c)
     c->ringOwn = r17TxRingOwn();
     c->outstanding = r17TxOutstanding();
     c->activeCover = __atomic_load_n(&p->coverActive, __ATOMIC_ACQUIRE);
+    c->held = __atomic_load_n(&p->held, __ATOMIC_ACQUIRE);
+    c->modeReserved = r17TxLiveGens(); /* native v7: independent live-generation count */
     c->gateFails = __atomic_load_n(&p->gateFails, __ATOMIC_RELAXED);
     c->barrierFails = __atomic_load_n(&p->barrierFails, __ATOMIC_RELAXED);
     c->edgeSeq = p->edgeSeq;
@@ -1542,14 +1611,7 @@ void RTL8125::r17TxRetire(R17TxState *p, R17Gen *g, UInt64 handle)
 {
     IOReturn result;
     if (p->stdMode) {
-        /* complete() is what makes IOKit call iovmUnmapMemory(); the driver
-         * never invokes the mapper itself. Note the contract cost: complete()
-         * drops the command's own bookkeeping even when the unmap fails, so a
-         * failed unmap cannot be retried -- it is reported as pinned. */
-        g->stdW.tCompleteBegin = mach_absolute_time();
-        result = g->stdCmd ? g->stdCmd->complete(true, false) : kIOReturnNotReady;
-        g->stdW.tCompleteEnd = mach_absolute_time();
-        g->stdW.completeResult = (UInt32)result;
+        result = r17TxStdComplete(p, g);
     } else {
         result = p->callback(p->context, r17tx::kRetire, &g->request);
     }
@@ -1567,7 +1629,7 @@ void RTL8125::r17TxRetire(R17TxState *p, R17Gen *g, UInt64 handle)
         g->packet = NULL;
         __atomic_fetch_sub(&p->held, 1u, __ATOMIC_ACQ_REL);
         if (p->stdMode) {
-            if (g->stdCmd) { g->stdCmd->clearMemoryDescriptor();
+            if (g->stdCmd) { g->stdCmd->clearMemoryDescriptor(false);
                              g->stdCmd->release(); g->stdCmd = nullptr; }
             if (g->stdMD && g->stdWired) g->stdMD->complete(kIODirectionOut);
             if (g->stdMD) { g->stdMD->release(); g->stdMD = nullptr; }
@@ -1613,7 +1675,7 @@ void RTL8125::r17TxRetire(R17TxState *p, R17Gen *g, UInt64 handle)
          * objects and mbuf, and park THIS generation. A failed retire is never
          * reported as recycled, and the other live generations are untouched. */
         g->request.handle = handle;
-        if (p->stdMode) {
+        if (p->stdMode && !(g->stdW.flags & r18std::kPinned)) {
             g->stdW.flags |= r18std::kPinned;
             __atomic_fetch_add(&p->stdPinned, 1u, __ATOMIC_RELAXED);
         }
@@ -1671,6 +1733,13 @@ void RTL8125::r17TxTimer(IOTimerEventSource *timer)
                 __ATOMIC_ACQUIRE))
                 __atomic_fetch_add(&p->completed, 1u, __ATOMIC_RELAXED);
         }
+        /* A failed standard retirement is terminal for this generation. The
+         * command may have dropped its mapping bookkeeping; re-entering it
+         * cannot establish that the retained backend owner was unmapped. The
+         * acquire load also covers pinned post-prepare rollback publication. */
+        state = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
+        if (state != r17tx::kPending ||
+            (p->stdMode && (g->stdW.flags & r18std::kPinned))) continue;
         UInt32 pending = r17tx::kPending;
         if (__atomic_compare_exchange_n(&g->state, &pending,
             (UInt32)r17tx::kRetiring, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -1705,12 +1774,13 @@ void RTL8125::r17TxStop()
 '''
 
 HOOKS = (
-    'if (!r17TxMap(m, txSegments, numSegs)) continue;',
+    'if (!r17TxMapAdmitted(m, txSegments, numSegs)) continue;',
     'r17TxComplete(txDirtyDescIndex);', 'r17TxPosted(m);',
     'r17TxStop();', 'r17Tx = NULL;',
     'functionName->isEqualTo(r17tx::kFunctionName)',
     'txMbufArray[index] = (p && r17TxFindByPacket(p, m)) ? NULL : m;',
-    'r17TxOutputReady() && interface->dequeueOutputPackets(',
+    'r32TxDequeue(interface, &m)', 'R32TxAdmission admission(this);',
+    'admission.handoff();',
     'result = (r17TxOutputReady() && (txNumFreeDesc > (kMaxSegs + 3)))')
 
 
@@ -1723,18 +1793,22 @@ def patch_cpp(text):
     stop = text.index('void RTL8125::stop(IOService *provider)')
     end = text.index('    if (workLoop)', stop)
     text = text[:end] + '    r17TxStop();\n' + text[end:]
-    # Backpressure must precede dequeue (the queue still owns the fifth mbuf).
+    # Reserve admission before dequeue, so a table transition stalls the queue
+    # instead of dropping an already dequeued frame. The guard handles the
+    # upstream body's existing continue paths before mapping/descriptor OWN.
     once('(interface->dequeueOutputPackets(1, &m, NULL, NULL, NULL) == kIOReturnSuccess)',
-         '(r17TxOutputReady() && interface->dequeueOutputPackets(1, &m, NULL, NULL, NULL) == kIOReturnSuccess)')
+         '(r32TxDequeue(interface, &m))')
+    once('(r32TxDequeue(interface, &m))) {',
+         '(r32TxDequeue(interface, &m))) {\n        R32TxAdmission admission(this);')
     # IOKit must see a resource stall, not success with packets still queued.
-    # Recheck capacity at the tail as well: publishing the fourth packet may
+    # Recheck capacity at the tail as well: publishing the last packet may
     # have consumed the final slot even if the dequeue loop ended otherwise.
     once('    result = (txNumFreeDesc > (kMaxSegs + 3)) ? kIOReturnSuccess : kIOReturnNoResources;',
          '    result = (r17TxOutputReady() && (txNumFreeDesc > (kMaxSegs + 3))) ? kIOReturnSuccess : kIOReturnNoResources;')
     # Mapping happens after the real physical segments are known and before the
     # ring reservation / descriptor fill / first OWN of this packet.
     once('        OSAddAtomic(-numSegs, &txNumFreeDesc);',
-         '        if (!r17TxMap(m, txSegments, numSegs)) continue;\n'
+         '        if (!r17TxMapAdmitted(m, txSegments, numSegs)) continue;\n'
          '        OSAddAtomic(-numSegs, &txNumFreeDesc);')
     once('                txMbufArray[index] = m;',
          '                /* Round23: the mbuf belongs to a selected generation, so the\n'
@@ -1744,7 +1818,8 @@ def patch_cpp(text):
          '                R17TxState *p = __atomic_load_n(&r17Tx, __ATOMIC_ACQUIRE);\n'
          '                txMbufArray[index] = (p && r17TxFindByPacket(p, m)) ? NULL : m;')
     once('        firstDesc->opts1 |= DescOwn;',
-         '        firstDesc->opts1 |= DescOwn;\n        r17TxPosted(m);')
+         '        firstDesc->opts1 |= DescOwn;\n'
+         '        admission.handoff();\n        r17TxPosted(m);')
     once('        m = txMbufArray[txDirtyDescIndex];',
          '        r17TxComplete(txDirtyDescIndex);\n        m = txMbufArray[txDirtyDescIndex];')
     # The struct definitions must come before outputStart's ownership check.

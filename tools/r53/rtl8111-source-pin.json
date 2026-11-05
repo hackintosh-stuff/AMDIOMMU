@@ -1,0 +1,102 @@
+{
+  "repository": "https://github.com/Mieze/RTL8111_driver_for_OS_X",
+  "commit": "a3dad34ed4f1e72805ce42f6d506f6917fdf79a0",
+  "version": "3.0.54",
+  "files": [
+    {
+      "path": "README.md",
+      "git_blob": "2fb3d1e52ab349fce02719b8837de15a9f31ecca",
+      "bytes": 12389
+    },
+    {
+      "path": "RealtekRTL8111/APPLE_LICENSE",
+      "git_blob": "71fe6fd79ce1fcf95157b4627fd864de0ae17897",
+      "bytes": 20108
+    },
+    {
+      "path": "RealtekRTL8111/Info.plist",
+      "git_blob": "58656f7eda86f36afb7696aba3609930eb157296",
+      "bytes": 2341
+    },
+    {
+      "path": "RealtekRTL8111/RealtekRTL8111-V2-Prefix.pch",
+      "git_blob": "1c92f814a8175abffab5c5a99a6d9b47c3e67d4e",
+      "bytes": 1734
+    },
+    {
+      "path": "RealtekRTL8111/RealtekRTL8111.cpp",
+      "git_blob": "164d40eddffeeebd529ba7c2931c1d12b47f2cfe",
+      "bytes": 56170
+    },
+    {
+      "path": "RealtekRTL8111/RealtekRTL8111.hpp",
+      "git_blob": "3f0d1da75a038f8b99c9efc51f35bf907bc14845",
+      "bytes": 14928
+    },
+    {
+      "path": "RealtekRTL8111/RealtekRTL8111Hardware.cpp",
+      "git_blob": "9fa86dceac556ce23e8079927928e028f68ff59a",
+      "bytes": 78576
+    },
+    {
+      "path": "RealtekRTL8111/RealtekRTL8111Linux-804704.cpp",
+      "git_blob": "e95b95d164c7a070ccd2f0a4b25cf870e47316f5",
+      "bytes": 1229218
+    },
+    {
+      "path": "RealtekRTL8111/RealtekRTL8111Linux-804704.hpp",
+      "git_blob": "6c0d2d3540789abb828ed27eda1024bc81cdffce",
+      "bytes": 60477
+    },
+    {
+      "path": "RealtekRTL8111/RealtekRTL8111Setup.cpp",
+      "git_blob": "af270023a2d9892d14f00f971dfd298ba0b2f9a8",
+      "bytes": 19373
+    },
+    {
+      "path": "RealtekRTL8111/RealtekRTL8111VTD.cpp",
+      "git_blob": "b33def6befb9cfb2a0d9b3f7b337cf7033e8faba",
+      "bytes": 15952
+    },
+    {
+      "path": "RealtekRTL8111/RealtekRxPool.cpp",
+      "git_blob": "1f94d3e3a3eda1f6ca905b39ab30c0811dd32d57",
+      "bytes": 7031
+    },
+    {
+      "path": "RealtekRTL8111/RealtekRxPool.hpp",
+      "git_blob": "500ad665cb31826705af8ee9d775fd3f7ba4c38f",
+      "bytes": 1325
+    },
+    {
+      "path": "RealtekRTL8111/ethertool.h",
+      "git_blob": "f536edab44596d6a30b92811777d3d3c31570234",
+      "bytes": 46142
+    },
+    {
+      "path": "RealtekRTL8111/gpl.txt",
+      "git_blob": "0d7390687b1fa78651e6bf5446fff7b675533e60",
+      "bytes": 18010
+    },
+    {
+      "path": "RealtekRTL8111/if_ether.h",
+      "git_blob": "33bb98d4736159db1a5a2e761a64490b57a3f5b9",
+      "bytes": 6996
+    },
+    {
+      "path": "RealtekRTL8111/linux.h",
+      "git_blob": "7b9d063009d3a57ff0e39a25272f977b20773a16",
+      "bytes": 10206
+    },
+    {
+      "path": "RealtekRTL8111/mii.h",
+      "git_blob": "ff8bb25a6acc14ca4a0045efa5533de7279acac8",
+      "bytes": 12992
+    },
+    {
+      "path": "RealtekRTL8111/r8168_dash.h",
+      "git_blob": "aa2652115991d8244d598fef25edada8e78e669c",
+      "bytes": 7687
+    }
+  ]
+}

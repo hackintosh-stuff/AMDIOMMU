@@ -2,7 +2,13 @@
 #include <IOKit/IOMapper.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOLocks.h>
 #include <IOKit/IODMACommand.h>
+#include <kern/thread.h>
+
+class IOPCIDevice;
+
+#include "amd_iommu_mapper_abi.hpp"
 
 // 设备 DMA 观察用的纯逻辑核心（区间集合、fault 分类、描述符解码）。
 // 与 host 回归测试包含同一个文件，见 tests/dma-observe-test.cpp。
@@ -12,11 +18,16 @@
 // 同一个文件"，见 tests/rxpost-test.cpp。
 #include "amd_iommu_rxset_core.hpp"
 #include "../tools/lucy-obs/RTL812xRxPool.hpp"
+#include "../tools/lucy-obs/RTL812xRxMap.hpp"
+#include "../tools/lucy-obs/RTL812xRxNative.hpp"
+#include "../tools/lucy-obs/RTL812xFixedDma.hpp"
 // Round17: native-mbuf TX mapping ABI (round16's RTL812xTxMap.hpp is kept as
 // the archived staging ABI and is no longer included by the probe).
 #include "../tools/lucy-obs/RTL812xTxMapNative.hpp"
 
 class IOTimerEventSource;   // 前置声明，避免头文件相互包含
+class R27ProbeTimer;
+struct R47HardwareInfo;
 
 // M1-B 探针（B1 + B2-0 + B2-a）
 //
@@ -43,10 +54,14 @@ class org_example_AMDMapperProbe : public IOMapper {
 
 protected:
     bool initHardware(IOService *provider) override;
+    void free() override;
 
 public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
+    IOReturn setProperties(OSObject *properties) override;
+    IOReturn callPlatformFunction(const OSSymbol *, bool,
+        void *, void *, void *, void *) override;
 
     uint64_t getPageSize() const override;
 
@@ -75,6 +90,102 @@ public:
 
 private:
     IOService *fTarget;          // B1 靶子（IOMA）
+    // Round44: a persistent per-device mapper. Ordinary IODMACommand calls
+    // use this backend without the experiment's registered object bindings.
+    bool fR44Auto = false;
+    // R52: the root owns the hardware; auto-device instances own one mapper.
+    // fR52Owner is set before start() and must survive initHardware().
+    static constexpr UInt32 kR52MaxDomains = 3;
+    org_example_AMDMapperProbe *fR52Owner = nullptr;
+    org_example_AMDMapperProbe *fR52Mappers[kR52MaxDomains] = {};
+    IOLock *fR52AttachLock = nullptr;
+    UInt64 fR52SnapshotSequence = 0;
+    bool fR52Stopping = false;
+    // R53 explicit segment-zero requester selection; an empty list keeps R52.
+    bool fR53SelectionExplicit = false;
+    UInt32 fR53Requesters[kR52MaxDomains] = {};
+    UInt32 fR53RequesterCount = 0;
+    bool r53ReadDeviceSelection();
+    IOService *fR54Offers[kR52MaxDomains] = {};  // retained by selector index
+    // R69: a selected third-party client that cannot call our claim handshake
+    // (Apple's own Ethernet kexts call only IOMapper::copyMapperForDevice) gets
+    // its iommu-parent at first publish instead of at claim. Off by default so
+    // the R54..R67 claim protocol and its analysis stay the default behaviour.
+    bool fR69AutoAttach = false;
+    // Capacity evidence for third-party clients; published only on change.
+    UInt64 fR69MaxLength = 0, fR69MaxPages = 0, fR69MaxRuns = 0;
+    UInt64 fR69PublishedMaxLength = 0, fR69PublishedMaxPages = 0,
+           fR69PublishedMaxRuns = 0, fR69PublishedRejects = 0;
+    // Capacity measurement: the live counters are only in the snapshot blob,
+    // which is republished on prepare/PM boundaries. Mirror the ones the S3
+    // measurement needs and publish them when they change, so a read never
+    // has to force a snapshot from user space.
+    UInt64 fR69MapOk = 0, fR69UnmapOk = 0;
+    UInt32 fR69LiveMaps = 0, fR69LivePages = 0,
+           fR69PeakMaps = 0, fR69PeakPages = 0;
+    UInt64 fR69PublishedMapOk = ~0ULL, fR69PublishedUnmapOk = ~0ULL;
+    UInt32 fR69PublishedLiveMaps = ~0U, fR69PublishedLivePages = ~0U,
+           fR69PublishedPeakMaps = ~0U, fR69PublishedPeakPages = ~0U;
+    UInt32 fR69RejectedLength = 0, fR69RejectedOptions = 0,
+           fR69RejectedLayout = 0, fR69RejectedRecords = 0,
+           fR69RejectedNoRange = 0, fR69RejectedBits = 0;
+    void r69PublishCapacity();
+    // S1 capacity profile (docs/m2-3az-round69-capacity-model.md). The legacy
+    // entry is the default and reproduces the accepted ABI3 arena exactly; a
+    // domain may only be prepared after the profile's page-table area exists.
+    // S2 derives the profile per device; a boot argument forces it for all.
+    // S5d: failure breadcrumbs are written on the provider (IOResources)
+    // because a failed start() destroys the instance before a read.
+    IOService *fR44Provider = nullptr;
+    UInt32 fR44NotifyTotal = 0;
+    r44mapper::Profile fR44Profile = r44mapper::kProfileLegacy;
+    bool fR44ProfileForced = false;
+    bool r44SelectProfile();
+    const r44mapper::Profile *r44ForcedProfile() const;
+    const r44mapper::Profile *r44ProfileForDevice(IOPCIDevice *nic) const;
+    struct R52Domain;
+    R52Domain *fR52Domain = nullptr;
+    void r52AttachExistingDevices();
+    bool r52PrepareController(const R47HardwareInfo &);
+    bool r52PrepareDomain(IOService *, UInt32);
+    bool r52ReleaseDomain();
+    void r52PublishDomains();
+    bool r52PowerSupported() const;
+    IOReturn r66SetSystemPM(bool armed);
+    bool fR63DMAParked = false; // writes hold both the mapper and controller locks
+    IOReturn r63SetRequesterDMA(bool park);
+    IOReturn r63SwitchRequesterDMA(bool park);
+    bool r52InvalidateLocked(bool, UInt64, UInt64, bool, bool *);
+    struct R44Controller;
+    R44Controller *fR44Controller = nullptr;
+    struct R44MapperState;
+    R44MapperState *fR44Mapper = nullptr;
+    bool r44StartAuto();
+    bool r44AttachAuto(IOService *, bool claim = false);
+    bool r44StopAuto();
+    bool r44Invalidate(bool invalidateDevice = false,
+        UInt64 address = 0, UInt64 bytes = 0,
+        bool newMapping = false, bool *skipped = nullptr);
+    void r44PublishAuto();
+    // TODO(R47-PM-HARDWARE): validate real system sleep/resume when the
+    // platform supports it. Normal network operation does not invoke PM.
+    // Called synchronously by Lucy's existing gated PM actions. The normal
+    // network-family disable has retired TX and rebuilt RX before suspend.
+    IOReturn r47PowerTransition(UInt32);
+    bool r47SuspendAuto();
+    bool r47ResumeAuto();
+    bool r44PrepareMappings(volatile UInt64 *, UInt64, UInt32, UInt32,
+                            const r44mapper::Profile &);
+    bool r44QuiesceMappings();
+    bool r44ReleaseMappings();
+    UInt32 r44LiveMappings() const;
+    void r44PublishMappings(OSDictionary **copy = nullptr);
+    IOReturn r44MapMemory(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r44UnmapMemory(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
+    bool r44Translate(uint64_t, uint64_t *) const;
+
     // Round17: native-mbuf TX mapping. One live owner, evidence and command
     // budget bounded separately (see kext/AMDMapperProbeTx.cpp).
     struct R17Domain;
@@ -104,11 +215,11 @@ private:
     // driver's gate or workloop.
     bool r17Gate(bool quiesce, UInt32 *outstanding, UInt32 *activeCover,
                  UInt32 *inFlight = nullptr, UInt32 *ringOwn = nullptr);
-    // The one wait: closes admission (kQuiesce is idempotent) and returns true
-    // only when BOTH the admitted-submission count and the total ring occupancy
-    // are zero, confirmed by a second read. `edge` names the boundary in the
-    // published records ("enter" / "exit").
+    // Closes admission, then waits for submitters, descriptors, driver held/live
+    // generations and backend owners to drain, with every retirement and command
+    // completion confirmed. Polling does not hold the driver's gate or d->lock.
     bool r17StopSubmit(UInt32 budgetMs, const char *edge);
+    bool r17BackendDrained();
     // Second half of the enter edge: only after the DTE flip and both domain
     // invalidations completed. `tInvComplete` is that completion time, which is
     // what "translation is in effect from here" means.
@@ -140,6 +251,7 @@ private:
     // one physically contiguous page run per call (the layout a single-mbuf TX
     // packet has); everything else is refused before any PTE is written.
     bool r18StdReady() const;
+    bool r32CapacityProbe();
     // True only for an address inside the domain's own bounded IOVA window, so
     // an unrelated mapper call can never be routed into (or counted as) this
     // path.
@@ -160,6 +272,59 @@ private:
     /* round19: multi-run windows */
     uint32_t fStdRuns = 0, fStdDiscontig = 0, fStdMaxRuns = 0, fStdCapRejects = 0;
     void publishStdStats();
+
+    // Round30: 1024 cyclic RX mappings. Commands are registered by BOTH object
+    // identities before IOKit can call the mapper. They never consume TX slots.
+    struct R27RxDomain;
+    R27RxDomain *fR27Rx = nullptr;
+    bool r27RxRequested() const;
+    bool r27RxBegin();
+    void r27RxReady();
+    bool r27RxFinish(UInt32 budgetMs);
+    bool r29WaitTailDone(UInt32 budgetMs);
+    void r27RxExport();
+    void r27RxRelease();
+    IOReturn r27RxControl(UInt32 op);
+    bool r27RxCandidate(IOMemoryDescriptor *, IODMACommand *) const;
+    bool r27RxOwnsAddress(uint64_t) const;
+    bool r27RxTranslate(uint64_t, uint64_t *) const;
+    IOReturn r27RxMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r27RxUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
+
+    // Round34: Lucy owns the standard objects and replaces the real RX mbufs.
+    // This service owns only routing identities, PTEs and mapping evidence.
+    struct R34RxDomain;
+    R34RxDomain *fR34Rx = nullptr;
+    bool r40FixedCandidate(IOMemoryDescriptor *, IODMACommand *) const;
+    bool r40FixedOwnsAddress(uint64_t) const;
+    bool r40FixedTranslate(uint64_t, uint64_t *) const;
+    bool r40FixedReadPA(UInt32, UInt64, UInt64, UInt64 *) const;
+    IOReturn r40FixedOperation(r34rx::Binding *);
+    IOReturn r40FixedMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r40FixedUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
+    bool r34RxPrepareMap(volatile UInt64 *, UInt64, UInt32, UInt32);
+    bool r34RxStopBeforeDte();
+    bool r34RxBegin();
+    bool r34RxAuthorize();
+    bool r34RxResumePhysical();
+    bool r34RxFinish(UInt32 budgetMs);
+    bool r34RxTailDone(UInt32 budgetMs);
+    void r34RxReady();
+    void r34RxExport();
+    void r34RxRelease();
+    IOReturn r34RxControl(UInt32 op);
+    static int r34RxCallback(void *, r34rx::Binding *);
+    IOReturn r34RxOperation(r34rx::Binding *);
+    IOReturn r34RxBatch(r34rx::Binding *);
+    bool r34RxCandidate(IOMemoryDescriptor *, IODMACommand *) const;
+    IOReturn r34RxMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r34RxUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
 
     // ---- B2 观测计数器 ----
     // iovmMapMemory 可能被高频调用，不能每次都 setProperty（会持续分配内存）。
@@ -376,6 +541,8 @@ private:
     // （默认 20 秒），那时 PCI 枚举、网卡驱动、链路协商都已完成。
     // 这样既不阻塞启动，又能在有真实 DMA 的窗口里做实验。
     void runM22b2PageTableProbe();
+    struct R33DeviceDomain;
+    void finishM22b2PageTableProbe(R33DeviceDomain *, bool finishWindow);
 
     // 延迟调度：在 start() 末尾挂一个一次性定时器，到点后调用
     // runM22b2PageTableProbe()。返回 false 表示调度失败（记录属性后放弃）。
@@ -384,7 +551,24 @@ private:
     // 定时器回调（静态，符合 IOTimerEventSource::Action 签名）
     static void m22b2TimerFired(OSObject *owner, IOTimerEventSource *sender);
 
-    IOTimerEventSource *fM22b2Timer;   // 一次性定时器（stop() 里释放）
+    // Round33: setup transfers its hardware resources to the service and
+    // returns. Explicit stop launches a separate worker for drain + restore.
+    bool r31SessionRequested() const;
+    static void r31SessionWorker(void *parameter, wait_result_t result);
+    static void r33DomainStopWorker(void *parameter, wait_result_t result);
+    void r33ScheduleDomainStop();
+    bool r33DomainStopPending() const;
+    void r31RequestStop();
+    bool fR31Session = false;
+    volatile UInt32 fR31StopRequested = 0;
+    volatile UInt32 fR31WorkerActive = 0;
+    volatile UInt64 fR31StopRequestTime = 0;
+    bool fR31SessionCompleted = false; // written/read by the worker only
+    R33DeviceDomain *fR33Domain = nullptr;
+    volatile UInt32 fR33TeardownState = 0; // 0 active, 1 queued/running, 2 finished
+    UInt32 fR33InstallCount = 0;
+
+    R27ProbeTimer *fM22b2Timer;   // 一次性定时器（stop() 里释放）
     uint32_t            fM22b2DelayMS; // 延迟毫秒数（可被 boot-arg 覆盖）
 
     // 叶子页大小模式：
@@ -1205,10 +1389,8 @@ public:
     //   目标设备那一条，解码出 mode 与根表地址，把它作为走表起点；同时把
     //   那条 DTE 的原始值一起导出，使"起点来自 DTE"可被独立核对。
     //
-    // 【为什么把页表指针作为参数传进来】
-    //   它们是 runM22b2PageTableProbe() 的局部变量，生命周期与该函数一致。
-    //   传参比把它们提升为成员更安全：成员会活得更久，而这块内存在恢复
-    //   之后就被释放了，留下一个悬空成员正是要避免的形态。
+    // 页表由 R33DeviceDomain 持有；诊断只在域仍有效时借用这些指针。
+    // 恢复硬件并完成诊断后，域统一释放页表，走表函数不保存借用指针。
     void m2b2WalkBusinessRanges(const volatile UInt64 *dte, UInt32 tgt,
                                 const volatile UInt64 *ptMem,
                                 UInt64 ptBasePA, UInt64 ptBytes);
@@ -1231,10 +1413,12 @@ public:
                        UInt64 ptBasePA, UInt64 ptBytes);
     void m2b2PublishRxSet();
 
-    // Round 15: finite owned allocation domain. The request is 30KiB and must
-    // never be a stack local. Driver retains all ring/spare mbufs until stop.
+    // Shared driver reference and token storage for the historical finite
+    // path and native sessions. Sessions use the R34 control, never pool RPCs.
+    // The finite path alone retains the R15 ring/spare allocation domain.
     IOService *fR15Service;
     r15pool::Request fR15Request;
+    UInt32 fR15PoolRpcCalls;
     UInt64 fR15MapTicks;
     UInt64 fR15InvTicks;
     bool m2b2R15Call(UInt32 op);
@@ -1245,7 +1429,8 @@ public:
     void m2b2R15Release();
     struct R15Scope {
         org_example_AMDMapperProbe *self;
-        ~R15Scope() { self->m2b2R15Release(); }
+        bool transferred = false;
+        ~R15Scope() { if (!transferred) self->m2b2R15Release(); }
     };
 
     // 第十轮：本轮声明的受控批次请求数；0 = 未声明。

@@ -1953,10 +1953,9 @@ static inline bool plausibleRingBase(u64 base, u64 bytes, u64 mapLimit,
 //
 // WHAT CAN ACTUALLY BE PROVEN FROM INSIDE THE KEXT
 // ------------------------------------------------
-// The probe cannot see the driver's IOBufferMemoryDescriptor, so "this is
-// that exact object" is not directly provable here. What IS provable, and is
-// far stronger than "a register said so", is that the memory we mapped is
-// self-consistently the ring the driver built:
+// Without a registered driver object, identity is inferred from the contents.
+// The fingerprint checks that the memory we mapped is self-consistently the
+// ring the driver built:
 //
 //   * the RX ring's LAST descriptor must carry RingEnd -- the driver writes
 //     `rxDescArray[kRxLastDesc].cmd.opts1 = RingEnd` at setup and nowhere
@@ -1969,18 +1968,20 @@ static inline bool plausibleRingBase(u64 base, u64 bytes, u64 mapLimit,
 // That is a real check with a real failure mode, which is what the round-7
 // version lacked.
 //
-// The probe also reports WHICH of these held, so a future round with access to
-// the driver's objects can replace the fingerprint with the stronger proof
-// without changing the interface.
+// The probe reports the actual basis. Native fixed DMA can identify the
+// driver's retained object and its live mapping even while a rebuilt TX ring
+// is empty and cannot satisfy the historical content fingerprint.
 enum RingBasis {
     RB_NONE = 0,
     RB_REGISTER_ONLY,      // only "the register names it": NOT enough to read
     RB_REGISTER_AND_MAP,   // mapped, but the contents are not recognisable
-    RB_FINGERPRINT         // mapped and the contents match the driver's ring
+    RB_FINGERPRINT,        // mapped and the contents match the driver's ring
+    RB_REGISTERED_FIXED_DMA_OBJECT // registered live object resolves to this PA
 };
 
 static inline const char *ringBasisName(u32 b) {
     switch (b) {
+        case RB_REGISTERED_FIXED_DMA_OBJECT: return "registered-fixed-DMA-object";
         case RB_FINGERPRINT:        return "register+content-fingerprint";
         case RB_REGISTER_AND_MAP:   return "register+mapped-content-unverified";
         case RB_REGISTER_ONLY:      return "register-only";

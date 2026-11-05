@@ -61,24 +61,24 @@ static const char kFunctionName[] = "RTL812xTxMapNative-v1";
  * report that as a number, so an old probe can read a new driver and simply see
  * a peak above 1 -- which is exactly the fact this round adds.
  *
- * ROUND 23 ADDS kSlots: the driver keeps this many mappings alive at once, each
- * in its own fixed stripe of the IOVA window (`amdtx::kPagesPerSlot` pages).
- * It lives here rather than in the driver because the probe's map side has to
- * size the same window, and a mismatch would show up as two generations
- * aliasing one IOVA range. */
+ * Round32 keeps sixteen live driver records. IOVA pages are allocated by the
+ * backend for each mapping; a driver record no longer names a fixed stripe.
+ * These capacity constants do not alter the native wire layout. */
 /* Round25: fixed history is circular and no longer an admission limit.
  * Round26: mode 2 maps ordinary TX; Request::reqId is then a driver-assigned
  * monotonic map-attempt sequence, and token identifies the installed run. The
  * layout stays fixed, but old code must not silently interpret these as packet
  * selection fields. */
-static const uint32_t kVersion = 6, kMaxSegments = 8, kMaxPages = 16;
-static const uint32_t kSlots = 4;
+/* Round29: standard complete() requires per-handle backend retirement ack.
+ * Quiesce reports both held mbufs and live generations; layout is unchanged. */
+static const uint32_t kVersion = 7, kMaxSegments = 8, kMaxPages = 32;
+static const uint32_t kSlots = 16;
 /* Evidence and legacy packet-selection bounds. The live DMA-owner bound is
  * kSlots; all-standard mode does not use kRequestLimit for admission. */
 static const uint32_t kMaxRequests = 32; // fixed retained history
 static const uint32_t kRequestLimit = 512; // selected direct/standard modes only
-/* Protocol upper bound, not a promise that one four-page slot fits this much.
- * The mapper still rejects a layout beyond its per-slot page capacity. */
+/* Protocol byte bound; the backend allocates the pages needed by this layout
+ * within its explicit per-mapping and total-arena capacities. */
 static const uint64_t kMaxBytes = 65536;
 enum { kInstall = 1, kDisarm = 2, kQuery = 3, kDetach = 4 };
 /* kMap/kRetire are the owned mapping. kCover (round 20) asks the backend to
@@ -127,13 +127,13 @@ enum { kInstall = 1, kDisarm = 2, kQuery = 3, kDetach = 4 };
  * `tSubmitDone`/`tDrainDone` are the first observations of inFlight==0 and of
  * (inFlight==0 && ringOwn==0) after a close; they are never overwritten by a
  * later poll, which is what round 20 got wrong in the other direction. */
-/* NOTE: these numbers live in a DIFFERENT field from the Configure ops above
- * but travel in the same `Request`/`Configure` op word when a callback is used,
- * so they must never collide with kInstall/kDisarm/kQuery/kDetach (1..4).
+/* Request callback ops are a separate channel and may reuse Configure values.
+ * Window-edge ops travel in Configure::op and must not collide with its
+ * kInstall/kDisarm/kQuery/kDetach values (1..4).
  * kQuiesce was 4 in the first draft of round 21 -- the same value as kDetach --
  * and every Detach was silently executed as a Quiesce. The window-edge ops
  * therefore start above the control range. */
-enum { kMap = 1, kRetire = 2, kCover = 3,
+enum { kMap = 1, kRetire = 2, kCover = 3, kRetireAck = 4,
        kQuiesce = 16, kResume = 17,
        /* kSample asks the driver to publish a ring record for ONE named window
         * step (Configure.state carries the r20tx::kStage* value). It exists
@@ -154,8 +154,8 @@ enum { kIdle = 0, kMapping = 1, kPosting = 2, kSubmitted = 3, kPending = 4,
  *
  * These assertions make the classes of mistake that produced it unbuildable:
  *   * a control op colliding with another control op;
- *   * a request op colliding with a control op (same op word, two meanings);
- *   * a state value colliding with a control op.
+ *   * a window-edge op colliding with a control op (same op word);
+ *   * duplicate request op or state values within their own channels.
  * If a future round adds an op, the build fails here instead of on the machine.
  */
 static_assert(kInstall != kDisarm && kInstall != kQuery && kInstall != kDetach &&
@@ -171,11 +171,12 @@ static_assert(kResume != kInstall && kResume != kDisarm && kResume != kQuery &&
 static_assert(kSample != kInstall && kSample != kDisarm && kSample != kQuery &&
               kSample != kDetach,
               "window-edge ops must not collide with control ops");
-static_assert(kMap != kRetire && kMap != kCover && kRetire != kCover,
+static_assert(kMap != kRetire && kMap != kCover && kMap != kRetireAck &&
+              kRetire != kCover && kRetire != kRetireAck && kCover != kRetireAck,
               "Request ops must be distinct");
-/* NOTE: Request ops (kMap=1, kRetire=2, kCover=3) DO share values with the
- * control ops (kInstall=1, kDisarm=2, kQuery=3). That is deliberate and safe:
- * `Request::op` and `Configure::op` are different fields of different structs,
+/* NOTE: Request ops (kMap=1, kRetire=2, kCover=3, kRetireAck=4) DO share values with the
+ * control ops (kInstall=1, kDisarm=2, kQuery=3, kDetach=4). That is deliberate:
+ * the callback's op argument and Configure::op are separate channels,
  * and no code path compares one against the other. Asserting they differ would
  * be asserting a property the design does not have -- an over-eager guard that
  * rejects correct code is worse than no guard, because the next person
@@ -197,6 +198,10 @@ struct Request {
     /* In all-standard mode token is the run token and reqId is the internal
      * map-attempt sequence; neither is required to appear in packet bytes. */
     uint64_t handle; // Map input=0. Any nonzero output owns a cleanup obligation.
+    /* kRetireAck: query immediately after standard complete(), using the
+     * unique stdHandle, bdf and installed run token. Success returns tRetire
+     * only after that handle's PTE clear and retire CompletionWait completed.
+     * reqId/iova are not lookup keys: a prepare rollback may lack segments. */
     uint64_t tMap, tDone, tRetire; // mach ticks; backend stamps map/retire
     /* Actual physical segments of the real packet. The driver fills these from
      * getPhysicalSegmentsWithCoalesce() before any OWN and never rewrites them. */
@@ -207,7 +212,9 @@ struct Request {
 typedef IOReturn (*Callback)(void *context, uint32_t op, Request *request);
 struct Configure {
     uint32_t version, bytes, op, bdf, token, state;
-    uint64_t deadline; // mach absolute ticks, finite > now; no new Map after it
+    // Mach ticks: nonzero > now prevents new Map at expiry;
+    // 0 keeps an all-standard session active until explicit Disarm.
+    uint64_t deadline;
     Callback callback;
     void *context;
     IOService *owner; // retained by the driver until successful Detach
@@ -222,8 +229,8 @@ struct Configure {
      *             driver then never creates an IODMACommand for a packet.
      *             kModeStandard makes the driver hand each selected packet's
      *             IOMemoryDescriptor to an IODMACommand built with `mapper`,
-     *             i.e. IOKit performs the map/unmap; the platform callback is
-     *             then used only for Install/Disarm/Detach/Query.
+     *             i.e. IOKit performs the map/unmap; kRetireAck independently
+     *             confirms the backend retirement before the driver frees.
      *             kModeAllStandard uses the same standard objects for EVERY
      *             packet in the finite window, without token/req selection.
      *             Install refuses this mode while TSO4 or TSO6 is enabled;
@@ -231,7 +238,7 @@ struct Configure {
      *   mapper -- the probe's own IOMapper (never the system mapper, which is
      *             verified NULL in this kext). Ignored in kModeDirect. */
     void *mapper;
-    uint32_t mode, modeReserved;
+    uint32_t mode, modeReserved; // Round29 control output: live generations (including retiring)
     /* Round21 window edges (additive; `bytes` is validated against sizeof on
      * both sides, so a mixed probe/driver pair is refused at Install).
      *   quiesced    -- 1: the admission word is closed, no new submission is

@@ -1,9 +1,22 @@
 #include "amd_iommu/IvrsTopology.hpp"
 
-#include <cstring>
+#if defined(KERNEL)
+#include <libkern/libkern.h>
+#else
+#include <string.h>
+#endif
 
 namespace amd_iommu {
 namespace {
+
+void resetUnitTable(IvhdUnitTable& units) noexcept {
+    // Per-unit initialization avoids several whole-table temporaries at -O0.
+    // Those would exceed the kext's 4 KiB stack-frame / weak-chkstk build gate.
+    units.count = 0;
+    units.valid = false;
+    for (std::size_t i = 0; i < kMaxIvhdUnits; ++i)
+        units.units[i] = IvhdUnit{};
+}
 
 std::uint16_t le16(const std::uint8_t* p) noexcept {
     return static_cast<std::uint16_t>(p[0] | (std::uint16_t{p[1]} << 8));
@@ -349,7 +362,7 @@ bool onBlock(void* context, const IvrsBlockView& block) {
         const std::size_t firstLen = first.length - first.fixedSize;
         const std::size_t thisLen = block.length - block.fixedSize;
         if (firstLen != thisLen ||
-            std::memcmp(first.bytes + first.fixedSize, block.bytes + block.fixedSize,
+            memcmp(first.bytes + first.fixedSize, block.bytes + block.fixedSize,
                         firstLen) != 0) {
             unit.conflictingDeviceTables = true;
         }
@@ -396,7 +409,7 @@ bool onBlock(void* context, const IvrsBlockView& block) {
 
 IvrsTopologyResult buildTopology(const std::uint8_t* bytes, std::size_t size,
                                  IvhdUnitTable& units) noexcept {
-    units = IvhdUnitTable{};
+    resetUnitTable(units);
     IvrsTopologyResult result{};
 
     CollectContext context{&units, &result, TopologyError::None, 0};
@@ -408,14 +421,14 @@ IvrsTopologyResult buildTopology(const std::uint8_t* bytes, std::size_t size,
         result.error = context.error;
         result.errorOffset = context.errorOffset;
         result.ivrsError = result.parse.error;
-        units = IvhdUnitTable{};
+        resetUnitTable(units);
         return result;
     }
     if (!result.parse) {
         result.error = TopologyError::TableInvalid;
         result.ivrsError = result.parse.error;
         result.errorOffset = result.parse.errorOffset;
-        units = IvhdUnitTable{};
+        resetUnitTable(units);
         return result;
     }
     if (units.count == 0) {
@@ -435,7 +448,7 @@ IvrsTopologyResult buildTopology(const std::uint8_t* bytes, std::size_t size,
             if (error != TopologyError::None) {
                 result.error = error;
                 result.errorOffset = offset;
-                units = IvhdUnitTable{};
+                resetUnitTable(units);
                 return result;
             }
         }
@@ -444,7 +457,7 @@ IvrsTopologyResult buildTopology(const std::uint8_t* bytes, std::size_t size,
         if (units.units[i].conflictingDuplicates) {
             result.error = TopologyError::ConflictingDuplicates;
             result.errorOffset = units.units[i].conflictBlockOffset;
-            units = IvhdUnitTable{};
+            resetUnitTable(units);
             return result;
         }
     }

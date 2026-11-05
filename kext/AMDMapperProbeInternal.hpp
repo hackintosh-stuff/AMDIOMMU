@@ -39,6 +39,16 @@
     #define M1A_HAS_SHARED_PTR 0
 #endif
 
+// Actual allocated timer subtype: IOEventSource's gate methods are protected.
+// Only this source's own workloop gate is exposed; no access/downcast trick.
+class R27ProbeTimer : public IOTimerEventSource {
+    OSDeclareDefaultStructors(R27ProbeTimer);
+public:
+    static R27ProbeTimer *create(OSObject *owner, Action action);
+    void openClientGate() { openGate(); }
+    void closeClientGate() { closeGate(); }
+};
+
 // ---- probeRawMapper (original lines 42..49) ----
 static inline IOMapper *probeRawMapper(IOService *device) {
 #if M1A_HAS_SHARED_PTR
@@ -177,21 +187,30 @@ struct LayoutRun {
     uint32_t pageBytes; // 该 run 占用的页对齐长度
 };
 
-struct ProbeLayout {
+template<unsigned RunCapacity>
+struct BoundedProbeLayout {
     uint32_t runs;
     uint32_t pages;      // 整个窗口的页数
     uint32_t firstOffset;
     uint64_t totalBytes;
     bool     discontig;
     bool     error;
-    LayoutRun run[8];
+    LayoutRun run[RunCapacity];
 };
+// Legacy experiments retain their 32-run value result. The ordinary mapper
+// supplies reusable domain storage and holds its mapper lock throughout the walk.
+using ProbeLayout = BoundedProbeLayout<32>;
 
-static inline ProbeLayout probeLayout(IOMemoryDescriptor *memory,
-                                      uint64_t offset, uint64_t length,
-                                      uint32_t maxRuns) {
-    ProbeLayout L = {};
-    if (!memory || !length) { L.error = true; return L; }
+template<unsigned RunCapacity>
+static inline void probeLayoutInto(BoundedProbeLayout<RunCapacity> &L,
+    IOMemoryDescriptor *memory, uint64_t offset, uint64_t length, uint32_t maxRuns) {
+    // Only [0,runs) is valid. Each run we expose is completely overwritten.
+    L.runs = L.pages = L.firstOffset = 0;
+    L.totalBytes = 0;
+    L.discontig = L.error = false;
+    if (!memory || !length || !maxRuns || maxRuns > RunCapacity) {
+        L.error = true; return;
+    }
     // 与 r18 的 probeSegmentRun 一样用公开的 getPhysicalSegment(
     // kIOMemoryMapperNone) 走查：mapper 到达时描述符必须已 wiring。这要求驱动
     // 侧的描述符带 kIOMemoryAutoPrepare（withAddress 隐含携带、
@@ -199,11 +218,11 @@ static inline ProbeLayout probeLayout(IOMemoryDescriptor *memory,
     // "IOGMD: not wired for the IODMACommand"，见 docs/m2-3d-round19-result.md）。
     uint64_t consumed = 0, slot = 0;
     while (consumed < length) {
-        if (L.runs == maxRuns) { L.error = true; return L; }
+        if (L.runs == maxRuns) { L.error = true; return; }
         IOByteCount segLen = 0;
         addr64_t pa = memory->getPhysicalSegment(
             (IOByteCount)(offset + consumed), &segLen, kIOMemoryMapperNone);
-        if (!pa || !segLen) { L.error = true; return L; }
+        if (!pa || !segLen) { L.error = true; return; }
         if (segLen > (length - consumed)) segLen = (IOByteCount)(length - consumed);
         const uint32_t align = (uint32_t)(pa & 4095ULL);
         const uint32_t pageBytes =
@@ -225,16 +244,22 @@ static inline ProbeLayout probeLayout(IOMemoryDescriptor *memory,
         consumed += segLen;
         L.totalBytes += (uint64_t)segLen;
     }
-    return L;
+}
+
+static inline ProbeLayout probeLayout(IOMemoryDescriptor *memory, uint64_t offset,
+                                     uint64_t length, uint32_t maxRuns) {
+    ProbeLayout layout = {};
+    probeLayoutInto(layout, memory, offset, length, maxRuns);
+    return layout;
 }
 
 // ---- kNicPaths (original lines 671..696) ----
 // ------------------------------------------------------------- B2-b 靶子定位
 //
 // RTL8127 的 PCI ID 是 10EC:8127（Info.plist 里写作 0x812710ec）。
-// 板载 RTL8111H 是 10EC:8168，必须排除——它虽然也支持 iommu-parent，
-// 但驱动（RealtekRTL8111）会先探测 AppleVTD，不存在就不问 mapper，
-// 拿它做靶子验证不了任何东西（见 m1b-b2-design.md §3.2）。
+// Legacy B2 experiments keep excluding the onboard 10EC:8168. R53 auto mode
+// selects it explicitly with an adapted ordinary RealtekRTL8111 mapper client;
+// these historical path fallbacks do not participate in auto attachment.
 //
 // 时序教训（0.6.0 首次部署实测）：
 //   探针匹配 IOResources，start() 极早。此时 serviceMatching(IOPCIDevice)
@@ -513,6 +538,11 @@ static inline const char *kNicPaths[] = {
 #define M2B2_4K_TOTAL_PAGES     (M2B2_ROOT_PAGES + M2B2_L2_PAGES + \
                                  M2B2_4K_L1_PAGES + M2B2_4K_LEAF_PAGES + \
                                  M2B2_BADROOT_PAGES)                      // 8211
+
+// Round30: the 64GiB subtree needs one L2 and five L1 tables for TX16 +
+// RX1024*2 pages. Keep two more pages for the existing identity cover path.
+// Six IOVA tree pages plus a small RX physical-restore coverage budget.
+#define M2B2_IOVA_RESERVED_PAGES 70u
 
 // PTE 位定义（amd_iommu_types.h:376-380）
 #define M2B2_PTE_PR             (1ULL << 0)
@@ -887,6 +917,21 @@ static inline UInt64 m2b2InvAddress() {
     return a;
 }
 
+// R50 ordinary mappings use a page-aligned range inside their low IOVA pool.
+// Match Linux v6.6 build_inv_address(): S=0 for one 4 KiB page; otherwise
+// the highest changed address bit selects the smallest aligned power-of-two
+// range containing both endpoints. Lower address bits become ones, then the
+// reserved low bits are cleared before S is set. Hardware may invalidate a
+// wider range; this encoding does not promise preservation of adjacent IOTLBs.
+// The caller checks the pool bounds and nonzero page-aligned byte count.
+static inline UInt64 r50InvRangeAddress(UInt64 address, UInt64 bytes) {
+    if (bytes == 4096) return address;
+    UInt64 different = address ^ (address + bytes - 1);
+    unsigned highest = 0;
+    while (different >>= 1) ++highest;
+    return ((address | ((1ULL << highest) - 1)) & ~0xFFFULL) | 0x01ULL;
+}
+
 // ---- M2B2 measurement window (original lines 2579..2598) ----
 // ==================== 统一测量窗口（v0.20.0）====================
 //
@@ -1008,7 +1053,14 @@ struct M2B2CmdRecord {
 };
 
 // ---- struct M2B2CmdCtx (original lines 2966..2985) ----
+struct M2B2HeadCache {
+    UInt32 head;
+    bool valid;
+    UInt64 reads, cachedBatches;
+};
+
 struct M2B2CmdCtx {
+    struct M2B2HeadCache *headCache = nullptr; // opt-in for the shared auto controller
     volatile UInt32 *buf;
     volatile UInt64 *sem;
     UInt64 semPA;        // 完成信号物理地址（命令里要用）
@@ -1106,14 +1158,11 @@ static inline void m2b2DoPostSample(void *ctx) {
     p->tailOk = true;
 }
 
-// ---- m2b2SampleEvents (original lines 2753..2916) ----
-static inline void m2b2SampleEvents(volatile UInt8 *base,
-                             volatile UInt32 *evtBuf,
-                             UInt32 measureSecs,
-                             UInt32 tgtDevid,
-                             org_example_AMDMapperProbe::M22b2EventWindow *w,
-                             void (*postSample)(void *) = nullptr,
-                             void *postCtx = nullptr) {
+// Round33 event-window endpoints do not own the device domain. The setup
+// worker records the beginning and returns; teardown records the end while the
+// service-owned resources and translation are still active.
+static inline bool m2b2BeginEventWindow(
+    volatile UInt8 *base, org_example_AMDMapperProbe::M22b2EventWindow *w) {
     w->valid = false;
     w->invalidReason = "not-run";
     w->tStart = 0; w->tEnd = 0; w->durMS = 0;
@@ -1135,17 +1184,17 @@ static inline void m2b2SampleEvents(volatile UInt8 *base,
 
     if (w->statusStart & M2B2_STATUS_EVT_OVERFLOW) {
         w->invalidReason = "overflow-at-window-start";
-        return;
+        return false;
     }
     if ((w->statusStart & M2B2_STATUS_EVT_RUN) == 0) {
         w->invalidReason = "evt-log-not-running-at-start";
-        return;
+        return false;
     }
     if ((w->headStart & 0xF) || (w->tailStart & 0xF) ||
         w->headStart >= M2B2_EVT_BUFFER_SIZE ||
         w->tailStart >= M2B2_EVT_BUFFER_SIZE) {
         w->invalidReason = "head-tail-out-of-range-at-start";
-        return;
+        return false;
     }
 
     // 【v0.20.0】记录窗口开始时的**前置积压**：[HEAD, TAIL) 里已经存在、
@@ -1161,10 +1210,14 @@ static inline void m2b2SampleEvents(volatile UInt8 *base,
     w->tStart = m2b2NowNS();
     w->wallStart = m2b2WallSecs();
 
-    // ---- 观察窗口 ----
-    IOSleep(measureSecs * 1000);
+    return true;
+}
 
-    // 【第九轮】窗口内后置采样：在 tEnd 之前、睡眠刚结束的这一刻。
+static inline void m2b2EndEventWindow(
+    volatile UInt8 *base, volatile UInt32 *evtBuf, UInt32 tgtDevid,
+    org_example_AMDMapperProbe::M22b2EventWindow *w,
+    void (*postSample)(void *) = nullptr, void *postCtx = nullptr) {
+    // 窗口内后置采样：在结束测量时、记录 tEnd 之前完成。
     //
     // 放在这里而不是调用方，是因为"窗口内部"这个性质只有在这里才成立。
     // 调用方拿到返回值时窗口已经关闭，之后读到的任何样本都只能证明
@@ -1272,6 +1325,16 @@ static inline void m2b2SampleEvents(volatile UInt8 *base,
     w->invalidReason = nullptr;
 }
 
+// Historical finite observations share the same endpoint implementation.
+static inline void m2b2SampleEvents(
+    volatile UInt8 *base, volatile UInt32 *evtBuf, UInt32 measureSecs,
+    UInt32 tgtDevid, org_example_AMDMapperProbe::M22b2EventWindow *w,
+    void (*postSample)(void *) = nullptr, void *postCtx = nullptr) {
+    if (!m2b2BeginEventWindow(base, w)) return;
+    IOSleep(measureSecs * 1000);
+    m2b2EndEventWindow(base, evtBuf, tgtDevid, w, postSample, postCtx);
+}
+
 // ---- m2b2EventTypeName (original lines 2918..2937) ----
 // 事件类型名。严格按 Linux v6.6 amd_iommu_types.h:138-148 的定义，
 // **不**做语义泛化：类型 3 是 DEV_TAB_HARDWARE_ERROR（设备表硬件错误），
@@ -1295,38 +1358,47 @@ static inline const char *m2b2EventTypeName(UInt32 t) {
 }
 
 // ---- m2b2Submit (original lines 2987..3046) ----
-// 提交一条命令 + 一条 COMPL_WAIT，并等待完成信号。
+// Publish one or more commands followed by one COMPLETION_WAIT.
 //
 // 返回 true 表示硬件确实执行并回写了完成值。
 // 返回 false 时 ctx->failed 已置位，调用方**不得**继续实验。
-static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c,
-                       const char *label,
-                       UInt32 d0, UInt32 d1, UInt32 d2, UInt32 d3) {
+struct M2B2CmdWords { UInt32 d0, d1, d2, d3; };
+static_assert(sizeof(M2B2CmdWords) == 16, "AMD command size");
+
+static inline bool m2b2SubmitBatch(volatile UInt8 *base, M2B2CmdCtx *c, const char *label,
+                                   const M2B2CmdWords *cmd, UInt32 count) {
     if (c->failed) return false;
 
     // Hardware owns HEAD, this single serialized producer owns TAIL. Keep one
     // 16-byte slot empty so equal pointers always mean empty, never full.
-    // Reserve BOTH entries before touching command memory. Never reset HEAD
+    // Reserve the batch and its fence before touching command memory. Never reset HEAD
     // or grow/rebase the buffer to work around a stalled consumer.
     const UInt32 bytes = (UInt32)M23_CMD_BUF_SIZE;
     const UInt32 slots = bytes / 16;
-    if (bytes < 64 || (bytes & (bytes - 1)) ||
+    if (bytes < 64 || (bytes & (bytes - 1)) || !cmd || !count || count > slots - 2 ||
         c->tail >= bytes || (c->tail & 15) || c->idx != c->tail / 16 ||
         c->completionSequence == ~((UInt64)0)) {
         c->failed = true;
         c->failReason = "cmd-ring-state";
         return false;
     }
-    bool space = false;
-    for (UInt32 wait = 0; wait < M2B1_LOOP_TIMEOUT; ++wait) {
+    auto hasRoom = [&](UInt32 head) {
+        return ((head + bytes - c->tail - 16) & (bytes - 1)) >= (count + 1) * 16;
+    };
+    auto *cache = c->headCache;
+    // Never advance TAIL past the reserved slot before this observed HEAD.
+    const bool hit = cache && cache->valid && hasRoom(cache->head);
+    bool space = hit;
+    for (UInt32 wait = 0; !space && wait < M2B1_LOOP_TIMEOUT; ++wait) {
         const UInt64 head = mmioRead64(base, M2B2_OFF_CMD_HEAD);
+        if (cache) ++cache->reads;
         if (head >= bytes || (head & 15)) {
             c->failed = true;
             c->failReason = "cmd-ring-head";
             return false;
         }
-        const UInt32 freeBytes = ((UInt32)head + bytes - c->tail - 16) & (bytes - 1);
-        if (freeBytes >= 32) { space = true; break; }
+        if (cache) { cache->head = (UInt32)head; cache->valid = true; }
+        space = hasRoom((UInt32)head);
     }
     if (!space) {
         c->failed = true;
@@ -1334,8 +1406,12 @@ static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c,
         return false;
     }
 
-    m2b2WriteCmd(c->buf, c->idx, d0, d1, d2, d3);
-    const UInt32 completionIdx = (c->idx + 1) % slots;
+    UInt32 completionIdx = c->idx;
+    for (UInt32 i = 0; i < count; ++i) {
+        const auto &w = cmd[i];
+        m2b2WriteCmd(c->buf, completionIdx, w.d0, w.d1, w.d2, w.d3);
+        completionIdx = (completionIdx + 1) % slots;
+    }
 
     // 完成等待：data[0] = sem 物理地址 | STORE_MASK(0x01)
     //           data[1] = sem 高 32 位 | (type << 28)
@@ -1352,7 +1428,7 @@ static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c,
     c->idx = nextIdx;
     c->tail = nextIdx * 16;
     c->completionSequence = seq;
-    // Publish the complete pair only after both descriptors are DMA-visible.
+    // Publish once, after all commands and the sole completion descriptor are visible.
     OSSynchronizeIO();
     mmioWrite64(base, M2B2_OFF_CMD_TAIL, c->tail);
     OSSynchronizeIO();
@@ -1369,11 +1445,11 @@ static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c,
     c->lastSem = obs;
     c->lastLoops = loops;
 
-    // 逐条记录命令字、预期值、观测值与阶段
+    // The historical log records the leading command and completion of this batch.
     if (c->recordCount < M2B2_CMD_LOG_MAX) {
         M2B2CmdRecord *r = &c->records[c->recordCount++];
         r->label = label;
-        r->d0 = d0; r->d1 = d1; r->d2 = d2; r->d3 = d3;
+        r->d0 = cmd[0].d0; r->d1 = cmd[0].d1; r->d2 = cmd[0].d2; r->d3 = cmd[0].d3;
         r->expected = seq;
         r->observed = obs;
         r->loops = loops;
@@ -1386,8 +1462,15 @@ static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c,
         return false;
     }
     c->completed++;
+    if (hit) ++cache->cachedBatches;
     if (c->wraps) c->postWrapCompleted++;
     return true;
+}
+
+static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c, const char *label,
+                              UInt32 d0, UInt32 d1, UInt32 d2, UInt32 d3) {
+    const M2B2CmdWords cmd{d0, d1, d2, d3};
+    return m2b2SubmitBatch(base, c, label, &cmd, 1);
 }
 
 // ---- m2b2ReadBar64 (original lines 3048..3085) ----

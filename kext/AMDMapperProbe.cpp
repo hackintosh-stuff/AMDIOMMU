@@ -5,6 +5,7 @@
 // function bodies are unchanged and in their original order.
 
 #include "AMDMapperProbe.hpp"
+#include "amd_iommu_device_policy.hpp"
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
@@ -31,6 +32,8 @@
 #include <mach/mach_time.h>
 #include <kern/clock.h>
 #include <libkern/OSByteOrder.h>
+#include <libkern/c++/OSBoolean.h>
+#include <libkern/c++/OSDictionary.h>
 
 // 页表编码/解码的唯一实现。生产代码与 host 回归测试**包含同一个文件**，
 // 测试跑的就是这里的分支，不是另写一份 Python 复述。
@@ -55,6 +58,9 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
     (void)provider;
     fTarget = nullptr;
     fNicDevice = nullptr;
+    fR44Auto = false;
+    fR44Controller = nullptr;
+    fR44Mapper = nullptr;
     fMapCalls = fUnmapCalls = fInsertCalls = fPhysAddrCalls = 0;
     fPublishedMapCalls = 0;
     fMapOkCalls = fMapRejectFragCalls = fMapRejectOtherCalls = 0;
@@ -80,6 +86,15 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
     // ---- M2-2b-2 延迟定时器 ----
     fM22b2Timer = nullptr;
     fM22b2DelayMS = 0;
+    fR31Session = false;
+    fR31StopRequested = 0;
+    fR31WorkerActive = 0;
+    fR31StopRequestTime = 0;
+    fR31SessionCompleted = false;
+    fR33Domain = nullptr;
+    fR33TeardownState = 0;
+    fR33InstallCount = 0;
+    fR34Rx = nullptr;
     for (int i = 0; i < kMaxActiveMaps; i++) {
         fMaps[i].pa = 0;
         fMaps[i].len = 0;
@@ -121,6 +136,12 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
 
 // ===== AMDMapperProbe.cpp (original lines 7584..7713) =====
 bool org_example_AMDMapperProbe::start(IOService *provider) {
+    // R70-S5: a failed start() destroys the instance, so every stage is also
+    // recorded on the provider, which survives and is readable via ioreg.
+    fR44Provider = provider;
+    if (provider) provider->setProperty("amdmapper-stage", "enter");
+    IOLog("AMDMapperProbe: start enter provider=%s\n",
+          provider ? provider->getName() : "?");
     setProperty("m1b-stage", "0-entered-start");
 
     // 安全闸门：必须在 super::start() 之前。
@@ -128,10 +149,38 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
     fIsSystem = false;
 
     if (!super::start(provider)) {
+        IOLog("AMDMapperProbe: super::start failed\n");
+        if (provider) provider->setProperty("amdmapper-stage", "super-start-FAILED");
         setProperty("m1b-stage", "1-super-start-FAILED");
         return false;
     }
     setProperty("m1b-stage", "2-super-start-ok");
+    if (provider) provider->setProperty("amdmapper-stage", "super-ok");
+    IOLog("AMDMapperProbe: super::start ok owner=%d\n", fR52Owner ? 1 : 0);
+    if (fR52Owner) {
+        // This instance is attached to the controller service, not matched to
+        // PCI. The owner prepares its domain before publishing iommu-parent.
+        fR44Auto = true;
+        setProperty("r44-mode", "auto");
+        setProperty("r52-role", "device");
+        setProperty("r44-system-mapper", "no");
+        return true;
+    }
+
+    char mode[32] = {};
+    fR44Auto = PE_parse_boot_argn("amdiommu", mode, sizeof(mode) - 1)
+            && (strcmp(mode, "auto") == 0 ||
+                strcmp(mode, "auto-attach") == 0);
+    // R69: "auto-attach" additionally publishes iommu-parent at first publish,
+    // because Apple's own kexts only call IOMapper::copyMapperForDevice() and
+    // can never invoke the AMDIOMMUClaimRequesterV1 handshake. Plain "auto"
+    // keeps the R54..R67 claim protocol and its analysis exactly as validated.
+    fR69AutoAttach = fR44Auto && strcmp(mode, "auto-attach") == 0;
+    if (fR44Auto) {
+        // Explicit clients claim at pre-open; this owner keeps their domains
+        // across ordinary interface down/up.
+        return r44StartAuto();
+    }
 
     // ---- B2-b：先决定是否放行真实设备 ----
     fArmed = parseArmBootArg();
@@ -264,19 +313,118 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
 }
 
 // ===== AMDMapperProbe.cpp (original lines 7715..7747) =====
-void org_example_AMDMapperProbe::stop(IOService *provider) {
-    fMapWindowOpen = false;
-    fArmed = false;         // 立刻停止放行真实设备
+void org_example_AMDMapperProbe::r31RequestStop() {
+    // RPC/service-stop callers only register a request. The worker owns every
+    // state publication, RX/TX drain and hardware restoration operation.
+    UInt64 expected = 0;
+    const UInt64 now = mach_absolute_time();
+    (void)__atomic_compare_exchange_n(&fR31StopRequestTime, &expected, now,
+                                     false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&fR31StopRequested, 1u, __ATOMIC_RELEASE);
+    r33ScheduleDomainStop();
+}
 
-    // 摘掉 M2-2b-2 的延迟定时器，避免 stop 之后回调仍被投递
-    // （那时对象正在拆除，runM22b2PageTableProbe 会访问已释放的成员）。
+IOReturn org_example_AMDMapperProbe::callPlatformFunction(
+    const OSSymbol *name, bool wait, void *target, void *operation,
+    void *unused3, void *unused4) {
+    if (name && name->isEqualTo(amd_iommu_policy::kClaim)) {
+        if (!target || operation || unused3 || unused4) return kIOReturnBadArgument;
+        return r44AttachAuto(static_cast<IOService *>(target), true)
+            ? kIOReturnSuccess : kIOReturnNotReady;
+    }
+    if (name && name->isEqualTo("R63SetRequesterDMA")) {
+        if (!fR44Auto || !fNicDevice) return kIOReturnNotReady;
+        const uintptr_t op = (uintptr_t)operation;
+        if (target != fNicDevice || unused3 || unused4 || (op != 1 && op != 2))
+            return kIOReturnBadArgument;
+        return r63SetRequesterDMA(op == 1);
+    }
+    if (name && name->isEqualTo("R47PowerTransition")) {
+        if (!fR44Auto || !fNicDevice) return kIOReturnNotReady;
+        const uintptr_t op = (uintptr_t)operation;
+        if (target != fNicDevice || unused3 || unused4 || (op != 1 && op != 2))
+            return kIOReturnBadArgument;
+        return r47PowerTransition((UInt32)op);
+    }
+    return super::callPlatformFunction(name, wait, target, operation,
+                                      unused3, unused4);
+}
+
+IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
+    OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    OSObject *pmArm = dict ? dict->getObject("R66ArmSystemPM") : nullptr;
+    if (pmArm) {
+        if (pmArm != kOSBooleanTrue && pmArm != kOSBooleanFalse)
+            return kIOReturnBadArgument;
+        return r66SetSystemPM(pmArm == kOSBooleanTrue);
+    }
+    OSObject *all = dict ? dict->getObject("R52Snapshot") : nullptr;
+    if (fR44Auto && all) {
+        if (all != kOSBooleanTrue) return kIOReturnBadArgument;
+        if (fR52Owner) return kIOReturnUnsupported;
+        r52PublishDomains();
+        return kIOReturnSuccess;
+    }
+    OSObject *snapshot = dict ? dict->getObject("R44Snapshot") : nullptr;
+    if (fR44Auto && snapshot) {
+        if (snapshot != kOSBooleanTrue) return kIOReturnBadArgument;
+        if (fR52Owner) r44PublishMappings();
+        else r52PublishDomains();
+        return kIOReturnSuccess;
+    }
+    OSObject *request = dict ? dict->getObject("R31Stop") : nullptr;
+    if (!request) return super::setProperties(properties);
+    if (request != kOSBooleanTrue) return kIOReturnBadArgument;
+    if (!fR31Session) return kIOReturnNotReady;
+    r31RequestStop();
+    return kIOReturnSuccess;
+}
+
+void org_example_AMDMapperProbe::stop(IOService *provider) {
+    if (fR44Auto) {
+        if (fPublishNotifier) {
+            fPublishNotifier->disable();
+            fPublishNotifier->release();
+            fPublishNotifier = nullptr;
+        }
+        if (!r44StopAuto()) return;
+        if (fNicDevice) {
+            if (fNicDevice->getProperty("iommu-parent") == this)
+                fNicDevice->removeProperty("iommu-parent");
+            fNicDevice->release();
+            fNicDevice = nullptr;
+        }
+        super::stop(provider);
+        return;
+    }
+    // Cancel under the timer's gate so the once-only launch has either
+    // completed or been cancelled. Keep the source installed until after the
+    // join: openClientGate/closeClientGate need its workloop association.
+    IOWorkLoop *wl = fM22b2Timer ? fM22b2Timer->getWorkLoop() : nullptr;
+    const bool callerInGate = wl && wl->inGate();
     if (fM22b2Timer) {
+        if (wl && !callerInGate) fM22b2Timer->closeClientGate();
         fM22b2Timer->cancelTimeout();
-        IOWorkLoop *wl = getWorkLoop();
+        if (wl) fM22b2Timer->openClientGate();
+    }
+
+    // Wait for domain teardown as well as workers: setup can return before the
+    // queued stop worker begins. Its mapper/provider dependencies stay alive
+    // across that handoff. Never hold the probe workloop gate across the join.
+    if (fR31Session) {
+        r31RequestStop();
+        while (__atomic_load_n(&fR31WorkerActive, __ATOMIC_ACQUIRE) ||
+               r33DomainStopPending())
+            IOSleep(10);
+    }
+    if (wl && callerInGate) fM22b2Timer->closeClientGate();
+    if (fM22b2Timer) {
         if (wl) wl->removeEventSource(fM22b2Timer);
         fM22b2Timer->release();
         fM22b2Timer = nullptr;
     }
+    fMapWindowOpen = false;
+    fArmed = false;
 
     // 先摘通知，避免 stop 之后回调仍被投递（那时对象正在拆除）
     if (fPublishNotifier) {
@@ -331,6 +479,11 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     uint64_t *mapAddress,
     uint64_t *mapLength) {
 
+    if (fR44Auto)
+        return r44MapMemory(memory, descriptorOffset, length, mapOptions,
+                            mapSpecification, dmaCommand, pageList,
+                            mapAddress, mapLength);
+
     fMapCalls++;
 
     // 只记录第一次调用的完整参数，避免属性无限增长。
@@ -371,6 +524,25 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     // 实测第一次部署就报了 realmapcalls=1、first-len=0x10000，
     // 而那正是 B2-0 的 16 KiB buffer，不是网卡。
     bool isProbeCall = fProbeCallActive;
+
+    // Fixed descriptor rings/tally own separate standard DMA command pairs.
+    // Their reserved IOVAs do not consume TX packet or RX slot accounting.
+    if (r40FixedCandidate(memory, dmaCommand))
+        return r40FixedMap(memory, descriptorOffset, length, mapOptions,
+                          mapSpecification, dmaCommand, pageList,
+                          mapAddress, mapLength);
+
+    if (r34RxCandidate(memory, dmaCommand))
+        return r34RxMap(memory, descriptorOffset, length, mapOptions,
+                       mapSpecification, dmaCommand, pageList,
+                       mapAddress, mapLength);
+
+    // The RX commands describe the driver's retained spare mbufs. Dispatch
+    // before TX/self-test handling, using registered MD/command identities.
+    if (r27RxCandidate(memory, dmaCommand))
+        return r27RxMap(memory, descriptorOffset, length, mapOptions,
+                       mapSpecification, dmaCommand, pageList,
+                       mapAddress, mapLength);
 
     // ---- ROUND 18: the standard path, and why it is checked first ----
     // r18StdReady() is true only when THIS run installed the round-17/18 domain
@@ -515,9 +687,20 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
 IOReturn org_example_AMDMapperProbe::iovmUnmapMemory(
     IOMemoryDescriptor *memory, IODMACommand *dmaCommand,
     uint64_t mapAddress, uint64_t mapLength) {
+    if (fR44Auto)
+        return r44UnmapMemory(memory, dmaCommand, mapAddress, mapLength);
     (void)memory;
 
     fUnmapCalls++;
+
+    if (r40FixedCandidate(memory, dmaCommand) || r40FixedOwnsAddress(mapAddress))
+        return r40FixedUnmap(memory, dmaCommand, mapAddress, mapLength);
+
+    if (r34RxCandidate(memory, dmaCommand) ||
+        (fR34Rx && r27RxOwnsAddress(mapAddress)))
+        return r34RxUnmap(memory, dmaCommand, mapAddress, mapLength);
+    if (r27RxCandidate(memory, dmaCommand) || r27RxOwnsAddress(mapAddress))
+        return r27RxUnmap(memory, dmaCommand, mapAddress, mapLength);
 
     // ROUND 18: an address inside our own bounded IOVA window can only have come
     // from r18StdMap(), so this is the framework completing that mapping. It is
@@ -559,6 +742,10 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
     (void)physicalAddress; (void)length;
 
     fInsertCalls++;
+    if (fR44Auto) {
+        setProperty("r44-insert-rejects", (unsigned long long)fInsertCalls, 32);
+        return kIOReturnUnsupported;
+    }
     // In the standard path this must stay ZERO: returning mapLength == length
     // makes IODMACommand take its single-range contract, which never calls
     // iovmInsert(). A nonzero count here would mean the round-18 layout bound
@@ -571,7 +758,21 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
 
 // ===== AMDMapperProbe.cpp (original lines 7985..8007) =====
 uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress) {
+    if (fR44Auto) {
+        uint64_t pa = 0;
+        return r44Translate(mappedAddress, &pa) ? pa : 0;
+    }
     fPhysAddrCalls++;
+
+    if (r40FixedOwnsAddress(mappedAddress)) {
+        uint64_t pa = 0;
+        return r40FixedTranslate(mappedAddress, &pa) ? pa : 0;
+    }
+
+    if (r27RxOwnsAddress(mappedAddress)) {
+        uint64_t pa = 0;
+        return r27RxTranslate(mappedAddress, &pa) ? pa : 0;
+    }
 
     // ROUND 18: a real page-table translation for the addresses this backend
     // actually installed. Outside that window nothing is claimed (see below).
@@ -611,7 +812,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.35.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.95.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

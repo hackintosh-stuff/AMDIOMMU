@@ -30,6 +30,9 @@ plutil -lint "$KEXT/Contents/Info.plist"
 # MEMBERS 表中，否则链接时会缺少符号。
 SRCS="kext/AMDMapperProbe.cpp \
       kext/AMDMapperProbeNic.cpp \
+      kext/AMDMapperProbeAuto.cpp \
+      kext/AMDMapperProbeDiscovery.cpp \
+      kext/AMDMapperProbeMapper.cpp \
       kext/AMDMapperProbeB1B2.cpp \
       kext/AMDMapperProbeMmio.cpp \
       kext/AMDMapperProbeTable.cpp \
@@ -37,7 +40,9 @@ SRCS="kext/AMDMapperProbe.cpp \
       kext/AMDMapperProbeObs.cpp \
       kext/AMDMapperProbeRxSet.cpp \
       kext/AMDMapperProbeTx.cpp \
-      kext/AMDMapperProbePgt.cpp"
+      kext/AMDMapperProbePgt.cpp \
+      src/Ivrs.cpp \
+      src/IvrsTopology.cpp"
 
 for f in $SRCS; do
     [ -f "$f" ] || { echo "missing source: $f"; exit 1; }
@@ -50,7 +55,7 @@ echo "== 编译（$(echo "$SRCS" | wc -w | tr -d ' ') 个编译单元）=="
 # 打开它会让 IOKit 直接 #error（要求额外定义 EXPERIMENTAL 宏，且声明 API 不稳定）。
 CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
     -isysroot $SDK -mmacosx-version-min=$SDKVER \
-    -I $HEADERS -nostdinc++ -std=c++17 \
+    -I $HEADERS -I $ROOT/include -nostdinc++ -std=c++17 \
     -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE \
     -fno-builtin -fno-common -fno-exceptions -fno-rtti \
     -fno-stack-protector -Wall -Wextra -Werror -O0 -g"
@@ -86,11 +91,16 @@ echo "filetype=$FT OK"
 # 会因为缺符号而失败，但"多定义/被静态化"这类问题不会，所以显式点名检查。
 echo "== 模块符号检查 =="
 # Search by the readable name inside the mangled symbol. Each of these lives in
-# a different module, so together they prove all eight translation units were
+# a different module, so together they prove the registered translation units were
 # compiled AND linked in. A missing module fails the link anyway; this catches
 # the subtler case of a module whose functions were made static or dropped.
 for name in \
     initHardware \
+    r44AttachAuto \
+    r44MapMemory \
+    r47PowerTransition \
+    r47SuspendAuto \
+    r47ResumeAuto \
     findTarget \
     runB1SelfTest \
     runM20ConfigProbe \
@@ -106,6 +116,11 @@ for name in \
 do
     nm "$BIN" | grep -q "T .*org_example_AMDMapperProbe.*$name" || {
         echo "missing module symbol: $name"; exit 1; }
+done
+# Firmware discovery reuses the host parser as independent translation units.
+for name in r47DiscoverHardware buildTopology resolveRequester; do
+    nm "$BIN" | grep -q "T .*$name" || {
+        echo "missing discovery/parser symbol: $name"; exit 1; }
 done
 echo "all module entry points present OK"
 

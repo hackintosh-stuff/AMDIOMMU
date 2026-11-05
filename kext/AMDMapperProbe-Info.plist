@@ -8,11 +8,50 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.35.0</string>
-    <key>CFBundleVersion</key><string>0.35.0</string>
+    <key>CFBundleShortVersionString</key><string>0.95.0</string>
+    <key>CFBundleVersion</key><string>0.95.0</string>
+    <!-- Client requests must fit [OSBundleCompatibleVersion, CFBundleVersion].
+         Existing mapper ABI1 clients remain compatible with 0.53.0;
+         Round54 clients require 0.61.0 for a pre-open claim on their selected PCI requester. -->
+    <key>OSBundleCompatibleVersion</key><string>0.53.0</string>
     <!--
+      0.71.0 第65轮：两个设备域分别完成PM准备与恢复失效，由共享Controller协调一次暂停和重启。\n      0.72.0 第68轮：双Domain协调式System PM暂缓启用，恢复已验证的普通双网卡生命周期。
+      0.75.0 第69轮：amdiommu_autoattach=1 时选中设备在首次发布即获得 iommu-parent，供无法调用私有 claim 的 Apple 驱动；新增映射容量与拒绝原因属性。
+      0.73.0 第66轮：双Domain PM仅允许启动后显式arm，避免PM-capable boot影响普通网卡生命周期。
       版本历史：
-        0.35.0 M2-3g 第26轮：.std.alltx 窗口内全部 TX 使用标准映射；
+        0.70.0 第63轮：设备停用时撤回其 DTE 读写授权；恢复须先完成设备和域失效。
+        0.69.0 第62轮：共享命令环复用上次读回的 HEAD，仅在预留空间不足时刷新硬件寄存器。
+        0.68.0 第61轮：普通页范围精确分段失效，每批共用一次完成等待，确认后才回收。
+        0.67.0 第60轮：普通多页 DMA 优先选择自然对齐的 IOVA，碎片下保留原分配路径；统计失效命令覆盖页。
+        0.66.0 第59轮：单次普通 DMA 映射支持 128 页及 128 个物理段，按 ABI3 导出全部页。
+        0.65.0 第58轮：按域内 IOVA 页保存描述符给出的物理地址，活动与历史快照保持原有 ABI2 格式。
+        0.64.0 第57轮：映射记录槽由每域占用位图统一管理；保留最低空槽选择、起始页索引和同步回收。
+        0.63.0 第56轮：普通 unmap 按本域起始 IOVA 页定位记录，保持完整所有权检查与同步失效后回收。
+        0.62.0 第55轮：IOVA 位图按 64 位字查找最低对齐空闲区间；保留 R54 驱动 ABI 与同步回收。
+        0.61.0 第54轮：显式 requester 由客户端在 PCI open 前申请设备域；普通 DMA 与按设备失效路径沿用 R53。
+        0.60.0 第53轮：按显式requester选择RTL8111/RTL8127混合设备域；未选设备保持直通，共享原有普通DMA后端。
+        0.59.0 第52轮：同一控制器接入两个RTL8127；每设备独立IOMapper、域、页表与IOVA池，共享命令环同步。
+        0.58.0 第51轮：按PCI NPCache选择普通map失效；无NP缓存时省去新map的INV/CW，unmap同步回收不变。
+        0.57.0 第50轮：普通map/unmap按实际IOVA页范围同步失效，首激活及PM仍全域；PM实机验证仍TODO。
+        0.56.0 第49轮：普通map支持64页/64runs，RX改为16组每组64页；PM实机验证仍TODO。
+        0.55.0 第48轮：普通mapper使用低4GiB IOVA池，支持32位DMA地址约束；PM实机验证仍TODO。
+        0.54.0 第47轮：普通auto路径接入运行时IVRS/PCI发现；加入IOMMU暂停/恢复处理，实机PM验证TODO。
+        0.53.0 M2-3y 第44轮：普通设备IOMapper自动发现；常驻控制器与通用MD/IODMACommand映射；正常网卡关闭和开启保留设备域。
+        0.52.0 M2-3x 第43轮：NIC停止前移至DTE切换之前；原生设备域全程只用IOVA，退出不再建立identity恢复映射。
+        0.51.0 M2-3w 第42轮：网卡停止时直接发布全环初始RX IOVA，撤除bootstrap identity后再启动收发。
+        0.50.0 M2-3v 第41轮：修复固定DMA入口的中断重新武装，并按已注册对象识别重建后的TX环。
+        0.49.0 M2-3u 第40轮：TX/RX描述符环与统计缓冲使用标准DMA映射IOVA；接管后活动域不保留identity叶。
+        0.42.0 M2-3n 第33轮：服务对象持有设备域资源；初始化线程返回后持续DMA，显式停止另起收尾线程。
+        0.41.0 M2-3m 第32轮：动态TX IOVA区域、独立活动映射记录、标准DMA容量与复用验证。
+        0.40.0 M2-3l 第31轮：独立内核线程维持RX1024/TX标准映射会话；.session取消计时退出，
+               R31Stop显式请求后沿用排空、R29D、退休确认与完整恢复。
+        0.39.0 M2-3k 第30轮：RX1024全环标准映射及循环复用；8MiB RX IOVA跨5张L1表，
+               全部物理描述符恢复后unmap，沿用R29D尾流与标准TX退休确认。
+        0.38.0 M2-3i 第29轮：RX释放后R29D确认尾流结束；标准TX按句柄确认退休，
+               软件generation与后端owner/slot/CW闭合后才恢复DTE及命令引擎。
+        0.37.0 M2-3h 第28轮：64个RX对象各映射一次并循环使用；Disarm后发布draining，
+               保持TX开放等待最多15秒RX排空，120秒有限授权覆盖60秒翻译窗口。
+        0.36.0 M2-3h 第27轮：.std.alltx.rxstd 增加64个RX spare的一次标准映射闭环；
                token 只标识运行，req 为内部映射序号。保留四槽与32条历史。
         0.1.0  M1-A：只验证 copyMapperForDevice(自己) 能否返回本 mapper。
         0.2.0  M1-B/B1：给真实设备 IOMA（pci1022,1481）设 iommu-parent 并验证。
@@ -130,7 +169,7 @@
             <key>IOClass</key><string>org_example_AMDMapperProbe</string>
             <key>IOMatchCategory</key><string>AMDMapperProbe</string>
             <key>IOProviderClass</key><string>IOResources</string>
-            <key>IOResourceMatch</key><string>IOKit</string>
+            <key>IOResourceMatch</key><string>IOBSD</string>
         </dict>
     </dict>
     <key>OSBundleLibraries</key>
@@ -160,6 +199,10 @@
           com.apple.iokit.IOPCIFamily (2.9)）。
         -->
         <key>com.apple.iokit.IOPCIFamily</key><string>2.9</string>
+        <!-- Runtime IVRS acquisition and IOACPIPlatformDevice metaClass. -->
+        <key>com.apple.iokit.IOACPIFamily</key><string>1.4</string>
     </dict>
+	<key>OSBundleRequired</key>
+	<string>Root</string>
 </dict>
 </plist>

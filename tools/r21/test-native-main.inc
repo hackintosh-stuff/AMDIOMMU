@@ -45,6 +45,14 @@ static IOReturn backend(void *, uint32_t op, r17tx::Request *r)
         r->tRetire = mach_absolute_time();
         return 0;
     }
+    if (op == r17tx::kRetireAck) {
+        stdAckCalls++;
+        auto record = stdConfirmedRetires.find(r->handle);
+        if (!r->handle || r->bdf != 0x2500 || r->token != 7 ||
+            record == stdConfirmedRetires.end()) return kIOReturnNotReady;
+        r->tRetire = record->second;
+        return kIOReturnSuccess;
+    }
     maps++;
     if (mapMode == 1) return 99;
     UInt64 at = 0;
@@ -109,16 +117,15 @@ static IOReturn detachCfg(RTL8125 &d)
     c.bdf = 0x2500; c.token = 7;
     return d.r17TxConfigure(&c);
 }
-static void installMode(RTL8125 &d, IOService &o, UInt32 mode, IOMapper *mapper)
+static void installMode(RTL8125 &d, IOService &o, UInt32 mode, IOMapper *mapper,
+                        UInt64 deadline = 100000000)
 {
-    /* Round23: every case installs a FRESH backend, whose slot mask starts empty
-     * exactly like the real probe's. Without this reset a stripe still held by a
-     * pinned generation in an earlier case would shift every later address. */
-    IODMACommand::stubLive = 0;
+    /* Each fixture installs a fresh device domain. */
+    IODMACommand::arena = {};
     d.r17Tx = nullptr;
     r17tx::Configure c{};
     c.version = r17tx::kVersion; c.bytes = sizeof(c); c.op = r17tx::kInstall;
-    c.bdf = 0x2500; c.token = 7; c.deadline = 100000000;
+    c.bdf = 0x2500; c.token = 7; c.deadline = deadline;
     c.callback = backend; c.context = &o; c.owner = &o;
     c.mode = mode; c.mapper = mapper;
     assert(!d.r17TxConfigure(&c));
@@ -139,6 +146,7 @@ static void installMode(RTL8125 &d, IOService &o, UInt32 mode, IOMapper *mapper)
         assert(!d.r17TxConfigure(&g));
     }
     assert(d.r17Admit == 0u);
+    d.interface.signals = 0; // discard this fixture's initial Resume wake
     assert(o.refs == 2);
     /* Round23: there is no driver-wide generation state any more. What must be
      * true after Install is that EVERY generation slot is idle and no mbuf is
@@ -223,7 +231,7 @@ static void stdRoundTrip(RTL8125 &d, IOService &o, IOTimerEventSource &timer,
     assert(mapCall(d, &m, seg, 1, &n));
     assert(n == 1);                                   /* one IOVA run */
     assert(p->gens[0].state == r17tx::kPosting);
-    /* Round23: the window is striped, so a lone mapping lands in stripe 0 */
+    /* First-fit allocation places a lone mapping at the first arena page. */
     assert(seg[0].location == amdtx::kBase + (pa & 4095ULL));
     assert(seg[0].location != pa);                     /* non-identity */
     assert(p->gens[0].request.count == 1);
@@ -1018,15 +1026,13 @@ int main(void)
         assert(q16->blockSnap.slots[0].mbufLen == 0);    /* never read */
         r16.r17TxStop();
     }
-    /* ---- (17) round23: FOUR mappings live at once ---------------------------
+    /* ---- concurrent mappings use independent driver records ----------------
      *
      * This is the round's core claim, so it is asserted as a set of facts rather
      * than one happy path:
-     *   (a) four generations exist simultaneously and each holds its own mbuf,
+     *   (a) every live record holds its own mbuf,
      *       IOMemoryDescriptor and IODMACommand;
-     *   (b) their IOVA ranges DO NOT OVERLAP (the property the fixed stripes
-     *       exist to guarantee -- checked from the returned addresses, not from
-     *       the code that produced them);
+     *   (b) their dynamically allocated IOVA ranges do not overlap;
      *   (c) each completes and retires INDEPENDENTLY, in a different order from
      *       the one they were mapped in, and the others stay valid meanwhile;
      *   (d) a freed slot is reused by the next generation;
@@ -1054,7 +1060,7 @@ int main(void)
             iova[i] = seg[i][0].location;
             submit(r17, ms[i], seg[i], 1); // real outputStart posts before next dequeue
         }
-        /* (a) four live generations, four distinct objects */
+        /* All sixteen live records hold distinct standard objects. */
         assert(q17->held == N);
         assert(q17->maxHeld == N);
         assert(stdMdCreated == md0 + (int)N && stdCmdCreated == cmd0 + (int)N);
@@ -1065,20 +1071,19 @@ int main(void)
             assert(q17->gens[i].stdMD && q17->gens[i].stdCmd);
             assert(q17->gens[i].stdHandle != 0);
         }
-        /* (b) the four IOVA ranges are disjoint: each starts inside its OWN
-         * stripe, and a stripe is amdtx::kPagesPerSlot pages wide. This is
-         * checked arithmetically from the returned addresses. */
+        /* These one-page requests occupy disjoint pages, without a fixed
+         * per-record stripe or gaps reserved for their unused capacity. */
         for (UInt32 i = 0; i < N; i++) {
             const UInt64 off = iova[i] - amdtx::kBase;
             assert(off < (UInt64)amdtx::kPages * 4096ULL);
-            assert(off / ((UInt64)amdtx::kPagesPerSlot * 4096ULL) == i);
+            assert(off / 4096ULL == i);
             for (UInt32 j = 0; j < i; j++) {
                 const UInt64 oi = iova[i] - amdtx::kBase;
                 const UInt64 oj = iova[j] - amdtx::kBase;
-                assert(oi / amdtx::kPagesPerSlot != oj / amdtx::kPagesPerSlot);
+                assert(oi / 4096ULL != oj / 4096ULL);
             }
         }
-        /* Round24: fifth stays in the interface queue, never dequeued/freed.
+        /* The next packet stays in the interface queue, never dequeued/freed.
          * The timer alone must wake output after retiring ONE slot. */
         Mbuf extra; extra.pa = 0x600000000ULL + 0x2b6;
         IOPhysicalSegment se[1] = {{0, 0}};
@@ -1133,7 +1138,7 @@ int main(void)
                 r17.r17TxComplete(q17->gens[i].lastSlot);
             }
             const int pending = (int)q17->held;
-            assert(pending == (int)N);          /* all four waiting to retire */
+            assert(pending == (int)N);
             retireTick(r17, &t17);
             /* exactly one unmap per generation: not N+1 (double unmap), not
              * fewer (an orphaned mapping) */
@@ -1146,7 +1151,7 @@ int main(void)
                 assert(ms[i]->frees == 1);      /* freed once, exactly */
             }
         }
-        /* (e) all five freed once, no queued/pending owner remains. */
+        /* Every packet freed once, no queued/pending owner remains. */
         assert(extra.frees == 1 && !queued && q17->outputWaiting == 0);
         assert(q17->dropped == drop0);
         assert(q17->held == 0);
@@ -1156,8 +1161,8 @@ int main(void)
             assert(ms[i]->frees == 1);
         }
 
-        /* (d) the freed slots are reusable, in any order: map two more and check
-         * they land back in stripe 0 and 1 rather than leaking the window. */
+        /* Freed pages are reusable: two more one-page mappings reuse pages
+         * zero and one rather than leaking address space. */
         {
             Mbuf a; a.token = 7; a.req = 1; a.len = 74;
             a.pa = 0x700000000ULL + 0x3b6;
@@ -1165,14 +1170,14 @@ int main(void)
             UInt32 na = 0;
             assert(mapCall(r17, &a, sa, 1, &na));
             assert((sa[0].location - amdtx::kBase) /
-                   ((UInt64)amdtx::kPagesPerSlot * 4096ULL) == 0);
+                   4096ULL == 0);
             Mbuf b; b.token = 7; b.req = 1; b.len = 74;
             b.pa = 0x700010000ULL + 0x4b6;
             IOPhysicalSegment sb[1] = {{0, 0}};
             UInt32 nb = 0;
             assert(mapCall(r17, &b, sb, 1, &nb));
             assert((sb[0].location - amdtx::kBase) /
-                   ((UInt64)amdtx::kPagesPerSlot * 4096ULL) == 1);
+                   4096ULL == 1);
             assert(q17->held == 2);
             submit(r17, &a, sa, 1);
             submit(r17, &b, sb, 1);
@@ -1188,14 +1193,14 @@ int main(void)
         stdMode = kStdOk;
     }
 
-    /* Round25: all 512 monotonic requests, four owners and timer-only resume.
-     * Complete only the oldest owner per tick so history wrap repeatedly occurs
-     * while three other live mappings must remain untouched. */
+    /* All 512 monotonic requests with the current live-record capacity and
+     * timer-only resume; history wrap does not disturb other live mappings. */
     {
         IOService owner; RTL8125 d; IOTimerEventSource timer; IOMapper mapper;
         stdMode = kStdOk;
         installMode(d, owner, r17tx::kModeStandard, &mapper);
         auto *p = d.r17Tx;
+        const UInt32 N = r17tx::kSlots;
         Mbuf packets[512];
         UInt32 next = 0;
         auto output = [&]() {
@@ -1210,10 +1215,10 @@ int main(void)
         };
         d.interface.output = output;
         output();
-        assert(next == 4 && p->held == 4 && p->outputWaiting);
+        assert(next == N && p->held == N && p->outputWaiting);
         while (p->retired < 512) {
             UInt32 oldest = 512;
-            for (UInt32 i = 0; i < 4; i++)
+            for (UInt32 i = 0; i < N; i++)
                 if (p->gens[i].packet && p->gens[i].request.reqId < oldest + 1)
                     oldest = p->gens[i].request.reqId - 1;
             assert(oldest < 512 && !packets[oldest].frees);
@@ -1222,9 +1227,9 @@ int main(void)
             retireTick(d, &timer); // no external output call: wake must refill
             assert(packets[oldest].frees == 1);
             assert(p->retired == oldest + 1);
-            assert(p->held <= 4);
+            assert(p->held <= N);
             assert(p->held == (next - p->retired));
-            for (UInt32 i = 0; i < 4; i++) {
+            for (UInt32 i = 0; i < N; i++) {
                 auto &live = p->gens[i];
                 if (!live.packet) continue;
                 assert(!live.packet->frees && live.stdMD && live.stdCmd);
@@ -1235,7 +1240,7 @@ int main(void)
         d.interface.output = nullptr;
         assert(next == 512 && p->mapped == 512 && p->completed == 512);
         assert(p->retired == 512 && p->stdUnmaps == 512 && p->held == 0);
-        assert(p->maxHeld == 4 && !p->dropped && !p->rejected);
+        assert(p->maxHeld == N && !p->dropped && !p->rejected);
         assert(p->outputWakes > 32 && p->outputResumes > 32);
         assert(p->snapshot.count == 32 && p->snapshot.historyStart == 480);
         assert(p->stdSnap.count == 32 && p->stdSnap.historyTotal == 512);
@@ -1252,11 +1257,11 @@ int main(void)
         auto detach = control(r17tx::kDetach);
         assert(!d.r17TxConfigure(&detach));
         d.r17TxStop();
-        printf("round25: 512 monotonic requests, 32-history wrap, four-slot auto-resume passed\n");
+        printf("round32: 512 monotonic requests, 32-history wrap, sixteen-owner auto-resume passed\n");
     }
 
-    /* Round26: ordinary frames fill the same four standard-map slots. The
-     * fifth stays in the interface queue until retirement wakes output, and a
+    /* Ordinary frames fill all sixteen live standard-map records. The next
+     * stays in the interface queue until retirement wakes output, and a
      * completed Detach followed by Resume restores ordinary output. No packet
      * token/req is needed for admission; the old selector is diagnostic only. */
     {
@@ -1276,22 +1281,25 @@ int main(void)
         d.enableTSO6 = false;
         installMode(d, owner, r17tx::kModeAllStandard, &mapper);
         auto *p = d.r17Tx;
-        Mbuf packets[5];
+        const UInt32 N = r17tx::kSlots, total = N + 1;
+        Mbuf packets[total];
         const UInt32 lengths[5] = {1514, 1024, 60, 74, 256};
-        for (UInt32 i = 0; i < 5; i++) {
-            packets[i].len = lengths[i];
+        for (UInt32 i = 0; i < total; i++) {
+            packets[i].len = lengths[i % 5];
             packets[i].pa = 0x900000000ULL + (UInt64)i * 0x3000 + 0x2b6;
+            packets[i].parsed = false;
         }
         packets[0].parsed = false; // ordinary UDP/TCP/ARP has no parsed IOB1 tag
         packets[1].token = 0;
         packets[2].req = 0;
         packets[3].req = r17tx::kRequestLimit + 1;
-        packets[4].req = 42;       // legacy-selected, still gets internal req=5
+        packets[N].parsed = true;
+        packets[N].req = 42;       // legacy-selected, still gets the internal sequence
         const int coverBefore = coverCalls;
         const int directBefore = maps;
         UInt32 next = 0;
         auto output = [&]() {
-            while (next < 5 && d.r17TxOutputReady()) {
+            while (next < total && d.r17TxOutputReady()) {
                 auto *m = &packets[next++];
                 IOPhysicalSegment seg[1] = {{m->pa, m->len}};
                 assert(mapCall(d, m, seg, 1));
@@ -1305,25 +1313,25 @@ int main(void)
         };
         d.interface.output = output;
         output();
-        assert(next == 4 && p->held == 4 && p->outputWaiting);
-        assert(p->mapped == 4 && p->unmarked == 4 && p->legacySelected == 0);
-        assert(!packets[4].frees && genOfPacket(d, &packets[4]) == r17tx::kSlots);
-        for (UInt32 i = 0; i < 5; i++) {
+        assert(next == N && p->held == N && p->outputWaiting);
+        assert(p->mapped == N && p->unmarked == N && p->legacySelected == 0);
+        assert(!packets[N].frees && genOfPacket(d, &packets[N]) == r17tx::kSlots);
+        for (UInt32 i = 0; i < total; i++) {
             const UInt32 k = genOfPacket(d, &packets[i]);
             assert(k < r17tx::kSlots);
             d.r17TxComplete(p->gens[k].lastSlot);
-            retireTick(d, &timer); // the first retirement itself admits frame 5
+            retireTick(d, &timer); // first retirement admits the queued frame
             assert(packets[i].frees == 1 && p->held <= r17tx::kSlots);
         }
         d.interface.output = nullptr;
-        assert(next == 5 && p->mapAttempts == 5 && p->mapped == 5);
-        assert(p->unmarked == 4 && p->legacySelected == 1);
-        assert(p->completed == 5 && p->retired == 5 && p->stdUnmaps == 5);
-        assert(p->held == 0 && p->maxHeld == 4 && !p->dropped && !p->rejected);
+        assert(next == total && p->mapAttempts == total && p->mapped == total);
+        assert(p->unmarked == N && p->legacySelected == 1);
+        assert(p->completed == total && p->retired == total && p->stdUnmaps == total);
+        assert(p->held == 0 && p->maxHeld == N && !p->dropped && !p->rejected);
         assert(p->stdSnap.mode == r17tx::kModeAllStandard);
-        assert(p->stdSnap.count == 5 && p->stdSnap.historyTotal == 5);
+        assert(p->stdSnap.count == total && p->stdSnap.historyTotal == total);
         assert(coverCalls == coverBefore && maps == directBefore);
-        for (UInt32 seq = 0; seq < 5; seq++) {
+        for (UInt32 seq = 0; seq < total; seq++) {
             assert(p->snapshot.witnesses[seq].request.reqId == seq + 1);
             assert(p->stdSnap.witnesses[seq].req == seq + 1);
         }
@@ -1332,7 +1340,7 @@ int main(void)
         Mbuf late; late.parsed = false;
         IOPhysicalSegment lateSeg[1] = {{late.pa, late.len}};
         assert(!mapCall(d, &late, lateSeg, 1) && late.frees == 1);
-        assert(p->mapAttempts == 6 && p->mapped == 5 && p->rejected == 1);
+        assert(p->mapAttempts == total + 1 && p->mapped == total && p->rejected == 1);
         assert(coverCalls == coverBefore && maps == directBefore);
         d.txDirtyDescIndex = d.txNextDescIndex;
         assert(!detachCfg(d));
@@ -1344,13 +1352,145 @@ int main(void)
         assert(d.r17TxOutputReady());
         assert(mapCall(d, &after, afterSeg, 1));
         assert(afterSeg[0].location == after.pa && !after.frees && !p->held);
-        assert(p->mapAttempts == 6 && p->mapped == 5 && p->unmarked == 4);
+        assert(p->mapAttempts == total + 1 && p->mapped == total && p->unmarked == N);
         postOrdinary(d, &after);
         d.freePacket(&after); // ordinary ring ownership, no mapping retirement
         assert(!d.r17TxRefs() && coverCalls == coverBefore && maps == directBefore);
         d.r17TxStop();
-        printf("round26: ordinary all-standard TX, four-slot resume, detach output passed\n");
+        printf("round32: ordinary all-standard TX, sixteen-owner resume, detach output passed\n");
     }
+
+    /* Round29: an empty hardware ring is not an empty driver. The real
+     * completion path still owns one generation until the timer completes the
+     * standard command AND reads its backend-confirmed retirement record. */
+    {
+        IOService owner; RTL8125 d; IOTimerEventSource timer; IOMapper mapper;
+        installMode(d, owner, r17tx::kModeAllStandard, &mapper);
+        auto *p = d.r17Tx;
+        Mbuf m; m.parsed = false;
+        IOPhysicalSegment seg[1] = {{m.pa, m.len}};
+        const int complete0 = stdCompleteCalls, ack0 = stdAckCalls;
+        assert(mapCall(d, &m, seg, 1));
+        auto *g = &p->gens[genOfPacket(d, &m)];
+        const UInt64 handle = g->stdHandle;
+        assert(handle && !g->request.handle); // ack must use the mapper stamp
+        submit(d, &m, seg, 1);
+        d.r17TxComplete(g->lastSlot);
+        d.txDirtyDescIndex = d.txNextDescIndex;
+        auto close = control(r17tx::kQuiesce);
+        assert(!d.r17TxConfigure(&close));
+        assert(!close.inFlight && !close.ringOwn && !close.activeCover);
+        assert(close.held == 1 && close.modeReserved == 1);
+        assert(close.mapped == 1 && close.completed == 1 && !close.retired);
+        assert(g->state == r17tx::kPending && !g->stdCompleteAttempted);
+        assert(!m.frees && stdCompleteCalls == complete0 && stdAckCalls == ack0);
+        retireTick(d, &timer);
+        assert(stdCompleteCalls == complete0 + 1 && stdAckCalls == ack0 + 1);
+        assert(m.frees == 1 && p->retired == 1 && p->stdUnmaps == 1);
+        assert(g->request.tRetire == stdConfirmedRetires.at(handle));
+        assert(g->request.tRetire < m.freedAt && !g->stdMD && !g->stdCmd);
+        assert(!d.r17TxConfigure(&close));
+        assert(!close.held && !close.modeReserved && close.mapped == close.retired);
+        assert(!detachCfg(d));
+        d.r17TxStop();
+    }
+
+    printf("round29: ring drained before acknowledged timer retirement passed\n");
+
+    /* Round31: zero deadline keeps real all-standard mapping active across
+     * the old 120-second limit. Explicit stop still retires before Disarm. */
+    {
+        IOService owner; RTL8125 d; IOTimerEventSource timer; IOMapper mapper;
+        installMode(d, owner, r17tx::kModeAllStandard, &mapper, 0);
+        auto *p = d.r17Tx;
+        const UInt64 started = mach_absolute_time();
+        for (unsigned phase = 0; phase < 2; phase++) {
+            if (phase) ticks += 125000000000ULL;
+            Mbuf m; m.parsed = false;
+            IOPhysicalSegment seg[1] = {{m.pa, m.len}};
+            assert(mapCall(d, &m, seg, 1));
+            const UInt32 k = genOfPacket(d, &m);
+            assert(k < r17tx::kSlots && seg[0].location != m.pa);
+            submit(d, &m, seg, 1);
+            d.r17TxComplete(p->gens[k].lastSlot);
+            retireTick(d, &timer);
+            assert(m.frees == 1 && !p->held);
+        }
+        assert(mach_absolute_time() - started > 120000000000ULL);
+        assert(!p->deadline && p->mapped == 2 && p->completed == 2);
+        assert(p->retired == 2 && p->stdUnmaps == 2 && !p->rejected);
+        assert(!d.r17TxLiveGens());
+        d.txDirtyDescIndex = d.txNextDescIndex;
+        assert(!gateCfg(d, true));
+        auto stop = control(r17tx::kDisarm);
+        assert(!d.r17TxConfigure(&stop) && !p->enabled);
+        assert(!detachCfg(d) && owner.refs == 1 && !p->callback);
+        assert(!gateCfg(d, false));
+        d.r17TxStop();
+    }
+    printf("round31: active all-standard session beyond 120s, retire/Disarm/Detach passed\n");
+
+    /* Round32: table transitions stop dequeue, preserving an ordinary queued
+     * frame. Resume wakes it both inside the mapping session and after Detach.
+     * Exercise the actual dequeue/admission/map/Posted methods used by the
+     * generated outputStart rather than the old already-dequeued wrapper. */
+    {
+        IOService owner; RTL8125 d; IOTimerEventSource timer; IOMapper mapper;
+        installMode(d, owner, r17tx::kModeAllStandard, &mapper, 0);
+        auto *p = d.r17Tx;
+        Mbuf mapped, ordinary;
+        mapped.parsed = ordinary.parsed = false;
+        auto output = [&]() {
+            mbuf_t m = nullptr;
+            while (d.r32TxDequeue(&d.interface, &m)) {
+                RTL8125::R32TxAdmission admission(&d);
+                assert(d.r17TxRefs() == 1);
+                IOPhysicalSegment seg[1] = {{m->pa, m->len}};
+                UInt32 count = 1;
+                assert(d.r17TxMapAdmitted(m, seg, count));
+                const UInt32 k = genOfPacket(d, m);
+                admission.handoff();
+                if (k < r17tx::kSlots) {
+                    assert(seg[0].location != m->pa);
+                    submit(d, m, seg, count);
+                } else {
+                    assert(seg[0].location == m->pa);
+                    postOrdinary(d, m);
+                    d.freePacket(m);
+                }
+            }
+        };
+        d.interface.output = output;
+        assert(!gateCfg(d, true));
+        d.interface.queued = &mapped;
+        output();
+        assert(d.interface.queued == &mapped && !d.interface.dequeues);
+        assert(!mapped.frees && !d.r17TxRefs() && p->outputWaiting);
+        assert(!p->mapAttempts && !p->rejected && !p->barrierFails);
+        const unsigned wakes = d.interface.signals;
+        assert(!gateCfg(d, false));
+        assert(d.interface.signals == wakes + 1 && d.interface.dequeues == 1);
+        assert(!d.interface.queued && !d.r17TxRefs() && p->mapped == 1);
+        const UInt32 k = genOfPacket(d, &mapped);
+        assert(k < r17tx::kSlots);
+        d.r17TxComplete(p->gens[k].lastSlot);
+        retireTick(d, &timer);
+        assert(mapped.frees == 1 && !p->held && !IODMACommand::arena.livePages);
+        d.txDirtyDescIndex = d.txNextDescIndex;
+        assert(!gateCfg(d, true));
+        d.interface.queued = &ordinary;
+        output();
+        assert(d.interface.queued == &ordinary && d.interface.dequeues == 1);
+        assert(!ordinary.frees && !d.r17TxRefs());
+        assert(!detachCfg(d) && !p->callback && !p->enabled);
+        assert(!gateCfg(d, false));
+        assert(d.interface.dequeues == 2 && !d.interface.queued && ordinary.frees == 1);
+        assert(!d.r17TxRefs() && p->mapAttempts == 1 && p->mapped == 1);
+        assert(!p->rejected && !p->barrierFails && !p->coverCalls && !p->coverRejects);
+        d.interface.output = nullptr;
+        d.r17TxStop();
+    }
+    printf("round32: queued TX survives quiesce, resumes mapped and detached, no rejection passed\n");
 
     printf("round21 window-edge tests: gate calls=%u fails=%u samples=%u\n",
            harnessGateCalls, harnessGateFails, lastSampleSeq);

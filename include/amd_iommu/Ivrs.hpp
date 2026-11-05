@@ -1,7 +1,21 @@
 #pragma once
 
+#if defined(KERNEL)
+// The kext is built with -nostdinc++; this parser needs only the C integer and
+// size types, with the same names used by the host build.
+#include <stddef.h>
+#include <stdint.h>
+namespace std {
+using ::size_t;
+using ::uint8_t;
+using ::uint16_t;
+using ::uint32_t;
+using ::uint64_t;
+}
+#else
 #include <cstddef>
 #include <cstdint>
+#endif
 
 namespace amd_iommu {
 
