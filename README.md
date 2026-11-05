@@ -15,30 +15,31 @@ indistinguishable from the compile-time one over 20,000 operations and pins the
 arena arithmetic; `93cb810` adds the ceiling profile, the peak counters and
 `tools/r70/measure.py`. Probe 0.78.0 builds clean; `R70_CAPACITY_OK`.
 
-**Not accepted.** The S3 measurement boot (Probe injected through OpenCore
-`Kernel > Add`, `amdiommu=auto-attach amdiommu_devices=2200,2500
-amdiommu_profile=rl-10g-max`) reached the login window at 18:03:33 and then
-panicked at uptime 52.0 s with the R69 string
-`"rl:34:0:0:0:tx: segment prepare error 0xe00002be"` — but the panic's backtrace
-lists only IOSkywalkFamily and **no AMDMapperProbe frame**, so the failing
-`IODMACommand` had a NULL mapper and returned `NoResources` before our code ran.
-The domain was never published for 22:00.0/25:00.0; the most likely cause is
-`r44Allocate` failing for the 516-page (≈2.1 MB) contiguous page-table area at
-first publish, which makes `r52PrepareDomain` return false and writes no
-`iommu-parent`. That falsifies the R69 gap-analysis assumption that a missing
-mapper degrades silently to physical DMA: **refusing admission is itself
-fatal** for this client. The panic halted the machine instead of rebooting
-(it looked like a hang), so recovery was manual: power cycle into the Debian
-OCRESCUE environment, ESP rollback from `config.plist.bak_r69_20261104_180225`
-(12 `Add` entries, probe kext deleted, boot-args rewritten to `amdiommu=off`
-with a `NVRAM > Delete` entry), reboot to macOS at 18:21, which then wrote the
-panic report. No capacity data was collected; no criterion was relaxed and no
-code changed after the panic. Next round must (1) stop depending on a 2.1 MB
-contiguous table allocation (block-wise leaf tables, or 512 MiB first),
-(2) make an admission failure a self-identifying `panic` with the reason
-instead of handing Apple a NULL mapper, and (3) add IOLog breadcrumbs per
-prepare stage plus a hold mode that builds the domain without publishing
-`iommu-parent` until armed.
+**Not accepted.** Three measurement boots (0.78.0, then 0.79.0 twice) panicked
+with the R69 signature `"rl:34:0:0:0:tx: segment prepare error 0xe00002be"` at
+uptime **52.0 / 61.8 / 63.2 s**; each panic halted the machine instead of
+rebooting, so every recovery needed a manual power cycle into the Debian
+OCRESCUE environment. Live readback 21 s into the second boot gave the cause:
+the controller instance reported `r44-profile=rl-10g-max` and
+`r44-profile-mode=forced`, the parent was published
+(`r44-parent=set-at-first-publish-autoattach`) and both domains were built
+(`r44-state=ready-passthrough`), yet both `10ec:8127` devices carried
+`r69-admission=granted-native-legacy`. `r44AttachAuto` gives every device its
+own mapper instance, and the admission path consulted a member flag that the
+instance had not been given, so the domains were built with the legacy 16 MiB
+arena and the Skywalk pool exhausted it within a minute. It was therefore
+neither a NULL mapper nor a missing domain; the absence of AMDMapperProbe
+frames in the panic backtrace is expected because the failing map call had
+already returned. Fix `afb6021` (Probe 0.80.0) resolves the boot argument on
+every admission (`r44ForcedProfile()`), keeps the S3b fallback chain
+(requested -> rl-10g -> legacy, refusing only with a self-identifying panic),
+and publishes `r44-attach-forced` / `r44-attach-instance` so the next boot can
+prove the override was seen within 30 s. No capacity data was collected and no
+criterion was relaxed; both rollbacks restored the ESP to 12 `Add` entries with
+`amdiommu=off` and a `NVRAM > Delete` entry. Next attempt: inject 0.80.0 with
+`rl-10g-max`, verify `r44-attach-forced=yes` and `granted-rl-10g-max` in the
+first 30 s, then measure. If the 516-page contiguous table allocation is what
+fails, the fallback will show `granted-rl-10g` with `r44-profile-fallback=yes`.
 
 ## Round69 / AppleEthernetRL on the AMD mapper — BLOCKED, panic preserved
 
