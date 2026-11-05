@@ -103,6 +103,19 @@ private:
     UInt32 fR53RequesterCount = 0;
     bool r53ReadDeviceSelection();
     IOService *fR54Offers[kR52MaxDomains] = {};  // retained by selector index
+    // R69: a selected third-party client that cannot call our claim handshake
+    // (Apple's own Ethernet kexts call only IOMapper::copyMapperForDevice) gets
+    // its iommu-parent at first publish instead of at claim. Off by default so
+    // the R54..R67 claim protocol and its analysis stay the default behaviour.
+    bool fR69AutoAttach = false;
+    // Capacity evidence for third-party clients; published only on change.
+    UInt64 fR69MaxLength = 0, fR69MaxPages = 0, fR69MaxRuns = 0;
+    UInt64 fR69PublishedMaxLength = 0, fR69PublishedMaxPages = 0,
+           fR69PublishedMaxRuns = 0, fR69PublishedRejects = 0;
+    UInt32 fR69RejectedLength = 0, fR69RejectedOptions = 0,
+           fR69RejectedLayout = 0, fR69RejectedRecords = 0,
+           fR69RejectedNoRange = 0, fR69RejectedBits = 0;
+    void r69PublishCapacity();
     struct R52Domain;
     R52Domain *fR52Domain = nullptr;
     void r52AttachExistingDevices();

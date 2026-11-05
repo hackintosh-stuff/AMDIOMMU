@@ -265,6 +265,19 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
     setProperty("r44-system-mapper", "no");
     setProperty("m1b-gsystem", IOMapper::gSystem ? "NONNULL" : "NULL-as-expected");
     if (!r53ReadDeviceSelection()) return false;
+    // R69: Apple's own Ethernet kexts only ask IOMapper::copyMapperForDevice(),
+    // so they can never call AMDIOMMUClaimRequesterV1. This opt-in publishes
+    // iommu-parent at first publish (before their probe) for the selected
+    // requesters only; without the argument the offer/claim protocol is intact.
+    {
+        char autoAttach[8] = {};
+        // Parsed once at start. Without the argument (or with "0") the offer and
+        // claim handshake stays exactly as R54..R67 validated it.
+        fR69AutoAttach = PE_parse_boot_argn("amdiommu_autoattach", autoAttach,
+                                           sizeof(autoAttach) - 1) &&
+            autoAttach[0] == '1';
+        setProperty("r69-autoattach", fR69AutoAttach ? "yes" : "no");
+    }
     fR52AttachLock = IOLockAlloc();
     if (!fR52AttachLock) return false;
     installPublishNotifier();
@@ -304,7 +317,9 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
     if (fR52Stopping) return false;
     if (fR53SelectionExplicit) {
         IOService *&offered = fR54Offers[match];
-        if (!claim) {
+        // A client that claims keeps the R54 ordering guarantees: the offer was
+        // published before its PCI open and this call must match that record.
+        if (!claim && !fR69AutoAttach) {
             if (offered) return offered == nic;  // first publish or replay
             if (nic->isOpen() || nic->getProperty("iommu-parent")) {
                 setProperty("r52-attach-failure", "already-open-or-bound");
@@ -321,9 +336,11 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
             offered = nic;
             return true;  // no mapper, page table or translated DTE yet
         }
-        if (offered != nic || nic->getProperty(amd_iommu_policy::kOffer) != this)
-            return false;
-        nic->removeProperty(amd_iommu_policy::kOffer);
+        if (claim) {
+            if (offered != nic || nic->getProperty(amd_iommu_policy::kOffer) != this)
+                return false;
+            nic->removeProperty(amd_iommu_policy::kOffer);
+        }
     }
     R53AttachPolicy policy(nic);
     ++fPublishHits;
@@ -533,8 +550,10 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slo
     // Only first map activates this endpoint's DTE, after the endpoint driver's reset.
     r44PublishMappings();
     if (!nic->setProperty("iommu-parent", this)) return false;
-    setProperty("r44-parent", fR52Owner->fR53SelectionExplicit
-        ? "set-on-client-claim-before-pci-open" : "set-before-driver-start");
+    setProperty("r44-parent", fR52Owner->fR69AutoAttach
+        ? "set-at-first-publish-autoattach"
+        : (fR52Owner->fR53SelectionExplicit
+            ? "set-on-client-claim-before-pci-open" : "set-before-driver-start"));
     return true;
 }
 #pragma clang diagnostic pop

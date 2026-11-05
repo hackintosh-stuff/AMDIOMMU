@@ -240,9 +240,16 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
             length > memory->getLength() - descriptorOffset) {
             result = kIOReturnBadArgument; break;
         }
-        if (length > r44mapper::kMapPages * 4096ULL ||
-            (mapOptions & (kIODMAMapFixedAddress | kIODMAMapIdentityMap |
-                           kIODMAMapDeviceMemory))) break;
+        // Publish the largest request actually seen so a capacity decision does
+        // not have to guess what a third-party client asks for.
+        if (length > fR69MaxLength) fR69MaxLength = length;
+        if (length > r44mapper::kMapPages * 4096ULL) {
+            ++fR69RejectedLength; break;
+        }
+        if (mapOptions & (kIODMAMapFixedAddress | kIODMAMapIdentityMap |
+                          kIODMAMapDeviceMemory)) {
+            ++fR69RejectedOptions; break;
+        }
         const UInt64 permissions =
             ((mapOptions & kIODMAMapReadAccess) ? amdpte::PTE_IR : 0) |
             ((mapOptions & kIODMAMapWriteAccess) ? amdpte::PTE_IW : 0);
@@ -252,15 +259,19 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         const unsigned bits = (mapSpecification && mapSpecification->numAddressBits)
             ? mapSpecification->numAddressBits : 64;
         if ((alignment & (alignment - 1)) || alignment > r44mapper::kBase ||
-            bits > 64 || bits < 32) break;
+            bits > 64 || bits < 32) { ++fR69RejectedBits; break; }
 
         // Use the public wired-descriptor walk; the SDK deliberately makes
         // upl_page_info opaque. A pageList provides the first-offset check.
         ++s.walks;
         auto &layout = d->walkScratch;
         probeLayoutInto(layout, memory, descriptorOffset, length, r44mapper::kRuns);
+        if (layout.pages > fR69MaxPages) fR69MaxPages = layout.pages;
+        if (layout.runs > fR69MaxRuns) fR69MaxRuns = layout.runs;
         if (layout.error || !layout.runs || layout.totalBytes != length ||
-            !layout.pages || layout.pages > r44mapper::kMapPages) break;
+            !layout.pages || layout.pages > r44mapper::kMapPages) {
+            ++fR69RejectedLayout; break;
+        }
         if ((pageList && pageList->pageOffset != layout.firstOffset) ||
             (layout.firstOffset & (alignment - 1))) break;
         bool physicalValid = true;
@@ -272,11 +283,13 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         if (!physicalValid) break;
 
         const unsigned slot = d->nextSlot(0, false);
-        if (slot == r44mapper::kRecords) { result = kIOReturnNoResources; break; }
+        if (slot == r44mapper::kRecords) {
+            ++fR69RejectedRecords; result = kIOReturnNoResources; break;
+        }
         const unsigned alignmentPages = alignment > 4096 ? (unsigned)(alignment / 4096) : 1;
         unsigned basePage = 0;
         if (!d->allocateRange(layout.pages, basePage, alignmentPages)) {
-            result = kIOReturnNoResources; break;
+            ++fR69RejectedNoRange; result = kIOReturnNoResources; break;
         }
         const UInt64 address = r44mapper::kBase + basePage * 4096ULL + layout.firstOffset;
         const UInt64 returnedLength = layout.discontig
@@ -357,7 +370,34 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
     } while (false);
     if (result != kIOReturnSuccess) ++s.mapRejected;
     IOLockUnlock(d->lock);
+    r69PublishCapacity();
     return result;
+}
+
+// Capacity evidence for third-party clients. Called without the mapper lock so
+// a property publication can never sit inside the DMA path's critical section.
+void org_example_AMDMapperProbe::r69PublishCapacity() {
+    const UInt64 rejects = (UInt64)fR69RejectedLength + fR69RejectedOptions +
+        fR69RejectedLayout + fR69RejectedRecords + fR69RejectedNoRange +
+        fR69RejectedBits;
+    if (fR69MaxLength == fR69PublishedMaxLength &&
+        fR69MaxPages == fR69PublishedMaxPages &&
+        fR69MaxRuns == fR69PublishedMaxRuns &&
+        rejects == fR69PublishedRejects)
+        return;
+    fR69PublishedMaxLength = fR69MaxLength;
+    fR69PublishedMaxPages = fR69MaxPages;
+    fR69PublishedMaxRuns = fR69MaxRuns;
+    fR69PublishedRejects = rejects;
+    setProperty("r69-max-map-length", fR69MaxLength, 64);
+    setProperty("r69-max-map-pages", fR69MaxPages, 64);
+    setProperty("r69-max-map-runs", fR69MaxRuns, 64);
+    setProperty("r69-rejects-length", (unsigned long long)fR69RejectedLength, 32);
+    setProperty("r69-rejects-options", (unsigned long long)fR69RejectedOptions, 32);
+    setProperty("r69-rejects-layout", (unsigned long long)fR69RejectedLayout, 32);
+    setProperty("r69-rejects-records", (unsigned long long)fR69RejectedRecords, 32);
+    setProperty("r69-rejects-norange", (unsigned long long)fR69RejectedNoRange, 32);
+    setProperty("r69-rejects-bits", (unsigned long long)fR69RejectedBits, 32);
 }
 
 IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
