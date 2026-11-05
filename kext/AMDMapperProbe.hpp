@@ -182,145 +182,10 @@ private:
     IOReturn r44UnmapMemory(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
     bool r44Translate(uint64_t, uint64_t *) const;
 
-    // Round17: native-mbuf TX mapping. One live owner, evidence and command
-    // budget bounded separately (see kext/AMDMapperProbeTx.cpp).
-    struct R17Domain;
-    R17Domain *fR17 = nullptr;
-    bool r17Prepare(volatile UInt64 *, UInt64, UInt32);
-    bool r17Activate(volatile UInt8 *, void *);
-    void r17Export(void *);
-    static IOReturn r17Callback(void *, UInt32, r17tx::Request *);
-    void r17Release();
-    // ---- round 21/22: the translation window edges ----
-    //
-    // The window is not "the period between two r17* calls"; it is the period
-    // during which the device actually translates through this backend. Both
-    // edges are ordered against the ORDINARY output path, which keeps running,
-    // so both are built on the driver's submission barrier rather than on a
-    // flag the probe sets and hopes nobody is inside:
-    //
-    //   enter: stop admission -> wait for admitted submitters to set OWN ->
-    //          wait for the ring to hold nothing -> flip DTE + invalidate ->
-    //          confirm -> open admission
-    //   exit:  stop admission -> wait submitters -> drain the ring ->
-    //          forced exit sample -> restore DTE + flush + read back ->
-    //          detach -> resume ordinary output
-    //
-    // `r17Gate` is the single place that talks to the barrier; `r17StopSubmit`
-    // is the only wait, and it runs on the probe's thread -- never inside the
-    // driver's gate or workloop.
-    bool r17Gate(bool quiesce, UInt32 *outstanding, UInt32 *activeCover,
-                 UInt32 *inFlight = nullptr, UInt32 *ringOwn = nullptr);
-    // Closes admission, then waits for submitters, descriptors, driver held/live
-    // generations and backend owners to drain, with every retirement and command
-    // completion confirmed. Polling does not hold the driver's gate or d->lock.
-    bool r17StopSubmit(UInt32 budgetMs, const char *edge);
-    bool r17BackendDrained();
-    // Second half of the enter edge: only after the DTE flip and both domain
-    // invalidations completed. `tInvComplete` is that completion time, which is
-    // what "translation is in effect from here" means.
-    bool r17EnterComplete(UInt64 tInvComplete);
-    // Exit, after the caller restored the device table and read it back:
-    // revoke controlled admission and release the backend, then (separately)
-    // let ordinary output flow again. Neither opens admission implicitly.
-    bool r17Detach();
-    bool r17ResumeOutput();
-    // Round22: the translation-off time is decided by AMDMapperProbePgt.cpp (it
-    // is the register read-back), but the value belongs to the window record.
-    // R17Domain is private to AMDMapperProbeTx.cpp, so it travels through here
-    // instead of being written across translation units.
-    void r17SetTranslateOff(UInt64);
-    // Round22: the domain keeps its own copy of the command-ring cursors, which
-    // it uses for every invalidation (map, unmap, cover). The caller must hand
-    // it the CURRENT position after it has submitted commands on its own copy --
-    // otherwise the domain appends at a stale slot and its CompletionWait never
-    // arrives. This is exactly what moving Install before the DTE flip exposed.
-    void r17SyncCommand(void *);
-    // R17Domain is incomplete outside AMDMapperProbeTx.cpp; the window state is
-    // read through this instead of by reaching into the struct.
-    bool r17Installed() const;
-    // Force the driver to sample the ring for a specific window step.
-    void r17SampleExit(UInt32 stage);
-    void r17PublishWindow();
-    // Round18: the SAME domain, entered through the IOMapper virtuals that
-    // IODMACommand calls, instead of through the platform callback. Bounded to
-    // one physically contiguous page run per call (the layout a single-mbuf TX
-    // packet has); everything else is refused before any PTE is written.
-    bool r18StdReady() const;
-    bool r32CapacityProbe();
-    // True only for an address inside the domain's own bounded IOVA window, so
-    // an unrelated mapper call can never be routed into (or counted as) this
-    // path.
-    bool r18StdOwnsAddress(uint64_t iova) const;
-    // Real page-table translation for mapToPhysicalAddress(); false when the
-    // entry is absent (never a fabricated identity result).
-    bool r18StdTranslate(uint64_t iova, uint64_t *outPA) const;
-    IOReturn r18StdMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
-        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
-        uint64_t *, uint64_t *);
-    IOReturn r18StdUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
-    // Published counters, so "the standard path ran" is never inferred from the
-    // driver's own success string.
-    uint32_t fStdMapCalls = 0, fStdMapOk = 0, fStdMapRejects = 0;
-    uint32_t fStdUnmapCalls = 0, fStdUnmapOk = 0;
-    uint32_t fStdPageRuns = 0, fStdFragRejects = 0, fStdOffsetRejects = 0;
-    uint32_t fStdInsertRejects = 0, fStdWalkCalls = 0;
-    /* round19: multi-run windows */
-    uint32_t fStdRuns = 0, fStdDiscontig = 0, fStdMaxRuns = 0, fStdCapRejects = 0;
-    void publishStdStats();
-
-    // Round30: 1024 cyclic RX mappings. Commands are registered by BOTH object
-    // identities before IOKit can call the mapper. They never consume TX slots.
-    struct R27RxDomain;
-    R27RxDomain *fR27Rx = nullptr;
-    bool r27RxRequested() const;
-    bool r27RxBegin();
-    void r27RxReady();
-    bool r27RxFinish(UInt32 budgetMs);
-    bool r29WaitTailDone(UInt32 budgetMs);
-    void r27RxExport();
-    void r27RxRelease();
-    IOReturn r27RxControl(UInt32 op);
-    bool r27RxCandidate(IOMemoryDescriptor *, IODMACommand *) const;
-    bool r27RxOwnsAddress(uint64_t) const;
-    bool r27RxTranslate(uint64_t, uint64_t *) const;
-    IOReturn r27RxMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
-        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
-        uint64_t *, uint64_t *);
-    IOReturn r27RxUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
-
     // Round34: Lucy owns the standard objects and replaces the real RX mbufs.
     // This service owns only routing identities, PTEs and mapping evidence.
     struct R34RxDomain;
     R34RxDomain *fR34Rx = nullptr;
-    bool r40FixedCandidate(IOMemoryDescriptor *, IODMACommand *) const;
-    bool r40FixedOwnsAddress(uint64_t) const;
-    bool r40FixedTranslate(uint64_t, uint64_t *) const;
-    bool r40FixedReadPA(UInt32, UInt64, UInt64, UInt64 *) const;
-    IOReturn r40FixedOperation(r34rx::Binding *);
-    IOReturn r40FixedMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
-        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
-        uint64_t *, uint64_t *);
-    IOReturn r40FixedUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
-    bool r34RxPrepareMap(volatile UInt64 *, UInt64, UInt32, UInt32);
-    bool r34RxStopBeforeDte();
-    bool r34RxBegin();
-    bool r34RxAuthorize();
-    bool r34RxResumePhysical();
-    bool r34RxFinish(UInt32 budgetMs);
-    bool r34RxTailDone(UInt32 budgetMs);
-    void r34RxReady();
-    void r34RxExport();
-    void r34RxRelease();
-    IOReturn r34RxControl(UInt32 op);
-    static int r34RxCallback(void *, r34rx::Binding *);
-    IOReturn r34RxOperation(r34rx::Binding *);
-    IOReturn r34RxBatch(r34rx::Binding *);
-    bool r34RxCandidate(IOMemoryDescriptor *, IODMACommand *) const;
-    IOReturn r34RxMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
-        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
-        uint64_t *, uint64_t *);
-    IOReturn r34RxUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
 
     // ---- B2 观测计数器 ----
     // iovmMapMemory 可能被高频调用，不能每次都 setProperty（会持续分配内存）。
@@ -420,141 +285,12 @@ private:
 
     bool findTarget();
     bool findNic();
-
-    // 只读查找网卡服务，**不**设置 fNicDevice、不依赖 fArmed。
-    //
-    // 为什么单独一个函数：M2-2b-2 需要在 amdiommu=pgt 下拿到目标设备的
-    // BDF，但此时 fArmed=false、fNicDevice 为 NULL。直接复用 findNic()
-    // 会修改状态并与 arm 流程耦合；复用 fNicDevice 则得到 NULL。
-    // 调用方负责 release 返回值。
-    IOService *findNicServiceOnly();
     bool armNic(IOService *nic);
     void installPublishNotifier();
     static bool publishHandler(void *target, void *refCon,
                                IOService *newService, IONotifier *notifier);
     void runB1SelfTest();
-    void runB2SelfTest();
-    void runB2aSelfTest();
-    void runB2OneTest(const char *tag, bool wantContiguous, IOByteCount size);
-    void publishMapStats(bool force);
-    void publishB2bStats();
-
-    // ---- M2-0b：PCI 配置空间只读探测 ----
-    //
-    // 目的：M2-0 的结论是 IVRS 的 0xFD380000 才对，DSDT 的 _CRS（0xFEB80000）
-    // 是陈旧声明。但那个结论依赖 Linux 侧证据，macOS 侧还没有独立验证。
-    //
-    // IOMMU 的 capability block（实测 cap_ptr = 0x40）里有它自己的 MMIO BAR：
-    //   cap_ptr + 0x00 : CapID(8) | CapPtr(8) | CapHdr(16)
-    //   cap_ptr + 0x04 : BAR low  (bit0 是 lock 位，需屏蔽)
-    //   cap_ptr + 0x08 : BAR high
-    // 这是硬件当前的、权威的 BAR 值，比 DSDT 的静态声明可信。
-    //
-    // 全部只读：configRead8/16/32 只做 PCI 配置读，不写任何寄存器。
-    void runM20ConfigProbe();
-
-    // ---- M2-1：只读 MMIO 探测 ----
-    //
-    // 本项目第一次碰 MMIO。三重保护：
-    //   1. boot-arg `amdiommu=mmio` 门控，默认完全不执行
-    //   2. 只读，且映射用 kIOMapReadOnly
-    //   3. 分阶段：先只读 EFR 一个寄存器，与 Linux 实测值比对，
-    //      不匹配立即停止，不继续碰其他偏移
-    void runM21MmioProbe();
-
-    // ---- M2-2a-1：最小 MMIO 写测试 ----
-    //
-    // 只回答一个问题：这个 MMIO 窗口能不能写。
-    // 不使能 IOMMU、不分配设备表、不发命令。
-    //
-    // 做法：写标记值到 DEV_TABLE 寄存器 → 读回 → 恢复原值 → 确认 CONTROL 未变。
-    // 门控：boot-arg `amdiommu=write`。
-    //
-    // 为什么选 DEV_TABLE 做靶子：它是唯一"写了也不会立刻产生副作用"的寄存器
-    // ——只有 CONTROL_IOMMU_EN 置位后硬件才会用它，而当前 IOMMU 完全关闭。
-    // 且它当前值为 0，即使恢复失败留下的也是"未编程"的干净状态。
-    void runM22aWriteProbe();
-
-    // ---- M2-2a-2：建设备表（不使能）----
-    //
-    // 分配物理连续内存 → 全填直通 DTE → 写 DEV_TABLE 基址寄存器 →
-    // 确认 CONTROL 未被改变 → 恢复原值。
-    //
-    // **不使能 IOMMU**。这是本步骤的核心价值：IOMMU 关闭时硬件不读这张表，
-    // 所以系统行为必须完全不变，从而把"表对不对"与"使能后稳不稳"彻底分开。
-    //
-    // 门控：boot-arg `amdiommu=table`。
-    void runM22bTableProbe();
-
-    // ---- M2-2a-3：短窗口使能测试（最高风险）----
-    //
-    // 完整走 Linux early_enable_iommu() 的使能序列，但**极短窗口后立即禁用**：
-    //   建设备表 → 写 DEV_TABLE → 分配命令缓冲 → 写 CMD_BUF →
-    //   复位 head/tail → CMDBUF_EN → **IOMMU_EN** → 读 STATUS →
-    //   立即清 IOMMU_EN → 确认已关闭 → 恢复所有寄存器
-    //
-    // 门控：boot-arg `amdiommu=enable`。
-    //
-    // 为什么短窗口：使能动作本身可能立即崩溃（地址错、编码错、命令缓冲未就绪）。
-    // 短窗口若崩，说明配置有根本问题，不必冒险长期运行。
-    void runM23EnableProbe();
-
-    // ---- M2-2b-1：命令通道验证 ----
-    //
-    // M2-2a-3 只"配置"了命令缓冲，从未发过命令。
-    // 这一步发一条 CMD_COMPL_WAIT，验证三件事：
-    //   命令格式正确  → 硬件能解析（type 在 data[1] 的 bit28..31）
-    //   tail 推进正确 → 硬件能看到新命令
-    //   cmd_sem 地址正确 → 硬件能写回完成信号
-    //
-    // 门控：boot-arg `amdiommu=cmd`。
-    //
-    // 这是全新组件：三块内存（设备表 / 命令缓冲 / 完成信号）同时在场，
-    // 且第一次真正驱动硬件执行动作。仍是短窗口。
-    void runM2b1CmdProbe();
-
-    // ---- M2-2b-2：4 级恒等页表 + 单设备 DTE 切换 ----
-    //
-    // M2-2b-1 证明了命令通道可用。这一步证明**页表机制**：
-    //   建 4 级页表 → 填恒等映射 → 使能 → CMD_INV_ALL →
-    //   把目标设备的 DTE 从直通改成翻译 → INV_DEV_ENTRY + INV_IOMMU_PAGES →
-    //   确认硬件接受（无 fault 事件）→ 全部恢复原状。
-    //
-    // 门控：boot-arg `amdiommu=pgt`。
-    //
-    // 新增观测手段：**事件日志**。开启 EVT_LOG_EN 后 IOMMU 会把自己的
-    // IO_PAGE_FAULT / DEV_TAB_ERR 写进我们指定的内存，这是前面所有步骤
-    // 都没有的能力——之前只能靠"系统有没有崩"来间接判断。
-    //
-    // 【2026-10-31 关键修正】本函数**不能**在 start() 里直接跑。
-    //
-    // 实测：把 RTL8127 用 SFP+ 光缆接上局域网、手动 `ifconfig en2 up`
-    // 之后它确实有 DMA（Ipkts 从 0 涨到 157）。但只要重启，en2 又回到
-    // `media: <unknown type>`、零包——因为探针的 start() 比 Lucy 配置网卡
-    // **更早**。所以"切换后 0 fault"仍然测不到东西。
-    //
-    // 解法：用 IOTimerEventSource 把整个探测推迟到 start() 返回之后
-    // （默认 20 秒），那时 PCI 枚举、网卡驱动、链路协商都已完成。
-    // 这样既不阻塞启动，又能在有真实 DMA 的窗口里做实验。
-    void runM22b2PageTableProbe();
     struct R33DeviceDomain;
-    void finishM22b2PageTableProbe(R33DeviceDomain *, bool finishWindow);
-
-    // 延迟调度：在 start() 末尾挂一个一次性定时器，到点后调用
-    // runM22b2PageTableProbe()。返回 false 表示调度失败（记录属性后放弃）。
-    bool scheduleM22b2();
-
-    // 定时器回调（静态，符合 IOTimerEventSource::Action 签名）
-    static void m22b2TimerFired(OSObject *owner, IOTimerEventSource *sender);
-
-    // Round33: setup transfers its hardware resources to the service and
-    // returns. Explicit stop launches a separate worker for drain + restore.
-    bool r31SessionRequested() const;
-    static void r31SessionWorker(void *parameter, wait_result_t result);
-    static void r33DomainStopWorker(void *parameter, wait_result_t result);
-    void r33ScheduleDomainStop();
-    bool r33DomainStopPending() const;
-    void r31RequestStop();
     bool fR31Session = false;
     volatile UInt32 fR31StopRequested = 0;
     volatile UInt32 fR31WorkerActive = 0;
@@ -566,44 +302,6 @@ private:
 
     R27ProbeTimer *fM22b2Timer;   // 一次性定时器（stop() 里释放）
     uint32_t            fM22b2DelayMS; // 延迟毫秒数（可被 boot-arg 覆盖）
-
-    // 叶子页大小模式：
-    //   false = 2 MiB 大页（覆盖全部 16 GiB）
-    //   true  = 4 KiB 小页（覆盖全部 16 GiB，用于判别大页编码是否被硬件接受）
-    // 由 boot-arg `amdiommu=pgt4k` 选择。
-    bool                fM22b2Use4K;
-
-    // 保持翻译生效的长时间观察模式（`amdiommu=pgthold`）。
-    // 观察窗口从 2 秒延长到 M2B2_HOLD_SECS 秒，期间 DTE 一直指向翻译表，
-    // 便于从外部用 netstat 观察设备是否仍在正常收发。
-    bool                fM22b2Hold;
-
-    // 纯睡眠对照（`amdiommu=pgtsleep`）：保持 DTE 直通，只做同样的 20 秒
-    // IOSleep，用来判断"计数冻结"是翻译造成的，还是长睡眠阻塞 workloop 造成的。
-    bool                fM22b2SleepOnly;
-
-    // 页表级数模式（`amdiommu=pgt3l`）：
-    //   false = PAGE_MODE_4_LEVEL（根表项覆盖 512 GiB）
-    //   true  = PAGE_MODE_3_LEVEL（根表项覆盖 1 GiB，与 16 GiB RAM 匹配）
-    bool                fM22b2Use3L;
-
-    // 设备 DMA 观察（v0.21.0）。
-    //
-    // 第五轮唯一没答上的问题就是"那条范围外 fault 的地址，是不是设备真的
-    // 在用"。当时的判据是 m1bb-realmapcalls，而它是 0——因为 RTL812xLucy
-    // 在 useAppleVTD 为假时根本不走 mapper，直接用裸物理地址。所以那个
-    // 计数器无法排除任何东西。
-    //
-    // 现在的做法是直接读设备：从 BAR2 读出 TX/RX 描述符环基址、统计缓冲
-    // 基址、以及 CounterAddr 寄存器，再把环里的描述符地址收集成一个
-    // 区间集合。这些是设备真正会去访问的地址，与驱动走不走 mapper 无关。
-    //
-    // 只读：不写任何设备寄存器，不改变驱动的 DMA 路径。
-    void observeDeviceDma();
-
-    // 只读 TX 环，返回 DescOwn 已清的槽数；-1 = 读不到。
-    // 窗口前后各调一次，差值即窗口内完成记录数。
-    int m2b2ScanTxDone();
 
     // 每个窗口最多保留多少条原始事件（16 字节/条）供离线解码。
     //
@@ -659,10 +357,6 @@ public:
     };
 
 private:
-    // 两个窗口实例。放在成员里而不是栈上：每个 424 字节，两个 848 字节，
-    // 正好是把 runM22b2PageTableProbe() 帧推过 __chkstk 阈值的那部分。
-    M22b2EventWindow fM22b2WinPre;
-    M22b2EventWindow fM22b2WinMain;
 
 public:
 
@@ -1292,6 +986,341 @@ public:
 
         const char *skipReason;
     };
+
+    // 把描述符里的地址+长度收进集合。
+    //
+    // 与第六轮的关键差别：**不按任何上限过滤**。所有非零地址都进集合，
+    // 能不能读那块内存由 readVerdict() 单独判定并作为元数据记录。
+    //
+    // 【第八轮】这个函数现在真的使用 tailCum/cloCum：它调用
+    // scanTxWindow()，按 [tailCum, 窗口后尾指针) 逐个累计索引取描述符，
+    // 每条带自己的槽位、代次、生命周期。第七轮版本忽略了这两个参数，
+    // 把所有非零地址一律标成 in-flight。
+    void m2b2CollectTxSegments(const UInt8 *ring, UInt32 count,
+                               UInt32 tailCum, UInt32 cloCum);
+
+    // 【第十轮】读取驱动侧观测日志（线格式 v2）。
+    //
+    // 与读环的根本区别：这里读的是驱动**仍然持有的**内存对象的副本。
+    // 驱动在提交/完成点写入记录，并把**头部+记录**作为**一份** OSData
+    // 发布。探针拿到的字节带着驱动自己算出的累计索引，所以"提交—完成"
+    // 的配对是按同一个数字对上的，不涉及对槽位复用的推断。
+    //
+    // 第九轮的 v1 有三个结构性缺陷，v2 逐个修掉（见实现处注释）：
+    //   1. seq 只在末尾写一次，读侧无法识别半写状态；
+    //   2. 头部与记录分属六个属性，可以来自不同次发布；
+    //   3. 记录里没有业务标识，无法与客户端请求对应。
+    void m2b2ReadDriverObs();
+
+    // ---- Debug-only declarations: used only by kext/*Debug.cpp ----
+public:
+
+
+    // Round17: native-mbuf TX mapping. One live owner, evidence and command
+    // budget bounded separately (see kext/AMDMapperProbeTx.cpp).
+    struct R17Domain;
+    R17Domain *fR17 = nullptr;
+    bool r17Prepare(volatile UInt64 *, UInt64, UInt32);
+    bool r17Activate(volatile UInt8 *, void *);
+    void r17Export(void *);
+    static IOReturn r17Callback(void *, UInt32, r17tx::Request *);
+    void r17Release();
+    // ---- round 21/22: the translation window edges ----
+    //
+    // The window is not "the period between two r17* calls"; it is the period
+    // during which the device actually translates through this backend. Both
+    // edges are ordered against the ORDINARY output path, which keeps running,
+    // so both are built on the driver's submission barrier rather than on a
+    // flag the probe sets and hopes nobody is inside:
+    //
+    //   enter: stop admission -> wait for admitted submitters to set OWN ->
+    //          wait for the ring to hold nothing -> flip DTE + invalidate ->
+    //          confirm -> open admission
+    //   exit:  stop admission -> wait submitters -> drain the ring ->
+    //          forced exit sample -> restore DTE + flush + read back ->
+    //          detach -> resume ordinary output
+    //
+    // `r17Gate` is the single place that talks to the barrier; `r17StopSubmit`
+    // is the only wait, and it runs on the probe's thread -- never inside the
+    // driver's gate or workloop.
+    bool r17Gate(bool quiesce, UInt32 *outstanding, UInt32 *activeCover,
+                 UInt32 *inFlight = nullptr, UInt32 *ringOwn = nullptr);
+    // Closes admission, then waits for submitters, descriptors, driver held/live
+    // generations and backend owners to drain, with every retirement and command
+    // completion confirmed. Polling does not hold the driver's gate or d->lock.
+    bool r17StopSubmit(UInt32 budgetMs, const char *edge);
+    bool r17BackendDrained();
+    // Second half of the enter edge: only after the DTE flip and both domain
+    // invalidations completed. `tInvComplete` is that completion time, which is
+    // what "translation is in effect from here" means.
+    bool r17EnterComplete(UInt64 tInvComplete);
+    // Exit, after the caller restored the device table and read it back:
+    // revoke controlled admission and release the backend, then (separately)
+    // let ordinary output flow again. Neither opens admission implicitly.
+    bool r17Detach();
+    bool r17ResumeOutput();
+    // Round22: the translation-off time is decided by AMDMapperProbePgt.cpp (it
+    // is the register read-back), but the value belongs to the window record.
+    // R17Domain is private to AMDMapperProbeTx.cpp, so it travels through here
+    // instead of being written across translation units.
+    void r17SetTranslateOff(UInt64);
+    // Round22: the domain keeps its own copy of the command-ring cursors, which
+    // it uses for every invalidation (map, unmap, cover). The caller must hand
+    // it the CURRENT position after it has submitted commands on its own copy --
+    // otherwise the domain appends at a stale slot and its CompletionWait never
+    // arrives. This is exactly what moving Install before the DTE flip exposed.
+    void r17SyncCommand(void *);
+    // R17Domain is incomplete outside AMDMapperProbeTx.cpp; the window state is
+    // read through this instead of by reaching into the struct.
+    bool r17Installed() const;
+    // Force the driver to sample the ring for a specific window step.
+    void r17SampleExit(UInt32 stage);
+    void r17PublishWindow();
+    // Round18: the SAME domain, entered through the IOMapper virtuals that
+    // IODMACommand calls, instead of through the platform callback. Bounded to
+    // one physically contiguous page run per call (the layout a single-mbuf TX
+    // packet has); everything else is refused before any PTE is written.
+    bool r18StdReady() const;
+    bool r32CapacityProbe();
+    // True only for an address inside the domain's own bounded IOVA window, so
+    // an unrelated mapper call can never be routed into (or counted as) this
+    // path.
+    bool r18StdOwnsAddress(uint64_t iova) const;
+    // Real page-table translation for mapToPhysicalAddress(); false when the
+    // entry is absent (never a fabricated identity result).
+    bool r18StdTranslate(uint64_t iova, uint64_t *outPA) const;
+    IOReturn r18StdMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r18StdUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
+    // Published counters, so "the standard path ran" is never inferred from the
+    // driver's own success string.
+    uint32_t fStdMapCalls = 0, fStdMapOk = 0, fStdMapRejects = 0;
+    uint32_t fStdUnmapCalls = 0, fStdUnmapOk = 0;
+    uint32_t fStdPageRuns = 0, fStdFragRejects = 0, fStdOffsetRejects = 0;
+    uint32_t fStdInsertRejects = 0, fStdWalkCalls = 0;
+    /* round19: multi-run windows */
+    uint32_t fStdRuns = 0, fStdDiscontig = 0, fStdMaxRuns = 0, fStdCapRejects = 0;
+    void publishStdStats();
+
+    // Round30: 1024 cyclic RX mappings. Commands are registered by BOTH object
+    // identities before IOKit can call the mapper. They never consume TX slots.
+    struct R27RxDomain;
+    R27RxDomain *fR27Rx = nullptr;
+    bool r27RxRequested() const;
+    bool r27RxBegin();
+    void r27RxReady();
+    bool r27RxFinish(UInt32 budgetMs);
+    bool r29WaitTailDone(UInt32 budgetMs);
+    void r27RxExport();
+    void r27RxRelease();
+    IOReturn r27RxControl(UInt32 op);
+    bool r27RxCandidate(IOMemoryDescriptor *, IODMACommand *) const;
+    bool r27RxOwnsAddress(uint64_t) const;
+    bool r27RxTranslate(uint64_t, uint64_t *) const;
+    IOReturn r27RxMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r27RxUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
+    bool r40FixedCandidate(IOMemoryDescriptor *, IODMACommand *) const;
+    bool r40FixedOwnsAddress(uint64_t) const;
+    bool r40FixedTranslate(uint64_t, uint64_t *) const;
+    bool r40FixedReadPA(UInt32, UInt64, UInt64, UInt64 *) const;
+    IOReturn r40FixedOperation(r34rx::Binding *);
+    IOReturn r40FixedMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r40FixedUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
+    bool r34RxPrepareMap(volatile UInt64 *, UInt64, UInt32, UInt32);
+    bool r34RxStopBeforeDte();
+    bool r34RxBegin();
+    bool r34RxAuthorize();
+    bool r34RxResumePhysical();
+    bool r34RxFinish(UInt32 budgetMs);
+    bool r34RxTailDone(UInt32 budgetMs);
+    void r34RxReady();
+    void r34RxExport();
+    void r34RxRelease();
+    IOReturn r34RxControl(UInt32 op);
+    static int r34RxCallback(void *, r34rx::Binding *);
+    IOReturn r34RxOperation(r34rx::Binding *);
+    IOReturn r34RxBatch(r34rx::Binding *);
+    bool r34RxCandidate(IOMemoryDescriptor *, IODMACommand *) const;
+    IOReturn r34RxMap(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+        const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
+        uint64_t *, uint64_t *);
+    IOReturn r34RxUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
+
+    // 只读查找网卡服务，**不**设置 fNicDevice、不依赖 fArmed。
+    //
+    // 为什么单独一个函数：M2-2b-2 需要在 amdiommu=pgt 下拿到目标设备的
+    // BDF，但此时 fArmed=false、fNicDevice 为 NULL。直接复用 findNic()
+    // 会修改状态并与 arm 流程耦合；复用 fNicDevice 则得到 NULL。
+    // 调用方负责 release 返回值。
+    IOService *findNicServiceOnly();
+    void runB2SelfTest();
+    void runB2aSelfTest();
+    void runB2OneTest(const char *tag, bool wantContiguous, IOByteCount size);
+    void publishMapStats(bool force);
+    void publishB2bStats();
+
+    // ---- M2-0b：PCI 配置空间只读探测 ----
+    //
+    // 目的：M2-0 的结论是 IVRS 的 0xFD380000 才对，DSDT 的 _CRS（0xFEB80000）
+    // 是陈旧声明。但那个结论依赖 Linux 侧证据，macOS 侧还没有独立验证。
+    //
+    // IOMMU 的 capability block（实测 cap_ptr = 0x40）里有它自己的 MMIO BAR：
+    //   cap_ptr + 0x00 : CapID(8) | CapPtr(8) | CapHdr(16)
+    //   cap_ptr + 0x04 : BAR low  (bit0 是 lock 位，需屏蔽)
+    //   cap_ptr + 0x08 : BAR high
+    // 这是硬件当前的、权威的 BAR 值，比 DSDT 的静态声明可信。
+    //
+    // 全部只读：configRead8/16/32 只做 PCI 配置读，不写任何寄存器。
+    void runM20ConfigProbe();
+
+    // ---- M2-1：只读 MMIO 探测 ----
+    //
+    // 本项目第一次碰 MMIO。三重保护：
+    //   1. boot-arg `amdiommu=mmio` 门控，默认完全不执行
+    //   2. 只读，且映射用 kIOMapReadOnly
+    //   3. 分阶段：先只读 EFR 一个寄存器，与 Linux 实测值比对，
+    //      不匹配立即停止，不继续碰其他偏移
+    void runM21MmioProbe();
+
+    // ---- M2-2a-1：最小 MMIO 写测试 ----
+    //
+    // 只回答一个问题：这个 MMIO 窗口能不能写。
+    // 不使能 IOMMU、不分配设备表、不发命令。
+    //
+    // 做法：写标记值到 DEV_TABLE 寄存器 → 读回 → 恢复原值 → 确认 CONTROL 未变。
+    // 门控：boot-arg `amdiommu=write`。
+    //
+    // 为什么选 DEV_TABLE 做靶子：它是唯一"写了也不会立刻产生副作用"的寄存器
+    // ——只有 CONTROL_IOMMU_EN 置位后硬件才会用它，而当前 IOMMU 完全关闭。
+    // 且它当前值为 0，即使恢复失败留下的也是"未编程"的干净状态。
+    void runM22aWriteProbe();
+
+    // ---- M2-2a-2：建设备表（不使能）----
+    //
+    // 分配物理连续内存 → 全填直通 DTE → 写 DEV_TABLE 基址寄存器 →
+    // 确认 CONTROL 未被改变 → 恢复原值。
+    //
+    // **不使能 IOMMU**。这是本步骤的核心价值：IOMMU 关闭时硬件不读这张表，
+    // 所以系统行为必须完全不变，从而把"表对不对"与"使能后稳不稳"彻底分开。
+    //
+    // 门控：boot-arg `amdiommu=table`。
+    void runM22bTableProbe();
+
+    // ---- M2-2a-3：短窗口使能测试（最高风险）----
+    //
+    // 完整走 Linux early_enable_iommu() 的使能序列，但**极短窗口后立即禁用**：
+    //   建设备表 → 写 DEV_TABLE → 分配命令缓冲 → 写 CMD_BUF →
+    //   复位 head/tail → CMDBUF_EN → **IOMMU_EN** → 读 STATUS →
+    //   立即清 IOMMU_EN → 确认已关闭 → 恢复所有寄存器
+    //
+    // 门控：boot-arg `amdiommu=enable`。
+    //
+    // 为什么短窗口：使能动作本身可能立即崩溃（地址错、编码错、命令缓冲未就绪）。
+    // 短窗口若崩，说明配置有根本问题，不必冒险长期运行。
+    void runM23EnableProbe();
+
+    // ---- M2-2b-1：命令通道验证 ----
+    //
+    // M2-2a-3 只"配置"了命令缓冲，从未发过命令。
+    // 这一步发一条 CMD_COMPL_WAIT，验证三件事：
+    //   命令格式正确  → 硬件能解析（type 在 data[1] 的 bit28..31）
+    //   tail 推进正确 → 硬件能看到新命令
+    //   cmd_sem 地址正确 → 硬件能写回完成信号
+    //
+    // 门控：boot-arg `amdiommu=cmd`。
+    //
+    // 这是全新组件：三块内存（设备表 / 命令缓冲 / 完成信号）同时在场，
+    // 且第一次真正驱动硬件执行动作。仍是短窗口。
+    void runM2b1CmdProbe();
+
+    // ---- M2-2b-2：4 级恒等页表 + 单设备 DTE 切换 ----
+    //
+    // M2-2b-1 证明了命令通道可用。这一步证明**页表机制**：
+    //   建 4 级页表 → 填恒等映射 → 使能 → CMD_INV_ALL →
+    //   把目标设备的 DTE 从直通改成翻译 → INV_DEV_ENTRY + INV_IOMMU_PAGES →
+    //   确认硬件接受（无 fault 事件）→ 全部恢复原状。
+    //
+    // 门控：boot-arg `amdiommu=pgt`。
+    //
+    // 新增观测手段：**事件日志**。开启 EVT_LOG_EN 后 IOMMU 会把自己的
+    // IO_PAGE_FAULT / DEV_TAB_ERR 写进我们指定的内存，这是前面所有步骤
+    // 都没有的能力——之前只能靠"系统有没有崩"来间接判断。
+    //
+    // 【2026-10-31 关键修正】本函数**不能**在 start() 里直接跑。
+    //
+    // 实测：把 RTL8127 用 SFP+ 光缆接上局域网、手动 `ifconfig en2 up`
+    // 之后它确实有 DMA（Ipkts 从 0 涨到 157）。但只要重启，en2 又回到
+    // `media: <unknown type>`、零包——因为探针的 start() 比 Lucy 配置网卡
+    // **更早**。所以"切换后 0 fault"仍然测不到东西。
+    //
+    // 解法：用 IOTimerEventSource 把整个探测推迟到 start() 返回之后
+    // （默认 20 秒），那时 PCI 枚举、网卡驱动、链路协商都已完成。
+    // 这样既不阻塞启动，又能在有真实 DMA 的窗口里做实验。
+    void runM22b2PageTableProbe();
+    void finishM22b2PageTableProbe(R33DeviceDomain *, bool finishWindow);
+
+    // 延迟调度：在 start() 末尾挂一个一次性定时器，到点后调用
+    // runM22b2PageTableProbe()。返回 false 表示调度失败（记录属性后放弃）。
+    bool scheduleM22b2();
+
+    // 定时器回调（静态，符合 IOTimerEventSource::Action 签名）
+    static void m22b2TimerFired(OSObject *owner, IOTimerEventSource *sender);
+
+    // Round33: setup transfers its hardware resources to the service and
+    // returns. Explicit stop launches a separate worker for drain + restore.
+    bool r31SessionRequested() const;
+    static void r31SessionWorker(void *parameter, wait_result_t result);
+    static void r33DomainStopWorker(void *parameter, wait_result_t result);
+    void r33ScheduleDomainStop();
+    bool r33DomainStopPending() const;
+    void r31RequestStop();
+
+    // 叶子页大小模式：
+    //   false = 2 MiB 大页（覆盖全部 16 GiB）
+    //   true  = 4 KiB 小页（覆盖全部 16 GiB，用于判别大页编码是否被硬件接受）
+    // 由 boot-arg `amdiommu=pgt4k` 选择。
+    bool                fM22b2Use4K;
+
+    // 保持翻译生效的长时间观察模式（`amdiommu=pgthold`）。
+    // 观察窗口从 2 秒延长到 M2B2_HOLD_SECS 秒，期间 DTE 一直指向翻译表，
+    // 便于从外部用 netstat 观察设备是否仍在正常收发。
+    bool                fM22b2Hold;
+
+    // 纯睡眠对照（`amdiommu=pgtsleep`）：保持 DTE 直通，只做同样的 20 秒
+    // IOSleep，用来判断"计数冻结"是翻译造成的，还是长睡眠阻塞 workloop 造成的。
+    bool                fM22b2SleepOnly;
+
+    // 页表级数模式（`amdiommu=pgt3l`）：
+    //   false = PAGE_MODE_4_LEVEL（根表项覆盖 512 GiB）
+    //   true  = PAGE_MODE_3_LEVEL（根表项覆盖 1 GiB，与 16 GiB RAM 匹配）
+    bool                fM22b2Use3L;
+
+    // 设备 DMA 观察（v0.21.0）。
+    //
+    // 第五轮唯一没答上的问题就是"那条范围外 fault 的地址，是不是设备真的
+    // 在用"。当时的判据是 m1bb-realmapcalls，而它是 0——因为 RTL812xLucy
+    // 在 useAppleVTD 为假时根本不走 mapper，直接用裸物理地址。所以那个
+    // 计数器无法排除任何东西。
+    //
+    // 现在的做法是直接读设备：从 BAR2 读出 TX/RX 描述符环基址、统计缓冲
+    // 基址、以及 CounterAddr 寄存器，再把环里的描述符地址收集成一个
+    // 区间集合。这些是设备真正会去访问的地址，与驱动走不走 mapper 无关。
+    //
+    // 只读：不写任何设备寄存器，不改变驱动的 DMA 路径。
+    void observeDeviceDma();
+
+    // 只读 TX 环，返回 DescOwn 已清的槽数；-1 = 读不到。
+    // 窗口前后各调一次，差值即窗口内完成记录数。
+    int m2b2ScanTxDone();
+    // 两个窗口实例。放在成员里而不是栈上：每个 424 字节，两个 848 字节，
+    // 正好是把 runM22b2PageTableProbe() 帧推过 __chkstk 阈值的那部分。
+    M22b2EventWindow fM22b2WinPre;
+    M22b2EventWindow fM22b2WinMain;
     M22b2DmaObs fM22b2Dma;
 
     // 观察到的设备 DMA 区间集合。
@@ -1326,18 +1355,6 @@ public:
     // 物理布局策略（恒等映射上限 + RAM 空洞 + 布局是否已知）
     amdobs::MapPolicy fM22b2Policy;
 
-    // 把描述符里的地址+长度收进集合。
-    //
-    // 与第六轮的关键差别：**不按任何上限过滤**。所有非零地址都进集合，
-    // 能不能读那块内存由 readVerdict() 单独判定并作为元数据记录。
-    //
-    // 【第八轮】这个函数现在真的使用 tailCum/cloCum：它调用
-    // scanTxWindow()，按 [tailCum, 窗口后尾指针) 逐个累计索引取描述符，
-    // 每条带自己的槽位、代次、生命周期。第七轮版本忽略了这两个参数，
-    // 把所有非零地址一律标成 in-flight。
-    void m2b2CollectTxSegments(const UInt8 *ring, UInt32 count,
-                               UInt32 tailCum, UInt32 cloCum);
-
     // 【第八轮】窗口结束后的描述符生命周期扫描。
     //
     // 与 m2b2CollectTxSegments 的区别：后者在窗口**之前**取快照（不知道
@@ -1346,19 +1363,6 @@ public:
     void m2b2ScanTxWindowAfter(const UInt8 *ring, UInt32 count);
 
     void m2b2CollectRxSegments(const UInt8 *ring, UInt32 count);
-
-    // 【第十轮】读取驱动侧观测日志（线格式 v2）。
-    //
-    // 与读环的根本区别：这里读的是驱动**仍然持有的**内存对象的副本。
-    // 驱动在提交/完成点写入记录，并把**头部+记录**作为**一份** OSData
-    // 发布。探针拿到的字节带着驱动自己算出的累计索引，所以"提交—完成"
-    // 的配对是按同一个数字对上的，不涉及对槽位复用的推断。
-    //
-    // 第九轮的 v1 有三个结构性缺陷，v2 逐个修掉（见实现处注释）：
-    //   1. seq 只在末尾写一次，读侧无法识别半写状态；
-    //   2. 头部与记录分属六个属性，可以来自不同次发布；
-    //   3. 记录里没有业务标识，无法与客户端请求对应。
-    void m2b2ReadDriverObs();
 
     // 【第十轮】采集目标网卡的身份（BDF / vendor / device / BSD unit / MAC）。
     //
@@ -1464,4 +1468,5 @@ public:
     MapEntry *allocMapEntry();
     bool      freeMapEntry(uint64_t pa, uint64_t len);
     uint32_t  usedMapEntries();
+
 };
