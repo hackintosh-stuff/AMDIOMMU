@@ -98,7 +98,7 @@ live, both NICs active, PM disarmed, SleepDisabled=1 and next-boot
 DMA timing inside the restart path); the sustained-load gap does not
 invalidate the R66-2 PM cycle or the ordinary-phase results.
 
-## Accepted Round66-2 / real dual-driver coordinated PM cycle, sustained wake business TODO(R67)
+## Accepted Round66-2 / real dual-driver coordinated PM cycle
 
 Base: `971198f2f4053057b9a5740f24a75c5add0cf470` (blocked R66 record). R66-2
 unblocks the R66 failure: RealtekRTL8111 3.0.56 now carries real PM hooks
@@ -131,43 +131,11 @@ completion chain B suspend 11571 < A suspend 11606 < A resume-dev 11607 <
 pt-raw hashes equal across the boundary; both drivers unblocked and back to
 `link-up`; target faults zero throughout. `disarm` succeeded (armed=no).
 SleepDisabled restored, finite job removed, next boot `amdiommu=off`, EFI
-unmounted, no extra reboot. Sustained post-wake business remains R67; this
-is the first hardware-validated dual-driver coordinated PM cycle
-(TODO(R47-PM-HARDWARE) narrows accordingly).
+unmounted, no extra reboot. This is the first hardware-validated
+dual-driver coordinated PM cycle; the sustained post-wake business for the
+dual-RTL8127 topology was delivered separately in R67-2.
 
-## Round66 / runtime-armed dual-domain sleep — BLOCKED, failure evidence preserved
-
-Base: `f6e2ed8d1c61776e02f9b2df60abe13fb12a945a` (accepted R68). The R66
-patch keeps boot out of PM-capable mode (`pm_boot_wake=False`) and adds an
-explicit runtime arm: `tools/r66/pm.py arm` sets `R66ArmSystemPM` on the
-shared controller once both NICs are up, gating `r52PowerSupported` for two
-domains. Only AMDMapperProbe was rebuilt (0.73.0, `6C3331A1-…`); Lucy 1.1.241
-and RTL8111 3.0.55 were retained untouched.
-
-**Not accepted.** The ordinary baseline passed on the fourth planned auto
-boot (auto4: A enable 1→1→2, chip 12→0→12, both requesters 11→00→11, zero
-faults, analysis 4/4 with identical recompute). The first two boots carried
-one real IOMMU fault each from the RTL8111 TX-stall watchdog resetting the
-chipset at boot (confirmed once in the unified log:
-`Tx stalled? Resetting chipset. ISR=0x0`); that blocker is intermittent,
-upstream, and outside this round's driver freeze. The controlled real sleep
-then ran exactly once: armed, `pmset sleepnow` at 05:48:37, RTC backup woke
-the machine at 05:54:00 (`Total Sleep/Wakes since boot :1`, boottime
-unchanged). Lucy's suspend fence succeeded (`pm-suspend-ready=1`), but the
-accepted RTL8111 3.0.55 has no R47 PM hook, so the second domain never
-participated, the shared controller was never stopped, and on wake Lucy's
-resume-side device invalidation failed (`failed-pm-domain-resume-invalidation`),
-leaving the controller suspended+powerFailed. The fail-safe held: Lucy
-reported `enable-blocked`, both NICs stayed disabled, and target faults
-stayed zero. Per the stop rule there was no second sleep and no masking
-reboot; `disarm` is refused (`kIOReturnBusy`) while the controller is
-suspended and the armed flag is documented as inert behind `powerFailed`
-with the next boot at `amdiommu=off`. Real sleep/wake remains
-TODO(R47-PM-HARDWARE): it needs an RTL8111 build with the R47 PM hook or a
-revised coordination contract, plus resume-side recovery after the command
-interface returns.
-
-## Accepted Round68 / restore the ordinary dual-NIC lifecycle, PM hardware TODO
+## Accepted Round68 / restore the ordinary dual-NIC lifecycle
 
 Base: `a7d09010133560fd5f6a2779a3c45a4321a25994` (blocked R65 record).
 Dual-domain system PM is paused: `r52PowerSupported()` returns false for two
@@ -187,36 +155,10 @@ The 96 MiB / 12-transfer reciprocal workload kept both down windows busy
 with dual hashes, shared commands closed at 1167 → 7518 → 9158 → 10609 →
 12190, exact range coverage held (A 32457/32457, B 37421/37421), the ring
 cached 10975 of 11023 batches with 48 refreshes and 48 wraps, and map/unmap
-closed at A 5421/5386 and B 6803/6792. Real system sleep/wake remains
-TODO(R47-PM-HARDWARE); ordinary down/up is not a sleep/wake test.
+closed at A 5421/5386 and B 6803/6792. Real system sleep/wake was validated
+later by R66-2; ordinary down/up is not a sleep/wake test.
 
-## Round65 / coordinated two-domain system PM — BLOCKED, failure evidence preserved
-
-Base: `8cfd4aca2ae8a7af1635e21583047d1b01e677ec` (accepted R64). The R65
-patch adds coordinated suspend/resume for two independent domains: each
-requester closes admission and fences its own domain, the last suspend stops
-the shared controller once, the first resume restarts it once, later resumes
-only fence their own domain, and admission reopens after each resume. A
-host model checks all four A/B callback orders. Only AMDMapperProbe 0.71.0
-was rebuilt; Lucy 1.1.241 and RTL8111 3.0.55 were retained.
-
-**Not accepted.** Four planned auto boots produced three complete 96 MiB
-dual-NIC runs, correct hashes, normal map/unmap, `r65-pm-domain-count = 2`
-and no fake suspend/resume counters. But each complete run recorded one real
-A/0x2700 IOMMU target fault during the A-down window, caused by an extra
-spurious `enable()` that restarts hardware while the rings are being torn
-down (enable-count 1 → 2 → 3 versus R64's 1 → 1 → 2). Zero target faults is
-a hard requirement, so the final analysis FAILs and `disarm-next` correctly
-refused. Fixes tried: capture whitelist for `r65-` keys, a bounded analyzer
-accommodation for the PM boot wake (R64/R63 re-analysis stays identical),
-and an `R65ArmSystemPM` gate that keeps ordinary boots out of dual-domain PM
-participation; none removed the fault. Evidence for all runs, captures and
-analyses is preserved. Failure recovery set the next boot to
-`amdiommu=off`, removed the finite job and left both NICs active without an
-extra reboot. Real system sleep/wake remains TODO(R47-PM-HARDWARE) for R66;
-ordinary interface down/up is not a sleep/wake test.
-
-## Accepted Round64 / both NICs independently revoke and restore requester DMA access, PM hardware TODO
+## Accepted Round64 / both NICs independently revoke and restore requester DMA access
 
 Base: `e0f5ef93f8a665c9597c3989a9c8e92a34a9709d` (accepted R63). Only
 RTL812xLucy was rebuilt (1.1.241, `6F935499-FCC0-3A8A-96E7-3CE0B1D647C8`);
@@ -245,7 +187,7 @@ Deployed binary corresponds to `361b5c1`; later implementation commits
 (`42d458d`, `1761255`) touch only the shared analyzer. PM remains
 TODO(R47-PM-HARDWARE); ordinary interface down/up is not a sleep/wake test.
 
-## Accepted Round63 / revoke one requester's DMA permission while its NIC is down, PM hardware TODO
+## Accepted Round63 / revoke one requester's DMA permission while its NIC is down
 
 Base: `4309a75855f67957284ec71909378b72fa132a05` (accepted R62; deployed `833e7bd`).
 R62 completed 11,291 batches in the measured window, refreshing the hardware
@@ -282,7 +224,7 @@ exact coverage held (A 32837/32837, B 34234/34234), the ring cached 8069 of
 3467/3456 map/unmap, and target faults stayed zero. PM remains
 TODO(R47-PM-HARDWARE).
 
-## Accepted Round62 / cache the shared command ring's observed HEAD, PM hardware TODO
+## Accepted Round62 / cache the shared command ring's observed HEAD
 
 Base: `e4d61d84ae08e38ab79dce8330cc4f6aaca0b7fe` (accepted R61; deployed `e236625`). Its first auto boot
 completed twelve transfers / 96 MiB. Both domains submitted real split
@@ -314,7 +256,7 @@ exact coverage held at the last phase (A 32310/32310 with 884 split batches,
 B 36866/36866 with 745), A ended 5608/5573 and B 6624/6613 map/unmap, and
 target faults stayed zero. PM remains TODO(R47-PM-HARDWARE).
 
-## Accepted Round61 / exact leaf invalidations with one completion per mapping, PM hardware TODO
+## Accepted Round61 / exact leaf invalidations with one completion per mapping
 
 Base: `562559ac04a5d921691a0150868b6b037332b0df` (accepted R60). At its last snapshot the two domains
 requested 74,628 pages of invalidation and the hardware command encodings
@@ -345,7 +287,7 @@ the parallel payloads overlapped 141.266/127.795 ms, both NICs took exactly
 one disable/enable cycle, A ended 5931/5896 and B 5551/5540 map/unmap, and
 target faults stayed zero. PM remains TODO(R47-PM-HARDWARE).
 
-## Accepted Round60 / aligned IOVA spans and reciprocal recovery, PM hardware TODO
+## Accepted Round60 / aligned IOVA spans and reciprocal recovery
 
 Base: `db18ba4b0e3f648980339ee182ad2d27be2205d5` (accepted R59; deployed `fdc6942`).
 The R59 dual-NIC run used eight 512 KiB Lucy RX mappings. In the A-down
@@ -381,7 +323,7 @@ payloads overlapped 117.064/111.356 ms, shared commands closed at
 deltas equal to the persistent maps, and target faults stayed zero. PM remains
 TODO(R47-PM-HARDWARE).
 
-## Accepted Round59 / 512 KiB ordinary DMA mappings (ABI3), PM hardware TODO
+## Accepted Round59 / 512 KiB ordinary DMA mappings (ABI3)
 
 Base: `63ca1bc0ced9c82f7b460559f8cd7917cdc8c0df` (R58 accepted). R58 deployed `3281ac6`;
 its first 64 MiB auto run passed all four groups with zero target faults.
@@ -416,7 +358,7 @@ while A was down, A recovered after up, and target faults stayed zero. The
 R53 off baseline was reused as historical context only; PM remains
 TODO(R47-PM-HARDWARE).
 
-## Accepted Round58 / compact storage for expected physical pages, PM hardware TODO
+## Accepted Round58 / compact storage for expected physical pages
 
 Base: `231447265fb0d0283a5921a822a9f0760ac39d58`, the accepted R57 result. R57 deployed `c8cca04`;
 its first 64 MiB auto run passed all four groups with zero target faults.
@@ -451,7 +393,7 @@ mappings with no rejected map/unmap or invalidation failure, and target
 faults stayed zero. The accepted R53 off baseline was reused; PM remains
 TODO(R47-PM-HARDWARE).
 
-## Accepted Round57 / bitmap of live mapping-record slots, PM hardware TODO
+## Accepted Round57 / bitmap of live mapping-record slots
 
 Base: `cc7bedff5abe77f2f2c97ab38bf223e7b3f49545` (accepted R56 record).
 R56 deployed `0830a5a13f00973e3c08b0a8d886730bd9fa9471`. Its first auto
@@ -487,7 +429,7 @@ occupied slots 0–34 and B 0–21 while handles grew to 4381/4443, showing
 allocation, release and reuse on the same slots. The accepted R53 off
 baseline was reused; PM remains TODO(R47-PM-HARDWARE).
 
-## Accepted Round56 / indexed unmap by starting IOVA page, PM hardware TODO
+## Accepted Round56 / indexed unmap by starting IOVA page
 
 Base: `b339d0ec39a365b063d2d4e8774d5ebeebcd6fad` (R55 accepted record);
 R55 deployed `54469ee61afa2143bc6c3848031ab2ad7d32730e`. Its first auto
@@ -522,7 +464,7 @@ closed at 831 → 8423 → 10303, A retired 4425 and B 5874 mappings with no
 rejected map/unmap or invalidation failure, and target faults stayed zero.
 The accepted R53 off baseline was reused; PM remains TODO(R47-PM-HARDWARE).
 
-## Accepted Round55 / word-wise first-fit IOVA allocation, PM hardware TODO
+## Accepted Round55 / word-wise first-fit IOVA allocation
 
 Base: `30395d3572b36457b68dca2f37e9cdb027407017`, accepted R54 record.
 The effective R54 deployment used `b882f091a50080969ccb69bb9748113cb3d3e0cb`.
@@ -562,7 +504,7 @@ left passthrough. The 64 MiB load overlapped 118.914 ms (upload) and 103.458 ms
 commands closed at 901 → 8106 → 9835, and target faults stayed zero. The
 accepted R53 off baseline was reused; PM remains TODO(R47-PM-HARDWARE).
 
-## Accepted Round54 / explicit per-device requester claims, PM hardware TODO
+## Accepted Round54 / explicit per-device requester claims
 
 Base: `a798b47a9daaae98d5d4efe98285c1bfbee9da2d` (accepted R53 record).
 The effective R53 run used `49365e9792b848af435493d5cf86ac49c802514c`.
@@ -681,7 +623,7 @@ The down/up result is limited to "B completes business while A is down and A
 recovers after up" and does not claim an existing TCP connection crossed the
 transition uninterrupted.
 
-## Accepted Round52 / two device domains on one controller, PM hardware TODO
+## Accepted Round52 / two device domains on one controller
 
 Base: `a75864596ba0e371685f029e7978d795fce1d39f`, the accepted Round51
 result-documentation successor. The original R51 capture was re-analyzed:
@@ -739,7 +681,7 @@ Real system PM remains `TODO(R47-PM-HARDWARE)`; dual-device PM is explicitly
 unsupported in this stage and is not part of the ordinary down/up test.
 Use the existing fixed Git checkouts and finite deployment/recovery workflow.
 
-## Accepted Round51 / omit map invalidation when NPCache is absent, PM hardware TODO
+## Accepted Round51 / omit map invalidation when NPCache is absent
 
 Base: `da99156d3e6b20694c88124afb75341f5f437545`, the accepted Round50 documentation successor.
 Round50 was independently re-analyzed from its original capture: all eleven
@@ -800,7 +742,7 @@ Round50 report correction: its down-phase raw request is
 `[0x80280000,0x80300000)` (512 KiB). The original analysis is correct;
 the report's transcribed endpoints do not require another hardware run.
 
-## Accepted Round50 / ranged ordinary IOVA invalidation, PM hardware TODO
+## Accepted Round50 / ranged ordinary IOVA invalidation
 
 Formal base: `23973d1652091ba0a671a4442e7a0fd3b2f87146`, the accepted Round49
 result-documentation successor; tree `cb92cf1b010cc6c0bdba1bcfb75b1c06b140fc10`.
@@ -879,7 +821,7 @@ Previous result and evidence are outside this source repository:
 [evidence archive](<../../docs/evidence/r49-final-20261103.tgz>)
 (SHA256 `7add839a6774d784d74d8d769a244090beac7e1ccfd013af60fbe9f2d459f1bc`).
 
-## Accepted Round49 / larger ordinary DMA mappings and RX batches, PM hardware TODO
+## Accepted Round49 / larger ordinary DMA mappings and RX batches
 
 Formal base: `e7074605b7077304d638f63440fe4467da918c8d`, the accepted Round48
 result-documentation successor; tree `3adb7278e1250c2d95f258d90ebecf227c65f5b5`.
@@ -950,7 +892,7 @@ Previous result and evidence are outside this source repository:
 [evidence archive](<../../docs/evidence/r48-final-20261103.tgz>)
 (SHA256 `0894e10c14c933b1079435d940cab6396adec2a15bdaa3134ba13cf33c31a283`).
 
-## Accepted Round48 / ordinary 32-bit DMA constraints, PM hardware TODO
+## Accepted Round48 / ordinary 32-bit DMA constraints
 
 Formal base: `123dea9ddb5f159535f1be5e42f01168203a0850`, the accepted Round47
 result-documentation successor; tree `08c7c25a982c47769d66bebd4db67d59d077a9dc`.
@@ -1020,7 +962,7 @@ The accepted previous result and archive are outside this source repository:
 [evidence archive](<../../docs/evidence/r47-final-20261103.tgz>)
 (SHA256 `27cb04f408d6a5c832dbdd3d0afaf663554b5ea9315e1b30737cff78f0bbe285`).
 
-## Accepted Round47 / IVRS controller discovery, PM hardware TODO
+## Accepted Round47 / IVRS controller discovery
 
 Formal base: `576c11adf03ce024bcf019d88cdc8b30781a19cc`, the accepted Round46
 result-documentation successor; tree `8b79ac2fdafe40ee4d7686e3f0d82996d01760e5`.
