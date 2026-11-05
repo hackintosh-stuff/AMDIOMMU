@@ -8,8 +8,8 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AMDMapperProbe</string>
     <key>CFBundlePackageType</key><string>KEXT</string>
-    <key>CFBundleShortVersionString</key><string>0.86.0</string>
-    <key>CFBundleVersion</key><string>0.86.0</string>
+    <key>CFBundleShortVersionString</key><string>0.87.0</string>
+    <key>CFBundleVersion</key><string>0.87.0</string>
     <!-- Client requests must fit [OSBundleCompatibleVersion, CFBundleVersion].
          Existing mapper ABI1 clients remain compatible with 0.53.0;
          Round54 clients require 0.61.0 for a pre-open claim on their selected PCI requester. -->
@@ -202,5 +202,7 @@
         <!-- Runtime IVRS acquisition and IOACPIPlatformDevice metaClass. -->
         <key>com.apple.iokit.IOACPIFamily</key><string>1.4</string>
     </dict>
+	<key>OSBundleRequired</key>
+	<string>Root</string>
 </dict>
 </plist>
