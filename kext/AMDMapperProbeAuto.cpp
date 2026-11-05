@@ -345,6 +345,7 @@ const r44mapper::Profile *org_example_AMDMapperProbe::r44ProfileForDevice(
 
 bool org_example_AMDMapperProbe::r44StartAuto() {
     IOLog("AMDMapperProbe: auto-start enter\n");
+    if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "enter");
     setProperty("r44-mode", "auto");
     setProperty("r52-role", "controller");
     setProperty("r52-snapshot-consistency", "per-domain");
@@ -354,7 +355,11 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
     setProperty("r44-controller-ready", "no");
     setProperty("r44-system-mapper", "no");
     setProperty("m1b-gsystem", IOMapper::gSystem ? "NONNULL" : "NULL-as-expected");
-    if (!r53ReadDeviceSelection()) return false;
+    if (!r53ReadDeviceSelection()) {
+        if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "failed-selection");
+        return false;
+    }
+    if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "selected");
     // R69: Apple's own Ethernet kexts only ask IOMapper::copyMapperForDevice(),
     // so they can never call AMDIOMMUClaimRequesterV1. This opt-in publishes
     // iommu-parent at first publish (before their probe) for the selected
@@ -371,14 +376,17 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
         setProperty("r69-autoattach", fR69AutoAttach ? "yes" : "no");
     }
     r44SelectProfile();
+    if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "profile-selected");
     fR52AttachLock = IOLockAlloc();
     if (!fR52AttachLock) return false;
     installPublishNotifier();
     if (!fPublishNotifier) {
         setProperty("r44-state", "failed-publish-notifier");
+        if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "failed-notifier");
         IOLockFree(fR52AttachLock); fR52AttachLock = nullptr;
         return false;
     }
+    if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "notifier-ok");
     // Offer explicit requesters to pre-open clients; keep eager attach for the default.
     // Replay published endpoints through the same path as the notification.
     r52AttachExistingDevices();
