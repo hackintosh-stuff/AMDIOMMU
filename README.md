@@ -1,5 +1,48 @@
 # AMDIOMMU — authoritative source repository
 
+## Round69 / AppleEthernetRL on the AMD mapper — BLOCKED, panic preserved
+
+Base: `bcb3d662f57ab8dbc330067ba7ac30f88925db88` (accepted R67-2). R69 adds
+`tools/r69/` and three Probe-only commits (`2062018`, `bdc370d`, `4adf62e`);
+no DMA mapper, page table, invalidation or NIC driver source was changed.
+
+**Not accepted.** The interface analysis is sound and the publication
+ordering was fixed: Apple's Ethernet kexts only call
+`IOMapper::copyMapperForDevice()` and can never invoke the
+`AMDIOMMUClaimRequesterV1` handshake, so `amdiommu=auto-attach` now builds the
+domain and publishes `iommu-parent` at first publish
+(`r44-parent=set-at-first-publish-autoattach`, `r52-domain-count=2`). Getting
+the probe ahead of the client also required OpenCore `Kernel > Add`
+injection: from the AuxKC it started ~14 s into boot, after
+`AppleEthernetRL` had already cached a NULL mapper, and `r44-map-ok` stayed 0.
+
+The blocker is a hard panic. Three boots died 57–78 s after start with
+`"rl:34:0:0:0:tx: segment prepare error 0xe00002be"` at
+`IOSkywalkPacketBufferPool.cpp:677`, raised from
+`prepareMemorySegment` via `segmentConstructor` → `skmem_region_alloc` →
+`pp_create` → `pp_alloc_packet_by_size` → `nx_netif_host_output` →
+`dlil_output`. `0xe00002be` is `kIOReturnNoResources`, returned by
+`r44MapMemory()` when the 1024 mapping records or the 16 MiB per-domain IOVA
+pool are exhausted; a 10 GbE Skywalk packet pool reaches that within a minute.
+`IOSkywalkFamily` treats the code as unrecoverable and panics, whereas
+AppleVTD can always hand out an IOVA from a 48-bit space. This is a capacity
+contract gap, not a transient fault.
+
+Containment ran from the Debian rescue environment: the three panic reports
+were copied out over a read-only APFS mount, then the OpenCore `Kernel > Add`
+entry and the ESP kext copy were removed, and boot-args reduced to
+`amdiommu=off`. The 15 SimpleAERL patches stay (unrelated). macOS is back up
+with `amdiommu=off`, no probe loaded, and `AppleEthernetRL (1.0.0d1)` driving
+both RTL8127 ports past the old threshold. `RTL812xLucy.kext` and
+`AMDMapperProbe.kext` were moved out of `/Library/Extensions` to
+`/Users/ling/r69-hold/`, so the accepted R67-2 topology is **not** restored by
+this round.
+
+Three design constraints carry into the next round: decide capacity
+**before** claiming a device and fall back to passthrough instead of failing
+at runtime; never return `kIOReturnNoResources` to a third-party client; and
+measure the real RTL8127 Skywalk pool size before choosing an ABI4 capacity.
+
 ## Accepted Round67-2 / dual RTL8127 post-wake sustained traffic, one wake lineage
 
 Base: `40fae03007b49dbc5b29418f71635d8d732b1665` (blocked R67 record). R67-2
