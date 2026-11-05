@@ -1,5 +1,37 @@
 # AMDIOMMU — authoritative source repository
 
+## Round70 / capacity model: S1+S2 implemented, S3 measurement boot — BLOCKED (hang, no panic)
+
+Base: `1fa228e` (R69 evidence archive). S1 `7aa457c` turns the ordinary
+mapper's fixed arena into a profile-sized one (`native-legacy` keeps the
+accepted ABI3 numbers byte for byte; `rl-10g` = 16384 records / 512 MiB;
+`rl-10g-max` = 65535 records / 1 GiB for the measurement boot) and frees the
+page-table area from `kR44TablePages`. S2 `eafb8ba` admits capacity per device
+before the domain exists: only `10ec:8124–8127` on the auto-attach path takes a
+pool-sized profile, everything else keeps ABI3; a refusal writes
+`r69-admission=refused-*` on the device and leaves it on passthrough instead of
+returning `NoResources` later. `1a3bd86` proves the runtime allocator is
+indistinguishable from the compile-time one over 20,000 operations and pins the
+arena arithmetic; `93cb810` adds the ceiling profile, the peak counters and
+`tools/r70/measure.py`. Probe 0.78.0 builds clean; `R70_CAPACITY_OK`.
+
+**Not accepted.** The S3 measurement boot (Probe injected through OpenCore
+`Kernel > Add`, `amdiommu=auto-attach amdiommu_devices=2200,2500
+amdiommu_profile=rl-10g-max`) reached `loginwindow USER_PROCESS console` at
+18:03:33 and then stopped responding. There is **no new panic** file (the
+newest remains R69's 17:25:14), the 18:03–18:05 window is absent from the
+persisted unified log, and both the NanoKVM management bridge and the two
+measured ports went unreachable. Recovery was manual: power cycle into the
+Debian OCRESCUE environment, then an ESP rollback from
+`config.plist.bak_r69_20261104_180225` (12 `Add` entries, probe kext deleted,
+boot-args rewritten to `amdiommu=off` with a `NVRAM > Delete` entry), and a
+reboot back to macOS at 18:21. No capacity data was collected; nothing in the
+acceptance criteria was relaxed and no code changed after the hang. The hang is
+not the R69 exhaustion signature, so it is recorded as a new, unlocalised
+blocker: the next attempt should use `rl-10g` (not max), add IOLog breadcrumbs
+per prepare stage, and optionally a hold mode that builds the domain without
+publishing `iommu-parent` until armed.
+
 ## Round69 / AppleEthernetRL on the AMD mapper — BLOCKED, panic preserved
 
 Base: `bcb3d662f57ab8dbc330067ba7ac30f88925db88` (accepted R67-2). R69 adds
