@@ -19,7 +19,7 @@ def now():
     return time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)
 
 
-# The probe refuses new maps after 120 s (AMDMapperProbeTx.cpp: c.deadline =
+# The probe refuses new maps after 120 s (AMDMapperProbeTxDebug.cpp: c.deadline =
 # mach_absolute_time() + 120000000000ULL). Past that point a load would measure
 # a closed gate rather than the driver, so that -- not an arbitrary 400 ms -- is
 # the real upper bound on how late a load may start.

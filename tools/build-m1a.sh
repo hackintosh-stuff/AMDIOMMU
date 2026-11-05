@@ -15,7 +15,20 @@ cd "$ROOT"
 SDK=$(xcrun --sdk macosx --show-sdk-path)
 SDKVER=$(xcrun --sdk macosx --show-sdk-version)
 HEADERS="$SDK/System/Library/Frameworks/Kernel.framework/Versions/A/Headers"
-W="$ROOT/build-m1a"
+# PROBE_DEBUG=1 selects the Debug variant: the retired M2 experiment
+# subsystem (kext/*Debug.cpp) is compiled back in, restoring the historical
+# amdiommu=arm/mmio/write/table/enable/cmd/pgt* modes. The default production
+# build accepts only amdiommu=auto / auto-attach.
+PROBE_DEBUG=${PROBE_DEBUG:-0}
+if [ "$PROBE_DEBUG" = "1" ]; then
+    W="$ROOT/build-m1a-debug"
+    BUILD_RECORD="$ROOT/latest-m1a-debug-build.txt"
+    DEBUG_DEFINE="-DAMD_MAPPER_PROBE_DEBUG=1"
+else
+    W="$ROOT/build-m1a"
+    BUILD_RECORD="$ROOT/latest-m1a-build.txt"
+    DEBUG_DEFINE=""
+fi
 
 rm -rf "$W"
 mkdir -p "$W"
@@ -33,16 +46,27 @@ SRCS="kext/AMDMapperProbe.cpp \
       kext/AMDMapperProbeAuto.cpp \
       kext/AMDMapperProbeDiscovery.cpp \
       kext/AMDMapperProbeMapper.cpp \
-      kext/AMDMapperProbeB1B2.cpp \
-      kext/AMDMapperProbeMmio.cpp \
-      kext/AMDMapperProbeTable.cpp \
-      kext/AMDMapperProbeDma.cpp \
-      kext/AMDMapperProbeObs.cpp \
-      kext/AMDMapperProbeRxSet.cpp \
-      kext/AMDMapperProbeTx.cpp \
-      kext/AMDMapperProbePgt.cpp \
       src/Ivrs.cpp \
       src/IvrsTopology.cpp"
+
+# Debug-only translation units. AMDMapperProbeDebug.cpp provides the historic
+# start/stop/iovm* implementations (mutually exclusive with the production
+# versions via AMD_MAPPER_PROBE_DEBUG); the other modules implement the
+# retired M2 experiment stages.
+DEBUG_SRCS="kext/AMDMapperProbeDebug.cpp \
+      kext/AMDMapperProbeNicDebug.cpp \
+      kext/AMDMapperProbeB1B2Debug.cpp \
+      kext/AMDMapperProbeMmioDebug.cpp \
+      kext/AMDMapperProbeTableDebug.cpp \
+      kext/AMDMapperProbeDmaDebug.cpp \
+      kext/AMDMapperProbeObsDebug.cpp \
+      kext/AMDMapperProbeRxSetDebug.cpp \
+      kext/AMDMapperProbeTxDebug.cpp \
+      kext/AMDMapperProbePgtDebug.cpp"
+
+if [ "$PROBE_DEBUG" = "1" ]; then
+    SRCS="$SRCS $DEBUG_SRCS"
+fi
 
 for f in $SRCS; do
     [ -f "$f" ] || { echo "missing source: $f"; exit 1; }
@@ -58,7 +82,7 @@ CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
     -I $HEADERS -I $ROOT/include -nostdinc++ -std=c++17 \
     -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE \
     -fno-builtin -fno-common -fno-exceptions -fno-rtti \
-    -fno-stack-protector -Wall -Wextra -Werror -O0 -g"
+    -fno-stack-protector -Wall -Wextra -Werror -O0 -g $DEBUG_DEFINE"
 
 OBJS=""
 for f in $SRCS; do
@@ -94,14 +118,13 @@ echo "== 模块符号检查 =="
 # a different module, so together they prove the registered translation units were
 # compiled AND linked in. A missing module fails the link anyway; this catches
 # the subtler case of a module whose functions were made static or dropped.
-for name in \
-    initHardware \
+PROD_NAMES="initHardware \
     r44AttachAuto \
     r44MapMemory \
     r47PowerTransition \
     r47SuspendAuto \
-    r47ResumeAuto \
-    findTarget \
+    r47ResumeAuto"
+DEBUG_NAMES="findTarget \
     runB1SelfTest \
     runM20ConfigProbe \
     runM22bTableProbe \
@@ -112,7 +135,13 @@ for name in \
     m2b2WalkBusinessRanges \
     m2b2RxSetRead \
     m2b2WalkRxSet \
-    m2b2PublishRxSet
+    m2b2PublishRxSet"
+if [ "$PROBE_DEBUG" = "1" ]; then
+    MODULE_NAMES="$PROD_NAMES $DEBUG_NAMES"
+else
+    MODULE_NAMES="$PROD_NAMES"
+fi
+for name in $MODULE_NAMES
 do
     nm "$BIN" | grep -q "T .*org_example_AMDMapperProbe.*$name" || {
         echo "missing module symbol: $name"; exit 1; }
@@ -167,6 +196,6 @@ echo "== 导入符号 =="
 nm -u "$BIN" > "$W/imported-symbols.txt"
 echo "count: $(wc -l < "$W/imported-symbols.txt" | tr -d ' ')"
 
-printf '%s\n' "$KEXT" > "$ROOT/latest-m1a-build.txt"
+printf '%s\n' "$KEXT" > "$BUILD_RECORD"
 echo
 echo "BUILD OK: $KEXT"

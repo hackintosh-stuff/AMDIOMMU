@@ -52,12 +52,12 @@ KEXT = os.path.join(ROOT, 'kext')
 MODULES = [
     'AMDMapperProbe.cpp',
     'AMDMapperProbeNic.cpp',
-    'AMDMapperProbeB1B2.cpp',
-    'AMDMapperProbeMmio.cpp',
-    'AMDMapperProbeTable.cpp',
-    'AMDMapperProbeDma.cpp',
-    'AMDMapperProbeObs.cpp',
-    'AMDMapperProbePgt.cpp',
+    'AMDMapperProbeB1B2Debug.cpp',
+    'AMDMapperProbeMmioDebug.cpp',
+    'AMDMapperProbeTableDebug.cpp',
+    'AMDMapperProbeDmaDebug.cpp',
+    'AMDMapperProbeObsDebug.cpp',
+    'AMDMapperProbePgtDebug.cpp',
 ]
 INTERNAL = 'AMDMapperProbeInternal.hpp'
 
@@ -71,7 +71,7 @@ INTERNAL = 'AMDMapperProbeInternal.hpp'
 # property that DOES apply: that every method it defines is declared in the
 # header, and that its entry points are reachable.
 POST_SPLIT_MODULES = [
-    'AMDMapperProbeRxSet.cpp',
+    'AMDMapperProbeRxSetDebug.cpp',
 ]
 
 # Markers emitted by the generator, in both spellings it uses.

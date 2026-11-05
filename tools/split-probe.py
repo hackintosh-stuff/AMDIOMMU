@@ -227,7 +227,7 @@ MEMBERS = [
         'IOReturn org_example_AMDMapperProbe::r47PowerTransition',
         'void org_example_AMDMapperProbe::r44PublishMappings',
     ]),
-    ('AMDMapperProbeB1B2.cpp', 'M1 mapper self-tests (B1, B2, B2a, B2b)', [
+    ('AMDMapperProbeB1B2Debug.cpp', 'M1 mapper self-tests (B1, B2, B2a, B2b)', [
         'void org_example_AMDMapperProbe::runB1SelfTest',
         'void org_example_AMDMapperProbe::runB2SelfTest',
         'void org_example_AMDMapperProbe::runB2OneTest',
@@ -238,17 +238,17 @@ MEMBERS = [
         'void org_example_AMDMapperProbe::publishB2bStats',
         'void org_example_AMDMapperProbe::publishMapStats',
     ]),
-    ('AMDMapperProbeMmio.cpp', 'M2-0/1/2a-1 MMIO read and write probes', [
+    ('AMDMapperProbeMmioDebug.cpp', 'M2-0/1/2a-1 MMIO read and write probes', [
         'void org_example_AMDMapperProbe::runM20ConfigProbe',
         'void org_example_AMDMapperProbe::runM21MmioProbe',
         'void org_example_AMDMapperProbe::runM22aWriteProbe',
     ]),
-    ('AMDMapperProbeTable.cpp', 'M2-2a-2/2a-3 device table, enable, cmd channel', [
+    ('AMDMapperProbeTableDebug.cpp', 'M2-2a-2/2a-3 device table, enable, cmd channel', [
         'void org_example_AMDMapperProbe::runM22bTableProbe',
         'void org_example_AMDMapperProbe::runM23EnableProbe',
         'void org_example_AMDMapperProbe::runM2b1CmdProbe',
     ]),
-    ('AMDMapperProbeDma.cpp', 'DMA observation: rings, segments, event log', [
+    ('AMDMapperProbeDmaDebug.cpp', 'DMA observation: rings, segments, event log', [
         'bool org_example_AMDMapperProbe::m2b2ReadCloPtr',
         'bool org_example_AMDMapperProbe::m2b2ReadTailPtr',
         'void org_example_AMDMapperProbe::m2b2CollectTxSegments',
@@ -257,13 +257,13 @@ MEMBERS = [
         'void org_example_AMDMapperProbe::m2b2PublishDmaDefaults',
         'void org_example_AMDMapperProbe::observeDeviceDma',
     ]),
-    ('AMDMapperProbeObs.cpp', 'driver observation log (wire v2) reader', [
+    ('AMDMapperProbeObsDebug.cpp', 'driver observation log (wire v2) reader', [
         'UInt32 org_example_AMDMapperProbe::m2b2ReadDeclaredBatch',
         'int org_example_AMDMapperProbe::m2b2ScanTxDone',
         'void org_example_AMDMapperProbe::m2b2CaptureNicIdentity',
         'void org_example_AMDMapperProbe::m2b2ReadDriverObs',
     ]),
-    ('AMDMapperProbePgt.cpp', 'M2-2b-2 page-table experiment', [
+    ('AMDMapperProbePgtDebug.cpp', 'M2-2b-2 page-table experiment', [
         'bool org_example_AMDMapperProbe::scheduleM22b2',
         'void org_example_AMDMapperProbe::m22b2TimerFired',
         'void org_example_AMDMapperProbe::runM22b2PageTableProbe',
@@ -289,7 +289,7 @@ KMOD_OWNER = 'AMDMapperProbe.cpp'
 # automatically below (see AUTO_BANNER_OWNERS); this list is for #define blocks
 # and similar that have no banner of their own.
 EXTRA_OWNED = [
-    ('AMDMapperProbeMmio.cpp', '#define M22_OFF_DEV_TABLE',
+    ('AMDMapperProbeMmioDebug.cpp', '#define M22_OFF_DEV_TABLE',
      'M2-2a-1 write constants'),
 ]
 

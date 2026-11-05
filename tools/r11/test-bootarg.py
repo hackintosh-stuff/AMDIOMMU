@@ -7,7 +7,7 @@ Three independent pieces of code parse `amdiommu=...`:
 
   kext/AMDMapperProbeInternal.hpp   parsePgtBootArg()  -- gate: does the
                                     experiment run at all?
-  kext/AMDMapperProbeObs.cpp        m2b2ReadDeclaredBatch() and
+  kext/AMDMapperProbeObsDebug.cpp        m2b2ReadDeclaredBatch() and
                                     m2b2ReadDeclaredToken() -- the declaration
 
 If they disagree, the failure is silent: the experiment runs, the batch

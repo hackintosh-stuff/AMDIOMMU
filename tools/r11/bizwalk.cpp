@@ -1,8 +1,8 @@
-// bizwalk.cpp -- appended to AMDMapperProbePgt.cpp by tools/r11/splice-bizwalk.py.
+// bizwalk.cpp -- appended to AMDMapperProbePgtDebug.cpp by tools/r11/splice-bizwalk.py.
 //
 // WHY THIS IS A SEPARATE GENERATED BLOCK
 // --------------------------------------
-// AMDMapperProbePgt.cpp is 2,237 lines. Inserting a ~260-line function by hand
+// AMDMapperProbePgtDebug.cpp is 2,237 lines. Inserting a ~260-line function by hand
 // into it is how a previous round lost a definition entirely (m2b2ScanTxDone,
 // which only surfaced at link time as a kmutil bind failure). So the block is
 // kept here, spliced at a named anchor, and the splice is verified by compiling.

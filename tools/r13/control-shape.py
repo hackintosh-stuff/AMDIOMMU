@@ -132,7 +132,7 @@ def match_brace(text, open_at):
 
 def main():
     if len(sys.argv) < 2:
-        print('usage: control-shape.py <AMDMapperProbePgt.cpp> [--verbose]',
+        print('usage: control-shape.py <AMDMapperProbePgtDebug.cpp> [--verbose]',
               file=sys.stderr)
         return 2
     verbose = '--verbose' in sys.argv

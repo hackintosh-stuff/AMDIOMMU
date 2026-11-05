@@ -83,12 +83,12 @@ PROBE_CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
 
 PROBE_SRCS="kext/AMDMapperProbe.cpp \
       kext/AMDMapperProbeNic.cpp \
-      kext/AMDMapperProbeB1B2.cpp \
-      kext/AMDMapperProbeMmio.cpp \
-      kext/AMDMapperProbeTable.cpp \
-      kext/AMDMapperProbeDma.cpp \
-      kext/AMDMapperProbeObs.cpp \
-      kext/AMDMapperProbePgt.cpp"
+      kext/AMDMapperProbeB1B2Debug.cpp \
+      kext/AMDMapperProbeMmioDebug.cpp \
+      kext/AMDMapperProbeTableDebug.cpp \
+      kext/AMDMapperProbeDmaDebug.cpp \
+      kext/AMDMapperProbeObsDebug.cpp \
+      kext/AMDMapperProbePgtDebug.cpp"
 
 # ---- the driver's flags, copied from tools/build-lucy.sh -----------------
 LUCY_CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \

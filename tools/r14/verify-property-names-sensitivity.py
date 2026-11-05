@@ -25,7 +25,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-SRC = os.path.join(ROOT, 'kext', 'AMDMapperProbeRxSet.cpp')
+SRC = os.path.join(ROOT, 'kext', 'AMDMapperProbeRxSetDebug.cpp')
 CHECKER = os.path.join(HERE, 'verify-property-names.py')
 
 FAILS = []
@@ -87,7 +87,7 @@ def main():
     try:
         dst_kext = os.path.join(work, 'kext')
         shutil.copytree(os.path.join(ROOT, 'kext'), dst_kext)
-        p = os.path.join(dst_kext, 'AMDMapperProbeRxSet.cpp')
+        p = os.path.join(dst_kext, 'AMDMapperProbeRxSetDebug.cpp')
         text = open(p, encoding='utf-8').read()
 
         # Reintroduce the defect: the status string goes back under the blob's

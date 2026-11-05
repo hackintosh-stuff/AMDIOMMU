@@ -19,12 +19,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 MODULES = [
     'AMDMapperProbe.cpp',
     'AMDMapperProbeNic.cpp',
-    'AMDMapperProbeB1B2.cpp',
-    'AMDMapperProbeMmio.cpp',
-    'AMDMapperProbeTable.cpp',
-    'AMDMapperProbeDma.cpp',
-    'AMDMapperProbeObs.cpp',
-    'AMDMapperProbePgt.cpp',
+    'AMDMapperProbeB1B2Debug.cpp',
+    'AMDMapperProbeMmioDebug.cpp',
+    'AMDMapperProbeTableDebug.cpp',
+    'AMDMapperProbeDmaDebug.cpp',
+    'AMDMapperProbeObsDebug.cpp',
+    'AMDMapperProbePgtDebug.cpp',
     'AMDMapperProbeInternal.hpp',
 ]
 

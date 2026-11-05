@@ -454,10 +454,10 @@ int main() {
 
 def main():
     entry = (ROOT / 'kext/AMDMapperProbe.cpp').read_text()
-    pgt = (ROOT / 'kext/AMDMapperProbePgt.cpp').read_text()
+    pgt = (ROOT / 'kext/AMDMapperProbePgtDebug.cpp').read_text()
     internal = (ROOT / 'kext/AMDMapperProbeInternal.hpp').read_text()
     header = (ROOT / 'kext/AMDMapperProbe.hpp').read_text()
-    rxset = (ROOT / 'kext/AMDMapperProbeRxSet.cpp').read_text()
+    rxset = (ROOT / 'kext/AMDMapperProbeRxSetDebug.cpp').read_text()
     setup = body(pgt, 'void org_example_AMDMapperProbe::runM22b2PageTableProbe(')
     finish = body(pgt, 'void org_example_AMDMapperProbe::finishM22b2PageTableProbe(')
     domain = body(pgt, 'struct org_example_AMDMapperProbe::R33DeviceDomain {')

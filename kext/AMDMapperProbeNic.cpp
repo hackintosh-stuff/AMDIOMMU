@@ -48,66 +48,6 @@
 #include "AMDMapperProbeInternal.hpp"
 
 // ===== AMDMapperProbeNic.cpp (original lines 156..215) =====
-bool org_example_AMDMapperProbe::findTarget() {
-    // 策略 1：按路径直取（实机 acpi-path = IOACPIPlane:/_SB/PCI0@0/IOMA@2）
-    const char *paths[] = {
-        "IODeviceTree:/PCI0/IOMA",
-        "IOACPIPlane:/_SB/PCI0@0/IOMA@2",
-        nullptr
-    };
-    for (int i = 0; paths[i]; i++) {
-        IORegistryEntry *e = IORegistryEntry::fromPath(paths[i]);
-        if (!e) continue;
-        IOService *svc = OSDynamicCast(IOService, e);
-        if (svc && iommuNameMatches(svc)) {
-            fTarget = svc;
-            setProperty("m1b-find", "OK-by-path");
-            setProperty("m1b-target-name", svc->getName());
-            setProperty("m1b-target-path", paths[i]);
-            return true;
-        }
-        e->release();
-    }
-
-    // 策略 2：枚举后逐个核对 IOName。
-    // serviceMatching + setObject 追加属性键并不可靠（0.2.0 实测拿到过
-    // D002/pci1022,1480），所以必须自己核对。
-    OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
-    if (!matching) {
-        setProperty("m1b-find", "FAIL-no-matching-dict");
-        return false;
-    }
-#if M1A_HAS_SHARED_PTR
-    OSPtr<OSIterator> iter = IOService::getMatchingServices(matching);
-    OSIterator *it = iter.get();
-#else
-    OSIterator *it = IOService::getMatchingServices(matching);
-#endif
-    matching->release();
-
-    if (!it) {
-        setProperty("m1b-find", "FAIL-no-iterator");
-        return false;
-    }
-
-    bool found = false;
-    OSObject *obj;
-    while ((obj = it->getNextObject())) {
-        IOService *svc = OSDynamicCast(IOService, obj);
-        if (svc && iommuNameMatches(svc)) {
-            svc->retain();
-            fTarget = svc;
-            setProperty("m1b-find", "OK-by-enumerate");
-            setProperty("m1b-target-name", svc->getName());
-            found = true;
-            break;
-        }
-    }
-    it->release();
-
-    if (!found) setProperty("m1b-find", "FAIL-no-iommu-device");
-    return found;
-}
 
 // ===== AMDMapperProbeNic.cpp (original lines 575..618) =====
 // ------------------------------------------------------ B2-b 发布通知（解决竞态）
@@ -140,6 +80,7 @@ bool org_example_AMDMapperProbe::publishHandler(
         return true;
     }
 
+#if AMD_MAPPER_PROBE_DEBUG
     // Legacy experiments keep their original RTL8127-only target.
     OSData *did = OSDynamicCast(OSData, newService->copyProperty("device-id"));
     bool isTarget = false;
@@ -159,35 +100,12 @@ bool org_example_AMDMapperProbe::publishHandler(
     if (self->fNicDevice == newService) return true;
 
     self->armNic(newService);
+#endif /* AMD_MAPPER_PROBE_DEBUG */
     return true;
 }
 
 // ===== AMDMapperProbeNic.cpp (original lines 620..644) =====
 // 给网卡挂 iommu-parent。可在 start() 里调用，也可在通知回调里调用。
-bool org_example_AMDMapperProbe::armNic(IOService *nic) {
-    if (!nic) return false;
-
-    if (fNicDevice && fNicDevice != nic) {
-        fNicDevice->removeProperty("iommu-parent");
-        fNicDevice->release();
-    }
-    if (fNicDevice != nic) {
-        nic->retain();
-        fNicDevice = nic;
-    }
-
-    nic->setProperty("iommu-parent", this);
-    setProperty("m1bb-parent", "set");
-    setProperty("m1bb-nic-name", nic->getName());
-
-    // 记录「挂属性时它是否已经被驱动占用」。
-    // 走通知路径时它刚 publish，必然还没有驱动 → no-good-timing。
-    // 若走 start() 里的兜底路径且已被占用 → yes-too-late，说明通知没赶上。
-    bool busy = (nic->getProperty("IOClass") != nullptr)
-             && (OSDynamicCast(OSString, nic->getProperty("IOClass")) != nullptr);
-    setProperty("m1bb-nic-busy", busy ? "yes-too-late" : "no-good-timing");
-    return true;
-}
 
 // ===== AMDMapperProbeNic.cpp (original lines 646..669) =====
 void org_example_AMDMapperProbe::installPublishNotifier() {
@@ -216,139 +134,6 @@ void org_example_AMDMapperProbe::installPublishNotifier() {
 }
 
 // ===== AMDMapperProbeNic.cpp (original lines 698..804) =====
-bool org_example_AMDMapperProbe::findNic() {
-    // ---- 策略 1/2：按路径直取 ----
-    for (int i = 0; kNicPaths[i]; i++) {
-        IORegistryEntry *e = IORegistryEntry::fromPath(kNicPaths[i]);
-        if (!e) continue;
-        IOService *svc = OSDynamicCast(IOService, e);
-        if (svc) {
-            // 核对 device-id，防止路径写错挂到别的设备上
-            OSData *did = OSDynamicCast(OSData, svc->copyProperty("device-id"));
-            bool ok = false;
-            if (did && did->getLength() >= 2) {
-                const UInt8 *p = (const UInt8 *)did->getBytesNoCopy();
-                // device-id 是小端：0x8127 → 27 81
-                ok = (p[0] == 0x27 && p[1] == 0x81);
-            }
-            if (did) did->release();
-
-            if (ok) {
-                svc->retain();
-                fNicDevice = svc;
-                setProperty("m1bb-find", (i == 0) ? "OK-by-devicetree"
-                                                 : "OK-by-acpipath");
-                setProperty("m1bb-nic-name", svc->getName());
-                setProperty("m1bb-nic-path", kNicPaths[i]);
-                return true;
-            }
-        }
-        e->release();
-    }
-
-    // ---- 策略 3：枚举（依赖 PCI 枚举完成，通常太晚）----
-    OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
-    if (!matching) {
-        setProperty("m1bb-find", "FAIL-no-matching");
-        return false;
-    }
-#if M1A_HAS_SHARED_PTR
-    OSPtr<OSIterator> iter = IOService::getMatchingServices(matching);
-    OSIterator *it = iter.get();
-#else
-    OSIterator *it = IOService::getMatchingServices(matching);
-#endif
-    matching->release();
-    if (!it) {
-        setProperty("m1bb-find", "FAIL-no-iterator");
-        return false;
-    }
-
-    bool found = false;
-    OSObject *obj;
-    while ((obj = it->getNextObject())) {
-        IOService *svc = OSDynamicCast(IOService, obj);
-        if (!svc) continue;
-
-        OSObject *nm = svc->copyProperty("IOName");
-        if (!nm) continue;
-        OSString *s = OSDynamicCast(OSString, nm);
-        bool hit = s && (s->isEqualTo("pci10ec,8127") != false);
-        nm->release();
-        if (!hit) continue;
-
-        // 命中。注意：这条兜底路径依赖 PCI 枚举完成，通常已经太晚
-        // （Lucy 可能早已 start 过）。真正的时序保障靠 publish 通知。
-        svc->retain();
-        fNicDevice = svc;
-        setProperty("m1bb-find", "OK-by-enumerate");
-        setProperty("m1bb-nic-name", svc->getName());
-        found = true;
-        break;
-    }
-    it->release();
-
-    if (!found) setProperty("m1bb-find", "ABSENT-no-rtl8127");
-    return found;
-}
-// 只读查找 RTL8127 的 IOService，供 M2-2b-2 取 BDF 用。
-//
-// 与 findNic() 的区别：
-//   findNic()            会 retain 并写 fNicDevice、写 m1bb-* 属性，
-//                        且调用方只在 fArmed 时才用，属"arm 流程"的一部分。
-//   findNicServiceOnly() 只查找并 retain 返回，调用方 release。
-//                        不碰任何成员状态，因此可以在 pgt 模式下安全使用。
-//
-// 复用同一组路径常量，保证两条路找的是同一个设备。
-IOService *org_example_AMDMapperProbe::findNicServiceOnly() {
-    for (int i = 0; kNicPaths[i]; i++) {
-        IORegistryEntry *e = IORegistryEntry::fromPath(kNicPaths[i]);
-        if (!e) continue;
-        IOService *svc = OSDynamicCast(IOService, e);
-        if (svc) {
-            OSData *did = OSDynamicCast(OSData, svc->copyProperty("device-id"));
-            bool ok = false;
-            if (did && did->getLength() >= 2) {
-                const UInt8 *p = (const UInt8 *)did->getBytesNoCopy();
-                ok = (p[0] == 0x27 && p[1] == 0x81);
-            }
-            if (did) did->release();
-            if (ok) {
-                svc->retain();
-                e->release();
-                return svc;
-            }
-        }
-        e->release();
-    }
-    // The path list only resolves once the entry is attached in that plane.
-    // The nub itself already exists and is published by the time this kext
-    // starts, so enumerating IOPCIDevice and checking the config IDs finds it
-    // without depending on either plane's spelling: on this machine the nub is
-    // named "ethernet", not "pci10ec,8127", so a name match would miss it.
-    OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
-    if (!matching) return nullptr;
-    OSIterator *it = IOService::getMatchingServices(matching);
-    matching->release();
-    if (!it) return nullptr;
-    IOService *result = nullptr;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    OSObject *obj;
-    while ((obj = it->getNextObject())) {
-        IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, obj);
-        if (!pci) continue;
-        if (pci->configRead16(kIOPCIConfigVendorID) != 0x10ec ||
-            pci->configRead16(kIOPCIConfigDeviceID) != 0x8127) continue;
-        pci->retain();
-        result = pci;
-        break;
-    }
-#pragma clang diagnostic pop
-    it->release();
-    return result;
-}
-
 
 // R52 auto mode enumerates endpoints, never a first match or a saved NIC path.
 // The first-publish callback uses the same per-requester attach routine.

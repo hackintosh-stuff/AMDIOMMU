@@ -4,7 +4,7 @@ Round 10 used this to re-splice two probe blocks into the single
 kext/AMDMapperProbe.cpp by matching text markers. Round 11 split
 that file into eight modules, so the markers no longer exist and
 re-splicing into the entry module is not a meaningful operation:
-the blocks live in AMDMapperProbeNic.cpp and AMDMapperProbeObs.cpp
+the blocks live in AMDMapperProbeNic.cpp and AMDMapperProbeObsDebug.cpp
 now, and tools/r11/verify-split.py is what checks the result
 (it anchors on a function and verifies file scope before writing).
 

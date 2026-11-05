@@ -345,7 +345,7 @@ int main() {
 
 def harness():
     header = (ROOT / 'kext/AMDMapperProbeInternal.hpp').read_text(encoding='utf-8')
-    tx = (ROOT / 'kext/AMDMapperProbeTx.cpp').read_text(encoding='utf-8')
+    tx = (ROOT / 'kext/AMDMapperProbeTxDebug.cpp').read_text(encoding='utf-8')
     names = ['M23_CMD_BUF_SIZE', 'M2B2_CMD_LOG_MAX', 'M2B2_CMD_COMPL_WAIT',
              'M2B2_OFF_CMD_HEAD', 'M2B2_OFF_CMD_TAIL', 'M2B2_CMD_INV_IOMMU_PAGES',
              'M2B2_CMD_PDE_MASK', 'M2B2_CMD_ALL_PAGES_ADDR', 'M2B2_IDENTITY_LIMIT']

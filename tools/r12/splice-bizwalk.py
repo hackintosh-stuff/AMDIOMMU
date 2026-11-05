@@ -20,7 +20,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
-TARGET = os.path.join(ROOT, 'kext', 'AMDMapperProbePgt.cpp')
+TARGET = os.path.join(ROOT, 'kext', 'AMDMapperProbePgtDebug.cpp')
 BODY = os.path.join(ROOT, 'build-work-r12', 'bizwalk-body.cpp.txt')
 
 SIG = 'void org_example_AMDMapperProbe::m2b2WalkBusinessRanges('

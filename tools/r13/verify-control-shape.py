@@ -43,7 +43,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 SHAPE = os.path.join(ROOT, 'tools', 'r13', 'control-shape.py')
-PGT = os.path.join(ROOT, 'kext', 'AMDMapperProbePgt.cpp')
+PGT = os.path.join(ROOT, 'kext', 'AMDMapperProbePgtDebug.cpp')
 ANALYZER = os.path.join(ROOT, 'tools', 'analyze-round12.py')
 FIXTURE = os.path.join(ROOT, 'tools', 'r12', 'make-control-fixture.py')
 WORK = os.path.join(ROOT, 'build-work-r13', 'ctlshape')

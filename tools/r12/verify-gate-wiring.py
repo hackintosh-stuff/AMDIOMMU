@@ -8,7 +8,7 @@ That is necessary but not sufficient: round 11's whole defect was that the
 properties existed and the verdict never read them. A perfect gate that the
 probe does not call is exactly the same bug with more code.
 
-So this script reads kext/AMDMapperProbePgt.cpp and requires:
+So this script reads kext/AMDMapperProbePgtDebug.cpp and requires:
 
   1. the PASS-CANDIDATE branch is guarded by obsEvidenceGate(), not by a
      hand-written conjunction of the evidence fields;
@@ -16,7 +16,7 @@ So this script reads kext/AMDMapperProbePgt.cpp and requires:
      field -- a default-constructed struct would pass the gate;
   3. no evidence term is computed inline in the verdict (that is the shape that
      let four of them be forgotten);
-  4. the identity guard in AMDMapperProbeObs.cpp refuses an UNKNOWN identity,
+  4. the identity guard in AMDMapperProbeObsDebug.cpp refuses an UNKNOWN identity,
      not just a mismatched one;
   5. the batch join in production uses the strict spec.
 
@@ -31,8 +31,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
-PGT = os.path.join(ROOT, 'kext', 'AMDMapperProbePgt.cpp')
-OBS = os.path.join(ROOT, 'kext', 'AMDMapperProbeObs.cpp')
+PGT = os.path.join(ROOT, 'kext', 'AMDMapperProbePgtDebug.cpp')
+OBS = os.path.join(ROOT, 'kext', 'AMDMapperProbeObsDebug.cpp')
 HDR = os.path.join(ROOT, 'kext', 'amd_iommu_dma_observe.hpp')
 
 RESULTS = []
