@@ -32,6 +32,12 @@ struct R53AttachPolicy {
     }
 };
 
+inline bool r53IsHexDigit(char c) {
+    return ((c >= '0') && (c <= '9')) ||
+           ((c >= 'a') && (c <= 'f')) ||
+           ((c >= 'A') && (c <= 'F'));
+}
+
 bool r53ParseRequester(const char *text, UInt32 &requester) {
     requester = 0;
     for (UInt32 i = 0; i < 4; ++i) {
@@ -254,11 +260,20 @@ bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
     // One to kR52MaxDomains four-hex-digit segment-zero requester IDs, no
     // saved BDFs. The third slot is reserved for a ConnectX-4 Lx next to the
     // two RTL8127 ports; the selected-pair semantics are unchanged.
+    // R70-S5f: values are written with a non-hex prefix (n3400) because the
+    // kernel converts an all-digit boot-arg value into a 32-bit integer
+    // inside the caller's buffer (observed: "3400" arrived as 0x0D48).
+    // So: skip every non-hex byte before each ID, then parse four hex digits.
     const char *cursor = selection;
-    while (*cursor) {
+    while (true) {
+        while (*cursor && !r53IsHexDigit(*cursor)) ++cursor;
+        if (!*cursor) break;
+        if (fR53RequesterCount == kR52MaxDomains) {
+            setProperty("r44-state", "failed-device-selection");
+            return false;
+        }
         UInt32 id = 0;
-        if (fR53RequesterCount == kR52MaxDomains ||
-            !r53ParseRequester(cursor, id)) {
+        if (!r53ParseRequester(cursor, id)) {
             setProperty("r44-state", "failed-device-selection");
             return false;
         }
@@ -270,12 +285,6 @@ bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
         }
         fR53Requesters[fR53RequesterCount++] = id;
         cursor += 4;
-        // Skip every separator (comma, space, newline): the boot-args string
-        // has carried embedded whitespace before, and a stray byte after the
-        // digits used to fail the whole selection.
-        while (*cursor && !(((*cursor >= '0') && (*cursor <= '9')) ||
-                            ((*cursor >= 'a') && (*cursor <= 'f')) ||
-                            ((*cursor >= 'A') && (*cursor <= 'F')))) ++cursor;
     }
     if (!fR53RequesterCount) {
         setProperty("r44-state", "failed-device-selection");
