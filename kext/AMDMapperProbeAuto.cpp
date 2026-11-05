@@ -418,10 +418,19 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
     if (!fR44Auto || fR52Owner || !fR52AttachLock) return false;
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
     if (!nic) return false;
+    // R70-S5j: config-space cycles on the ConnectX-6 stalled the
+    // notification-delivery thread right here (the serial log showed
+    // everything stopping after "auto-start enter"), so read the identity
+    // from the registry properties instead of touching config space.
+    UInt32 vendorId = 0, deviceId = 0;
+    pciIdProperty(nic, "vendor-id", vendorId);
+    pciIdProperty(nic, "device-id", deviceId);
+    const UInt16 vendor16 = (UInt16)(vendorId & 0xffffU);
+    const UInt16 device16 = (UInt16)(deviceId & 0xffffU);
     const UInt32 requester = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
-    const UInt16 vendor16 = nic->configRead16(kIOPCIConfigVendorID);
-    const UInt16 device16 = nic->configRead16(kIOPCIConfigDeviceID);
+    IOLog("AMDMapperProbe: attach enter name=%s requester=%x vendor=%x device=%x\n",
+          service->getName(), requester, vendor16, device16);
     // R70-S5i: the selector matches on this requester value; kprintf reaches
     // the serial console (serial=5 + CustomPciSerialDevice), so every Mellanox
     // sighting is logged there too - the panic cannot take this evidence away.
@@ -445,9 +454,8 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
         IOLog("AMDMapperProbe: requester %x not selected (vendor %x)\n",
               requester, vendor16);
         if (claim || vendor16 != 0x10ec) return false;
-        const UInt16 device = nic->configRead16(kIOPCIConfigDeviceID);
-        if (device != 0x8127 && device != 0x8168) return false;
-        if (fR53SelectionExplicit || device != 0x8127) {
+        if (device16 != 0x8127 && device16 != 0x8168) return false;
+        if (fR53SelectionExplicit || device16 != 0x8127) {
             nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kPassthrough);
             return false;
         }
