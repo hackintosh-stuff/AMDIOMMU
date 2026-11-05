@@ -114,6 +114,8 @@ bool org_example_AMDMapperProbe::r44PrepareMappings(
     // The arithmetic lives in the ABI header so tests/ can verify it without
     // compiling the kext; it must match the carve order below exactly.
     const UInt64 blockBytes = r44mapper::arenaBytesFor(profile);
+    IOLog("AMDMapperProbe: prepare profile=%s records=%u pages=%u tables=%u arena=%llu\n",
+          profile.name, profile.records, profile.pages, tablePages, blockBytes);
     if (!blockBytes || blockBytes > r44mapper::kMaxArenaBytes) return false;
     auto *d = (R44MapperState *)IOMalloc(sizeof(R44MapperState));
     if (!d) return false;

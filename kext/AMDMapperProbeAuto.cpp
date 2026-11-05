@@ -6,6 +6,7 @@
 #include "amd_iommu_device_policy.hpp"
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSCollectionIterator.h>
+#include <kern/debug.h>
 
 namespace {
 // Ordering: per-device mapper lock -> shared controller lock. Attachment
@@ -313,6 +314,7 @@ const r44mapper::Profile *org_example_AMDMapperProbe::r44ProfileForDevice(
 #pragma clang diagnostic pop
 
 bool org_example_AMDMapperProbe::r44StartAuto() {
+    IOLog("AMDMapperProbe: auto-start enter\n");
     setProperty("r44-mode", "auto");
     setProperty("r52-role", "controller");
     setProperty("r52-snapshot-consistency", "per-domain");
@@ -586,41 +588,69 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slo
     d->deviceID = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
     d->state = "preparing";
-    // S2 admission: decide capacity BEFORE the domain exists and before any
-    // iommu-parent is published (docs/m2-3az-round69-capacity-model.md §5).
-    // A refusal leaves the device on passthrough; it must never surface later
-    // as a runtime kIOReturnNoResources, which is what panicked R69.
-    const r44mapper::Profile *profile = r44ProfileForDevice(nic);
-    if (!profile) profile = &r44mapper::kProfileLegacy;
-    const UInt32 tablePages = profile->tablePages;
-    const UInt64 arenaBytes = r44mapper::arenaBytesFor(*profile);
-    const bool capacityOk = arenaBytes && arenaBytes <= r44mapper::kMaxArenaBytes &&
-        tablePages >= profile->pages / 512 + 2;
-    const bool tablesOk = capacityOk &&
-        r44Allocate(d->tables, tablePages * M2B2_PAGE_SIZE, d->tablePA);
-    if (!tablesOk) {
-        nic->setProperty("r69-admission", "refused-insufficient-capacity");
-        nic->setProperty("r69-admission-need-records", profile->records, 32);
-        nic->setProperty("r69-admission-need-pages", profile->pages, 32);
-        nic->setProperty("r69-admission-need-table-bytes",
-                         (unsigned long long)tablePages * M2B2_PAGE_SIZE, 64);
-        return false;
+    // S2 admission with an S3b fallback chain. R70-S3 proved that refusing is
+    // NOT a safe passthrough for Apple's client: with no iommu-parent the
+    // client's kMapped IODMACommand gets NULL and IOSkywalk panics on
+    // 0xe00002be exactly like capacity exhaustion. So try the requested
+    // profile first, then progressively smaller arenas, and only give up when
+    // even the legacy arena cannot be prepared - and then say so loudly.
+    const r44mapper::Profile *requested = r44ProfileForDevice(nic);
+    if (!requested) requested = &r44mapper::kProfileLegacy;
+    const r44mapper::Profile *candidates[3] = {
+        requested, &r44mapper::kProfileRl10g, &r44mapper::kProfileLegacy};
+    const r44mapper::Profile *profile = nullptr;
+    for (unsigned i = 0; i < 3 && !profile; ++i) {
+        const r44mapper::Profile *p = candidates[i];
+        bool seen = false;
+        for (unsigned j = 0; j < i; ++j) if (candidates[j] == p) seen = true;
+        if (seen) continue;
+        const UInt32 tablePages = p->tablePages;
+        const UInt64 arenaBytes = r44mapper::arenaBytesFor(*p);
+        if (!arenaBytes || arenaBytes > r44mapper::kMaxArenaBytes ||
+            tablePages < p->pages / 512 + 2) {
+            IOLog("AMDMapperProbe: profile %s rejected arena=%llu tables=%u\n",
+                  p->name, arenaBytes, tablePages);
+            continue;
+        }
+        if (!r44Allocate(d->tables, (UInt64)tablePages * M2B2_PAGE_SIZE,
+                         d->tablePA)) {
+            IOLog("AMDMapperProbe: profile %s table allocation failed (%u pages)\n",
+                  p->name, tablePages);
+            d->tables = nullptr;
+            continue;
+        }
+        if (!r44PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
+                d->tablePA, tablePages, M2B2_PAGE_MODE_4_LEVEL, *p)) {
+            IOLog("AMDMapperProbe: profile %s prepare failed\n", p->name);
+            d->tables->release();
+            d->tables = nullptr;
+            continue;
+        }
+        profile = p;
     }
-    if (!r44PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
-            d->tablePA, tablePages, M2B2_PAGE_MODE_4_LEVEL, *profile)) {
-        nic->setProperty("r69-admission", "refused-arena-prepare-failed");
+    if (!profile) {
+        nic->setProperty("r69-admission", "refused-no-arena");
+        IOLog("AMDMapperProbe: admission refused, no arena fits (requested %s)\n",
+              requested->name);
+        if (fR69AutoAttach)
+            panic("AMDMapperProbe: admission-refused: no arena fits (requested %s)",
+                  requested->name);
         return false;
     }
     d->profileName = profile->name;
     d->profileRecords = profile->records;
     d->profilePages = profile->pages;
-    d->tablePages = tablePages;
+    d->tablePages = profile->tablePages;
     nic->setProperty("r44-profile", profile->name);
+    nic->setProperty("r44-profile-requested", requested->name);
+    nic->setProperty("r44-profile-fallback", profile == requested ? "no" : "yes");
     const char *admission = profile == &r44mapper::kProfileRl10g
         ? "granted-rl-10g"
         : (profile == &r44mapper::kProfileRl10gMax ? "granted-rl-10g-max"
                                                    : "granted-native-legacy");
     nic->setProperty("r69-admission", admission);
+    IOLog("AMDMapperProbe: domain %u ready profile=%s records=%u pages=%u tables=%u\n",
+          slot, profile->name, profile->records, profile->pages, profile->tablePages);
     if (!fR52Owner->r52PrepareController(hardware)) return false;
     R44Controller *c = fR52Owner->fR44Controller;
     fR44Controller = c;
