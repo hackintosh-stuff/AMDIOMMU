@@ -142,17 +142,18 @@ inline const Profile *profileForName(const char *name) {
 // accepted ABI3 arena. The caller applies a boot-arg override beforehand.
 inline const Profile *profileForDevice(uint32_t vendor, uint32_t device,
                                        bool appleClientPath) {
-    if (!appleClientPath) return &kProfileLegacy;
     const uint32_t vendor16 = vendor & 0xffffU, device16 = device & 0xffffU;
+    // Mellanox ConnectX-4 Lx (Apple MLX5 client). No claim path exists for
+    // this device, so it is decided before the client-path gate. Untested on
+    // hardware: this only makes admission possible, not the dext mapper path.
+    if (vendor16 == 0x15b3U && device16 == 0x1015U)
+        return &kProfileConnectX;
+    if (!appleClientPath) return &kProfileLegacy;
     // R70 measured 52,227 IOVA pages on a saturated 10 GbE flow, so the
     // 512 MiB profile would leave only 2.5x headroom. The 1 GiB profile keeps
     // 5x on pages and 20x on records for the same 10.5 MB of wired memory.
     if (vendor16 == 0x10ecU && device16 >= 0x8124U && device16 <= 0x8127U)
         return &kProfileRl10gMax;
-    // Mellanox ConnectX-4 Lx (Apple MLX5 client). Untested on hardware: this
-    // only makes admission possible, it does not prove the dext mapper path.
-    if (vendor16 == 0x15b3U && device16 == 0x1015U)
-        return &kProfileConnectX;
     return &kProfileLegacy;
 }
 } // namespace r44mapper
