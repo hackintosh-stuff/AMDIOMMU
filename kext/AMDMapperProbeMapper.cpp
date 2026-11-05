@@ -4,6 +4,22 @@
 #include "amd_iommu_tx_core.hpp"
 #include "amd_iommu_mapper_abi.hpp"
 #include <IOKit/IOLocks.h>
+#include <kern/debug.h>
+
+// XNU's DMA-unmap caller can discard our error and unwire the descriptor.
+// Once PTEs have been published, neither an error return nor retaining an
+// IOMemoryDescriptor proves its backing pages remain wired. If retirement
+// cannot be confirmed, fail-stop before returning control to that caller.
+// Do not allocate, publish registry data, retry a failed ring, or drop the
+// domain lock here. This is containment, not recovery or proof of device idle.
+[[noreturn]] static void r70DMAFailStop(
+    const char *reason, const r44mapper::RecordHeader &record) {
+    panic("AMDMapperProbe: unsafe DMA retirement (%s), handle=%llu "
+          "iova=0x%llx length=0x%llx state=0x%x",
+          reason, (unsigned long long)record.handle,
+          (unsigned long long)record.mapAddress,
+          (unsigned long long)record.mapLength, (unsigned)record.state);
+}
 
 struct org_example_AMDMapperProbe::R44MapperState {
     struct Mapping {
@@ -398,7 +414,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
             d->accepting = false; s.flags |= r44mapper::kFailed;
             s.flags &= ~r44mapper::kAccepting;
             d->exportRecord(record, s.lastMap);
-            result = kIOReturnIOError; break;
+            r70DMAFailStop("map invalidation unconfirmed", record);
         }
         record.tMapComplete = mach_absolute_time(); record.state |= r44mapper::kMapConfirmed;
         ++s.mapOk;
@@ -488,14 +504,9 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
     IOLockLock(d->lock);
     auto &s = d->snapshot;
     ++s.unmapCalls;
-    // Sleep retains live mappings. Reject before clearing a single PTE or
-    // touching the command ring while the hardware is unavailable.
-    if (!d->accepting) {
-        ++s.unmapRejected;
-        IOLockUnlock(d->lock);
-        return kIOReturnNotReady;
-    }
-    IOReturn result = kIOReturnBadArgument;
+    // Reject unrelated/invalid calls normally, even for a suspended or failed
+    // domain. Only an exact owned live mapping can put backing RAM at risk.
+    IOReturn result = d->accepting ? kIOReturnBadArgument : kIOReturnNotReady;
     do {
         if (mapAddress < r44mapper::kBase) break;
         const UInt64 page = (mapAddress - r44mapper::kBase) / 4096;
@@ -507,8 +518,16 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
         auto &record = mapping.record;
         if (!d->slotLive(slot) || record.basePage != page || record.mapAddress != mapAddress) break;
         if (mapping.memory != memory || mapping.command != dmaCommand ||
-            record.mapLength != mapLength ||
-            record.state != (r44mapper::kMapPublished | r44mapper::kMapConfirmed)) break;
+            record.mapLength != mapLength) break;
+        // An earlier allocator failure may leave a record whose hardware
+        // retirement already completed. Keep that safe leak closed, not fatal.
+        if (record.state & r44mapper::kUnmapConfirmed) {
+            result = kIOReturnInternalError; break;
+        }
+        if (!d->accepting)
+            r70DMAFailStop("owned unmap while domain unavailable", record);
+        if (record.state != (r44mapper::kMapPublished | r44mapper::kMapConfirmed))
+            r70DMAFailStop("owned unmap with unretired state", record);
         for (unsigned i = 0; i < record.pages; ++i) d->leaf(record.basePage + i) = 0;
         OSSynchronizeIO();
         record.tClear = mach_absolute_time(); record.state |= r44mapper::kClearPublished;
@@ -519,7 +538,7 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
             d->accepting = false; s.flags |= r44mapper::kFailed;
             s.flags &= ~r44mapper::kAccepting;
             d->exportRecord(record, s.lastUnmap);
-            result = kIOReturnIOError; break;
+            r70DMAFailStop("unmap invalidation unconfirmed", record);
         }
         record.tUnmapComplete = mach_absolute_time(); record.state |= r44mapper::kUnmapConfirmed;
         d->exportRecord(record, s.lastUnmap);

@@ -78,12 +78,18 @@ constexpr UInt64 kR44Enabled = M2B2_CTRL_IOMMU_EN |
     M2B2_CTRL_CMDBUF_EN | M2B2_CTRL_EVT_LOG_EN;
 
 bool r44Allocate(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
+    pa = 0;
     md = IOBufferMemoryDescriptor::withCapacity((IOByteCount)bytes,
                                                kIODirectionOut, true);
     if (!md) return false;
     IOByteCount span = 0;
     pa = md->getPhysicalSegment(0, &span, kIOMemoryMapperNone);
-    if (!pa || (pa & 0xfff) || span < bytes) return false;
+    if (!pa || (pa & 0xfff) || span < bytes) {
+        md->release();
+        md = nullptr;
+        pa = 0;
+        return false;
+    }
     bzero(md->getBytesNoCopy(), (size_t)bytes);
     return true;
 }
