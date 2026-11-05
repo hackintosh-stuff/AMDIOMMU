@@ -137,6 +137,7 @@ private:
     // S5d: failure breadcrumbs are written on the provider (IOResources)
     // because a failed start() destroys the instance before a read.
     IOService *fR44Provider = nullptr;
+    UInt32 fR44NotifyTotal = 0;
     r44mapper::Profile fR44Profile = r44mapper::kProfileLegacy;
     bool fR44ProfileForced = false;
     bool r44SelectProfile();

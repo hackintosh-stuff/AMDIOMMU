@@ -420,6 +420,21 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
     if (!nic) return false;
     const UInt32 requester = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
+    // R70-S5g evidence: the selector matches on this requester value, so
+    // record how IOPCIFamily actually numbered a Mellanox device. The
+    // pcidebug registry name and getBusNumber() may disagree.
+    if (fR44Provider &&
+        nic->configRead16(kIOPCIConfigVendorID) == 0x15b3) {
+        char buf[16] = {};
+        snprintf(buf, sizeof(buf), "%02x:%02x:%x",
+                 (unsigned)nic->getBusNumber(),
+                 (unsigned)nic->getDeviceNumber(),
+                 (unsigned)nic->getFunctionNumber());
+        fR44Provider->setProperty("amdmapper-mlx-bdf", buf);
+        char req[8] = {};
+        snprintf(req, sizeof(req), "%x", requester);
+        fR44Provider->setProperty("amdmapper-mlx-requester", req);
+    }
     UInt32 match = 0;
     while (match < fR53RequesterCount && fR53Requesters[match] != requester) ++match;
     if (match == fR53RequesterCount) {
