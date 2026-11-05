@@ -542,6 +542,10 @@ void org_example_AMDMapperProbe::r44PublishMappings(OSDictionary **copy) {
         setProperty("r44-mapper-abi", r44mapper::kVersion, 32);
         setProperty("r44-live-maps", s.liveCount, 32);
         setProperty("r44-live-pages", s.livePages, 32);
+        // S3 measurement: peaks since this domain was prepared, published with
+        // the ordinary snapshot so a read never races the DMA path.
+        setProperty("r44-peak-maps", s.peakMaps, 32);
+        setProperty("r44-peak-pages", s.peakPages, 32);
         setProperty("r44-map-ok", s.mapOk, 64);
         setProperty("r44-unmap-ok", s.unmapOk, 64);
         setProperty("r44-map-rejected", s.mapRejected, 64);

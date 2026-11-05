@@ -111,6 +111,10 @@ void profileTable() {
           "a typo must be refused, never resolved to another profile");
     check(r44mapper::profileForName("native-legacy") == &r44mapper::kProfileLegacy,
           "native-legacy lookup failed");
+    check(r44mapper::profileForName("rl-10g-max") == &r44mapper::kProfileRl10gMax,
+          "rl-10g-max lookup failed");
+    check(r44mapper::kProfileRl10gMax.records == 65535,
+          "measurement ceiling must use the largest UInt16 slot count");
 }
 
 void arenaArithmetic() {
@@ -125,6 +129,13 @@ void arenaArithmetic() {
     check(r44mapper::arenaBytesFor(r44mapper::kProfileRl10g) <
               r44mapper::kMaxArenaBytes,
           "rl-10g arena exceeds the wired-memory guard");
+    // Ceiling profile: 65535*120 + 262144*8 + 262144*2 + 1024*8 + 512*8 +
+    // 2*4096*8 = 10563464 -> 10563584.
+    check(r44mapper::arenaBytesFor(r44mapper::kProfileRl10gMax) == 10563584ULL,
+          "rl-10g-max arena size does not match the documented footprint");
+    check(r44mapper::arenaBytesFor(r44mapper::kProfileRl10gMax) <
+              r44mapper::kMaxArenaBytes,
+          "rl-10g-max arena exceeds the wired-memory guard");
     check(r44mapper::kMappingBytes == 120, "record slot size changed");
 }
 

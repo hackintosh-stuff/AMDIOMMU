@@ -74,6 +74,11 @@ static constexpr Profile kProfileLegacy = {
     "native-legacy", kRecords, kPages, kMapPages, kRuns, 16};
 static constexpr Profile kProfileRl10g = {
     "rl-10g", 16384, 131072, kMapPages, kRuns, 260};
+// Measurement ceiling: 1 GiB / the largest record count the UInt16 slot
+// encoding allows. The S3 boot runs on this profile so a first measurement
+// cannot repeat R69's exhaustion; the final rl-10g numbers come from it.
+static constexpr Profile kProfileRl10gMax = {
+    "rl-10g-max", 65535, 262144, kMapPages, kRuns, 516};
 static_assert(kProfileLegacy.records == kRecords && kProfileLegacy.pages == kPages,
               "legacy profile must not change the accepted window");
 static_assert(kProfileRl10g.pages % 512 == 0, "leaf tables cover 2 MiB each");
@@ -81,6 +86,10 @@ static_assert(kProfileRl10g.tablePages >= kProfileRl10g.pages / 512 + 2,
               "profile must cover its own page tables");
 static_assert(kProfileRl10g.records <= 0xffff, "slot + 1 must fit in UInt16");
 static_assert(kProfileRl10g.pages <= 0xffffffffU / 4096U, "IOVA window must fit UInt32 pages");
+static_assert(kProfileRl10gMax.pages % 512 == 0, "leaf tables cover 2 MiB each");
+static_assert(kProfileRl10gMax.tablePages >= kProfileRl10gMax.pages / 512 + 2,
+              "profile must cover its own page tables");
+static_assert(kProfileRl10gMax.records <= 0xffff, "slot + 1 must fit in UInt16");
 
 inline bool sameProfileName(const char *a, const char *b) {
     if (!a || !b) return false;
@@ -114,6 +123,7 @@ inline const Profile *profileForName(const char *name) {
     if (!name || !*name) return &kProfileLegacy;
     if (sameProfileName(name, kProfileLegacy.name)) return &kProfileLegacy;
     if (sameProfileName(name, kProfileRl10g.name)) return &kProfileRl10g;
+    if (sameProfileName(name, kProfileRl10gMax.name)) return &kProfileRl10gMax;
     return nullptr;
 }
 

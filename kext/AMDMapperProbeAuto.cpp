@@ -616,8 +616,11 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slo
     d->profilePages = profile->pages;
     d->tablePages = tablePages;
     nic->setProperty("r44-profile", profile->name);
-    nic->setProperty("r69-admission", profile == &r44mapper::kProfileRl10g
-        ? "granted-rl-10g" : "granted-native-legacy");
+    const char *admission = profile == &r44mapper::kProfileRl10g
+        ? "granted-rl-10g"
+        : (profile == &r44mapper::kProfileRl10gMax ? "granted-rl-10g-max"
+                                                   : "granted-native-legacy");
+    nic->setProperty("r69-admission", admission);
     if (!fR52Owner->r52PrepareController(hardware)) return false;
     R44Controller *c = fR52Owner->fR44Controller;
     fR44Controller = c;

@@ -21,7 +21,8 @@ import sys
 from pathlib import Path
 
 IDENTIFIER = 'com.apple.driver.AppleEthernetRL'
-BOOT_KEYS = ('amdiommu=', 'amdiommu_devices=', 'amdiommu_autoattach=')
+BOOT_KEYS = ('amdiommu=', 'amdiommu_devices=', 'amdiommu_autoattach=',
+             'amdiommu_profile=')
 NVRAM_GUID = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 
 
