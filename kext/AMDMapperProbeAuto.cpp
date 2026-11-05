@@ -294,16 +294,28 @@ static bool pciIdProperty(IORegistryEntry *entry, const char *key, UInt32 &value
     return true;
 }
 
+// The boot-arg override is parsed on every call. Each attached device gets its
+// own mapper instance (see r44AttachAuto), so an admission decision must never
+// depend on which instance happened to run r44SelectProfile first - R70-S3b
+// showed a device admitted with the legacy arena while the controller instance
+// reported the forced profile.
+const r44mapper::Profile *org_example_AMDMapperProbe::r44ForcedProfile() const {
+    char requested[24] = {};
+    if (!PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1))
+        return nullptr;
+    return r44mapper::profileForName(requested);
+}
+
 // S2 admission input: which capacity does this device need *before* a domain
 // exists? Only Apple's AppleEthernetRL (10ec:8124-8127 under auto-attach, i.e.
 // a client that cannot call AMDIOMMUClaimRequesterV1) gets the pool-sized
 // profile. Lucy/RTL8111 keep the accepted ABI3 window, so R67-2 behaviour is
-// unchanged. A boot-arg profile overrides both for measurement rounds.
+// unchanged.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 const r44mapper::Profile *org_example_AMDMapperProbe::r44ProfileForDevice(
     IOPCIDevice *nic) const {
-    if (fR44ProfileForced) return &fR44Profile;
+    if (const r44mapper::Profile *forced = r44ForcedProfile()) return forced;
     if (!fR69AutoAttach || !nic) return &r44mapper::kProfileLegacy;
     UInt32 vendor = 0, device = 0;
     if (!pciIdProperty(nic, "vendor-id", vendor) ||
@@ -596,6 +608,10 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slo
     // even the legacy arena cannot be prepared - and then say so loudly.
     const r44mapper::Profile *requested = r44ProfileForDevice(nic);
     if (!requested) requested = &r44mapper::kProfileLegacy;
+    // Per-instance admission evidence: the device mapper is its own instance,
+    // so record whether this instance saw the boot-arg override at all.
+    nic->setProperty("r44-attach-forced", r44ForcedProfile() ? "yes" : "no");
+    nic->setProperty("r44-attach-instance", getRegistryEntryID(), 64);
     const r44mapper::Profile *candidates[3] = {
         requested, &r44mapper::kProfileRl10g, &r44mapper::kProfileLegacy};
     const r44mapper::Profile *profile = nullptr;

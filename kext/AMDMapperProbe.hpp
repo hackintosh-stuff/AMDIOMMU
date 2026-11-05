@@ -127,6 +127,7 @@ private:
     r44mapper::Profile fR44Profile = r44mapper::kProfileLegacy;
     bool fR44ProfileForced = false;
     bool r44SelectProfile();
+    const r44mapper::Profile *r44ForcedProfile() const;
     const r44mapper::Profile *r44ProfileForDevice(IOPCIDevice *nic) const;
     struct R52Domain;
     R52Domain *fR52Domain = nullptr;
