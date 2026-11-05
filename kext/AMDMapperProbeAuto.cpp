@@ -298,6 +298,8 @@ static bool pciIdProperty(IORegistryEntry *entry, const char *key, UInt32 &value
 // a client that cannot call AMDIOMMUClaimRequesterV1) gets the pool-sized
 // profile. Lucy/RTL8111 keep the accepted ABI3 window, so R67-2 behaviour is
 // unchanged. A boot-arg profile overrides both for measurement rounds.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 const r44mapper::Profile *org_example_AMDMapperProbe::r44ProfileForDevice(
     IOPCIDevice *nic) const {
     if (fR44ProfileForced) return &fR44Profile;
@@ -308,6 +310,7 @@ const r44mapper::Profile *org_example_AMDMapperProbe::r44ProfileForDevice(
         return &r44mapper::kProfileLegacy;
     return r44mapper::profileForDevice(vendor, device, true);
 }
+#pragma clang diagnostic pop
 
 bool org_example_AMDMapperProbe::r44StartAuto() {
     setProperty("r44-mode", "auto");
