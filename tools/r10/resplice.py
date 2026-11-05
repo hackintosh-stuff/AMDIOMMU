@@ -5,8 +5,9 @@ kext/AMDMapperProbe.cpp by matching text markers. Round 11 split
 that file into eight modules, so the markers no longer exist and
 re-splicing into the entry module is not a meaningful operation:
 the blocks live in AMDMapperProbeNic.cpp and AMDMapperProbeObsDebug.cpp
-now, and tools/r11/verify-split.py is what checks the result
-(it anchors on a function and verifies file scope before writing).
+now, and the round-11 split checker that used to validate the result
+(tools/r11/verify-split.py) has since been retired because its original-line
+markers no longer match the refactored tree.
 
 Kept for the record of how round 10 was built. Running it will
 refuse, because its markers are gone.
