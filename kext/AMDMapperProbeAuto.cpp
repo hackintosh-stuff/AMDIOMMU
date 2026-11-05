@@ -420,11 +420,14 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
     if (!nic) return false;
     const UInt32 requester = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
-    // R70-S5g evidence: the selector matches on this requester value, so
-    // record how IOPCIFamily actually numbered a Mellanox device. The
-    // pcidebug registry name and getBusNumber() may disagree.
-    if (fR44Provider &&
-        nic->configRead16(kIOPCIConfigVendorID) == 0x15b3) {
+    const UInt16 vendor16 = nic->configRead16(kIOPCIConfigVendorID);
+    const UInt16 device16 = nic->configRead16(kIOPCIConfigDeviceID);
+    // R70-S5i: the selector matches on this requester value; kprintf reaches
+    // the serial console (serial=5 + CustomPciSerialDevice), so every Mellanox
+    // sighting is logged there too - the panic cannot take this evidence away.
+    IOLog("AMDMapperProbe: pci requester=%x vendor=%x device=%x bus=%x\n",
+          requester, vendor16, device16, nic->getBusNumber());
+    if (vendor16 == 0x15b3 && fR44Provider) {
         char buf[16] = {};
         snprintf(buf, sizeof(buf), "%02x:%02x:%x",
                  (unsigned)nic->getBusNumber(),
@@ -439,7 +442,9 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
     while (match < fR53RequesterCount && fR53Requesters[match] != requester) ++match;
     if (match == fR53RequesterCount) {
         // Only the legacy default and known unselected clients need model IDs.
-        if (claim || nic->configRead16(kIOPCIConfigVendorID) != 0x10ec) return false;
+        IOLog("AMDMapperProbe: requester %x not selected (vendor %x)\n",
+              requester, vendor16);
+        if (claim || vendor16 != 0x10ec) return false;
         const UInt16 device = nic->configRead16(kIOPCIConfigDeviceID);
         if (device != 0x8127 && device != 0x8168) return false;
         if (fR53SelectionExplicit || device != 0x8127) {
