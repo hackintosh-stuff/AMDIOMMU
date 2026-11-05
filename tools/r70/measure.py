@@ -100,6 +100,28 @@ def server(args):
     _log(args, record)
 
 
+def sender(args):
+    # Raw byte sender: pairs with any listener (nc, a peer, a NAS sink) when
+    # the far side cannot run this tool. The client role above receives.
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    sock.bind((args.bind6, 0))
+    sock.settimeout(args.timeout)
+    sock.connect((args.peer6, args.port))
+    chunk = b'\x5a' * (1 << 20)
+    sent = 0
+    started = time.monotonic()
+    try:
+        while sent < args.bytes:
+            n = min(len(chunk), args.bytes - sent)
+            sock.sendall(chunk[:n])
+            sent += n
+    finally:
+        sock.close()
+    record = {'role': 'sender', 'peer': args.peer6, 'bytes': sent,
+              'seconds': round(time.monotonic() - started, 3)}
+    _log(args, record)
+
+
 def client(args):
     sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
     sock.bind((args.bind6, 0))
@@ -141,6 +163,15 @@ def main(argv):
     srv.add_argument('--timeout', type=float, default=60)
     srv.add_argument('--log')
     srv.set_defaults(func=server)
+
+    snd = sub.add_parser('sender')
+    snd.add_argument('--bind6', required=True)
+    snd.add_argument('--peer6', required=True)
+    snd.add_argument('--port', type=int, required=True)
+    snd.add_argument('--bytes', type=int, default=2 << 30)
+    snd.add_argument('--timeout', type=float, default=60)
+    snd.add_argument('--log')
+    snd.set_defaults(func=sender)
 
     cli = sub.add_parser('client')
     cli.add_argument('--bind6', required=True)
