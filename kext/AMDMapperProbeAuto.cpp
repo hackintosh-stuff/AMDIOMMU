@@ -732,10 +732,13 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slo
     nic->setProperty("r44-profile", profile->name);
     nic->setProperty("r44-profile-requested", requested->name);
     nic->setProperty("r44-profile-fallback", profile == requested ? "no" : "yes");
-    const char *admission = profile == &r44mapper::kProfileRl10g
-        ? "granted-rl-10g"
-        : (profile == &r44mapper::kProfileRl10gMax ? "granted-rl-10g-max"
-                                                   : "granted-native-legacy");
+    const char *admission = profile == &r44mapper::kProfileConnectX
+        ? "granted-connectx-25g"
+        : (profile == &r44mapper::kProfileRl10g
+               ? "granted-rl-10g"
+               : (profile == &r44mapper::kProfileRl10gMax
+                      ? "granted-rl-10g-max"
+                      : "granted-native-legacy"));
     nic->setProperty("r69-admission", admission);
     IOLog("AMDMapperProbe: domain %u ready profile=%s records=%u pages=%u tables=%u\n",
           slot, profile->name, profile->records, profile->pages, profile->tablePages);
