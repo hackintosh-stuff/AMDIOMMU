@@ -31,13 +31,17 @@ with the legacy 16 MiB arena. Fix `afb6021` (0.80.0) resolves
 (0.82.0) read live IOVA pages from the allocator instead of the stale snapshot.
 
 On the fixed build (`rl-10g-max`, 65535 records / 1 GiB, 516-page tables) both
-domains reported `granted-rl-10g-max` with zero faults, and a 2 GB single flow
-on en4 (1 GbE, 18.5 s, ~930 Mb/s) produced peak **279 concurrent mappings and
-4419 IOVA pages (~17.3 MiB)**, zero rejects. That peak exceeds the legacy 4096
-page bound — the quantitative explanation for all three panics — while
-`rl-10g` (512 MiB) retains 29.7x page headroom and `rl-10g-max` 59.3x. The
-10 GbE port (en2) had no carrier during the run, so its peak remains
-**unmeasured**; the rounds' conclusion is limited to the measured 1 GbE path.
+domains reported `granted-rl-10g-max` with zero faults. A 2 GB single flow on
+en4 (1 GbE, 18.5 s, ~930 Mb/s) produced peak **279 concurrent mappings and
+4419 IOVA pages (~17.3 MiB)**, which alone exceeds the legacy 4096-page bound
+and explains the three panics. After the SFP+ link came up, the same probe was
+measured against a TrueNAS peer on en2: 1 GB in 0.927 s (~8.9 Gbps) and three
+2 GB transfers at ~9.3 Gbps each gave peak **3267 concurrent mappings and
+52,227 IOVA pages (~204 MiB)**, zero rejects and zero target faults. That makes
+the 512 MiB profile only 2.5x on pages, so the Apple-RL default moved to
+`rl-10g-max` (20x records, 5.0x pages) in `6b0643c`, with `rl-10g` retained as
+the fallback step and `native-legacy` unchanged for Lucy/RTL8111. Not measured:
+concurrent multi-flow 10 GbE, the AVB path, and sustained 10 GbE business.
 Closure: probe ejected from the ESP, EFI and NVRAM back to `amdiommu=off`.
 
 ## Round69 / AppleEthernetRL on the AMD mapper — BLOCKED, panic preserved
