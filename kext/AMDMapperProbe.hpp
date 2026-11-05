@@ -6,6 +6,8 @@
 #include <IOKit/IODMACommand.h>
 #include <kern/thread.h>
 
+class IOPCIDevice;
+
 #include "amd_iommu_mapper_abi.hpp"
 
 // 设备 DMA 观察用的纯逻辑核心（区间集合、fault 分类、描述符解码）。
