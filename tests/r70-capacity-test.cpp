@@ -168,6 +168,9 @@ void devicePolicy() {
     check(r44mapper::profileForDevice(0x15b3, 0x1015, true) ==
               &r44mapper::kProfileConnectX,
           "ConnectX-4 Lx admission must not depend on the claim path");
+    check(r44mapper::profileForDevice(0x15b3, 0x101d, false) ==
+              &r44mapper::kProfileConnectX,
+          "ConnectX-6 Dx must be admitted with the 1 GiB arena");
     check(r44mapper::profileForName("connectx-25g") ==
               &r44mapper::kProfileConnectX,
           "connectx-25g profile lookup failed");

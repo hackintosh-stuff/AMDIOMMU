@@ -143,10 +143,13 @@ inline const Profile *profileForName(const char *name) {
 inline const Profile *profileForDevice(uint32_t vendor, uint32_t device,
                                        bool appleClientPath) {
     const uint32_t vendor16 = vendor & 0xffffU, device16 = device & 0xffffU;
-    // Mellanox ConnectX-4 Lx (Apple MLX5 client). No claim path exists for
-    // this device, so it is decided before the client-path gate. Untested on
-    // hardware: this only makes admission possible, not the dext mapper path.
-    if (vendor16 == 0x15b3U && device16 == 0x1015U)
+    // Mellanox ConnectX-4 Lx / ConnectX-6 Dx (Apple MLX5 client). No claim
+    // path exists for these devices, so the decision happens before the
+    // client-path gate. R70-S5 showed the dext command queue times out with
+    // no mapper at all, so admission is what makes the next test possible.
+    if (vendor16 == 0x15b3U &&
+        (device16 == 0x1015U || device16 == 0x1017U || device16 == 0x1019U ||
+         device16 == 0x101bU || device16 == 0x101dU))
         return &kProfileConnectX;
     if (!appleClientPath) return &kProfileLegacy;
     // R70 measured 52,227 IOVA pages on a saturated 10 GbE flow, so the
