@@ -174,6 +174,29 @@ void devicePolicy() {
     check(r44mapper::profileForName("rl-10g-max") ==
               &r44mapper::kProfileRl10gMax,
           "rl-10g-max profile lookup failed");
+    // R70-S6: PCI-class fallback for devices in neither ID table.
+    r44mapper::ProfileSource source = r44mapper::ProfileSource::legacy;
+    check(r44mapper::profileForDevice(0x9999, 0x0001, true, 0x020000, &source) ==
+              &r44mapper::kProfileRl10gMax,
+          "an unlisted network controller must take the 1 GiB arena");
+    check(source == r44mapper::ProfileSource::classTable,
+          "the class fallback must be attributed to the class table");
+    check(r44mapper::profileForDevice(0x1b21, 0x0612, true, 0x010601) ==
+              &r44mapper::kProfileRl10g,
+          "a storage controller must take the 512 MiB arena");
+    check(r44mapper::profileForDevice(0x8086, 0x1234, true, 0x0c0330) ==
+              &r44mapper::kProfileLegacy,
+          "a USB controller must keep the legacy window");
+    check(r44mapper::profileForDevice(0x10ec, 0x8127, true, 0x020000, &source) ==
+              &r44mapper::kProfileRl10gMax &&
+              source == r44mapper::ProfileSource::idTable,
+          "the ID table must win over the class fallback");
+    check(r44mapper::profileForDevice(0x9999, 0x0001, false, 0x020000) ==
+              &r44mapper::kProfileLegacy,
+          "the claim path must not inherit the class fallback");
+    check(r44mapper::profileForDevice(0x15b3, 0x1015, false, 0x020000) ==
+              &r44mapper::kProfileRl10gMax,
+          "Mellanox admission must still ignore the class fallback gate");
 }
 
 void capacitySemantics() {

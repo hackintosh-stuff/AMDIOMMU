@@ -135,9 +135,29 @@ inline const Profile *profileForName(const char *name) {
 // the auto-attach path, because that is the one client that cannot call our
 // private claim. Lucy, the board RTL8111 and every claim-based path keep the
 // accepted ABI3 arena. The caller applies a boot-arg override beforehand.
+//
+// R70-S6: when neither the vendor table nor the Apple RL range matches, fall
+// back to the PCI class code so an unlisted device still gets a usable arena
+// instead of the 16 MiB ABI3 window. This is deliberately a fixed policy, not
+// a runtime measurement: sizing by observed demand would require rebuilding a
+// live domain, which is a separate (and riskier) change.
+enum class ProfileSource { bootArg, idTable, classTable, legacy };
+
+inline const Profile *profileForClass(uint32_t classCode) {
+    // class-code is the 24-bit PCI class in the usual base<<16 | sub<<8 | if
+    // layout. Only the base class matters here.
+    const uint32_t base = (classCode >> 16) & 0xffffU;
+    if (base == 0x02U) return &kProfileRl10gMax;  // network controller
+    if (base == 0x01U) return &kProfileRl10g;     // storage controller
+    return nullptr;
+}
+
 inline const Profile *profileForDevice(uint32_t vendor, uint32_t device,
-                                       bool appleClientPath) {
+                                       bool appleClientPath,
+                                       uint32_t classCode = 0,
+                                       ProfileSource *source = nullptr) {
     const uint32_t vendor16 = vendor & 0xffffU, device16 = device & 0xffffU;
+    if (source) *source = ProfileSource::legacy;
     // Mellanox adapters driven by Apple's MLX5 client. No claim path exists
     // for these devices, so the decision happens before the client-path gate.
     // R70-S5 showed the dext command queue times out with no mapper at all,
@@ -145,14 +165,22 @@ inline const Profile *profileForDevice(uint32_t vendor, uint32_t device,
     // 1 GiB ceiling as the measured 10 GbE profile.
     if (vendor16 == 0x15b3U &&
         (device16 == 0x1015U || device16 == 0x1017U || device16 == 0x1019U ||
-         device16 == 0x101bU || device16 == 0x101dU))
+         device16 == 0x101bU || device16 == 0x101dU)) {
+        if (source) *source = ProfileSource::idTable;
         return &kProfileRl10gMax;
+    }
     if (!appleClientPath) return &kProfileLegacy;
     // R70 measured 52,227 IOVA pages on a saturated 10 GbE flow, so the
     // 512 MiB profile would leave only 2.5x headroom. The 1 GiB profile keeps
     // 5x on pages and 20x on records for the same 10.5 MB of wired memory.
-    if (vendor16 == 0x10ecU && device16 >= 0x8124U && device16 <= 0x8127U)
+    if (vendor16 == 0x10ecU && device16 >= 0x8124U && device16 <= 0x8127U) {
+        if (source) *source = ProfileSource::idTable;
         return &kProfileRl10gMax;
+    }
+    if (const Profile *byClass = profileForClass(classCode)) {
+        if (source) *source = ProfileSource::classTable;
+        return byClass;
+    }
     return &kProfileLegacy;
 }
 } // namespace r44mapper

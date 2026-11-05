@@ -23,14 +23,29 @@ Two build variants exist and accept different boot-args:
 | | `rl-10g-max` | 65535 records / 262144 pages (1 GiB), 516 table pages. |
 | | unknown name | Does **not** widen the arena: falls back to legacy and records `r44-profile=unsupported-name`. |
 
-When omitted, `amdiommu_profile` is derived per device (`r44ProfileForDevice`);
-a forced name applies to every attached device. `amdiommu_autoattach` was
-removed — `amdiommu=auto-attach` is the only switch.
+When omitted, `amdiommu_profile` is derived per device (`r44ProfileForDevice`).
+The derivation order is: boot-arg override, then vendor/device table, then a PCI
+class fallback, then `native-legacy`:
 
-Current example (CX4 Lx on this machine):
+| Derived from | Matches | Profile |
+|---|---|---|
+| vendor/device table | `15b3:1015/1017/1019/101b/101d`, `10ec:8124-8127` | `rl-10g-max` |
+| PCI class fallback | base class `0x02` (network) | `rl-10g-max` |
+| PCI class fallback | base class `0x01` (storage) | `rl-10g` |
+| otherwise | — | `native-legacy` |
+
+The choice is published per device as `r44-profile-source` =
+`boot-arg` \| `id-table` \| `class-table` \| `legacy-fallback` (plus
+`no-identity` when the registry lacks vendor/device properties). The class
+fallback applies only to the auto-attach path; claim-based clients keep the
+accepted ABI3 window. A forced name still applies to every attached device.
+`amdiommu_autoattach` was removed — `amdiommu=auto-attach` is the only switch.
+
+Current example (CX4 Lx on this machine). The profile can be omitted because
+`15b3:1015` is in the ID table:
 
 ```
-amdiommu=auto-attach amdiommu_devices=n2300,n2301 amdiommu_profile=rl-10g-max
+amdiommu=auto-attach amdiommu_devices=n2300,n2301
 ```
 
 `serial=5`, `io=0xffffffff`, `debug=` and `-v` are XNU/OpenCore arguments, **not**

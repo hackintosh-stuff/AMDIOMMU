@@ -138,12 +138,15 @@ private:
     bool fR44ProfileForced = false;
     bool r44SelectProfile();
     const r44mapper::Profile *r44ForcedProfile() const;
-    const r44mapper::Profile *r44ProfileForDevice(IOPCIDevice *nic) const;
+    const r44mapper::Profile *r44ProfileForDevice(
+        UInt32 vendor, UInt32 device, UInt32 classCode,
+        r44mapper::ProfileSource *source = nullptr) const;
     struct R52Domain;
     R52Domain *fR52Domain = nullptr;
     void r52AttachExistingDevices();
     bool r52PrepareController(const R47HardwareInfo &);
-    bool r52PrepareDomain(IOService *, UInt32);
+    bool r52PrepareDomain(IOService *, UInt32, const r44mapper::Profile *,
+                          r44mapper::ProfileSource);
     bool r52ReleaseDomain();
     void r52PublishDomains();
     bool r52PowerSupported() const;

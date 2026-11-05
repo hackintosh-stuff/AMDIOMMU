@@ -341,21 +341,22 @@ const r44mapper::Profile *org_example_AMDMapperProbe::r44ForcedProfile() const {
 }
 
 // S2 admission input: which capacity does this device need *before* a domain
-// exists? Only Apple's AppleEthernetRL (10ec:8124-8127 under auto-attach, i.e.
-// a client that cannot call AMDIOMMUClaimRequesterV1) gets the pool-sized
-// profile. Lucy/RTL8111 keep the accepted ABI3 window, so R67-2 behaviour is
-// unchanged.
+// exists? Pure decision helper: the caller reads the registry identity before
+// it takes fR52AttachLock. Doing that lookup under the attach lock was observed
+// to stall the boot on the first non-forced attach (R70-S6), so this function
+// must never touch the registry itself.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 const r44mapper::Profile *org_example_AMDMapperProbe::r44ProfileForDevice(
-    IOPCIDevice *nic) const {
-    if (const r44mapper::Profile *forced = r44ForcedProfile()) return forced;
-    if (!fR69AutoAttach || !nic) return &r44mapper::kProfileLegacy;
-    UInt32 vendor = 0, device = 0;
-    if (!pciIdProperty(nic, "vendor-id", vendor) ||
-        !pciIdProperty(nic, "device-id", device))
-        return &r44mapper::kProfileLegacy;
-    return r44mapper::profileForDevice(vendor, device, true);
+    UInt32 vendor, UInt32 device, UInt32 classCode,
+    r44mapper::ProfileSource *source) const {
+    if (source) *source = r44mapper::ProfileSource::legacy;
+    if (const r44mapper::Profile *forced = r44ForcedProfile()) {
+        if (source) *source = r44mapper::ProfileSource::bootArg;
+        return forced;
+    }
+    if (!fR69AutoAttach) return &r44mapper::kProfileLegacy;
+    return r44mapper::profileForDevice(vendor, device, true, classCode, source);
 }
 #pragma clang diagnostic pop
 
@@ -421,6 +422,15 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
             return false;
         }
     }
+    // Registry identity and profile must be resolved before fR52AttachLock:
+    // a device property lookup performed while the attach lock was held stalled
+    // the boot as soon as the profile was derived per device (R70-S6). Only the
+    // already-resolved profile is passed down from here.
+    UInt32 classCode = 0;
+    pciIdProperty(nic, "class-code", classCode);
+    r44mapper::ProfileSource profileSource = r44mapper::ProfileSource::legacy;
+    const r44mapper::Profile *deviceProfile =
+        r44ProfileForDevice(vendor16, device16, classCode, &profileSource);
     R52LockGuard attachment(fR52AttachLock);
     if (fR52Stopping) return false;
     if (fR53SelectionExplicit) {
@@ -481,7 +491,7 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
     if (!mapper->start(this)) {
         mapper->detach(this); mapper->release(); return false;
     }
-    if (!mapper->r52PrepareDomain(nic, slot)) {
+    if (!mapper->r52PrepareDomain(nic, slot, deviceProfile, profileSource)) {
         setProperty("r52-attach-failure", "device-prepare");
         setProperty("r52-rejected-requester", requester, 32);
         mapper->r52ReleaseDomain();
@@ -620,9 +630,12 @@ bool org_example_AMDMapperProbe::r52PrepareController(const R47HardwareInfo &har
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slot) {
+bool org_example_AMDMapperProbe::r52PrepareDomain(
+    IOService *service, UInt32 slot, const r44mapper::Profile *requestedIn,
+    r44mapper::ProfileSource sourceIn) {
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
     if (!fR52Owner || !nic || slot >= kR52MaxDomains) return false;
+    const r44mapper::Profile *requested = requestedIn;
     R47HardwareInfo hardware{};
     if (!r47DiscoverHardware(this, nic, hardware)) return false;
     auto *d = (R52Domain *)IOMalloc(sizeof(R52Domain));
@@ -639,12 +652,17 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slo
     // 0xe00002be exactly like capacity exhaustion. So try the requested
     // profile first, then progressively smaller arenas, and only give up when
     // even the legacy arena cannot be prepared - and then say so loudly.
-    const r44mapper::Profile *requested = r44ProfileForDevice(nic);
+    r44mapper::ProfileSource source = sourceIn;
     if (!requested) requested = &r44mapper::kProfileLegacy;
     // Per-instance admission evidence: the device mapper is its own instance,
     // so record whether this instance saw the boot-arg override at all.
     nic->setProperty("r44-attach-forced", r44ForcedProfile() ? "yes" : "no");
     nic->setProperty("r44-attach-instance", getRegistryEntryID(), 64);
+    nic->setProperty("r44-profile-source",
+        source == r44mapper::ProfileSource::bootArg ? "boot-arg"
+        : (source == r44mapper::ProfileSource::idTable ? "id-table"
+        : (source == r44mapper::ProfileSource::classTable ? "class-table"
+                                                          : "legacy-fallback")));
     const r44mapper::Profile *candidates[3] = {
         requested, &r44mapper::kProfileRl10g, &r44mapper::kProfileLegacy};
     const r44mapper::Profile *profile = nullptr;
