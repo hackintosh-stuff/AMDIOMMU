@@ -120,6 +120,39 @@ def summarize(cfg):
     print('  boot-args: %s' % boot_args(cfg))
 
 
+def injection_entry(bundle, name):
+    info = plistlib.loads((Path(bundle) / 'Contents/Info.plist').read_bytes())
+    executable = info.get('CFBundleExecutable')
+    if not executable:
+        raise SystemExit('FAIL: %s has no CFBundleExecutable' % bundle)
+    return {
+        'Arch': 'Any',
+        'BundlePath': name,
+        'Comment': 'R69 IOMapper probe for third-party clients',
+        'Enabled': True,
+        'ExecutablePath': 'Contents/MacOS/%s' % executable,
+        'MaxKernel': '',
+        'MinKernel': '',
+        'PlistPath': 'Contents/Info.plist',
+    }
+
+
+def upsert_injection(cfg, entry):
+    kernel = cfg.setdefault('Kernel', {})
+    adds = kernel.get('Add') or []
+    kept = [a for a in adds if a.get('BundlePath') != entry['BundlePath']]
+    kernel['Add'] = kept + [entry]
+    return len(kernel['Add'])
+
+
+def drop_injection(cfg, name):
+    kernel = cfg.setdefault('Kernel', {})
+    adds = kernel.get('Add') or []
+    kernel['Add'] = [a for a in adds if a.get('BundlePath') != name]
+    return len(adds) - len(kernel['Add'])
+
+
+
 def main(argv):
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest='cmd', required=True)
@@ -131,6 +164,15 @@ def main(argv):
         item.add_argument('--check-only', action='store_true')
     status = sub.add_parser('status')
     status.add_argument('--efi', required=True)
+    inject = sub.add_parser('inject')
+    inject.add_argument('--efi', required=True)
+    inject.add_argument('--kext', required=True)
+    inject.add_argument('--name', default='AMDMapperProbe.kext')
+    inject.add_argument('--check-only', action='store_true')
+    eject = sub.add_parser('eject')
+    eject.add_argument('--efi', required=True)
+    eject.add_argument('--name', default='AMDMapperProbe.kext')
+    eject.add_argument('--check-only', action='store_true')
     args = parser.parse_args(argv)
 
     path = config_path(args.efi)
@@ -138,6 +180,34 @@ def main(argv):
 
     if args.cmd == 'status':
         summarize(cfg)
+        return 0
+
+    if args.cmd == 'inject':
+        entry = injection_entry(args.kext, args.name)
+        total = upsert_injection(cfg, entry)
+        print('would inject %s (%s), %d Add entries'
+              % (args.name, entry['ExecutablePath'], total))
+        if args.check_only:
+            return 0
+        dest = Path(args.efi) / 'EFI/OC/Kexts' / args.name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(args.kext, dest)
+        subprocess.run(['codesign', '--verify', '--strict', str(dest)],
+                       check=True)
+        saved = backup(path)
+        write_verified(path, cfg)
+        print('injected %s (signature verified); backup %s' % (dest, saved))
+        return 0
+
+    if args.cmd == 'eject':
+        removed = drop_injection(cfg, args.name)
+        print('would remove %d Add entries for %s' % (removed, args.name))
+        if args.check_only:
+            return 0
+        saved = backup(path)
+        write_verified(path, cfg)
+        print('ejected; backup %s' % saved)
         return 0
 
     if args.cmd == 'apply':
