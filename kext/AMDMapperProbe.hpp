@@ -6,6 +6,8 @@
 #include <IOKit/IODMACommand.h>
 #include <kern/thread.h>
 
+#include "amd_iommu_mapper_abi.hpp"
+
 // 设备 DMA 观察用的纯逻辑核心（区间集合、fault 分类、描述符解码）。
 // 与 host 回归测试包含同一个文件，见 tests/dma-observe-test.cpp。
 #include "amd_iommu_dma_observe.hpp"
@@ -116,6 +118,11 @@ private:
            fR69RejectedLayout = 0, fR69RejectedRecords = 0,
            fR69RejectedNoRange = 0, fR69RejectedBits = 0;
     void r69PublishCapacity();
+    // S1 capacity profile (docs/m2-3az-round69-capacity-model.md). The legacy
+    // entry is the default and reproduces the accepted ABI3 arena exactly; a
+    // domain may only be prepared after the profile's page-table area exists.
+    r44mapper::Profile fR44Profile = r44mapper::kProfileLegacy;
+    bool r44SelectProfile();
     struct R52Domain;
     R52Domain *fR52Domain = nullptr;
     void r52AttachExistingDevices();

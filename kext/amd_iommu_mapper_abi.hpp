@@ -47,4 +47,52 @@ struct Snapshot {
 static_assert(sizeof(RecordHeader) == 104, "ordinary mapper record prefix");
 static_assert(sizeof(Record) == 1128, "R59 ordinary mapper record ABI3");
 static_assert(sizeof(Snapshot) == 2496, "R59 ordinary mapper snapshot ABI3");
+
+// ---------------------------------------------------------------------------
+// Capacity profiles (S1 of docs/m2-3az-round69-capacity-model.md).
+//
+// A profile decides the arena a domain reserves *before* any client maps:
+// record slots, IOVA pages and the page-table area. The ABI3 record/snapshot
+// layouts are unchanged in S1, so mapPages/runs stay at their ABI3 values and
+// the legacy profile reproduces the accepted behaviour exactly. Raising the
+// per-map bound is a separate step because it changes Record.physical[].
+//
+// The default is the legacy profile: a domain that never selects one behaves
+// byte-for-byte like R67-2. "rl-10g" is the conservative starting point for
+// Apple's Skywalk packet pools (one segment per iovmMapMemory call); its final
+// numbers come from the S3 measurement, not from this table.
+// ---------------------------------------------------------------------------
+struct Profile {
+    const char *name;
+    uint32_t records;
+    uint32_t pages;
+    uint32_t mapPages;
+    uint32_t runs;
+    uint32_t tablePages;
+};
+static constexpr Profile kProfileLegacy = {
+    "native-legacy", kRecords, kPages, kMapPages, kRuns, 16};
+static constexpr Profile kProfileRl10g = {
+    "rl-10g", 16384, 131072, kMapPages, kRuns, 260};
+static_assert(kProfileLegacy.records == kRecords && kProfileLegacy.pages == kPages,
+              "legacy profile must not change the accepted window");
+static_assert(kProfileRl10g.pages % 512 == 0, "leaf tables cover 2 MiB each");
+static_assert(kProfileRl10g.tablePages >= kProfileRl10g.pages / 512 + 2,
+              "profile must cover its own page tables");
+static_assert(kProfileRl10g.records <= 0xffff, "slot + 1 must fit in UInt16");
+static_assert(kProfileRl10g.pages <= 0xffffffffU / 4096U, "IOVA window must fit UInt32 pages");
+
+inline bool sameProfileName(const char *a, const char *b) {
+    if (!a || !b) return false;
+    while (*a && *a == *b) { ++a; ++b; }
+    return *a == *b;
+}
+// Unknown names must not silently fall back: the caller publishes the request
+// and keeps the legacy arena, so a typo can never widen the pool.
+inline const Profile *profileForName(const char *name) {
+    if (!name || !*name) return &kProfileLegacy;
+    if (sameProfileName(name, kProfileLegacy.name)) return &kProfileLegacy;
+    if (sameProfileName(name, kProfileRl10g.name)) return &kProfileRl10g;
+    return nullptr;
+}
 } // namespace r44mapper

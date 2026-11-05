@@ -89,6 +89,65 @@ inline bool release(BoundedAllocator<PoolPages, MaxMapPages> &a,
     a.livePages -= pages;
     return true;
 }
+
+// Runtime-sized sibling of BoundedAllocator. The ordinary per-device mapper
+// cannot fix its pool at compile time any more (capacity profiles are chosen
+// at start), so the bitmap storage comes from the domain arena and poolPages
+// is a member. The first-fit semantics are identical to the template above,
+// which keeps the legacy profile byte-for-byte compatible with R67-2.
+struct RuntimeAllocator {
+    u64 *used, *ever;
+    unsigned poolPages, maxMapPages;
+    unsigned livePages, peakPages, reusedAllocations;
+};
+inline bool allocate(RuntimeAllocator &a, unsigned pages, unsigned &basePage,
+                     unsigned alignmentPages = 1) {
+    if (!a.used || !a.ever || !pages || pages > a.maxMapPages || !alignmentPages ||
+        (alignmentPages & (alignmentPages - 1)) || pages > a.poolPages) return false;
+    const unsigned lastBase = a.poolPages - pages;
+    const u64 alignMask = alignmentPages - 1U;
+    unsigned from = 0;
+    while (from <= lastBase) {
+        const unsigned first = findNextBitmapPage(a.used, from, lastBase + 1, false);
+        const u64 aligned = (static_cast<u64>(first) + alignMask) & ~alignMask;
+        if (aligned > lastBase) return false;
+        const unsigned base = static_cast<unsigned>(aligned);
+        const unsigned end = base + pages;
+        const unsigned conflict = findNextBitmapPage(a.used, base, end, true);
+        if (conflict != end) {
+            from = conflict + 1;
+            continue;
+        }
+        bool reused = false;
+        for (unsigned j = 0; j < pages; ++j) {
+            const unsigned p = base + j;
+            const u64 bit = 1ULL << (p % 64);
+            reused = reused || (a.ever[p / 64] & bit);
+            a.used[p / 64] |= bit;
+            a.ever[p / 64] |= bit;
+        }
+        a.livePages += pages;
+        if (a.livePages > a.peakPages) a.peakPages = a.livePages;
+        if (reused) ++a.reusedAllocations;
+        basePage = base;
+        return true;
+    }
+    return false;
+}
+inline bool release(RuntimeAllocator &a, unsigned basePage, unsigned pages) {
+    if (!a.used || !pages || pages > a.maxMapPages || basePage > a.poolPages - pages ||
+        a.livePages < pages) return false;
+    for (unsigned j = 0; j < pages; ++j) {
+        const unsigned p = basePage + j;
+        if (!(a.used[p / 64] & (1ULL << (p % 64)))) return false;
+    }
+    for (unsigned j = 0; j < pages; ++j) {
+        const unsigned p = basePage + j;
+        a.used[p / 64] &= ~(1ULL << (p % 64));
+    }
+    a.livePages -= pages;
+    return true;
+}
 struct Segment { u64 pa, bytes, iova; };
 struct Plan {
     unsigned count, pages, basePage;

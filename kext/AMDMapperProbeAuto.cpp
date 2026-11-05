@@ -44,7 +44,7 @@ bool r53ParseRequester(const char *text, UInt32 &requester) {
     }
     return true;
 }
-constexpr UInt32 kR44TablePages = 16;
+// The page-table area is profile-driven: r44mapper::Profile::tablePages.
 constexpr UInt32 kR61MaxParts = 16;  // at most two blocks per size for a <=128-page interval
 static_assert(r44mapper::kMapPages <= 128, "revisit exact range command bound");
 
@@ -254,6 +254,26 @@ bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
     return true;
 }
 
+// S1: the capacity profile is chosen before any domain is prepared. An
+// unknown name must never widen the arena, so it stays on the legacy profile
+// and records the request for the next round's evidence.
+bool org_example_AMDMapperProbe::r44SelectProfile() {
+    char requested[24] = {};
+    fR44Profile = r44mapper::kProfileLegacy;
+    bool accepted = true;
+    if (PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1)) {
+        const r44mapper::Profile *picked = r44mapper::profileForName(requested);
+        setProperty("r44-profile-request", requested);
+        if (picked) fR44Profile = *picked;
+        else accepted = false;
+    }
+    setProperty("r44-profile", accepted ? fR44Profile.name : "unsupported-name");
+    setProperty("r44-profile-records", fR44Profile.records, 32);
+    setProperty("r44-profile-pages", fR44Profile.pages, 32);
+    setProperty("r44-profile-table-pages", fR44Profile.tablePages, 32);
+    return accepted;
+}
+
 bool org_example_AMDMapperProbe::r44StartAuto() {
     setProperty("r44-mode", "auto");
     setProperty("r52-role", "controller");
@@ -280,6 +300,7 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
         }
         setProperty("r69-autoattach", fR69AutoAttach ? "yes" : "no");
     }
+    r44SelectProfile();
     fR52AttachLock = IOLockAlloc();
     if (!fR52AttachLock) return false;
     installPublishNotifier();
@@ -527,9 +548,13 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(IOService *service, UInt32 slo
     d->deviceID = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
     d->state = "preparing";
-    if (!r44Allocate(d->tables, kR44TablePages * M2B2_PAGE_SIZE, d->tablePA) ||
+    // The profile decides the page-table area before the domain exists; a
+    // profile that cannot reserve its own tables is refused here, not at the
+    // first map (docs/m2-3az-round69-capacity-model.md S1).
+    const UInt32 tablePages = fR44Profile.tablePages;
+    if (!r44Allocate(d->tables, tablePages * M2B2_PAGE_SIZE, d->tablePA) ||
         !r44PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
-            d->tablePA, kR44TablePages, M2B2_PAGE_MODE_4_LEVEL))
+            d->tablePA, tablePages, M2B2_PAGE_MODE_4_LEVEL))
         return false;
     if (!fR52Owner->r52PrepareController(hardware)) return false;
     R44Controller *c = fR52Owner->fR44Controller;
@@ -601,10 +626,11 @@ bool org_example_AMDMapperProbe::r52InvalidateLocked(
     R52Domain *d = fR52Domain;
     if (!c || !d || !c->ready || c->command.failed) return false;
     const bool full = !d->active || invalidateDevice || !bytes;
+    const UInt64 windowBytes = (UInt64)fR44Profile.pages * 4096ULL;
     if (!full && (((address | bytes) & 4095ULL) ||
         address < r44mapper::kBase ||
-        address - r44mapper::kBase >= r44mapper::kPages * 4096ULL ||
-        bytes > r44mapper::kPages * 4096ULL - (address - r44mapper::kBase)))
+        address - r44mapper::kBase >= windowBytes ||
+        bytes > windowBytes - (address - r44mapper::kBase)))
         return false;
     OSSynchronizeIO();
     // Upper-level tables are prebuilt and ordinary maps fill only empty leaves.
@@ -986,7 +1012,7 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     number("r44-domain-id", d->domainID);
     number("r44-root-pa", d->tablePA);
     number("r44-table-pa", d->tablePA);
-    number("r44-table-bytes", kR44TablePages * M2B2_PAGE_SIZE);
+    number("r44-table-bytes", (UInt64)fR44Profile.tablePages * M2B2_PAGE_SIZE);
     number("r44-device-table-pa", c->devicePA);
     number("r44-command-pa", c->commandPA);
     number("r44-event-pa", c->eventPA);

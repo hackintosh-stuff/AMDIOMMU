@@ -13,19 +13,23 @@ struct org_example_AMDMapperProbe::R44MapperState {
     };
     IOLock *lock;
     volatile UInt64 *tables;
-    volatile UInt64 *leaves[r44mapper::kPages / 512];
-    amdtx::BoundedAllocator<r44mapper::kPages, r44mapper::kMapPages> allocator;
+    // One wired block holds every capacity-dependent array; its size comes
+    // from the selected profile at prepare time. The legacy profile allocates
+    // the same bytes the static ABI3 arrays used to occupy.
+    void *arena;
+    size_t arenaBytes;
+    volatile UInt64 **leaves;
+    amdtx::RuntimeAllocator allocator;
     // Both scratch buffers are per-domain and used only while lock is held.
     BoundedProbeLayout<r44mapper::kRuns> walkScratch;
     r44mapper::Record exportScratch;
-    Mapping mappings[r44mapper::kRecords];
+    Mapping *mappings;
     // Expected PA from the descriptor walk, independent of the actual leaf PTE.
-    UInt64 physicalByPage[r44mapper::kPages];
+    UInt64 *physicalByPage;
     // Sole per-slot liveness state; accessed under the domain lock.
-    amdtx::u64 liveSlots[(r44mapper::kRecords + 63) / 64];
+    amdtx::u64 *liveSlots;
     // Per-domain start index: zero means no mapping starts on this IOVA page.
-    static_assert(r44mapper::kRecords <= 0xffffU, "slot + 1 must fit in UInt16");
-    UInt16 slotByStartPage[r44mapper::kPages];
+    UInt16 *slotByStartPage;
     r44mapper::Snapshot snapshot;
     OSData *suspendLive, *suspendPT, *resumeLive, *resumePT;
     UInt64 nextHandle;
@@ -33,6 +37,7 @@ struct org_example_AMDMapperProbe::R44MapperState {
     // Only snapshot publication writes registry properties, never the hot path.
     UInt64 map32Ok, mapHighPAOk, mappedHighPAPages;
     UInt32 minMapBits, maxMapBits;
+    UInt32 records, pages;
     bool accepting;
 
     volatile UInt64 &leaf(unsigned page) { return leaves[page / 512][page % 512]; }
@@ -49,7 +54,7 @@ struct org_example_AMDMapperProbe::R44MapperState {
     }
 
     unsigned nextSlot(unsigned from, bool occupied) const {
-        return amdtx::findNextBitmapPage(liveSlots, from, r44mapper::kRecords, occupied);
+        return amdtx::findNextBitmapPage(liveSlots, from, records, occupied);
     }
     bool slotLive(unsigned slot) const {
         return (liveSlots[slot / 64] & (1ULL << (slot % 64))) != 0;
@@ -73,7 +78,7 @@ struct org_example_AMDMapperProbe::R44MapperState {
                                             sizeof(r44mapper::Record));
         if (!data) return nullptr;
         auto &row = exportScratch;
-        for (unsigned i = nextSlot(0, true); i < r44mapper::kRecords;
+        for (unsigned i = nextSlot(0, true); i < records;
              i = nextSlot(i + 1, true)) {
             exportRecord(mappings[i].record, row);
             if (!data->appendBytes(&row, sizeof(row))) {
@@ -94,28 +99,73 @@ struct org_example_AMDMapperProbe::R44MapperState {
 
 bool org_example_AMDMapperProbe::r44PrepareMappings(
     volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel) {
+    const r44mapper::Profile &profile = fR44Profile;
     if (fR44Mapper || !tables || !tablePA || (tablePA & 4095ULL) ||
-        tablePages < 11 || (rootLevel != 3 && rootLevel != 4)) return false;
+        (rootLevel != 3 && rootLevel != 4)) return false;
+    // Capacity is decided before the domain exists: the caller must have
+    // reserved this profile's page-table area, and the record count must fit
+    // the UInt16 slot encoding used by slotByStartPage.
+    if (!profile.records || profile.records > 0xffffU || !profile.pages ||
+        (profile.pages % 512) || profile.tablePages < 11 ||
+        tablePages < profile.tablePages) return false;
+    const UInt32 leavesCount = profile.pages / 512;
+    const UInt64 words = (profile.records + 63) / 64;
+    const UInt64 pageWords = (profile.pages + 63) / 64;
+    // One block keeps allocation/free symmetric; all offsets are 8-byte safe.
+    UInt64 blockBytes = 0;
+    blockBytes += (UInt64)profile.records * sizeof(R44MapperState::Mapping);
+    blockBytes += (UInt64)profile.pages * sizeof(UInt64);      // physicalByPage
+    blockBytes += (UInt64)profile.pages * sizeof(UInt16);      // slotByStartPage
+    blockBytes += words * sizeof(amdtx::u64);                  // liveSlots
+    blockBytes += (UInt64)leavesCount * sizeof(volatile UInt64 *);
+    blockBytes += 2 * pageWords * sizeof(amdtx::u64);          // used/ever
+    blockBytes = (blockBytes + 4095ULL) & ~4095ULL;
+    if (!blockBytes || blockBytes > (64ULL << 20)) return false;
     auto *d = (R44MapperState *)IOMalloc(sizeof(R44MapperState));
     if (!d) return false;
     bzero(d, sizeof(*d));
     d->lock = IOLockAlloc();
     if (!d->lock) { IOFree(d, sizeof(*d)); return false; }
+    d->arena = IOMalloc((vm_size_t)blockBytes);
+    if (!d->arena) { IOLockFree(d->lock); IOFree(d, sizeof(*d)); return false; }
+    bzero(d->arena, (size_t)blockBytes);
+    d->arenaBytes = (size_t)blockBytes;
+    d->records = profile.records;
+    d->pages = profile.pages;
     d->tables = tables;
+    uint8_t *cursor = (uint8_t *)d->arena;
+    d->mappings = (R44MapperState::Mapping *)cursor;
+    cursor += (UInt64)profile.records * sizeof(R44MapperState::Mapping);
+    d->physicalByPage = (UInt64 *)cursor;
+    cursor += (UInt64)profile.pages * sizeof(UInt64);
+    d->slotByStartPage = (UInt16 *)cursor;
+    cursor += (UInt64)profile.pages * sizeof(UInt16);
+    d->liveSlots = (amdtx::u64 *)cursor;
+    cursor += words * sizeof(amdtx::u64);
+    d->leaves = (volatile UInt64 **)cursor;
+    cursor += (UInt64)leavesCount * sizeof(volatile UInt64 *);
+    amdtx::u64 *used = (amdtx::u64 *)cursor;
+    cursor += pageWords * sizeof(amdtx::u64);
+    amdtx::u64 *ever = (amdtx::u64 *)cursor;
+    d->allocator = amdtx::RuntimeAllocator{used, ever, profile.pages,
+                                           profile.mapPages, 0, 0, 0};
     amdsparse::Arena arena = {tables, tablePA, tablePages, 1, rootLevel,
                               tablePA, 0, 0, nullptr};
-    for (unsigned i = 0; i < r44mapper::kPages / 512; ++i) {
-        d->leaves[i] = amdtx::prepareAt(arena, r44mapper::kBase + i * 0x200000ULL, 512);
+    for (UInt32 i = 0; i < leavesCount; ++i) {
+        d->leaves[i] = amdtx::prepareAt(arena, r44mapper::kBase + (UInt64)i * 0x200000ULL, 512);
         if (!d->leaves[i]) {
-            IOLockFree(d->lock); IOFree(d, sizeof(*d)); return false;
+            IOLockFree(d->lock);
+            IOFree(d->arena, d->arenaBytes);
+            IOFree(d, sizeof(*d));
+            return false;
         }
     }
     auto &s = d->snapshot;
     s.version = r44mapper::kVersion; s.bytes = sizeof(s);
     s.flags = r44mapper::kPrepared | r44mapper::kAccepting;
-    s.capacityMaps = r44mapper::kRecords; s.capacityPages = r44mapper::kPages;
-    s.maxMapPages = r44mapper::kMapPages; s.maxRuns = r44mapper::kRuns;
-    s.iovaBase = r44mapper::kBase; s.iovaBytes = r44mapper::kPages * 4096ULL;
+    s.capacityMaps = profile.records; s.capacityPages = profile.pages;
+    s.maxMapPages = profile.mapPages; s.maxRuns = profile.runs;
+    s.iovaBase = r44mapper::kBase; s.iovaBytes = profile.pages * 4096ULL;
     s.rootPA = tablePA; s.ptBytes = tablePages * 4096ULL;
     s.rootLevel = rootLevel; s.tablePages = tablePages;
     s.preparedAt = mach_absolute_time();
@@ -216,6 +266,7 @@ bool org_example_AMDMapperProbe::r44ReleaseMappings() {
     if (d->suspendPT) d->suspendPT->release();
     if (d->resumeLive) d->resumeLive->release();
     if (d->resumePT) d->resumePT->release();
+    if (d->arena) IOFree(d->arena, d->arenaBytes);
     IOLockFree(d->lock); IOFree(d, sizeof(*d));
     return true;
 }
@@ -243,7 +294,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         // Publish the largest request actually seen so a capacity decision does
         // not have to guess what a third-party client asks for.
         if (length > fR69MaxLength) fR69MaxLength = length;
-        if (length > r44mapper::kMapPages * 4096ULL) {
+        if (length > (UInt64)d->allocator.maxMapPages * 4096ULL) {
             ++fR69RejectedLength; break;
         }
         if (mapOptions & (kIODMAMapFixedAddress | kIODMAMapIdentityMap |
@@ -269,7 +320,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         if (layout.pages > fR69MaxPages) fR69MaxPages = layout.pages;
         if (layout.runs > fR69MaxRuns) fR69MaxRuns = layout.runs;
         if (layout.error || !layout.runs || layout.totalBytes != length ||
-            !layout.pages || layout.pages > r44mapper::kMapPages) {
+            !layout.pages || layout.pages > d->allocator.maxMapPages) {
             ++fR69RejectedLayout; break;
         }
         if ((pageList && pageList->pageOffset != layout.firstOffset) ||
@@ -283,7 +334,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         if (!physicalValid) break;
 
         const unsigned slot = d->nextSlot(0, false);
-        if (slot == r44mapper::kRecords) {
+        if (slot == d->records) {
             ++fR69RejectedRecords; result = kIOReturnNoResources; break;
         }
         const unsigned alignmentPages = alignment > 4096 ? (unsigned)(alignment / 4096) : 1;
@@ -419,9 +470,9 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
     do {
         if (mapAddress < r44mapper::kBase) break;
         const UInt64 page = (mapAddress - r44mapper::kBase) / 4096;
-        if (page >= r44mapper::kPages) break;
+        if (page >= d->pages) break;
         const UInt16 owner = d->slotByStartPage[page];
-        if (!owner || owner > r44mapper::kRecords) break;
+        if (!owner || owner > d->records) break;
         const unsigned slot = owner - 1U;
         auto &mapping = d->mappings[slot];
         auto &record = mapping.record;
@@ -465,7 +516,7 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
 bool org_example_AMDMapperProbe::r44Translate(uint64_t address, uint64_t *physical) const {
     auto *d = fR44Mapper;
     if (!d || !physical || address < r44mapper::kBase ||
-        address - r44mapper::kBase >= r44mapper::kPages * 4096ULL) return false;
+        address - r44mapper::kBase >= (UInt64)d->pages * 4096ULL) return false;
     IOLockLock(d->lock);
     const auto decoded = amdpte::decodePte(d->leaf((unsigned)((address - r44mapper::kBase) / 4096)), 1);
     const bool present = decoded.kind == amdpte::PTE_LEAF_DEFAULT;
