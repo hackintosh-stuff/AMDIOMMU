@@ -136,8 +136,11 @@ inline const Profile *profileForDevice(uint32_t vendor, uint32_t device,
                                        bool appleClientPath) {
     if (!appleClientPath) return &kProfileLegacy;
     const uint32_t vendor16 = vendor & 0xffffU, device16 = device & 0xffffU;
+    // R70 measured 52,227 IOVA pages on a saturated 10 GbE flow, so the
+    // 512 MiB profile would leave only 2.5x headroom. The 1 GiB profile keeps
+    // 5x on pages and 20x on records for the same 10.5 MB of wired memory.
     if (vendor16 == 0x10ecU && device16 >= 0x8124U && device16 <= 0x8127U)
-        return &kProfileRl10g;
+        return &kProfileRl10gMax;
     return &kProfileLegacy;
 }
 } // namespace r44mapper

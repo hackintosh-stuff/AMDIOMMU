@@ -142,11 +142,11 @@ void arenaArithmetic() {
 void devicePolicy() {
     // S2 admission input: only AppleEthernetRL on the auto-attach path widens.
     check(r44mapper::profileForDevice(0x10ec, 0x8124, true) ==
-              &r44mapper::kProfileRl10g,
-          "AppleEthernetRL 8124 must take the pool profile");
+              &r44mapper::kProfileRl10gMax,
+          "AppleEthernetRL 8124 must take the 10 GbE-sized profile");
     check(r44mapper::profileForDevice(0x10ec, 0x8127, true) ==
-              &r44mapper::kProfileRl10g,
-          "AppleEthernetRL 8127 must take the pool profile");
+              &r44mapper::kProfileRl10gMax,
+          "AppleEthernetRL 8127 must take the 10 GbE-sized profile");
     check(r44mapper::profileForDevice(0x10ec, 0x8123, true) ==
               &r44mapper::kProfileLegacy,
           "device below the Apple RL range must keep the legacy window");
