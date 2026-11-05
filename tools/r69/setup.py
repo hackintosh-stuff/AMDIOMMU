@@ -8,7 +8,7 @@ config; it never touches a kext, the kernel collection or a disk.
 
 Usage (on the Mac, with the EFI mounted):
     python3 tools/r69/setup.py apply  --efi /Volumes/EFI --plist ~/r69/AERL.plist \
-        --args 'amdiommu=auto amdiommu_devices=2200,2500 amdiommu_autoattach=1'
+        --args 'amdiommu=auto-attach amdiommu_devices=n2200,n2500 amdiommu_profile=connectx-25g'
     python3 tools/r69/setup.py status --efi /Volumes/EFI
     python3 tools/r69/setup.py remove --efi /Volumes/EFI --args 'amdiommu=off'
 """
@@ -21,8 +21,11 @@ import sys
 from pathlib import Path
 
 IDENTIFIER = 'com.apple.driver.AppleEthernetRL'
-BOOT_KEYS = ('amdiommu=', 'amdiommu_devices=', 'amdiommu_autoattach=',
-             'amdiommu_profile=')
+# Keys this tool rewrites when --args is given. amdiommu_autoattach is RETIRED:
+# the kext no longer reads it, but it stays here so `apply` still scrubs the
+# stale token from older ESP/NVRAM configs.
+BOOT_KEYS = ('amdiommu=', 'amdiommu_devices=', 'amdiommu_profile=',
+             'amdiommu_autoattach=')
 NVRAM_GUID = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 
 

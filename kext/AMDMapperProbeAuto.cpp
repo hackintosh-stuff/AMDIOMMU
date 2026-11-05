@@ -374,20 +374,11 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
         return false;
     }
     // R69: Apple's own Ethernet kexts only ask IOMapper::copyMapperForDevice(),
-    // so they can never call AMDIOMMUClaimRequesterV1. This opt-in publishes
-    // iommu-parent at first publish (before their probe) for the selected
-    // requesters only; without the argument the offer/claim protocol is intact.
-    {
-        // The mode string is the authoritative switch (amdiommu=auto-attach).
-        // The separate key stays as an alias but never turns the mode off.
-        char autoAttach[8] = {};
-        if (PE_parse_boot_argn("amdiommu_autoattach", autoAttach,
-                               sizeof(autoAttach) - 1)) {
-            if (autoAttach[0] == '1') fR69AutoAttach = true;
-            setProperty("r69-autoattach-arg", autoAttach);
-        }
-        setProperty("r69-autoattach", fR69AutoAttach ? "yes" : "no");
-    }
+    // so they can never call AMDIOMMUClaimRequesterV1. amdiommu=auto-attach is
+    // the only switch: it publishes iommu-parent at first publish (before their
+    // probe) for the selected requesters only. Plain amdiommu=auto keeps the
+    // offer/claim protocol intact.
+    setProperty("r69-autoattach", fR69AutoAttach ? "yes" : "no");
     r44SelectProfile();
     fR52AttachLock = IOLockAlloc();
     if (!fR52AttachLock) return false;
