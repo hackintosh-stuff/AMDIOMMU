@@ -251,14 +251,6 @@ bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
     fR53SelectionExplicit = PE_parse_boot_argn("amdiommu_devices", selection,
                                               sizeof(selection) - 1);
     fR53RequesterCount = 0;
-    // R70-S5e: the boot-args value may carry invisible separators (the config
-    // history contains embedded newlines), so capture exactly what the kernel
-    // handed us before parsing.
-    if (fR44Provider) {
-        fR44Provider->setProperty("amdmapper-selection-raw", selection);
-        fR44Provider->setProperty("amdmapper-selection-explicit",
-                                  fR53SelectionExplicit ? "yes" : "no");
-    }
     if (!fR53SelectionExplicit) {
         setProperty("r53-device-selection", "default-rtl8127");
         return true;
@@ -369,7 +361,6 @@ const r44mapper::Profile *org_example_AMDMapperProbe::r44ProfileForDevice(
 
 bool org_example_AMDMapperProbe::r44StartAuto() {
     IOLog("AMDMapperProbe: auto-start enter\n");
-    if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "enter");
     setProperty("r44-mode", "auto");
     setProperty("r52-role", "controller");
     setProperty("r52-snapshot-consistency", "per-domain");
@@ -380,10 +371,8 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
     setProperty("r44-system-mapper", "no");
     setProperty("m1b-gsystem", IOMapper::gSystem ? "NONNULL" : "NULL-as-expected");
     if (!r53ReadDeviceSelection()) {
-        if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "failed-selection");
         return false;
     }
-    if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "selected");
     // R69: Apple's own Ethernet kexts only ask IOMapper::copyMapperForDevice(),
     // so they can never call AMDIOMMUClaimRequesterV1. This opt-in publishes
     // iommu-parent at first publish (before their probe) for the selected
@@ -400,17 +389,14 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
         setProperty("r69-autoattach", fR69AutoAttach ? "yes" : "no");
     }
     r44SelectProfile();
-    if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "profile-selected");
     fR52AttachLock = IOLockAlloc();
     if (!fR52AttachLock) return false;
     installPublishNotifier();
     if (!fPublishNotifier) {
         setProperty("r44-state", "failed-publish-notifier");
-        if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "failed-notifier");
         IOLockFree(fR52AttachLock); fR52AttachLock = nullptr;
         return false;
     }
-    if (fR44Provider) fR44Provider->setProperty("amdmapper-auto-stage", "notifier-ok");
     // Offer explicit requesters to pre-open clients; keep eager attach for the default.
     // Replay published endpoints through the same path as the notification.
     r52AttachExistingDevices();
@@ -424,10 +410,8 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
     if (!fR44Auto || fR52Owner || !fR52AttachLock) return false;
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
     if (!nic) return false;
-    // R70-S5j: config-space cycles on the ConnectX-6 stalled the
-    // notification-delivery thread right here (the serial log showed
-    // everything stopping after "auto-start enter"), so read the identity
-    // from the registry properties instead of touching config space.
+    // A config-space cycle on this device can stall the notification thread,
+    // so take the identity from the registry properties instead.
     UInt32 vendorId = 0, deviceId = 0;
     pciIdProperty(nic, "vendor-id", vendorId);
     pciIdProperty(nic, "device-id", deviceId);
@@ -435,30 +419,10 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
     const UInt16 device16 = (UInt16)(deviceId & 0xffffU);
     const UInt32 requester = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
-    IOLog("AMDMapperProbe: attach enter name=%s requester=%x vendor=%x device=%x\n",
-          service->getName(), requester, vendor16, device16);
-    // R70-S5i: the selector matches on this requester value; kprintf reaches
-    // the serial console (serial=5 + CustomPciSerialDevice), so every Mellanox
-    // sighting is logged there too - the panic cannot take this evidence away.
-    IOLog("AMDMapperProbe: pci requester=%x vendor=%x device=%x bus=%x\n",
-          requester, vendor16, device16, nic->getBusNumber());
-    if (vendor16 == 0x15b3 && fR44Provider) {
-        char buf[16] = {};
-        snprintf(buf, sizeof(buf), "%02x:%02x:%x",
-                 (unsigned)nic->getBusNumber(),
-                 (unsigned)nic->getDeviceNumber(),
-                 (unsigned)nic->getFunctionNumber());
-        fR44Provider->setProperty("amdmapper-mlx-bdf", buf);
-        char req[8] = {};
-        snprintf(req, sizeof(req), "%x", requester);
-        fR44Provider->setProperty("amdmapper-mlx-requester", req);
-    }
     UInt32 match = 0;
     while (match < fR53RequesterCount && fR53Requesters[match] != requester) ++match;
     if (match == fR53RequesterCount) {
         // Only the legacy default and known unselected clients need model IDs.
-        IOLog("AMDMapperProbe: requester %x not selected (vendor %x)\n",
-              requester, vendor16);
         if (claim || vendor16 != 0x10ec) return false;
         if (device16 != 0x8127 && device16 != 0x8168) return false;
         if (fR53SelectionExplicit || device16 != 0x8127) {

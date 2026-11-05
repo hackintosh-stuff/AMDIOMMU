@@ -133,11 +133,6 @@ bool org_example_AMDMapperProbe::publishHandler(
     org_example_AMDMapperProbe *self =
         (org_example_AMDMapperProbe *)target;
     if (!self || !newService) return true;
-    IOLog("AMDMapperProbe: publish name=%s\n", newService->getName());
-    self->fR44NotifyTotal++;
-    if (self->fR44Provider)
-        self->fR44Provider->setProperty("amdmapper-notify-total",
-                                        self->fR44NotifyTotal, 32);
     if (self->fR44Auto) {
         // One path for explicit requester offers and the legacy default.
         // It also marks known unselected clients for physical DMA.

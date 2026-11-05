@@ -136,12 +136,6 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
 
 // ===== AMDMapperProbe.cpp (original lines 7584..7713) =====
 bool org_example_AMDMapperProbe::start(IOService *provider) {
-    // R70-S5: a failed start() destroys the instance, so every stage is also
-    // recorded on the provider, which survives and is readable via ioreg.
-    fR44Provider = provider;
-    if (provider) provider->setProperty("amdmapper-stage", "enter");
-    IOLog("AMDMapperProbe: start enter provider=%s\n",
-          provider ? provider->getName() : "?");
     setProperty("m1b-stage", "0-entered-start");
 
     // 安全闸门：必须在 super::start() 之前。
@@ -149,14 +143,10 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
     fIsSystem = false;
 
     if (!super::start(provider)) {
-        IOLog("AMDMapperProbe: super::start failed\n");
-        if (provider) provider->setProperty("amdmapper-stage", "super-start-FAILED");
         setProperty("m1b-stage", "1-super-start-FAILED");
         return false;
     }
     setProperty("m1b-stage", "2-super-start-ok");
-    if (provider) provider->setProperty("amdmapper-stage", "super-ok");
-    IOLog("AMDMapperProbe: super::start ok owner=%d\n", fR52Owner ? 1 : 0);
     if (fR52Owner) {
         // This instance is attached to the controller service, not matched to
         // PCI. The owner prepares its domain before publishing iommu-parent.

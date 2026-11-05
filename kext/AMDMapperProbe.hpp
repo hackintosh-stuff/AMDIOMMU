@@ -134,10 +134,6 @@ private:
     // entry is the default and reproduces the accepted ABI3 arena exactly; a
     // domain may only be prepared after the profile's page-table area exists.
     // S2 derives the profile per device; a boot argument forces it for all.
-    // S5d: failure breadcrumbs are written on the provider (IOResources)
-    // because a failed start() destroys the instance before a read.
-    IOService *fR44Provider = nullptr;
-    UInt32 fR44NotifyTotal = 0;
     r44mapper::Profile fR44Profile = r44mapper::kProfileLegacy;
     bool fR44ProfileForced = false;
     bool r44SelectProfile();
