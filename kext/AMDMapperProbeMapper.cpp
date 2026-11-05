@@ -45,12 +45,12 @@ struct org_example_AMDMapperProbe::R44MapperState {
     // A naturally placed span fits the smallest AMD range command for its
     // length. Reserve only the requested pages. A failed first-fit search
     // does not modify the allocator, so fragmented pools keep their capacity.
-    bool allocateRange(unsigned pages, unsigned &base, unsigned required) {
+    bool allocateRange(unsigned count, unsigned &base, unsigned required) {
         unsigned preferred = required; // caller supplied a nonzero power of two
-        while (preferred < pages) preferred <<= 1;
-        if (preferred != required && amdtx::allocate(allocator, pages, base, preferred))
+        while (preferred < count) preferred <<= 1;
+        if (preferred != required && amdtx::allocate(allocator, count, base, preferred))
             return true;
-        return amdtx::allocate(allocator, pages, base, required);
+        return amdtx::allocate(allocator, count, base, required);
     }
 
     unsigned nextSlot(unsigned from, bool occupied) const {
@@ -111,16 +111,10 @@ bool org_example_AMDMapperProbe::r44PrepareMappings(
     const UInt32 leavesCount = profile.pages / 512;
     const UInt64 words = (profile.records + 63) / 64;
     const UInt64 pageWords = (profile.pages + 63) / 64;
-    // One block keeps allocation/free symmetric; all offsets are 8-byte safe.
-    UInt64 blockBytes = 0;
-    blockBytes += (UInt64)profile.records * sizeof(R44MapperState::Mapping);
-    blockBytes += (UInt64)profile.pages * sizeof(UInt64);      // physicalByPage
-    blockBytes += (UInt64)profile.pages * sizeof(UInt16);      // slotByStartPage
-    blockBytes += words * sizeof(amdtx::u64);                  // liveSlots
-    blockBytes += (UInt64)leavesCount * sizeof(volatile UInt64 *);
-    blockBytes += 2 * pageWords * sizeof(amdtx::u64);          // used/ever
-    blockBytes = (blockBytes + 4095ULL) & ~4095ULL;
-    if (!blockBytes || blockBytes > (64ULL << 20)) return false;
+    // The arithmetic lives in the ABI header so tests/ can verify it without
+    // compiling the kext; it must match the carve order below exactly.
+    const UInt64 blockBytes = r44mapper::arenaBytesFor(profile);
+    if (!blockBytes || blockBytes > r44mapper::kMaxArenaBytes) return false;
     auto *d = (R44MapperState *)IOMalloc(sizeof(R44MapperState));
     if (!d) return false;
     bzero(d, sizeof(*d));

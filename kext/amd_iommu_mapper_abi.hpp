@@ -87,6 +87,27 @@ inline bool sameProfileName(const char *a, const char *b) {
     while (*a && *a == *b) { ++a; ++b; }
     return *a == *b;
 }
+
+// Bytes a domain reserves for the capacity-dependent arrays: record slots,
+// physical-by-page index, per-start-page slot map, liveness bitmap, leaf
+// pointers and the allocator's two bitmaps. Page tables are separate
+// (Profile::tablePages). Kept here so tests/ can check the arithmetic without
+// compiling the kext.
+static constexpr uint32_t kMappingBytes = 16 + sizeof(RecordHeader); // 2 pointers + header
+static_assert(kMappingBytes == 120, "one record slot is two pointers plus the ABI3 header");
+static constexpr uint64_t kMaxArenaBytes = 64ULL << 20;
+
+inline uint64_t arenaBytesFor(const Profile &p) {
+    const uint64_t words = ((uint64_t)p.records + 63) / 64;
+    const uint64_t pageWords = ((uint64_t)p.pages + 63) / 64;
+    uint64_t bytes = (uint64_t)p.records * kMappingBytes;
+    bytes += (uint64_t)p.pages * sizeof(uint64_t);   // physicalByPage
+    bytes += (uint64_t)p.pages * sizeof(uint16_t);   // slotByStartPage
+    bytes += words * sizeof(uint64_t);               // liveSlots
+    bytes += ((uint64_t)p.pages / 512) * sizeof(uint64_t *); // leaves
+    bytes += 2 * pageWords * sizeof(uint64_t);       // allocator used/ever
+    return (bytes + 4095ULL) & ~4095ULL;
+}
 // Unknown names must not silently fall back: the caller publishes the request
 // and keeps the legacy arena, so a typo can never widen the pool.
 inline const Profile *profileForName(const char *name) {

@@ -53,6 +53,23 @@ printf '\n== kext core regressions ==\n'
     -o "$WORK/pte-core-test"
 "$WORK/pte-core-test"
 
+# ---- R70 S1: the capacity model ------------------------------------------
+#
+# The ordinary mapper's arena is now sized by a profile instead of compile-time
+# constants. Two things must therefore hold, and both are checked here rather
+# than trusted:
+#
+#   1. the runtime-sized allocator is indistinguishable from the compile-time
+#      one it replaced (the legacy profile has to stay byte-compatible with
+#      R67-2), and
+#   2. the profile table and the arena arithmetic match the documented values,
+#      so a widened window is a reviewed number, not an accident.
+printf '\n== R70 capacity model ==\n'
+"$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g $SAN_FLAGS \
+    -I "$ROOT/kext" "$ROOT/tests/r70-capacity-test.cpp" \
+    -o "$WORK/r70-capacity-test"
+"$WORK/r70-capacity-test"
+
 # ---- round 12: the two cores that decide the verdict --------------------
 #
 # WHY THESE ARE HERE AND NOT IN A ONE-OFF BINARY
@@ -225,10 +242,10 @@ printf '\n== round-12 archive replay ==\n'
 python3 "$ROOT/tools/r13/replay-archives.py"
 
 printf 'TEST_OK=%s\nINSPECTOR=%s\n' "$WORK/offline-tests" "$WORK/ivrs-inspect"
-printf 'CORE_OK=%s %s %s %s %s %s\n' "$WORK/dma-observe-test" \
+printf 'CORE_OK=%s %s %s %s %s %s %s\n' "$WORK/dma-observe-test" \
        "$WORK/pte-core-test" "$WORK/obs-write-test" \
        "$WORK/bizwalk-core-test" "$WORK/evidence-gate-test" \
-       "$WORK/rxpost-test"
+       "$WORK/rxpost-test" "$WORK/r70-capacity-test"
 (cd "$ROOT" && shasum -a 256 include/amd_iommu/*.hpp src/*.cpp \
     kext/amd_iommu_*.hpp kext/AMDMapperProbe*.cpp kext/AMDMapperProbe*.hpp \
     tools/lucy-obs/*.hpp \
