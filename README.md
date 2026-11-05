@@ -44,6 +44,17 @@ the fallback step and `native-legacy` unchanged for Lucy/RTL8111. Not measured:
 concurrent multi-flow 10 GbE, the AVB path, and sustained 10 GbE business.
 Closure: probe ejected from the ESP, EFI and NVRAM back to `amdiommu=off`.
 
+Prep for a ConnectX-4 Lx (no card installed yet, untested on hardware):
+`183443a` moves the mapper to ABI4 (per-map bound 256 pages / 1 MiB,
+`Record` 2152 B, `Snapshot` 4544 B, `kVersion` 4, tool layout `{4: …}`),
+raises the domain limit to three and parses 1-3 requester IDs;
+`e645f66` admits `15b3:1015` as profile `connectx-25g` (1 GiB) before the
+claim-path gate. Still unknown: whether Apple's MLX5 dext asks for a device
+mapper or `gSystem` (we publish none), the MLX5 run count limit (`kRuns` stays
+128), and the real 25G capacity. The first CX4 boot must be `amdiommu=off`
+first, then probe-only with `amdiommu_devices=<cx4>` and an immediate
+`granted-connectx-25g` check.
+
 ## Round69 / AppleEthernetRL on the AMD mapper — BLOCKED, panic preserved
 
 Base: `bcb3d662f57ab8dbc330067ba7ac30f88925db88` (accepted R67-2). R69 adds
