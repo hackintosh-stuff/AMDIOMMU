@@ -402,6 +402,11 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         }
         record.tMapComplete = mach_absolute_time(); record.state |= r44mapper::kMapConfirmed;
         ++s.mapOk;
+        // Mirror the counters the S3 measurement reads; published outside the
+        // lock by r69PublishCapacity() only when they change.
+        fR69MapOk = s.mapOk;
+        fR69LiveMaps = s.liveCount; fR69LivePages = s.livePages;
+        fR69PeakMaps = s.peakMaps; fR69PeakPages = s.peakPages;
         if (bits == 32) ++d->map32Ok;
         if (highPages) ++d->mapHighPAOk;
         d->mappedHighPAPages += highPages;
@@ -427,15 +432,39 @@ void org_example_AMDMapperProbe::r69PublishCapacity() {
     const UInt64 rejects = (UInt64)fR69RejectedLength + fR69RejectedOptions +
         fR69RejectedLayout + fR69RejectedRecords + fR69RejectedNoRange +
         fR69RejectedBits;
-    if (fR69MaxLength == fR69PublishedMaxLength &&
-        fR69MaxPages == fR69PublishedMaxPages &&
-        fR69MaxRuns == fR69PublishedMaxRuns &&
-        rejects == fR69PublishedRejects)
-        return;
+    // Peak/max/reject changes are rare and must be published immediately. The
+    // monotonic counters move on every map, so they are only republished once
+    // 128 of them accumulate: this keeps the DMA path out of the registry for
+    // all but one call in 128.
+    const bool rareChange =
+        fR69MaxLength != fR69PublishedMaxLength ||
+        fR69MaxPages != fR69PublishedMaxPages ||
+        fR69MaxRuns != fR69PublishedMaxRuns ||
+        rejects != fR69PublishedRejects ||
+        fR69PeakMaps != fR69PublishedPeakMaps ||
+        fR69PeakPages != fR69PublishedPeakPages;
+    const bool liveChange =
+        fR69LiveMaps != fR69PublishedLiveMaps ||
+        fR69LivePages != fR69PublishedLivePages ||
+        fR69MapOk - fR69PublishedMapOk >= 128 ||
+        fR69UnmapOk - fR69PublishedUnmapOk >= 128;
+    if (!rareChange && !liveChange) return;
     fR69PublishedMaxLength = fR69MaxLength;
     fR69PublishedMaxPages = fR69MaxPages;
     fR69PublishedMaxRuns = fR69MaxRuns;
     fR69PublishedRejects = rejects;
+    fR69PublishedMapOk = fR69MapOk;
+    fR69PublishedUnmapOk = fR69UnmapOk;
+    fR69PublishedLiveMaps = fR69LiveMaps;
+    fR69PublishedLivePages = fR69LivePages;
+    fR69PublishedPeakMaps = fR69PeakMaps;
+    fR69PublishedPeakPages = fR69PeakPages;
+    setProperty("r44-map-ok-live", fR69MapOk, 64);
+    setProperty("r44-unmap-ok-live", fR69UnmapOk, 64);
+    setProperty("r44-live-maps-live", fR69LiveMaps, 32);
+    setProperty("r44-live-pages-live", fR69LivePages, 32);
+    setProperty("r44-peak-maps-live", fR69PeakMaps, 32);
+    setProperty("r44-peak-pages-live", fR69PeakPages, 32);
     setProperty("r69-max-map-length", fR69MaxLength, 64);
     setProperty("r69-max-map-pages", fR69MaxPages, 64);
     setProperty("r69-max-map-runs", fR69MaxRuns, 64);
@@ -499,6 +528,8 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
         }
         d->slotByStartPage[page] = 0;
         --s.liveCount; ++s.unmapOk;
+        fR69UnmapOk = s.unmapOk;
+        fR69LiveMaps = s.liveCount; fR69LivePages = s.livePages;
         s.lastUnmapAt = record.tUnmapComplete;
         d->setSlotLive(slot, false);
         mapping.memory = nullptr; mapping.command = nullptr;

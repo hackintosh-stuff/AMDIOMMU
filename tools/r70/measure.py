@@ -26,6 +26,8 @@ import time
 
 PROBE_KEYS = (
     'r44-map-ok', 'r44-unmap-ok', 'r44-live-maps', 'r44-live-pages',
+    'r44-map-ok-live', 'r44-unmap-ok-live', 'r44-live-maps-live',
+    'r44-live-pages-live', 'r44-peak-maps-live', 'r44-peak-pages-live',
     'r44-peak-maps', 'r44-peak-pages', 'r44-map-rejected', 'r44-unmap-rejected',
     'r69-max-map-length', 'r69-max-map-pages', 'r69-max-map-runs',
     'r69-rejects-length', 'r69-rejects-options', 'r69-rejects-layout',

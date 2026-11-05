@@ -116,6 +116,16 @@ private:
     UInt64 fR69MaxLength = 0, fR69MaxPages = 0, fR69MaxRuns = 0;
     UInt64 fR69PublishedMaxLength = 0, fR69PublishedMaxPages = 0,
            fR69PublishedMaxRuns = 0, fR69PublishedRejects = 0;
+    // Capacity measurement: the live counters are only in the snapshot blob,
+    // which is republished on prepare/PM boundaries. Mirror the ones the S3
+    // measurement needs and publish them when they change, so a read never
+    // has to force a snapshot from user space.
+    UInt64 fR69MapOk = 0, fR69UnmapOk = 0;
+    UInt32 fR69LiveMaps = 0, fR69LivePages = 0,
+           fR69PeakMaps = 0, fR69PeakPages = 0;
+    UInt64 fR69PublishedMapOk = ~0ULL, fR69PublishedUnmapOk = ~0ULL;
+    UInt32 fR69PublishedLiveMaps = ~0U, fR69PublishedLivePages = ~0U,
+           fR69PublishedPeakMaps = ~0U, fR69PublishedPeakPages = ~0U;
     UInt32 fR69RejectedLength = 0, fR69RejectedOptions = 0,
            fR69RejectedLayout = 0, fR69RejectedRecords = 0,
            fR69RejectedNoRange = 0, fR69RejectedBits = 0;
