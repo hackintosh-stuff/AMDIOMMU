@@ -136,6 +136,10 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
 
 // ===== AMDMapperProbe.cpp (original lines 7584..7713) =====
 bool org_example_AMDMapperProbe::start(IOService *provider) {
+    // R70-S5: the personality once stopped instantiating, so the first line
+    // must leave a kernel-log breadcrumb even if the instance dies at once.
+    IOLog("AMDMapperProbe: start enter provider=%s\n",
+          provider ? provider->getName() : "?");
     setProperty("m1b-stage", "0-entered-start");
 
     // 安全闸门：必须在 super::start() 之前。
@@ -143,10 +147,12 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
     fIsSystem = false;
 
     if (!super::start(provider)) {
+        IOLog("AMDMapperProbe: super::start failed\n");
         setProperty("m1b-stage", "1-super-start-FAILED");
         return false;
     }
     setProperty("m1b-stage", "2-super-start-ok");
+    IOLog("AMDMapperProbe: super::start ok owner=%d\n", fR52Owner ? 1 : 0);
     if (fR52Owner) {
         // This instance is attached to the controller service, not matched to
         // PCI. The owner prepares its domain before publishing iommu-parent.
@@ -802,7 +808,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.84.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.85.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;
