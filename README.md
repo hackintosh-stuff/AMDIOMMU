@@ -1,5 +1,41 @@
 # AMDIOMMU — authoritative source repository
 
+## Round70 S5 / Mellanox ConnectX-6 Dx attached to the mapper — maps flowing, dext init pending
+
+Base: `8b684d4` (R70 prep). After the Apple MLX5 dext proved unable to talk to
+either a CX4 Lx (unsupported, firmware upgraded 14.21.2320→14.32.1010 via
+mstflint and still rejected at `QUERY_HCA_CAP`) or a CX6 Dx without a mapper
+(command timeouts → dext self-panic → `IOUserServer has crashed too many
+times`), this round wired the CX6 Dx (`15b3:101d`) to our mapper and got real
+DMA flowing through it.
+
+Chain: `060510c` (0.94.0). `4eb7b64`/`f78f296` moved the failure breadcrumbs
+onto the provider node (`amdmapper-*` properties under IOResources), which is
+how two traps were found: (1) this kernel's `PE_parse_boot_argn` rewrites an
+all-digit boot-arg value into a 32-bit integer inside the caller's buffer
+(`3400` arrived as bytes `48 0D`), so the device selector now uses a non-hex
+prefix (`n2200,n2201`) and the parser skips every non-hex byte; (2) the
+IORegistry `pcidebug` string is **decimal** — the CX6 sits at 22:00.x
+(`getBusNumber()`=0x22), not 34:00 as read as hex, which is why the first
+selector never matched. `75f5981`+`cbacf6f` dropped `configRead16` from the
+attach path (a config cycle on the CX6 stalled the notification thread —
+the serial log showed everything stopping after `auto-start enter`) in favour
+of the device-tree `vendor-id`/`device-id` properties.
+
+With the selector matching, both CX6 functions attached: two domains at
+`connectx-25g` (65535 records / 1 GiB, 516-page tables, 2.1 MB contiguous
+allocation ×2), `r44-parent=set-at-first-publish-autoattach`, and the Apple
+MLX5 dext got as far as `startInterface num_channels 6` with **241/244 maps
+flowing through the mapper and zero target faults** — the first third-party
+client DMA served by the mapper since R67-2. Remote iteration was made safe by
+`Kernel > Block` disabling the MLX5 dext personality (it does reach dexts),
+and by removing `serial=5` after the AX99100 console turned recoverable dext
+errors into full hangs. Remaining: the firmware health monitor reports
+`device's health compromised` 1.5 s after `startInterface` (likely dirt left
+by the earlier failed boots; cold power cycle pending), and the admission
+string for the connectx profile was mislabelled until `060510c`. Full trail in
+`docs/m2-3bb-round70-mellanox-personality.md`.
+
 ## Round70 / capacity model: S1+S2 implemented, S3 measurement boot — BLOCKED (hang, no panic)
 
 Base: `1fa228e` (R69 evidence archive). S1 `7aa457c` turns the ordinary
