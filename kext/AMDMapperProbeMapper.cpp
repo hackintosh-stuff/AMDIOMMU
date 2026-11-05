@@ -405,8 +405,12 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         // Mirror the counters the S3 measurement reads; published outside the
         // lock by r69PublishCapacity() only when they change.
         fR69MapOk = s.mapOk;
-        fR69LiveMaps = s.liveCount; fR69LivePages = s.livePages;
-        fR69PeakMaps = s.peakMaps; fR69PeakPages = s.peakPages;
+        // s.livePages/s.peakPages are only refreshed when a snapshot is
+        // published, so read the allocator directly for the measurement.
+        fR69LiveMaps = s.liveCount;
+        fR69LivePages = d->allocator.livePages;
+        fR69PeakMaps = s.peakMaps;
+        fR69PeakPages = d->allocator.peakPages;
         if (bits == 32) ++d->map32Ok;
         if (highPages) ++d->mapHighPAOk;
         d->mappedHighPAPages += highPages;
@@ -529,7 +533,8 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
         d->slotByStartPage[page] = 0;
         --s.liveCount; ++s.unmapOk;
         fR69UnmapOk = s.unmapOk;
-        fR69LiveMaps = s.liveCount; fR69LivePages = s.livePages;
+        fR69LiveMaps = s.liveCount;
+        fR69LivePages = d->allocator.livePages;
         s.lastUnmapAt = record.tUnmapComplete;
         d->setSlotLive(slot, false);
         mapping.memory = nullptr; mapping.command = nullptr;
