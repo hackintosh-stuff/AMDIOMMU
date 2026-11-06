@@ -71,15 +71,12 @@ counters), `pm-*` (suspend/resume), `dma-*` (DMA park gate), plus standalone
 keys such as `probe-stage`, `publish-notifier`, `device-selection`,
 `snapshot-domains` and `admission`.
 
-Current example (CX4 Lx on this machine). No profile argument is needed because
+Current example (ConnectX-4 Lx). No profile argument is needed because
 the arena now follows demand:
 
 ```
 amdiommu=auto-attach amdiommu_devices=n2300,n2301
 ```
-
-`serial=5`, `io=0xffffffff`, `debug=` and `-v` are XNU/OpenCore arguments, **not**
-parsed by this kext.
 
 ### Default device selection from Info.plist
 
