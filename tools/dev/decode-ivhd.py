@@ -18,11 +18,13 @@ logs EVENT_TYPE_IOTLB_INV_TO (0x7) and the translation is never made valid.
 
 IVHD common prefix (docs/ivrs-format.md:46): type u8 at 0, flags u8 at 1,
 length u16 at 2, DeviceID u16 at 4.
+
+Usage: decode-ivhd.py <IVRS-blob.bin>
+The blob is the raw IVRS table, captured once per board; nothing is assumed
+about which board it came from.
 """
 import struct
 import sys
-
-FIXTURE = "fixtures/IVRS-msi-x570-gaming-edge-wifi-20261029.bin"
 
 # Linux v6.6 init.c:2687-2701, amd_iommu_types.h IVHD_FLAG_* masks
 IVHD_FLAG_HT_TUN_EN_MASK = 0x01
@@ -43,9 +45,17 @@ FLAG_NAMES = [
 ]
 
 
-def main():
-    with open(FIXTURE, "rb") as f:
-        blob = f.read()
+def main(argv):
+    if len(argv) != 2:
+        print("usage: decode-ivhd.py <IVRS-blob.bin>", file=sys.stderr)
+        return 2
+    path = argv[1]
+    try:
+        with open(path, "rb") as f:
+            blob = f.read()
+    except OSError as exc:
+        print("cannot read {}: {}".format(path, exc), file=sys.stderr)
+        return 2
 
     total_len = struct.unpack_from("<I", blob, 4)[0]
     print("IVRS length = {} bytes".format(total_len))
@@ -94,11 +104,8 @@ def main():
         return 1
 
     print("=" * 62)
-    print("iommu_init_flags() effect for this board")
     print("IVHD flags byte = 0x{:02X}".format(ivhd_flags))
     print()
-    print("  CONTROL_COHERENT_EN  (bit10) = ALWAYS SET  (unconditional)")
-    print("  IOTLB inv timeout            = ALWAYS SET  (CTRL_INV_TO_1S)")
     for mask, bit, name in [
         (IVHD_FLAG_HT_TUN_EN_MASK, 1, "CONTROL_HT_TUN_EN"),
         (IVHD_FLAG_PASSPW_EN_MASK, 8, "CONTROL_PASSPW_EN"),
@@ -108,14 +115,8 @@ def main():
         on = bool(ivhd_flags & mask)
         print("  {:<20} (bit{:>2}) = {}".format(
             name, bit, "SET" if on else "cleared"))
-    print()
-    print("CONTROL baseline measured on this machine = 0x220000000400")
-    print("  -> bit10 already 1, bit1/8/9/11 already 0")
-    print("  -> the conditional flags therefore change NOTHING")
-    print("  -> but the IOTLB invalidation TIMEOUT bits (5..7) are the one")
-    print("     thing iommu_init_flags() would still add, and we never do.")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv))
