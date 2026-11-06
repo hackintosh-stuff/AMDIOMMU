@@ -63,7 +63,7 @@ def rmtree_force(path):
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 WORK = os.path.join(ROOT, 'build-work-r12', 'en2')
-CURRENT = os.path.join(ROOT, 'tools', 'en2-run.sh')
+CURRENT = os.path.join(ROOT, 'tools', 'dev', 'en2-run.sh')
 
 FAILS = []
 
