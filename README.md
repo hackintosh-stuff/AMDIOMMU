@@ -85,6 +85,22 @@ Available only with `AMD_MAPPER_PROBE_DEBUG=1`. The parsers live in
 | | `.batch<N>`, `.t0x<N>` / `.token<N>`, `.std`, `.alltx`, `.rxstd`, `.session` | Suffixes inside the same `amdiommu=` value, e.g. `amdiommu=pgt.batch512.t0x2a.std.alltx.rxstd.session`. The parser scans every `.key` segment; a separate trailing boot-arg is not a dependable channel on this kernel. |
 | `m2b2delay=<seconds>` | 1–300 | Delay before the one-shot M2-2b-2 page-table probe (default 20000 ms). |
 
+## Install location (target machine)
+
+The kext that actually runs is NOT installed in `/Library/Extensions` and is not
+part of the auxiliary kernel collection. It is deployed into the **OpenCore
+directory on the target machine's EFI system partition** and injected at boot:
+
+- Bundle: `<EFI system partition>/EFI/OC/Kexts/AMDMapperProbe.kext`
+- Enabled via `Kernel > Add` (`BundlePath = AMDMapperProbe.kext`) in the OC
+  `config.plist` on the same partition.
+
+Deploying a new build therefore means copying `build-m1a/AMDMapperProbe.kext`
+(or the debug variant) over that bundle and rebooting; the partition number of
+the EFI system partition varies, resolve it on the machine instead of hardcoding
+it. `build-m1a/` and `build-m1a-debug/` are build outputs only; they are not
+installed anywhere until copied to the ESP.
+
 ## Source and evidence policy
 
 - `kext/`, `tools/` are canonical implementation and generator inputs. `include/`, `src/`, `tests/`, `fixtures/`, `reference/` contain existing modules, tests and reference inputs.
