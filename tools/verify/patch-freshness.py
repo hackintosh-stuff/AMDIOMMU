@@ -42,7 +42,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-PATCH = os.path.join(ROOT, 'tools', 'apply-lucy-obs2.py')
+PATCH = os.path.join(ROOT, 'tools', 'build', 'patch-lucy-obs.py')
 WORK = os.path.join(ROOT, 'build-work-r13', 'freshness')
 
 FAILS = []
