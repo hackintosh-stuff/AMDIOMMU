@@ -10,3 +10,4 @@ __pycache__/
 *.kext/
 MacKernelSDK/
 /reference/
+/fixtures/

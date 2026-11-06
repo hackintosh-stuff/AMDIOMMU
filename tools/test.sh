@@ -239,7 +239,7 @@ printf 'CORE_OK=%s %s %s %s %s %s %s\n' "$WORK/dma-observe-test" \
     kext/amd_iommu_*.hpp kext/AMDMapperProbe*.cpp kext/AMDMapperProbe*.hpp \
     tools/lucy-obs/*.hpp \
     tests/*.cpp tests/InspectorSmoke.py tools/test.sh tools/dev/ivrs-inspect.cpp \
-    tools/verify/*.py fixtures/*.bin) \
+    tools/verify/*.py) \
     > "$WORK/test-source-manifest.sha256"
 printf '%s\n' "$WORK" > "$ROOT/latest-tests.txt"
 
