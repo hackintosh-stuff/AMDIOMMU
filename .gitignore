@@ -9,3 +9,4 @@ __pycache__/
 /latest-*-build.txt
 *.kext/
 MacKernelSDK/
+/reference/
