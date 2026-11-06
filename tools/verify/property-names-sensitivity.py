@@ -26,7 +26,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 SRC = os.path.join(ROOT, 'kext', 'AMDMapperProbeRxSetDebug.cpp')
-CHECKER = os.path.join(HERE, 'verify-property-names.py')
+CHECKER = os.path.join(HERE, 'property-names.py')
 
 FAILS = []
 
@@ -51,7 +51,7 @@ def run_checker(root):
     else:
         tools = os.path.join(root, 'tools', 'r14')
         os.makedirs(tools, exist_ok=True)
-        target = os.path.join(tools, 'verify-property-names.py')
+        target = os.path.join(tools, 'property-names.py')
         shutil.copy(CHECKER, target)
     r = subprocess.run([sys.executable, target],
                        capture_output=True, text=True)
