@@ -16,7 +16,7 @@ Hardware validation covers the **MSI MPG X570 GAMING EDGE WIFI with a Ryzen 5 36
 ## Conditions that decide compatibility
 
 - **Endpoint routing.** The driver reads the ACPI I/O Virtualization Reporting Structure (IVRS) to identify the IOMMU responsible for the selected PCIe device. It checks the controller's PCI capability and MMIO base against firmware. The production path handles PCI segment 0 and rejects a target that requires a requester-ID alias, redirection, or a nonzero IVHD device data setting.
-- **Controller state and capacity.** If firmware supplies an Extended Feature Register (EFR) value, it must agree with the hardware reading. The driver declines to take over a controller whose translation engine, command buffer, or event log is already enabled. Up to three selected devices can have translation domains, and they must share one IOMMU.
+- **Controller state and capacity.** If firmware supplies an Extended Feature Register (EFR) value, it must agree with the hardware reading. The driver declines to take over a controller whose translation engine, command buffer, or event log is already enabled. Up to 16 selected devices can have translation domains (slots allocated on demand), and they must share one IOMMU.
 - **Firmware memory requirements.** The parser recognizes I/O Virtualization Memory Definition (IVMD) entries. The production mapping path does not implement the reserved or unity mappings those entries can require for a device. The MSI firmware sample contains no IVMD entries, so its successful runs leave that case open.
 
 ## Hardware evidence and next validation

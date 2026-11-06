@@ -258,7 +258,7 @@ struct org_example_AMDMapperProbe::Controller {
 
 
 bool org_example_AMDMapperProbe::ReadDeviceSelection() {
-    char selection[32] = {};
+    char selection[128] = {};
     fSelectionExplicit = PE_parse_boot_argn("amdiommu_devices", selection,
                                               sizeof(selection) - 1);
     fRequesterCount = 0;
@@ -266,8 +266,8 @@ bool org_example_AMDMapperProbe::ReadDeviceSelection() {
         return ReadDefaultDevices();
     }
     // One to kMaxDomains four-hex-digit segment-zero requester IDs, no
-    // saved BDFs. The third slot is reserved for a Mellanox adapter next to the
-    // two RTL8127 ports; the selected-pair semantics are unchanged.
+    // saved BDFs. Slots are allocated on demand; the capacity matches the
+    // Info.plist default device list (16).
     // R70-S5f: values are written with a non-hex prefix (n3400) because the
     // kernel converts an all-digit boot-arg value into a 32-bit integer
     // inside the caller's buffer (observed: "3400" arrived as 0x0D48).

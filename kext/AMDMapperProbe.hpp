@@ -102,7 +102,10 @@ private:
     bool fAuto = false;
     // R52: the root owns the hardware; auto-device instances own one mapper.
     // fOwner is set before start() and must survive initHardware().
-    static constexpr UInt32 kMaxDomains = 3;
+    // Slots are allocated on demand: every matched device gets its own domain
+    // (page tables, IOVA arena, DTE) and they all share one IOMMU controller.
+    // 16 aligns the boot-arg/offer capacity with the Info.plist default list.
+    static constexpr UInt32 kMaxDomains = 16;
     org_example_AMDMapperProbe *fOwner = nullptr;
     org_example_AMDMapperProbe *fMappers[kMaxDomains] = {};
     IOLock *fAttachLock = nullptr;
