@@ -1,4 +1,4 @@
-// Persistent per-device hardware lifecycle for amdiommu=auto.
+// Persistent per-device hardware lifecycle for amdiommu=passive.
 // The experiment's timer, Lucy bindings and measurement windows are not used.
 #include "AMDMapperProbeInternal.hpp"
 #include "AMDMapperProbeDiscovery.hpp"
@@ -384,7 +384,7 @@ const mapper_abi::Profile *org_example_AMDMapperProbe::ProfileForDevice(
 
 bool org_example_AMDMapperProbe::StartAuto() {
     IOLog("AMDMapperProbe: auto-start enter\n");
-    setProperty("iommu-mode", "auto");
+    setProperty("iommu-mode", "passive");
     setProperty("iommu-role", "controller");
     setProperty("snapshot-consistency", "per-domain");
     setProperty("iommu-max-domains", kMaxDomains, 32);
@@ -399,8 +399,8 @@ bool org_example_AMDMapperProbe::StartAuto() {
     // R69: Apple's own Ethernet kexts only ask IOMapper::copyMapperForDevice(),
     // so they can never call AMDIOMMUClaimRequesterV1. amdiommu=auto-attach is
     // the only switch: it publishes iommu-parent at first publish (before their
-    // probe) for the selected requesters only. Plain amdiommu=auto keeps the
-    // offer/claim protocol intact.
+    // probe) for the selected requesters only. Plain amdiommu=passive keeps
+    // the offer/claim protocol intact.
     setProperty("auto-attach", fAutoAttach ? "yes" : "no");
     SelectProfile();
     fAttachLock = IOLockAlloc();

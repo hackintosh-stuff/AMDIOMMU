@@ -143,7 +143,7 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
 
 // ===== production-only member functions =====
 //
-// The main switch now accepts only amdiommu=auto and amdiommu=auto-attach.
+// The main switch now accepts only amdiommu=passive and amdiommu=auto-attach.
 // The retired M2 experiment modes (arm/mmio/write/table/enable/cmd/pgt*)
 // and their entry points live in AMDMapperProbeDebug.cpp, compiled by
 // tools/build-m1a-debug.sh with AMD_MAPPER_PROBE_DEBUG=1.
@@ -165,7 +165,7 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
     if (fOwner) {
         // Device instance attached to the controller service.
         fAuto = true;
-        setProperty("iommu-mode", "auto");
+        setProperty("iommu-mode", "passive");
         setProperty("iommu-role", "device");
         setProperty("iommu-system-mapper", "no");
         return true;
@@ -173,7 +173,7 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
 
     char mode[32] = {};
     fAuto = PE_parse_boot_argn("amdiommu", mode, sizeof(mode) - 1)
-            && (strcmp(mode, "auto") == 0 ||
+            && (strcmp(mode, "passive") == 0 ||
                 strcmp(mode, "auto-attach") == 0);
     fAutoAttach = fAuto && strcmp(mode, "auto-attach") == 0;
     if (fAuto) {

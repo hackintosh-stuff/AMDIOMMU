@@ -4,7 +4,7 @@
 #
 # Output: build-m1a-debug/AMDMapperProbe.kext
 # The production build (sh tools/build-m1a.sh) is unchanged and accepts
-# only amdiommu=auto / auto-attach.
+# only amdiommu=passive / auto-attach.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"

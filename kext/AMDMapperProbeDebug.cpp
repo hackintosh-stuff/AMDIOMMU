@@ -79,7 +79,7 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
         // This instance is attached to the controller service, not matched to
         // PCI. The owner prepares its domain before publishing iommu-parent.
         fAuto = true;
-        setProperty("iommu-mode", "auto");
+        setProperty("iommu-mode", "passive");
         setProperty("iommu-role", "device");
         setProperty("iommu-system-mapper", "no");
         return true;
@@ -87,11 +87,11 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
 
     char mode[32] = {};
     fAuto = PE_parse_boot_argn("amdiommu", mode, sizeof(mode) - 1)
-            && (strcmp(mode, "auto") == 0 ||
+            && (strcmp(mode, "passive") == 0 ||
                 strcmp(mode, "auto-attach") == 0);
     // R69: "auto-attach" additionally publishes iommu-parent at first publish,
     // because Apple's own kexts only call IOMapper::copyMapperForDevice() and
-    // can never invoke the AMDIOMMUClaimRequesterV1 handshake. Plain "auto"
+    // can never invoke the AMDIOMMUClaimRequesterV1 handshake. Plain "passive"
     // keeps the R54..R67 claim protocol and its analysis exactly as validated.
     fAutoAttach = fAuto && strcmp(mode, "auto-attach") == 0;
     if (fAuto) {

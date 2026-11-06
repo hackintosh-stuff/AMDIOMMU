@@ -18,7 +18,7 @@ HEADERS="$SDK/System/Library/Frameworks/Kernel.framework/Versions/A/Headers"
 # PROBE_DEBUG=1 selects the Debug variant: the retired M2 experiment
 # subsystem (kext/*Debug.cpp) is compiled back in, restoring the historical
 # amdiommu=arm/mmio/write/table/enable/cmd/pgt* modes. The default production
-# build accepts only amdiommu=auto / auto-attach.
+# build accepts only amdiommu=passive / auto-attach.
 PROBE_DEBUG=${PROBE_DEBUG:-0}
 if [ "$PROBE_DEBUG" = "1" ]; then
     W="$ROOT/build-m1a-debug"

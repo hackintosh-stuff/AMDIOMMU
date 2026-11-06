@@ -2,7 +2,7 @@
 // modes (arm/mmio/write/table/enable/cmd/pgt/pgt4k/pgthold/pgtsleep/pgt3l).
 //
 // Only included by the Debug build (AMD_MAPPER_PROBE_DEBUG=1); the production
-// build's main switch accepts just amdiommu=auto / auto-attach. The legacy
+// build's main switch accepts just amdiommu=passive / auto-attach. The legacy
 // experiment modules live in kext/*Debug.cpp and are built by
 // tools/build-m1a-debug.sh.
 
