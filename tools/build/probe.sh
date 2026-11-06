@@ -55,7 +55,10 @@ SRCS="kext/AMDMapperProbe.cpp \
 # retired M2 experiment stages.
 DEBUG_SRCS="kext/AMDMapperProbeDebug.cpp \
       kext/AMDMapperProbeNicDebug.cpp \
-      kext/AMDMapperProbeB1B2Debug.cpp \
+      kext/AMDMapperProbeMapperBindingDebug.cpp \
+      kext/AMDMapperProbeDmaContractDebug.cpp \
+      kext/AMDMapperProbeContigMapDebug.cpp \
+      kext/AMDMapperProbeMapTableDebug.cpp
       kext/AMDMapperProbeMmioDebug.cpp \
       kext/AMDMapperProbeTableDebug.cpp \
       kext/AMDMapperProbeDmaDebug.cpp \

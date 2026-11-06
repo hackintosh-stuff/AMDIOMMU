@@ -1,4 +1,5 @@
-// AMDMapperProbeB1B2.cpp -- M1 mapper self-tests (B1, B2, B2a, B2b)
+// AMDMapperProbeContigMapDebug.cpp -- M1 B2-a: a physically contiguous buffer must
+// map, a fragmented one must be rejected, and both verdicts come from count deltas.
 //
 // Part of the AMDMapperProbe kext. Split out of the original
 // single-file AMDMapperProbe.cpp by tools/dev/split-probe.py; the
@@ -52,125 +53,7 @@
 
 #include "AMDMapperProbeInternal.hpp"
 
-// ===== AMDMapperProbeB1B2.cpp (original lines 217..242) =====
-// ------------------------------------------------------------------ B1 self-test
-
-void org_maz1_AMDMapperProbe::runB1SelfTest() {
-    if (!fTarget) {
-        setProperty("m1b-selftest", "SKIP-no-target");
-        return;
-    }
-
-    IOMapper *before = probeRawMapper(fTarget);
-    if (before) {
-        setProperty("m1b-selftest", "ABORT-pre-existing-mapper");
-        return;
-    }
-    setProperty("m1b-before", "NULL-as-expected");
-
-    fTarget->setProperty("iommu-parent", this);
-
-    IOMapper *after = probeRawMapper(fTarget);
-    if (after == this) {
-        setProperty("m1b-selftest", "PASS-real-device-found-our-mapper");
-    } else if (after) {
-        setProperty("m1b-selftest", "FAIL-wrong-mapper");
-    } else {
-        setProperty("m1b-selftest", "FAIL-still-NULL");
-    }
-}
-
-// ===== AMDMapperProbeB1B2.cpp (original lines 308..392) =====
-// ---------------------------------------------------------------- B2-0 self-test
-
-// Run a real IODMACommand flow using our own buffer and mapper.
-//
-// This reproduces exactly what RTL812xLucy does to its descriptor ring:
-//     IODMACommand::withSpecification(..., mapper, NULL)
-//     setMemoryDescriptor(md)   <- internally calls our iovmMapMemory
-//
-// No hardware is involved at any point: the buffer is ours, and the IOVA is
-// never used by any device.
-void org_maz1_AMDMapperProbe::runB2SelfTest() {
-    const IOByteCount kBufSize = 16 * 4096;
-
-    IOBufferMemoryDescriptor *bmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-        kernel_task,
-        kIODirectionInOut | kIOMemoryPhysicallyContiguous,
-        kBufSize,
-        0xFFFFFFFFFFFFFF00ULL);
-    if (!bmd) {
-        setProperty("m1b2-alloc", "FAIL-buffer");
-        return;
-    }
-    setProperty("m1b2-alloc", "OK");
-    setHexProperty(this, "m1b2-bufsize", kBufSize);
-
-    if (bmd->prepare() != kIOReturnSuccess) {
-        setProperty("m1b2-prepare", "FAIL");
-        bmd->release();
-        return;
-    }
-    setProperty("m1b2-prepare", "OK");
-
-    // Pass our mapper explicitly -- identical to how the Lucy driver uses it.
-    IODMACommand *cmd = IODMACommand::withSpecification(
-        kIODMACommandOutputHost64,
-        64,             // numAddressBits
-        0,              // maxSegmentSize
-        IODMACommand::kMapped,
-        0,              // maxTransferSize
-        1,              // alignment
-        this,           // mapper <- the key point: OUR mapper
-        NULL);
-    if (!cmd) {
-        setProperty("m1b2-cmd", "FAIL-withSpecification");
-        bmd->complete();
-        bmd->release();
-        return;
-    }
-    setProperty("m1b2-cmd", "OK");
-
-    // This line triggers iovmMapMemory (via the multi-segment path inside
-    // prepare). Note: B2-0 deliberately keeps the window **closed**, behaving
-    // exactly like 0.4.0, so results from two deployments are directly
-    // comparable and do not lose the baseline because the implementation
-    // changed. The success path is observed by B2-a, which follows.
-    // fProbeCallActive tells iovmMapMemory that the probe itself initiated
-    // this call, so this (doomed-to-fail) call is not miscounted as a real
-    // device call.
-    fProbeCallActive = true;
-    IOReturn ret = cmd->setMemoryDescriptor(bmd);
-    fProbeCallActive = false;
-
-    setHexProperty(this, "m1b2-setmd-ret", (uint64_t)(uint32_t)ret);
-    setProperty("m1b2-setmd",
-        (ret == kIOReturnSuccess) ? "SUCCESS" : "FAILED-as-expected");
-    setHexProperty(this, "m1b2-mapcalls", fMapCalls);
-
-    if (ret == kIOReturnSuccess) {
-        IODMACommand::Segment64 seg;
-        UInt64 offset = 0;
-        UInt32 numSegs = 1;
-
-        if (cmd->gen64IOVMSegments(&offset, &seg, &numSegs) == kIOReturnSuccess) {
-            setProperty("m1b2-gen64", "OK");
-            setHexProperty(this, "m1b2-seg0-iova", seg.fIOVMAddr);
-            setHexProperty(this, "m1b2-seg0-len", seg.fLength);
-        } else {
-            setProperty("m1b2-gen64", "FAILED");
-        }
-        cmd->clearMemoryDescriptor();
-    }
-
-    cmd->release();
-    bmd->complete();
-    bmd->release();
-
-    setProperty("m1b2-done", "yes");
-}
-
-// ===== AMDMapperProbeB1B2.cpp (original lines 394..487) =====
+// ===== split from AMDMapperProbe.cpp: original lines 394..487 =====
 // ---------------------------------------------------------------- B2-a self-test
 //
 // Two comparison cases:
@@ -270,7 +153,7 @@ void org_maz1_AMDMapperProbe::runB2OneTest(
     bmd->release();
 }
 
-// ===== AMDMapperProbeB1B2.cpp (original lines 489..521) =====
+// ===== split from AMDMapperProbe.cpp: original lines 489..521 =====
 void org_maz1_AMDMapperProbe::runB2aSelfTest() {
     // B2-0 just ran once (window closed -> counted in rejectOther). Zero
     // B2-a's own counters first so the numbers reported below reflect only
@@ -308,74 +191,3 @@ void org_maz1_AMDMapperProbe::runB2aSelfTest() {
     }
 }
 
-// ===== AMDMapperProbeB1B2.cpp (original lines 523..540) =====
-// ------------------------------------------------------ B2-b mapping table operations
-//
-// Identity mappings need no page table, but we must **remember which ranges
-// were mapped**, otherwise mapToPhysicalAddress cannot distinguish "what we
-// mapped" from "what someone asked about", and unmap cannot validate its
-// arguments.
-
-org_maz1_AMDMapperProbe::MapEntry *
-org_maz1_AMDMapperProbe::allocMapEntry() {
-    for (int i = 0; i < kMaxActiveMaps; i++) {
-        if (!fMaps[i].used) {
-            fMaps[i].used = true;
-            uint32_t n = usedMapEntries();
-            if (n > fTablePeak) fTablePeak = n;
-            return &fMaps[i];
-        }
-    }
-    return nullptr;     // table full
-}
-
-// ===== AMDMapperProbeB1B2.cpp (original lines 542..554) =====
-// Release by exact (pa,len) match. Under identity mapping pa is the IOVA, and
-// on unmap the kernel passes back exactly the value we originally returned
-// (IOMemoryDescriptor::dmaUnmap -> iovmUnmapMemory).
-bool org_maz1_AMDMapperProbe::freeMapEntry(uint64_t pa, uint64_t len) {
-    for (int i = 0; i < kMaxActiveMaps; i++) {
-        if (fMaps[i].used && fMaps[i].pa == pa && fMaps[i].len == len) {
-            fMaps[i].used = false;
-            fMaps[i].pa = 0;
-            fMaps[i].len = 0;
-            return true;
-        }
-    }
-    return false;
-}
-
-// ===== AMDMapperProbeB1B2.cpp (original lines 556..562) =====
-uint32_t org_maz1_AMDMapperProbe::usedMapEntries() {
-    uint32_t n = 0;
-    for (int i = 0; i < kMaxActiveMaps; i++) {
-        if (fMaps[i].used) n++;
-    }
-    return n;
-}
-
-// ===== AMDMapperProbeB1B2.cpp (original lines 564..573) =====
-void org_maz1_AMDMapperProbe::publishB2bStats() {
-    setHexProperty(this, "m1bb-realmapcalls", fRealMapCalls);
-    setHexProperty(this, "m1bb-realmapok", fRealMapOk);
-    setHexProperty(this, "m1bb-realfrag", fRealMapRejectFrag);
-    setHexProperty(this, "m1bb-realnoslot", fRealMapRejectNoSlot);
-    setHexProperty(this, "m1bb-realunmap", fRealUnmapCalls);
-    setHexProperty(this, "m1bb-tablepeak", fTablePeak);
-    setHexProperty(this, "m1bb-tableused", usedMapEntries());
-    setHexProperty(this, "m1bb-publishhits", fPublishHits);
-}
-
-// ===== AMDMapperProbeB1B2.cpp (original lines 7407..7417) =====
-// ------------------------------------------------------------- statistics property refresh
-
-// Refresh only when the call count changes, avoiding a setProperty (which
-// keeps allocating memory) on every mapping.
-void org_maz1_AMDMapperProbe::publishMapStats(bool force) {
-    if (!force && fMapCalls == fPublishedMapCalls) return;
-    fPublishedMapCalls = fMapCalls;
-    setHexProperty(this, "m1b2-mapcalls", fMapCalls);
-    setHexProperty(this, "m1b2-unmapcalls", fUnmapCalls);
-    setHexProperty(this, "m1b2-insertcalls", fInsertCalls);
-    setHexProperty(this, "m1b2-physaddrcalls", fPhysAddrCalls);
-}

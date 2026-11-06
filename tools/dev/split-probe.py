@@ -227,11 +227,17 @@ MEMBERS = [
         'IOReturn org_maz1_AMDMapperProbe::PowerTransition',
         'void org_maz1_AMDMapperProbe::PublishMappings',
     ]),
-    ('AMDMapperProbeB1B2Debug.cpp', 'M1 mapper self-tests (B1, B2, B2a, B2b)', [
+    ('AMDMapperProbeMapperBindingDebug.cpp', 'M1 B1: target device names our mapper', [
         'void org_maz1_AMDMapperProbe::runB1SelfTest',
+    ]),
+    ('AMDMapperProbeDmaContractDebug.cpp', 'M1 B2: IODMACommand contract through our mapper', [
         'void org_maz1_AMDMapperProbe::runB2SelfTest',
+    ]),
+    ('AMDMapperProbeContigMapDebug.cpp', 'M1 B2-a: contiguous maps, fragmented rejects', [
         'void org_maz1_AMDMapperProbe::runB2OneTest',
         'void org_maz1_AMDMapperProbe::runB2aSelfTest',
+    ]),
+    ('AMDMapperProbeMapTableDebug.cpp', 'M1 B2-b: active mapping table and statistics', [
         'org_maz1_AMDMapperProbe::MapEntry *',
         'bool org_maz1_AMDMapperProbe::freeMapEntry',
         'uint32_t org_maz1_AMDMapperProbe::usedMapEntries',

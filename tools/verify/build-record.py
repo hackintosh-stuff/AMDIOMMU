@@ -126,7 +126,10 @@ def make_stubs(tmp):
 
     # The source files the manifests hash.
     for name in ('AMDMapperProbe.cpp', 'AMDMapperProbeNic.cpp',
-                 'AMDMapperProbeB1B2Debug.cpp', 'AMDMapperProbeMmioDebug.cpp',
+                 'AMDMapperProbeMapperBindingDebug.cpp',
+                 'AMDMapperProbeDmaContractDebug.cpp',
+                 'AMDMapperProbeContigMapDebug.cpp',
+                 'AMDMapperProbeMapTableDebug.cpp', 'AMDMapperProbeMmioDebug.cpp',
                  'AMDMapperProbeTableDebug.cpp', 'AMDMapperProbeDmaDebug.cpp',
                  'AMDMapperProbeObsDebug.cpp', 'AMDMapperProbePgtDebug.cpp',
                  'AMDMapperProbeInternal.hpp', 'AMDMapperProbe.hpp',

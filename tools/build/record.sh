@@ -102,7 +102,10 @@ echo "== 1. source inventory =="
 # hand -- and the record says which is which.
 MODULES="kext/AMDMapperProbe.cpp \
          kext/AMDMapperProbeNic.cpp \
-         kext/AMDMapperProbeB1B2Debug.cpp \
+         kext/AMDMapperProbeMapperBindingDebug.cpp \
+         kext/AMDMapperProbeDmaContractDebug.cpp \
+         kext/AMDMapperProbeContigMapDebug.cpp \
+         kext/AMDMapperProbeMapTableDebug.cpp
          kext/AMDMapperProbeMmioDebug.cpp \
          kext/AMDMapperProbeTableDebug.cpp \
          kext/AMDMapperProbeDmaDebug.cpp \

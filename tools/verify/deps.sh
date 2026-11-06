@@ -83,7 +83,10 @@ PROBE_CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
 
 PROBE_SRCS="kext/AMDMapperProbe.cpp \
       kext/AMDMapperProbeNic.cpp \
-      kext/AMDMapperProbeB1B2Debug.cpp \
+      kext/AMDMapperProbeMapperBindingDebug.cpp \
+      kext/AMDMapperProbeDmaContractDebug.cpp \
+      kext/AMDMapperProbeContigMapDebug.cpp \
+      kext/AMDMapperProbeMapTableDebug.cpp
       kext/AMDMapperProbeMmioDebug.cpp \
       kext/AMDMapperProbeTableDebug.cpp \
       kext/AMDMapperProbeDmaDebug.cpp \
