@@ -220,28 +220,10 @@ python3 "$ROOT/tools/r13/verify-patch-freshness.py" || {
 # the measurement says, instead of repeating round 12's untested claim.
 python3 "$ROOT/tools/r13/verify-reproducibility.py"
 
-# The analyser is the gate on the evidence. Its positive case is the real
-# round-11 archive; its negative cases are mutations of that archive. Both are
-# required: a suite that only rejects would pass on an analyser that rejects
-# everything.
-#
-# The fixture is generated here rather than checked in, because a checked-in
-# fixture silently goes stale when the schema changes -- and a stale fixture
-# makes the negative suite test a shape the analyser no longer accepts.
-printf '\n== round-12 analyser ==\n'
-FIXTURE_DIR="$WORK/fixture-r12"
-python3 "$ROOT/tools/r11/make-fixture.py" "$FIXTURE_DIR" > /dev/null
-CONTROL_DIR="$WORK/fixture-r12-control"
-python3 "$ROOT/tools/r12/make-control-fixture.py" "$CONTROL_DIR" > /dev/null
-REAL_CAPTURE="${AMDIOMMU_EVIDENCE:-$ROOT/docs/evidence}/20261101-014200"
-if [ -d "$REAL_CAPTURE" ]; then
-    python3 "$ROOT/tools/r12/test-analyzer12.py" "$REAL_CAPTURE" "$FIXTURE_DIR"
-    python3 "$ROOT/tools/r12/verify-mode-schema.py" "$CONTROL_DIR" "$REAL_CAPTURE"
-else
-    printf '  (analyser checks REFUSED: no real capture at %s)\n' "$REAL_CAPTURE"
-    printf '  This is a SKIP for missing data, NOT a pass. Point\n'
-    printf '  AMDIOMMU_EVIDENCE at a checkout that carries the archive to run it.\n'
-fi
+# The round-12 analyser, its fixture generators and its negative suite were
+# retired together with the shared decoder (tools/analyze-round12.py) and the
+# r15/r16/r17 analysis+capture tools. Early rounds are no longer replayed from
+# this checkout, so there is nothing here to gate.
 
 # The round-12 archive replay (tools/r13/replay-archives.py) was retired here:
 # it re-judges real captures under docs/evidence/, which are not part of this

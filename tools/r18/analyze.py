@@ -12,9 +12,9 @@ about itself:
   * obs-snapshot-used.bin-- TX ring observations (submit/done/close)
   * client.log / peer.log-- the two ends' bytes
 
-The round-17 witness layout is deliberately UNCHANGED, so the round-17 archive
-stays decodable with tools/r17/analyze.py while this file adds the standard-path
-evidence on top.
+The round-17 witness layout is deliberately UNCHANGED; this file adds the
+standard-path evidence on top. The round-17 analyser itself was retired with
+tools/r17/analyze.py.
 
 Usage: py -3 tools/r18/analyze.py CAPTURE [OUT.json]
 """

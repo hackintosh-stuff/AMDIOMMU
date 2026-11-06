@@ -32,11 +32,8 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 DRV = os.path.join(ROOT, 'tools', 'lucy-obs', 'RTL812xRxPost.hpp')
 CORE = os.path.join(ROOT, 'kext', 'amd_iommu_rxset_core.hpp')
 TEST = os.path.join(ROOT, 'tests', 'rxpost-test.cpp')
-# The analyser decodes the SAME blob from archived bytes. It was not covered by
-# this check, and it drifted: it read seq@24 (blenRaw) and capacity@32 (seq),
-# producing a set that disagreed with the probe by 125 ranges and looked like a
-# probe defect. It is now checked with the other two.
-ANALYSER = os.path.join(ROOT, 'tools', 'analyze-round12.py')
+# A fourth declaration (the round-12 analyser) was checked here until that file
+# was retired; the three files above are the whole contract now.
 
 SIZES = {'u32': 4, 'u64': 8, 'UInt32': 4, 'UInt64': 8}
 
@@ -315,47 +312,8 @@ def main():
         if not used:
             print('    (the test relies on sizeof(); acceptable, noted)')
 
-    # ---- 6. the ANALYSER must decode the same bytes ----
-    #
-    # This is the fourth declaration of the layout, and the one that actually
-    # bit: the analyser read seq@24 and capacity@32, i.e. it treated blenRaw as
-    # seq and seq as capacity. The resulting set disagreed with the probe's by
-    # 125 ranges and read as a probe defect.
-    print()
-    ana = open(ANALYSER, encoding='utf-8').read()
-    m = re.search(r"seq, slot, cap, flags = struct\.unpack_from\('<4I',"
-                  r"\s*blob,\s*off \+ (\d+)\)", ana)
-    got = int(m.group(1)) if m else None
-    ok_ana = (got == rearm_seq)
-    print('  analyser reads the record words at : %s  %s'
-          % (got, 'OK' if ok_ana else 'MISMATCH'))
-    if not ok_ana:
-        print('    expected %d (the driver struct\'s seq offset)' % rearm_seq)
-        print('    The analyser would decode capacity out of the wrong field.')
-        ok = False
-
-    # The analyser must also agree on the record size it steps by.
-    m2 = re.search(r'^RXPOST_REARM_BYTES = (\d+)$', ana, re.M)
-    got2 = int(m2.group(1)) if m2 else None
-    ok2 = (got2 == sum(s for _, s in REARM_FIELDS))
-    print('  analyser RXPOST_REARM_BYTES       : %s  %s'
-          % (got2, 'OK' if ok2 else 'MISMATCH'))
-    if not ok2:
-        ok = False
-    m3 = re.search(r'^RXPOST_HDR_BYTES = (\d+)$', ana, re.M)
-    got3 = int(m3.group(1)) if m3 else None
-    ok3 = (got3 == total)
-    print('  analyser RXPOST_HDR_BYTES         : %s  %s'
-          % (got3, 'OK' if ok3 else 'MISMATCH'))
-    if not ok3:
-        ok = False
-    m4 = re.search(r'^RXPOST_SLOT_BYTES = (\d+)$', ana, re.M)
-    got4 = int(m4.group(1)) if m4 else None
-    ok4 = (got4 == sum(s for _, s in SLOT_FIELDS))
-    print('  analyser RXPOST_SLOT_BYTES        : %s  %s'
-          % (got4, 'OK' if ok4 else 'MISMATCH'))
-    if not ok4:
-        ok = False
+    # The former fourth declaration (tools/analyze-round12.py) was retired with
+    # that file; the three declarations above are the whole contract now.
 
     print()
     print('  RESULT: %s' % ('CONSISTENT' if ok else 'FAILURES'))
