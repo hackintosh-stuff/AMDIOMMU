@@ -1,5 +1,18 @@
 # AMDIOMMU — experimental AMD IOMMU driver
 
+A kernel extension that gives macOS a working `IOMapper` on AMD platforms. Apple
+ships no IOMMU driver for consumer AMD chipsets, so a device's DMA normally
+bypasses the IOMMU entirely. This kext discovers the AMD IOMMU from the ACPI
+IVRS table and PCI configuration, takes the controller over once its state and
+feature registers agree, and gives the selected PCIe requesters a translation
+domain. It then publishes itself, so a driver either claims it explicitly
+(`amdiommu=passive`) or Apple's own Ethernet kexts find it through
+`IOMapper::copyMapperForDevice()` (`amdiommu=auto-attach`).
+
+Status: experimental, 0.97.0. Verified board/CPU/device combinations are listed
+in [COMPATIBILITY.md](COMPATIBILITY.md); building, deploying into OpenCore and
+setting boot-args are covered below.
+
 ## Boot arguments
 
 Two build variants exist and accept different boot-args:
