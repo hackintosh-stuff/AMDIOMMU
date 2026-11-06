@@ -2,7 +2,7 @@
 // retired B1/B2-b/M2-2b-2 experiment path (findTarget/armNic/findNic/
 // findNicServiceOnly). Not compiled by the production build.
 //
-// The shared publish notifier / r52AttachExistingDevices stay in
+// The shared publish notifier / AttachExistingDevices stay in
 // AMDMapperProbeNic.cpp, which both builds compile.
 
 #include "AMDMapperProbe.hpp"

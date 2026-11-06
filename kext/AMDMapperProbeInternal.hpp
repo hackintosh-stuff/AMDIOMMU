@@ -942,7 +942,7 @@ static inline UInt64 m2b2InvAddress() {
 // reserved low bits are cleared before S is set. Hardware may invalidate a
 // wider range; this encoding does not promise preservation of adjacent IOTLBs.
 // The caller checks the pool bounds and nonzero page-aligned byte count.
-static inline UInt64 r50InvRangeAddress(UInt64 address, UInt64 bytes) {
+static inline UInt64 InvRangeAddress(UInt64 address, UInt64 bytes) {
     if (bytes == 4096) return address;
     UInt64 different = address ^ (address + bytes - 1);
     unsigned highest = 0;

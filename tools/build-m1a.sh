@@ -119,11 +119,11 @@ echo "== 模块符号检查 =="
 # compiled AND linked in. A missing module fails the link anyway; this catches
 # the subtler case of a module whose functions were made static or dropped.
 PROD_NAMES="initHardware \
-    r44AttachAuto \
-    r44MapMemory \
-    r47PowerTransition \
-    r47SuspendAuto \
-    r47ResumeAuto"
+    AttachAuto \
+    MapMemory \
+    PowerTransition \
+    SuspendAuto \
+    ResumeAuto"
 DEBUG_NAMES="findTarget \
     runB1SelfTest \
     runM20ConfigProbe \
@@ -147,7 +147,7 @@ do
         echo "missing module symbol: $name"; exit 1; }
 done
 # Firmware discovery reuses the host parser as independent translation units.
-for name in r47DiscoverHardware buildTopology resolveRequester; do
+for name in DiscoverHardware buildTopology resolveRequester; do
     nm "$BIN" | grep -q "T .*$name" || {
         echo "missing discovery/parser symbol: $name"; exit 1; }
 done

@@ -83,10 +83,10 @@ bool org_example_AMDMapperProbe::publishHandler(
     org_example_AMDMapperProbe *self =
         (org_example_AMDMapperProbe *)target;
     if (!self || !newService) return true;
-    if (self->fR44Auto) {
+    if (self->fAuto) {
         // One path for explicit requester offers and the legacy default.
         // It also marks known unselected clients for physical DMA.
-        self->r44AttachAuto(newService);
+        self->AttachAuto(newService);
         return true;
     }
 
@@ -150,7 +150,7 @@ void org_example_AMDMapperProbe::installPublishNotifier() {
 
 // R52 auto mode enumerates endpoints, never a first match or a saved NIC path.
 // The first-publish callback uses the same per-requester attach routine.
-void org_example_AMDMapperProbe::r52AttachExistingDevices() {
+void org_example_AMDMapperProbe::AttachExistingDevices() {
     OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
     if (!matching) return;
     OSIterator *it = IOService::getMatchingServices(matching);
@@ -160,7 +160,7 @@ void org_example_AMDMapperProbe::r52AttachExistingDevices() {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     while (OSObject *object = it->getNextObject()) {
         IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, object);
-        if (pci) r44AttachAuto(pci);
+        if (pci) AttachAuto(pci);
     }
 #pragma clang diagnostic pop
     it->release();

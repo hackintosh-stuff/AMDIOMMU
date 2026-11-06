@@ -3,14 +3,14 @@
 #pragma once
 #include <stdint.h>
 
-namespace r44mapper {
+namespace mapper_abi {
 static constexpr uint32_t kVersion = 4;
 // Ordinary DMA addresses must satisfy a 32-bit IODMACommand as well as 64-bit
 // clients. Keep this independent of the legacy experiment's 64 GiB window.
 static constexpr uint64_t kBase = 0x80000000ULL; // 2 GiB, 16 MiB pool below 4 GiB
 static constexpr uint32_t kPages = 4096, kRecords = 1024;
 // ABI4 doubles the per-map bound so a 25/100 GbE client (MLX5 rings) is not
-// rejected at 512 KiB. kR61MaxParts=16 still covers a 1 MiB invalidation range
+// rejected at 512 KiB. kMaxParts=16 still covers a 1 MiB invalidation range
 // (about 9 power-of-two descriptors).
 static constexpr uint32_t kMapPages = 256, kRuns = 128;
 enum : uint32_t {
@@ -223,4 +223,4 @@ inline const Profile *profileForDevice(uint32_t vendor, uint32_t device,
     }
     return &kProfileLegacy;
 }
-} // namespace r44mapper
+} // namespace mapper_abi

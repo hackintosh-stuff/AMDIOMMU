@@ -29,7 +29,7 @@ class IOPCIDevice;
 
 class IOTimerEventSource;   // forward declaration, avoids mutual header inclusion
 class R27ProbeTimer;
-struct R47HardwareInfo;
+struct HardwareInfo;
 
 // The M1-B probe (B1 + B2-0 + B2-a)
 //
@@ -99,126 +99,126 @@ private:
     IOService *fTarget;          // B1 target (IOMA)
     // Round44: a persistent per-device mapper. Ordinary IODMACommand calls
     // use this backend without the experiment's registered object bindings.
-    bool fR44Auto = false;
+    bool fAuto = false;
     // R52: the root owns the hardware; auto-device instances own one mapper.
-    // fR52Owner is set before start() and must survive initHardware().
-    static constexpr UInt32 kR52MaxDomains = 3;
-    org_example_AMDMapperProbe *fR52Owner = nullptr;
-    org_example_AMDMapperProbe *fR52Mappers[kR52MaxDomains] = {};
-    IOLock *fR52AttachLock = nullptr;
-    UInt64 fR52SnapshotSequence = 0;
-    bool fR52Stopping = false;
+    // fOwner is set before start() and must survive initHardware().
+    static constexpr UInt32 kMaxDomains = 3;
+    org_example_AMDMapperProbe *fOwner = nullptr;
+    org_example_AMDMapperProbe *fMappers[kMaxDomains] = {};
+    IOLock *fAttachLock = nullptr;
+    UInt64 fSnapshotSequence = 0;
+    bool fStopping = false;
     // R53 explicit segment-zero requester selection; an empty list keeps R52.
-    bool fR53SelectionExplicit = false;
-    UInt32 fR53Requesters[kR52MaxDomains] = {};
-    UInt32 fR53RequesterCount = 0;
-    bool r53ReadDeviceSelection();
-    IOService *fR54Offers[kR52MaxDomains] = {};  // retained by selector index
+    bool fSelectionExplicit = false;
+    UInt32 fRequesters[kMaxDomains] = {};
+    UInt32 fRequesterCount = 0;
+    bool ReadDeviceSelection();
+    IOService *fOffers[kMaxDomains] = {};  // retained by selector index
     // R69: a selected third-party client that cannot call our claim handshake
     // (Apple's own Ethernet kexts call only IOMapper::copyMapperForDevice) gets
     // its iommu-parent at first publish instead of at claim. Off by default so
     // the R54..R67 claim protocol and its analysis stay the default behaviour.
-    bool fR69AutoAttach = false;
+    bool fAutoAttach = false;
     // Capacity evidence for third-party clients; published only on change.
-    UInt64 fR69MaxLength = 0, fR69MaxPages = 0, fR69MaxRuns = 0;
-    UInt64 fR69PublishedMaxLength = 0, fR69PublishedMaxPages = 0,
-           fR69PublishedMaxRuns = 0, fR69PublishedRejects = 0;
+    UInt64 fMaxLength = 0, fMaxPages = 0, fMaxRuns = 0;
+    UInt64 fPublishedMaxLength = 0, fPublishedMaxPages = 0,
+           fPublishedMaxRuns = 0, fPublishedRejects = 0;
     // Capacity measurement: the live counters are only in the snapshot blob,
     // which is republished on prepare/PM boundaries. Mirror the ones the S3
     // measurement needs and publish them when they change, so a read never
     // has to force a snapshot from user space.
-    UInt64 fR69MapOk = 0, fR69UnmapOk = 0;
-    UInt32 fR69LiveMaps = 0, fR69LivePages = 0,
-           fR69PeakMaps = 0, fR69PeakPages = 0;
-    UInt64 fR69PublishedMapOk = ~0ULL, fR69PublishedUnmapOk = ~0ULL;
-    UInt32 fR69PublishedLiveMaps = ~0U, fR69PublishedLivePages = ~0U,
-           fR69PublishedPeakMaps = ~0U, fR69PublishedPeakPages = ~0U;
-    UInt32 fR69RejectedLength = 0, fR69RejectedOptions = 0,
-           fR69RejectedLayout = 0, fR69RejectedRecords = 0,
-           fR69RejectedNoRange = 0, fR69RejectedBits = 0;
-    void r69PublishCapacity();
+    UInt64 fMapOk = 0, fUnmapOk = 0;
+    UInt32 fLiveMaps = 0, fLivePages = 0,
+           fPeakMaps = 0, fPeakPages = 0;
+    UInt64 fPublishedMapOk = ~0ULL, fPublishedUnmapOk = ~0ULL;
+    UInt32 fPublishedLiveMaps = ~0U, fPublishedLivePages = ~0U,
+           fPublishedPeakMaps = ~0U, fPublishedPeakPages = ~0U;
+    UInt32 fRejectedLength = 0, fRejectedOptions = 0,
+           fRejectedLayout = 0, fRejectedRecords = 0,
+           fRejectedNoRange = 0, fRejectedBits = 0;
+    void PublishCapacity();
     // S1 capacity profile (docs/m2-3az-round69-capacity-model.md). The legacy
     // entry is the default and reproduces the accepted ABI3 arena exactly; a
     // domain may only be prepared after the profile's page-table area exists.
     // R71-B: capacity is no longer chosen per device at admission. Every domain
     // is prepared at the legacy arena and may grow once, at its first mapping,
-    // to the ceiling in kProfileCeiling (see r44GrowBeforeFirstMap). The boot
+    // to the ceiling in kProfileCeiling (see GrowBeforeFirstMap). The boot
     // argument now names that ceiling; a device's identity table entry only
     // decides how far a third-party client may grow.
-    r44mapper::Profile fR44Profile = r44mapper::kProfileLegacy;
-    bool fR44ProfileForced = false;
-    bool r44SelectProfile();
-    const r44mapper::Profile *r44ForcedProfile() const;
+    mapper_abi::Profile fProfile = mapper_abi::kProfileLegacy;
+    bool fProfileForced = false;
+    bool SelectProfile();
+    const mapper_abi::Profile *ForcedProfile() const;
     // Admission ceiling for this device: the boot-arg profile when it parses,
     // otherwise the demand default. A forced value at or below the legacy arena
     // disables growth, which keeps the R67-2 compatibility mode available.
-    const r44mapper::Profile *r44Ceiling(bool &forced) const;
-    const r44mapper::Profile *r44ProfileForDevice(
+    const mapper_abi::Profile *Ceiling(bool &forced) const;
+    const mapper_abi::Profile *ProfileForDevice(
         UInt32 vendor, UInt32 device, UInt32 classCode,
-        r44mapper::ProfileSource *source = nullptr) const;
-    struct R52Domain;
-    R52Domain *fR52Domain = nullptr;
-    void r52AttachExistingDevices();
-    bool r52PrepareController(const R47HardwareInfo &);
-    bool r52PrepareDomain(IOService *, UInt32, const r44mapper::Profile *,
-                          r44mapper::ProfileSource);
-    bool r52ReleaseDomain();
-    void r52PublishDomains();
-    bool r52PowerSupported() const;
-    IOReturn r66SetSystemPM(bool armed);
-    bool fR63DMAParked = false; // writes hold both the mapper and controller locks
-    IOReturn r63SetRequesterDMA(bool park);
-    IOReturn r63SwitchRequesterDMA(bool park);
-    bool r52InvalidateLocked(bool, UInt64, UInt64, bool, bool *);
-    struct R44Controller;
-    R44Controller *fR44Controller = nullptr;
-    struct R44MapperState;
-    R44MapperState *fR44Mapper = nullptr;
-    bool r44StartAuto();
-    bool r44AttachAuto(IOService *, bool claim = false);
-    bool r44StopAuto();
-    bool r44Invalidate(bool invalidateDevice = false,
+        mapper_abi::ProfileSource *source = nullptr) const;
+    struct Domain;
+    Domain *fDomain = nullptr;
+    void AttachExistingDevices();
+    bool PrepareController(const HardwareInfo &);
+    bool PrepareDomain(IOService *, UInt32, const mapper_abi::Profile *,
+                          mapper_abi::ProfileSource);
+    bool ReleaseDomain();
+    void PublishDomains();
+    bool PowerSupported() const;
+    IOReturn SetSystemPM(bool armed);
+    bool fDMAParked = false; // writes hold both the mapper and controller locks
+    IOReturn SetRequesterDMA(bool park);
+    IOReturn SwitchRequesterDMA(bool park);
+    bool InvalidateLocked(bool, UInt64, UInt64, bool, bool *);
+    struct Controller;
+    Controller *fController = nullptr;
+    struct MapperState;
+    MapperState *fMapper = nullptr;
+    bool StartAuto();
+    bool AttachAuto(IOService *, bool claim = false);
+    bool StopAuto();
+    bool Invalidate(bool invalidateDevice = false,
         UInt64 address = 0, UInt64 bytes = 0,
         bool newMapping = false, bool *skipped = nullptr);
-    void r44PublishAuto();
+    void PublishAuto();
     // TODO(R47-PM-HARDWARE): validate real system sleep/resume when the
     // platform supports it. Normal network operation does not invoke PM.
     // Called synchronously by Lucy's existing gated PM actions. The normal
     // network-family disable has retired TX and rebuilt RX before suspend.
-    IOReturn r47PowerTransition(UInt32);
-    bool r47SuspendAuto();
-    bool r47ResumeAuto();
-    bool r44PrepareMappings(volatile UInt64 *, UInt64, UInt32, UInt32,
-                            const r44mapper::Profile &);
+    IOReturn PowerTransition(UInt32);
+    bool SuspendAuto();
+    bool ResumeAuto();
+    bool PrepareMappings(volatile UInt64 *, UInt64, UInt32, UInt32,
+                            const mapper_abi::Profile &);
     // R71-B: shared by prepare and growth so the arena carve order exists once.
     // `d` is zeroed and owns nothing; on failure it still owns nothing.
-    static bool r44BuildArena(R44MapperState *d, volatile UInt64 *tables,
+    static bool BuildArena(MapperState *d, volatile UInt64 *tables,
                               UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel,
-                              const r44mapper::Profile &profile);
+                              const mapper_abi::Profile &profile);
     // R71-B: called with the domain lock held, from the first admissible map.
     // Rebuilds the arena and page-table area at the admission ceiling while the
     // DTE still names a passthrough root, then adopts them in one step.
-    bool r44GrowBeforeFirstMap(R44MapperState *d);
-    // R52Domain is defined in AMDMapperProbeAuto.cpp, so the growth code (which
-    // owns R44MapperState) asks the platform side through these accessors
+    bool GrowBeforeFirstMap(MapperState *d);
+    // Domain is defined in AMDMapperProbeAuto.cpp, so the growth code (which
+    // owns MapperState) asks the platform side through these accessors
     // instead of reaching into a type it cannot see.
-    bool r44GrowthOpen() const;
-    const r44mapper::Profile *r44PreparedProfile() const;
-    const r44mapper::Profile *r44CeilingProfile() const;
-    void r44AdoptGrownTables(IOBufferMemoryDescriptor *tables, UInt64 tablePA,
-                             UInt32 tablePages, const r44mapper::Profile &target);
+    bool GrowthOpen() const;
+    const mapper_abi::Profile *PreparedProfile() const;
+    const mapper_abi::Profile *CeilingProfile() const;
+    void AdoptGrownTables(IOBufferMemoryDescriptor *tables, UInt64 tablePA,
+                             UInt32 tablePages, const mapper_abi::Profile &target);
     // Same allocation the controller buffers use, so admission and growth cannot
     // diverge on alignment or contiguity requirements.
-    bool r44AllocateTableArea(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa);
-    bool r44QuiesceMappings();
-    bool r44ReleaseMappings();
-    UInt32 r44LiveMappings() const;
-    void r44PublishMappings(OSDictionary **copy = nullptr);
-    IOReturn r44MapMemory(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
+    bool AllocateTableArea(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa);
+    bool QuiesceMappings();
+    bool ReleaseMappings();
+    UInt32 LiveMappings() const;
+    void PublishMappings(OSDictionary **copy = nullptr);
+    IOReturn MapMemory(IOMemoryDescriptor *, uint64_t, uint64_t, uint32_t,
         const IODMAMapSpecification *, IODMACommand *, const IODMAMapPageList *,
         uint64_t *, uint64_t *);
-    IOReturn r44UnmapMemory(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
-    bool r44Translate(uint64_t, uint64_t *) const;
+    IOReturn UnmapMemory(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
+    bool Translate(uint64_t, uint64_t *) const;
 
     // Round34: Lucy owns the standard objects and replaces the real RX mbufs.
     // This service owns only routing identities, PTEs and mapping evidence.

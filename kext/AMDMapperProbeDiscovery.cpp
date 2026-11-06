@@ -10,13 +10,13 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 namespace {
-constexpr UInt16 kR47PciSegment = 0;
+constexpr UInt16 kPciSegment = 0;
 // Basic registers, command/event indices and status end below 0x4000. The
 // optional performance-counter aperture is not used by this backend.
-constexpr UInt64 kR47MmioBytes = 0x4000;
-constexpr UInt32 kR47PciEfrSupported = 1u << 27;
+constexpr UInt64 kMmioBytes = 0x4000;
+constexpr UInt32 kPciEfrSupported = 1u << 27;
 
-IOPCIDevice *r47FindIommu(UInt16 deviceID) {
+IOPCIDevice *FindIommu(UInt16 deviceID) {
     OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
     if (!matching) return nullptr;
     OSIterator *it = IOService::getMatchingServices(matching);
@@ -41,7 +41,7 @@ IOPCIDevice *r47FindIommu(UInt16 deviceID) {
 
 // Any ACPI device exposes the firmware table set; the lookup itself is table
 // scoped, so one device is enough. The static IVRS table lives for the boot.
-IOACPIPlatformDevice *r47FindAcpiDevice() {
+IOACPIPlatformDevice *FindAcpiDevice() {
     OSDictionary *matching = IOService::serviceMatching("IOACPIPlatformDevice");
     if (!matching) return nullptr;
     OSIterator *it = IOService::getMatchingServices(matching);
@@ -61,8 +61,8 @@ IOACPIPlatformDevice *r47FindAcpiDevice() {
 }
 }
 
-bool r47DiscoverHardware(IOService *probe, IOPCIDevice *nic,
-                         R47HardwareInfo &info) {
+bool DiscoverHardware(IOService *probe, IOPCIDevice *nic,
+                         HardwareInfo &info) {
     info = {};
     auto failure = [probe](const char *reason) {
         probe->setProperty("r47-discovery-state", reason);
@@ -73,7 +73,7 @@ bool r47DiscoverHardware(IOService *probe, IOPCIDevice *nic,
     };
     probe->setProperty("r47-discovery-source", "acpi-ivrs+pci");
     probe->setProperty("r47-discovery-state", "reading-ivrs");
-    IOACPIPlatformDevice *acpi = r47FindAcpiDevice();
+    IOACPIPlatformDevice *acpi = FindAcpiDevice();
     if (!acpi) return failure("failed-acpi-device");
     // getACPITableData returns a borrowed const OSData. Retain a separate copy
     // as raw runtime evidence; the parser's views only live inside this call.
@@ -105,10 +105,10 @@ bool r47DiscoverHardware(IOService *probe, IOPCIDevice *nic,
                           amd_iommu::topologyErrorString(topology.error));
         return finish("failed-ivrs-topology", false);
     }
-    const auto requester = amd_iommu::resolveRequester(*units, kR47PciSegment,
+    const auto requester = amd_iommu::resolveRequester(*units, kPciSegment,
         nic->getBusNumber(), nic->getDeviceNumber(), nic->getFunctionNumber());
     number("r47-ivrs-unit-count", units->count);
-    number("r47-pci-segment", kR47PciSegment);
+    number("r47-pci-segment", kPciSegment);
     number("r47-requester-id", requester.deviceId);
     if (!requester) {
         probe->setProperty("r47-discovery-detail",
@@ -131,9 +131,9 @@ bool r47DiscoverHardware(IOService *probe, IOPCIDevice *nic,
         return finish("failed-unsupported-requester-policy", false);
     const UInt16 cap = unit.capabilityOffset;
     if (cap < 0x40 || cap > 0xf4 || (cap & 3) || !unit.registerBase ||
-        (unit.registerBase & (kR47MmioBytes - 1)))
+        (unit.registerBase & (kMmioBytes - 1)))
         return finish("failed-ivrs-controller-address", false);
-    IOPCIDevice *iommu = r47FindIommu(unit.deviceId);
+    IOPCIDevice *iommu = FindIommu(unit.deviceId);
     if (!iommu) return finish("failed-iommu-pci-device", false);
     const UInt32 header = iommu->configRead32(cap);
     const UInt32 barLo = iommu->configRead32(cap + 4);
@@ -150,13 +150,13 @@ bool r47DiscoverHardware(IOService *probe, IOPCIDevice *nic,
         !(barLo & 1) || pciBase != unit.registerBase)
         return finish("failed-iommu-pci-identity", false);
     info.mmioBase = unit.registerBase;
-    info.mmioBytes = kR47MmioBytes;
+    info.mmioBytes = kMmioBytes;
     info.iommuID = unit.deviceId;
     info.capabilityOffset = cap;
     info.capabilityHeader = header;
     info.firmwareEfr = unit.efrImage;
     info.firmwareEfrPresent = unit.efrPresent && (bytes[36] & 1);
-    info.pciEfrSupported = (header & kR47PciEfrSupported) != 0;
+    info.pciEfrSupported = (header & kPciEfrSupported) != 0;
     number("r47-mmio-base", info.mmioBase);
     number("r47-mmio-bytes", info.mmioBytes);
     number("r47-ivrs-efr-present", info.firmwareEfrPresent);

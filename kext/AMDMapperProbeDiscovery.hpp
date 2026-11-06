@@ -9,7 +9,7 @@
 
 // Runtime identity of the IVHD unit that owns the current NIC. This contains
 // values only; no pointer borrows the ACPI table or a PCI iterator's lifetime.
-struct R47HardwareInfo {
+struct HardwareInfo {
     UInt64 mmioBase;
     UInt64 mmioBytes;
     UInt64 firmwareEfr;
@@ -21,7 +21,7 @@ struct R47HardwareInfo {
 };
 
 // Read-only discovery for the current segment-0, per-device normal mode.
-// MMIO is mapped and checked by r44AttachAuto before its first register write.
-bool r47DiscoverHardware(IOService *probe, IOPCIDevice *nic,
-                         R47HardwareInfo &info);
+// MMIO is mapped and checked by AttachAuto before its first register write.
+bool DiscoverHardware(IOService *probe, IOPCIDevice *nic,
+                         HardwareInfo &info);
 #pragma clang diagnostic pop

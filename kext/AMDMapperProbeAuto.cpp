@@ -12,33 +12,33 @@ namespace {
 // Ordering: per-device mapper lock -> shared controller lock. Attachment
 // serializes the fixed device list independently; no controller path takes
 // a mapper lock or invokes the network driver.
-struct R52LockGuard {
+struct LockGuard {
     IOLock *lock;
-    explicit R52LockGuard(IOLock *value) : lock(value) { IOLockLock(lock); }
-    ~R52LockGuard() { IOLockUnlock(lock); }
+    explicit LockGuard(IOLock *value) : lock(value) { IOLockLock(lock); }
+    ~LockGuard() { IOLockUnlock(lock); }
 };
 // Mark each selected candidate before any preparation that can fail. Drivers
 // see either a completed per-device mapper or an explicit startup failure.
-struct R53AttachPolicy {
+struct AttachPolicy {
     IOService *device;
     bool mapped = false;
-    explicit R53AttachPolicy(IOService *value) : device(value) {
+    explicit AttachPolicy(IOService *value) : device(value) {
         device->setProperty(amd_iommu_policy::kProperty,
                             amd_iommu_policy::kSelected);
     }
-    ~R53AttachPolicy() {
+    ~AttachPolicy() {
         device->setProperty(amd_iommu_policy::kProperty, mapped ?
             amd_iommu_policy::kMapped : amd_iommu_policy::kFailed);
     }
 };
 
-inline bool r53IsHexDigit(char c) {
+inline bool IsHexDigit(char c) {
     return ((c >= '0') && (c <= '9')) ||
            ((c >= 'a') && (c <= 'f')) ||
            ((c >= 'A') && (c <= 'F'));
 }
 
-bool r53ParseRequester(const char *text, UInt32 &requester) {
+bool ParseRequester(const char *text, UInt32 &requester) {
     requester = 0;
     for (UInt32 i = 0; i < 4; ++i) {
         const char digit = text[i];
@@ -51,20 +51,20 @@ bool r53ParseRequester(const char *text, UInt32 &requester) {
     }
     return true;
 }
-// The page-table area is profile-driven: r44mapper::Profile::tablePages.
-constexpr UInt32 kR61MaxParts = 16;  // power-of-two split fits a 1 MiB range
-static_assert(r44mapper::kMapPages <= 512, "revisit exact range command bound");
+// The page-table area is profile-driven: mapper_abi::Profile::tablePages.
+constexpr UInt32 kMaxParts = 16;  // power-of-two split fits a 1 MiB range
+static_assert(mapper_abi::kMapPages <= 512, "revisit exact range command bound");
 
 // The caller has checked that address and bytes are page-aligned and inside the domain.
-UInt32 r61PlanRange(UInt32 opcode, UInt64 address, UInt64 bytes,
-                    M2B2CmdWords (&out)[kR61MaxParts], UInt64 &covered) {
+UInt32 PlanRange(UInt32 opcode, UInt64 address, UInt64 bytes,
+                    M2B2CmdWords (&out)[kMaxParts], UInt64 &covered) {
     UInt32 count = 0;
     covered = 0;
     while (bytes) {
-        if (count == kR61MaxParts) return 0;  // never publish a partial plan
+        if (count == kMaxParts) return 0;  // never publish a partial plan
         UInt64 span = 4096;
         while (span <= bytes / 2 && !(address & (2 * span - 1))) span *= 2;
-        const UInt64 encoded = r50InvRangeAddress(address, span);
+        const UInt64 encoded = InvRangeAddress(address, span);
         out[count++] = {0, opcode, (UInt32)encoded, (UInt32)(encoded >> 32)};
         covered += (encoded & 1) ? (2ULL << __builtin_ctzll(~(encoded >> 12))) : 1;
         address += span;
@@ -73,11 +73,11 @@ UInt32 r61PlanRange(UInt32 opcode, UInt64 address, UInt64 bytes,
     return count;
 }
 // PCI IOMMU capability, not EFR: Linux v6.6 IOMMU_CAP_NPCACHE.
-constexpr UInt32 kR51NpCache = 1u << 26;
-constexpr UInt64 kR44Enabled = M2B2_CTRL_IOMMU_EN |
+constexpr UInt32 kNpCache = 1u << 26;
+constexpr UInt64 kEnabled = M2B2_CTRL_IOMMU_EN |
     M2B2_CTRL_CMDBUF_EN | M2B2_CTRL_EVT_LOG_EN;
 
-bool r44Allocate(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
+bool Allocate(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
     pa = 0;
     md = IOBufferMemoryDescriptor::withCapacity((IOByteCount)bytes,
                                                kIODirectionOut, true);
@@ -98,13 +98,13 @@ bool r44Allocate(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
 // R71-B: growth allocates a domain's page-table area through the same helper the
 // controller buffers use, so admission and growth cannot diverge on the 4 KiB
 // alignment or on the physical-contiguity requirement.
-bool org_example_AMDMapperProbe::r44AllocateTableArea(
+bool org_example_AMDMapperProbe::AllocateTableArea(
     IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
-    return r44Allocate(md, bytes, pa);
+    return Allocate(md, bytes, pa);
 }
 
 
-struct org_example_AMDMapperProbe::R52Domain {
+struct org_example_AMDMapperProbe::Domain {
     IOBufferMemoryDescriptor *tables;
     UInt64 tablePA, activeTime;
     UInt32 deviceID, domainID;
@@ -114,7 +114,7 @@ struct org_example_AMDMapperProbe::R52Domain {
     UInt64 lastRangeAddress, lastRangeBytes, lastRangeSequence;
     UInt64 rangeDescriptors, splitBatches, splitAddress, splitBytes, splitSequence;
     UInt32 splitCount;
-    M2B2CmdWords splitWords[kR61MaxParts];
+    M2B2CmdWords splitWords[kMaxParts];
     UInt32 lastRangeCommand[4];
     UInt64 lastInvDevSequence, lastInvPagesSequence;
     UInt64 parkCount, restoreCount, gateDevSequence, gatePagesSequence;
@@ -136,22 +136,22 @@ struct org_example_AMDMapperProbe::R52Domain {
     UInt32 profileRecords, profilePages, tablePages;
     // R71-B: the arena is prepared at profileName and may grow once, at the first
     // mapping, to this ceiling (nullptr before prepare finishes).
-    const r44mapper::Profile *ceilingProfile;
+    const mapper_abi::Profile *ceilingProfile;
     const char *state;
     bool active;
 };
 
-struct org_example_AMDMapperProbe::R44Controller {
+struct org_example_AMDMapperProbe::Controller {
     IOBufferMemoryDescriptor *devices, *commands, *semaphore, *events;
     IOLock *lock;
-    R52Domain *domains[kR52MaxDomains];
+    Domain *domains[kMaxDomains];
     UInt32 domainCount;
     IOMemoryDescriptor *mmioMemory;
     IOMemoryMap *mmioMap;
     volatile UInt8 *base;
     UInt64 devicePA, commandPA, semaphorePA, eventPA;
     UInt64 originalDT, originalCommand, originalEvent, originalControl;
-    R47HardwareInfo hardware;
+    HardwareInfo hardware;
     UInt64 startupEfr;
     UInt64 readyTime;
     UInt64 eventEntries, targetFaults;
@@ -184,7 +184,7 @@ struct org_example_AMDMapperProbe::R44Controller {
         mmioWrite64(base, M2B2_OFF_CONTROL, ctrl);
         observedControl = mmioRead64(base, M2B2_OFF_CONTROL);
         return !(status & (M2B2_STATUS_CMDBUF_RUN | M2B2_STATUS_EVT_RUN)) &&
-            !(observedControl & kR44Enabled);
+            !(observedControl & kEnabled);
     }
 
     // TAIL belongs to the event producer. Consume the final events after it
@@ -205,8 +205,8 @@ struct org_example_AMDMapperProbe::R44Controller {
                 if (!type) { eventInvalid = true; break; }
                 for (UInt32 i = 0; i < 4; ++i) lastEvent[i] = entries[entry + i];
                 ++eventEntries;
-                for (UInt32 slot = 0; slot < kR52MaxDomains; ++slot) {
-                    R52Domain *d = domains[slot];
+                for (UInt32 slot = 0; slot < kMaxDomains; ++slot) {
+                    Domain *d = domains[slot];
                     if (!d || (lastEvent[0] & M2B2_EVENT_DEVID_MASK) != d->deviceID)
                         continue;
                     ++d->targetFaults;
@@ -257,16 +257,16 @@ struct org_example_AMDMapperProbe::R44Controller {
 };
 
 
-bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
+bool org_example_AMDMapperProbe::ReadDeviceSelection() {
     char selection[32] = {};
-    fR53SelectionExplicit = PE_parse_boot_argn("amdiommu_devices", selection,
+    fSelectionExplicit = PE_parse_boot_argn("amdiommu_devices", selection,
                                               sizeof(selection) - 1);
-    fR53RequesterCount = 0;
-    if (!fR53SelectionExplicit) {
+    fRequesterCount = 0;
+    if (!fSelectionExplicit) {
         setProperty("r53-device-selection", "default-rtl8127");
         return true;
     }
-    // One to kR52MaxDomains four-hex-digit segment-zero requester IDs, no
+    // One to kMaxDomains four-hex-digit segment-zero requester IDs, no
     // saved BDFs. The third slot is reserved for a Mellanox adapter next to the
     // two RTL8127 ports; the selected-pair semantics are unchanged.
     // R70-S5f: values are written with a non-hex prefix (n3400) because the
@@ -275,46 +275,46 @@ bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
     // So: skip every non-hex byte before each ID, then parse four hex digits.
     const char *cursor = selection;
     while (true) {
-        while (*cursor && !r53IsHexDigit(*cursor)) ++cursor;
+        while (*cursor && !IsHexDigit(*cursor)) ++cursor;
         if (!*cursor) break;
-        if (fR53RequesterCount == kR52MaxDomains) {
+        if (fRequesterCount == kMaxDomains) {
             setProperty("r44-state", "failed-device-selection");
             return false;
         }
         UInt32 id = 0;
-        if (!r53ParseRequester(cursor, id)) {
+        if (!ParseRequester(cursor, id)) {
             setProperty("r44-state", "failed-device-selection");
             return false;
         }
-        for (UInt32 i = 0; i < fR53RequesterCount; ++i) {
-            if (fR53Requesters[i] == id) {
+        for (UInt32 i = 0; i < fRequesterCount; ++i) {
+            if (fRequesters[i] == id) {
                 setProperty("r44-state", "failed-device-selection");
                 return false;
             }
         }
-        fR53Requesters[fR53RequesterCount++] = id;
+        fRequesters[fRequesterCount++] = id;
         cursor += 4;
     }
-    if (!fR53RequesterCount) {
+    if (!fRequesterCount) {
         setProperty("r44-state", "failed-device-selection");
         return false;
     }
     setProperty("r53-device-selection", selection);
-    setProperty("r53-selected-count", fR53RequesterCount, 32);
+    setProperty("r53-selected-count", fRequesterCount, 32);
     return true;
 }
 
 // S1/R71-B: this selects the *ceiling* a domain may grow to, not the arena it is
-// prepared with. Growth happens at the first mapping (r44GrowBeforeFirstMap), so
+// prepared with. Growth happens at the first mapping (GrowBeforeFirstMap), so
 // the value published here says how far that growth may go.
-bool org_example_AMDMapperProbe::r44SelectProfile() {
+bool org_example_AMDMapperProbe::SelectProfile() {
     char requested[24] = {};
     const bool named = PE_parse_boot_argn("amdiommu_profile", requested,
                                           sizeof(requested) - 1) != 0;
     bool forced = false;
-    const r44mapper::Profile *ceiling = r44Ceiling(forced);
-    fR44Profile = *ceiling;
-    fR44ProfileForced = forced;
+    const mapper_abi::Profile *ceiling = Ceiling(forced);
+    fProfile = *ceiling;
+    fProfileForced = forced;
     if (named) setProperty("r44-profile-request", requested);
     setProperty("r44-profile-mode", forced ? "forced" : "first-map-growth");
     setProperty("r44-profile", ceiling->name);
@@ -324,21 +324,21 @@ bool org_example_AMDMapperProbe::r44SelectProfile() {
     setProperty("r44-profile-table-pages", ceiling->tablePages, 32);
     // An unknown name must never widen the pool. It is reported as refused and
     // leaves the legacy ceiling in place, which also disables growth.
-    return !named || r44mapper::profileForName(requested) != nullptr;
+    return !named || mapper_abi::profileForName(requested) != nullptr;
 }
 
 // The ceiling is a per-instance decision: every attached device owns its own
 // mapper instance and the boot argument is parsed again for each of them, so an
 // override can never be lost to whichever instance ran first (R70-S3b).
-const r44mapper::Profile *org_example_AMDMapperProbe::r44Ceiling(bool &forced) const {
+const mapper_abi::Profile *org_example_AMDMapperProbe::Ceiling(bool &forced) const {
     forced = false;
     char requested[24] = {};
     if (!PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1))
-        return &r44mapper::kProfileRl10gMax;
+        return &mapper_abi::kProfileRl10gMax;
     forced = true;
-    if (const r44mapper::Profile *picked = r44mapper::profileForName(requested))
+    if (const mapper_abi::Profile *picked = mapper_abi::profileForName(requested))
         return picked;
-    return &r44mapper::kProfileLegacy;
+    return &mapper_abi::kProfileLegacy;
 }
 
 // Vendor/device IDs come from the device-tree properties OpenCore already
@@ -351,49 +351,49 @@ static bool pciIdProperty(IORegistryEntry *entry, const char *key, UInt32 &value
 }
 
 // The boot-arg override is parsed on every call. Each attached device gets its
-// own mapper instance (see r44AttachAuto), so an admission decision must never
-// depend on which instance happened to run r44SelectProfile first - R70-S3b
+// own mapper instance (see AttachAuto), so an admission decision must never
+// depend on which instance happened to run SelectProfile first - R70-S3b
 // showed a device admitted with the legacy arena while the controller instance
 // reported the forced profile.
-const r44mapper::Profile *org_example_AMDMapperProbe::r44ForcedProfile() const {
+const mapper_abi::Profile *org_example_AMDMapperProbe::ForcedProfile() const {
     char requested[24] = {};
     if (!PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1))
         return nullptr;
-    return r44mapper::profileForName(requested);
+    return mapper_abi::profileForName(requested);
 }
 
 // S2 admission input: which capacity does this device need *before* a domain
 // exists? Pure decision helper: the caller reads the registry identity before
-// it takes fR52AttachLock. Doing that lookup under the attach lock was observed
+// it takes fAttachLock. Doing that lookup under the attach lock was observed
 // to stall the boot on the first non-forced attach (R70-S6), so this function
 // must never touch the registry itself.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-const r44mapper::Profile *org_example_AMDMapperProbe::r44ProfileForDevice(
+const mapper_abi::Profile *org_example_AMDMapperProbe::ProfileForDevice(
     UInt32 vendor, UInt32 device, UInt32 classCode,
-    r44mapper::ProfileSource *source) const {
-    if (source) *source = r44mapper::ProfileSource::legacy;
-    if (const r44mapper::Profile *forced = r44ForcedProfile()) {
-        if (source) *source = r44mapper::ProfileSource::bootArg;
+    mapper_abi::ProfileSource *source) const {
+    if (source) *source = mapper_abi::ProfileSource::legacy;
+    if (const mapper_abi::Profile *forced = ForcedProfile()) {
+        if (source) *source = mapper_abi::ProfileSource::bootArg;
         return forced;
     }
-    if (!fR69AutoAttach) return &r44mapper::kProfileLegacy;
-    return r44mapper::profileForDevice(vendor, device, true, classCode, source);
+    if (!fAutoAttach) return &mapper_abi::kProfileLegacy;
+    return mapper_abi::profileForDevice(vendor, device, true, classCode, source);
 }
 #pragma clang diagnostic pop
 
-bool org_example_AMDMapperProbe::r44StartAuto() {
+bool org_example_AMDMapperProbe::StartAuto() {
     IOLog("AMDMapperProbe: auto-start enter\n");
     setProperty("r44-mode", "auto");
     setProperty("r52-role", "controller");
     setProperty("r52-snapshot-consistency", "per-domain");
-    setProperty("r52-max-domains", kR52MaxDomains, 32);
+    setProperty("r52-max-domains", kMaxDomains, 32);
     setProperty("r52-domain-count", 0ULL, 64);
     setProperty("r44-state", "waiting-for-pci-publication");
     setProperty("r44-controller-ready", "no");
     setProperty("r44-system-mapper", "no");
     setProperty("m1b-gsystem", IOMapper::gSystem ? "NONNULL" : "NULL-as-expected");
-    if (!r53ReadDeviceSelection()) {
+    if (!ReadDeviceSelection()) {
         return false;
     }
     // R69: Apple's own Ethernet kexts only ask IOMapper::copyMapperForDevice(),
@@ -401,27 +401,27 @@ bool org_example_AMDMapperProbe::r44StartAuto() {
     // the only switch: it publishes iommu-parent at first publish (before their
     // probe) for the selected requesters only. Plain amdiommu=auto keeps the
     // offer/claim protocol intact.
-    setProperty("r69-autoattach", fR69AutoAttach ? "yes" : "no");
-    r44SelectProfile();
-    fR52AttachLock = IOLockAlloc();
-    if (!fR52AttachLock) return false;
+    setProperty("r69-autoattach", fAutoAttach ? "yes" : "no");
+    SelectProfile();
+    fAttachLock = IOLockAlloc();
+    if (!fAttachLock) return false;
     installPublishNotifier();
     if (!fPublishNotifier) {
         setProperty("r44-state", "failed-publish-notifier");
-        IOLockFree(fR52AttachLock); fR52AttachLock = nullptr;
+        IOLockFree(fAttachLock); fAttachLock = nullptr;
         return false;
     }
     // Offer explicit requesters to pre-open clients; keep eager attach for the default.
     // Replay published endpoints through the same path as the notification.
-    r52AttachExistingDevices();
-    r52PublishDomains();
+    AttachExistingDevices();
+    PublishDomains();
     return true;
 }
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
-    if (!fR44Auto || fR52Owner || !fR52AttachLock) return false;
+bool org_example_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
+    if (!fAuto || fOwner || !fAttachLock) return false;
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
     if (!nic) return false;
     // A config-space cycle on this device can stall the notification thread,
@@ -434,32 +434,32 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
     const UInt32 requester = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
     UInt32 match = 0;
-    while (match < fR53RequesterCount && fR53Requesters[match] != requester) ++match;
-    if (match == fR53RequesterCount) {
+    while (match < fRequesterCount && fRequesters[match] != requester) ++match;
+    if (match == fRequesterCount) {
         // Only the legacy default and known unselected clients need model IDs.
         if (claim || vendor16 != 0x10ec) return false;
         if (device16 != 0x8127 && device16 != 0x8168) return false;
-        if (fR53SelectionExplicit || device16 != 0x8127) {
+        if (fSelectionExplicit || device16 != 0x8127) {
             nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kPassthrough);
             return false;
         }
     }
-    // Registry identity and profile must be resolved before fR52AttachLock:
+    // Registry identity and profile must be resolved before fAttachLock:
     // a device property lookup performed while the attach lock was held stalled
     // the boot as soon as the profile was derived per device (R70-S6). Only the
     // already-resolved profile is passed down from here.
     UInt32 classCode = 0;
     pciIdProperty(nic, "class-code", classCode);
-    r44mapper::ProfileSource profileSource = r44mapper::ProfileSource::legacy;
-    const r44mapper::Profile *deviceProfile =
-        r44ProfileForDevice(vendor16, device16, classCode, &profileSource);
-    R52LockGuard attachment(fR52AttachLock);
-    if (fR52Stopping) return false;
-    if (fR53SelectionExplicit) {
-        IOService *&offered = fR54Offers[match];
+    mapper_abi::ProfileSource profileSource = mapper_abi::ProfileSource::legacy;
+    const mapper_abi::Profile *deviceProfile =
+        ProfileForDevice(vendor16, device16, classCode, &profileSource);
+    LockGuard attachment(fAttachLock);
+    if (fStopping) return false;
+    if (fSelectionExplicit) {
+        IOService *&offered = fOffers[match];
         // A client that claims keeps the R54 ordering guarantees: the offer was
         // published before its PCI open and this call must match that record.
-        if (!claim && !fR69AutoAttach) {
+        if (!claim && !fAutoAttach) {
             if (offered) return offered == nic;  // first publish or replay
             if (nic->isOpen() || nic->getProperty("iommu-parent")) {
                 setProperty("r52-attach-failure", "already-open-or-bound");
@@ -482,20 +482,20 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
             nic->removeProperty(amd_iommu_policy::kOffer);
         }
     }
-    R53AttachPolicy policy(nic);
+    AttachPolicy policy(nic);
     ++fPublishHits;
     setProperty("r44-notify-hits", (unsigned long long)fPublishHits, 64);
-    UInt32 slot = kR52MaxDomains;
-    for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
-        auto *mapper = fR52Mappers[i];
-        if (!mapper) { if (slot == kR52MaxDomains) slot = i; continue; }
+    UInt32 slot = kMaxDomains;
+    for (UInt32 i = 0; i < kMaxDomains; ++i) {
+        auto *mapper = fMappers[i];
+        if (!mapper) { if (slot == kMaxDomains) slot = i; continue; }
         if (mapper->fNicDevice == nic) { policy.mapped = true; return true; }
-        if (mapper->fR52Domain && mapper->fR52Domain->deviceID == requester) {
+        if (mapper->fDomain && mapper->fDomain->deviceID == requester) {
             setProperty("r52-attach-failure", "duplicate-requester");
             return false;
         }
     }
-    if (slot == kR52MaxDomains) {
+    if (slot == kMaxDomains) {
         setProperty("r52-attach-failure", "domain-capacity");
         return false;
     }
@@ -507,53 +507,53 @@ bool org_example_AMDMapperProbe::r44AttachAuto(IOService *service, bool claim) {
     auto *mapper = new org_example_AMDMapperProbe;
     if (!mapper) return false;
     if (!mapper->init()) { mapper->release(); return false; }
-    mapper->fR52Owner = this;
+    mapper->fOwner = this;
     mapper->setName("AMDMapperDevice");
     if (!mapper->attach(this)) { mapper->release(); return false; }
     if (!mapper->start(this)) {
         mapper->detach(this); mapper->release(); return false;
     }
-    if (!mapper->r52PrepareDomain(nic, slot, deviceProfile, profileSource)) {
+    if (!mapper->PrepareDomain(nic, slot, deviceProfile, profileSource)) {
         setProperty("r52-attach-failure", "device-prepare");
         setProperty("r52-rejected-requester", requester, 32);
-        mapper->r52ReleaseDomain();
+        mapper->ReleaseDomain();
         mapper->stop(this);
         mapper->detach(this); mapper->release();
         return false;
     }
-    fR52Mappers[slot] = mapper;
+    fMappers[slot] = mapper;
     policy.mapped = true;
     mapper->registerService();
     return true;
 }
 #pragma clang diagnostic pop
 
-bool org_example_AMDMapperProbe::r52PrepareController(const R47HardwareInfo &hardware) {
-    if (fR44Controller) {
-        R52LockGuard guard(fR44Controller->lock);
-        const auto &found = fR44Controller->hardware;
+bool org_example_AMDMapperProbe::PrepareController(const HardwareInfo &hardware) {
+    if (fController) {
+        LockGuard guard(fController->lock);
+        const auto &found = fController->hardware;
         // This round deliberately owns one IVRS unit. The second requester
         // must resolve to that same unit; never reprogram its shared registers.
-        return fR44Controller->ready && !fR44Controller->suspended &&
-            !fR44Controller->command.failed &&
+        return fController->ready && !fController->suspended &&
+            !fController->command.failed &&
             found.mmioBase == hardware.mmioBase &&
             found.mmioBytes == hardware.mmioBytes &&
             found.iommuID == hardware.iommuID &&
             found.capabilityHeader == hardware.capabilityHeader;
     }
-    auto *c = (R44Controller *)IOMalloc(sizeof(R44Controller));
+    auto *c = (Controller *)IOMalloc(sizeof(Controller));
     if (!c) return false;
     bzero(c, sizeof(*c));
     c->lock = IOLockAlloc();
     c->hardware = hardware;
     c->state = "preparing";
-    fR44Controller = c;
+    fController = c;
     const char *failure = nullptr;
     if (!c->lock ||
-        !r44Allocate(c->devices, M22B_TABLE_SIZE_FULL, c->devicePA) ||
-        !r44Allocate(c->commands, M23_CMD_BUF_SIZE, c->commandPA) ||
-        !r44Allocate(c->semaphore, M2B2_PAGE_SIZE, c->semaphorePA) ||
-        !r44Allocate(c->events, M2B2_EVT_BUFFER_SIZE, c->eventPA)) {
+        !Allocate(c->devices, M22B_TABLE_SIZE_FULL, c->devicePA) ||
+        !Allocate(c->commands, M23_CMD_BUF_SIZE, c->commandPA) ||
+        !Allocate(c->semaphore, M2B2_PAGE_SIZE, c->semaphorePA) ||
+        !Allocate(c->events, M2B2_EVT_BUFFER_SIZE, c->eventPA)) {
         failure = "failed-dma-memory";
     }
 
@@ -594,13 +594,13 @@ bool org_example_AMDMapperProbe::r52PrepareController(const R47HardwareInfo &har
         c->originalCommand = mmioRead64(c->base, M2B2_OFF_CMD_BUF);
         c->originalEvent = mmioRead64(c->base, M2B2_OFF_EVT_BUF);
         c->originalControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
-        if (c->originalControl & kR44Enabled)
+        if (c->originalControl & kEnabled)
             failure = "failed-iommu-already-enabled";
     }
     if (failure) {
         setProperty("r44-state", failure);
         c->releaseBuffers();
-        fR44Controller = nullptr;
+        fController = nullptr;
         IOFree(c, sizeof(*c));
         return false;
     }
@@ -630,12 +630,12 @@ bool org_example_AMDMapperProbe::r52PrepareController(const R47HardwareInfo &har
     mmioWrite64(c->base, M2B2_OFF_CONTROL, control);
     control |= M2B2_CTRL_IOMMU_EN;
     mmioWrite64(c->base, M2B2_OFF_CONTROL, control);
-    if ((mmioRead64(c->base, M2B2_OFF_CONTROL) & kR44Enabled) != kR44Enabled) {
+    if ((mmioRead64(c->base, M2B2_OFF_CONTROL) & kEnabled) != kEnabled) {
         c->state = "failed-controller-enable";
         setProperty("r44-failure", c->state);
         if (c->restore()) {
             c->releaseBuffers();
-            fR44Controller = nullptr;
+            fController = nullptr;
             IOFree(c, sizeof(*c));
         } else if (!c->pinned) {
             c->pinned = true;
@@ -652,18 +652,18 @@ bool org_example_AMDMapperProbe::r52PrepareController(const R47HardwareInfo &har
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-bool org_example_AMDMapperProbe::r52PrepareDomain(
-    IOService *service, UInt32 slot, const r44mapper::Profile *requestedIn,
-    r44mapper::ProfileSource sourceIn) {
+bool org_example_AMDMapperProbe::PrepareDomain(
+    IOService *service, UInt32 slot, const mapper_abi::Profile *requestedIn,
+    mapper_abi::ProfileSource sourceIn) {
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
-    if (!fR52Owner || !nic || slot >= kR52MaxDomains) return false;
-    const r44mapper::Profile *requested = requestedIn;
-    R47HardwareInfo hardware{};
-    if (!r47DiscoverHardware(this, nic, hardware)) return false;
-    auto *d = (R52Domain *)IOMalloc(sizeof(R52Domain));
+    if (!fOwner || !nic || slot >= kMaxDomains) return false;
+    const mapper_abi::Profile *requested = requestedIn;
+    HardwareInfo hardware{};
+    if (!DiscoverHardware(this, nic, hardware)) return false;
+    auto *d = (Domain *)IOMalloc(sizeof(Domain));
     if (!d) return false;
     bzero(d, sizeof(*d));
-    fR52Domain = d;
+    fDomain = d;
     d->domainID = slot + 1;
     d->deviceID = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
@@ -675,30 +675,30 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(
     // domain is prepared - at the legacy arena, the smallest one and the only one
     // that cannot fail for size - and may grow at its first mapping to the
     // ceiling this device is admitted for.
-    r44mapper::ProfileSource source = sourceIn;
-    if (!requested) requested = &r44mapper::kProfileLegacy;
+    mapper_abi::ProfileSource source = sourceIn;
+    if (!requested) requested = &mapper_abi::kProfileLegacy;
     char requestedName[24] = {};
     const bool named = PE_parse_boot_argn("amdiommu_profile", requestedName,
                                           sizeof(requestedName) - 1) != 0;
     const bool unsupported =
-        named && r44mapper::profileForName(requestedName) == nullptr;
+        named && mapper_abi::profileForName(requestedName) == nullptr;
     bool forcedCeiling = false;
-    const r44mapper::Profile *ceiling = r44Ceiling(forcedCeiling);
+    const mapper_abi::Profile *ceiling = Ceiling(forcedCeiling);
     // The claim path is the verified R67-2 configuration: it keeps the arena it
     // was accepted with unless an operator raises the ceiling explicitly.
-    if (!forcedCeiling && !(fR52Owner && fR52Owner->fR69AutoAttach))
-        ceiling = &r44mapper::kProfileLegacy;
-    const r44mapper::Profile *prepared = &r44mapper::kProfileLegacy;
+    if (!forcedCeiling && !(fOwner && fOwner->fAutoAttach))
+        ceiling = &mapper_abi::kProfileLegacy;
+    const mapper_abi::Profile *prepared = &mapper_abi::kProfileLegacy;
     const bool growth =
-        r44mapper::profileForFirstMapGrowth(prepared, ceiling) != nullptr;
+        mapper_abi::profileForFirstMapGrowth(prepared, ceiling) != nullptr;
     // Per-instance admission evidence: the device mapper is its own instance,
     // so record whether this instance saw the boot-arg override at all.
-    nic->setProperty("r44-attach-forced", r44ForcedProfile() ? "yes" : "no");
+    nic->setProperty("r44-attach-forced", ForcedProfile() ? "yes" : "no");
     nic->setProperty("r44-attach-instance", getRegistryEntryID(), 64);
     nic->setProperty("r44-profile-source",
-        source == r44mapper::ProfileSource::bootArg ? "boot-arg"
-        : (source == r44mapper::ProfileSource::idTable ? "id-table"
-        : (source == r44mapper::ProfileSource::classTable ? "class-table"
+        source == mapper_abi::ProfileSource::bootArg ? "boot-arg"
+        : (source == mapper_abi::ProfileSource::idTable ? "id-table"
+        : (source == mapper_abi::ProfileSource::classTable ? "class-table"
                                                           : "legacy-fallback")));
     // The identity table is advisory now: it sets the admission ceiling and
     // records what identity-based sizing would have picked. It cannot cost a real
@@ -713,18 +713,18 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(
     nic->setProperty("r44-growth-policy", growth ? "first-map" : "disabled");
     nic->setProperty("r44-capacity-grown", "no");
     nic->setProperty("r44-profile", prepared->name);
-    const UInt64 preparedBytes = r44mapper::arenaBytesFor(*prepared);
+    const UInt64 preparedBytes = mapper_abi::arenaBytesFor(*prepared);
     const bool preparedOK = preparedBytes &&
-        preparedBytes <= r44mapper::kMaxArenaBytes &&
+        preparedBytes <= mapper_abi::kMaxArenaBytes &&
         prepared->tablePages >= prepared->pages / 512 + 2 &&
-        r44AllocateTableArea(d->tables,
+        AllocateTableArea(d->tables,
             (UInt64)prepared->tablePages * M2B2_PAGE_SIZE, d->tablePA) &&
-        r44PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
+        PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
             d->tablePA, prepared->tablePages, M2B2_PAGE_MODE_4_LEVEL, *prepared);
     if (!preparedOK) {
         nic->setProperty("r69-admission", "refused-no-arena");
         IOLog("AMDMapperProbe: admission refused, the legacy arena did not prepare\n");
-        if (fR69AutoAttach)
+        if (fAutoAttach)
             panic("AMDMapperProbe: admission-refused: legacy arena did not prepare");
         if (d->tables) { d->tables->release(); d->tables = nullptr; }
         return false;
@@ -735,18 +735,18 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(
     d->tablePages = prepared->tablePages;
     d->ceilingProfile = ceiling;
     const char *admission = growth
-        ? (ceiling == &r44mapper::kProfileRl10gMax
+        ? (ceiling == &mapper_abi::kProfileRl10gMax
                ? "granted-rl-10g-max-on-demand" : "granted-rl-10g-on-demand")
         : "granted-native-legacy";
     nic->setProperty("r69-admission", admission);
     IOLog("AMDMapperProbe: domain %u prepared %s, ceiling %s (growth %s)\n",
           slot, prepared->name, unsupported ? "unsupported-name" : ceiling->name,
           growth ? "first-map" : "disabled");
-    if (!fR52Owner->r52PrepareController(hardware)) return false;
-    R44Controller *c = fR52Owner->fR44Controller;
-    fR44Controller = c;
+    if (!fOwner->PrepareController(hardware)) return false;
+    Controller *c = fOwner->fController;
+    fController = c;
     {
-        R52LockGuard guard(c->lock);
+        LockGuard guard(c->lock);
         c->domains[slot] = d;
         ++c->domainCount;
         d->state = "ready-passthrough";
@@ -754,18 +754,18 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(
     nic->retain(); fNicDevice = nic;
     setProperty("r52-requester", d->deviceID, 32);
     setProperty("r52-mapper-id", getRegistryEntryID(), 64);
-    setProperty("r52-owner-id", fR52Owner->getRegistryEntryID(), 64);
+    setProperty("r52-owner-id", fOwner->getRegistryEntryID(), 64);
     setProperty("r52-device-entry-id", nic->getRegistryEntryID(), 64);
     setProperty("r47-mmio-efr", c->startupEfr, 64);
     setProperty("r47-efr-match", c->hardware.pciEfrSupported ?
         (c->hardware.firmwareEfrPresent ? "yes" : "firmware-absent") : "not-reported");
     // Identity and a complete domain snapshot precede copyMapperForDevice().
     // Only first map activates this endpoint's DTE, after the endpoint driver's reset.
-    r44PublishMappings();
+    PublishMappings();
     if (!nic->setProperty("iommu-parent", this)) return false;
-    setProperty("r44-parent", fR52Owner->fR69AutoAttach
+    setProperty("r44-parent", fOwner->fAutoAttach
         ? "set-at-first-publish-autoattach"
-        : (fR52Owner->fR53SelectionExplicit
+        : (fOwner->fSelectionExplicit
             ? "set-on-client-claim-before-pci-open" : "set-before-driver-start"));
     return true;
 }
@@ -773,26 +773,26 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(
 
 // R71-B: growth reads and updates the domain through these four calls. The
 // domain struct is private to this file while the rebuild itself lives with
-// R44MapperState, so neither translation unit needs the other's type.
-bool org_example_AMDMapperProbe::r44GrowthOpen() const {
-    R52Domain *d = fR52Domain;
+// MapperState, so neither translation unit needs the other's type.
+bool org_example_AMDMapperProbe::GrowthOpen() const {
+    Domain *d = fDomain;
     return d && !d->active;
 }
 
-const r44mapper::Profile *org_example_AMDMapperProbe::r44PreparedProfile() const {
-    R52Domain *d = fR52Domain;
-    return d ? r44mapper::profileForName(d->profileName) : nullptr;
+const mapper_abi::Profile *org_example_AMDMapperProbe::PreparedProfile() const {
+    Domain *d = fDomain;
+    return d ? mapper_abi::profileForName(d->profileName) : nullptr;
 }
 
-const r44mapper::Profile *org_example_AMDMapperProbe::r44CeilingProfile() const {
-    R52Domain *d = fR52Domain;
+const mapper_abi::Profile *org_example_AMDMapperProbe::CeilingProfile() const {
+    Domain *d = fDomain;
     return d ? d->ceilingProfile : nullptr;
 }
 
-void org_example_AMDMapperProbe::r44AdoptGrownTables(
+void org_example_AMDMapperProbe::AdoptGrownTables(
     IOBufferMemoryDescriptor *tables, UInt64 tablePA, UInt32 tablePages,
-    const r44mapper::Profile &target) {
-    R52Domain *d = fR52Domain;
+    const mapper_abi::Profile &target) {
+    Domain *d = fDomain;
     if (!d) return;
     // The DTE is written from tablePA at first activation, which is still ahead:
     // nothing in the hardware refers to the area this call replaces.
@@ -806,59 +806,59 @@ void org_example_AMDMapperProbe::r44AdoptGrownTables(
     if (old) old->release();
 }
 
-bool org_example_AMDMapperProbe::r52ReleaseDomain() {
-    R52Domain *d = fR52Domain;
-    R44Controller *c = fR44Controller;
-    if (!d) return r44QuiesceMappings() && r44ReleaseMappings();
+bool org_example_AMDMapperProbe::ReleaseDomain() {
+    Domain *d = fDomain;
+    Controller *c = fController;
+    if (!d) return QuiesceMappings() && ReleaseMappings();
     // Active roots are released only after the shared owner restored hardware.
     if (c && c->configured && d->active) return false;
-    if (!r44QuiesceMappings() || !r44ReleaseMappings()) return false;
+    if (!QuiesceMappings() || !ReleaseMappings()) return false;
     if (c) {
-        R52LockGuard guard(c->lock);
-        for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
+        LockGuard guard(c->lock);
+        for (UInt32 i = 0; i < kMaxDomains; ++i) {
             if (c->domains[i] != d) continue;
             c->domains[i] = nullptr; --c->domainCount;
         }
     }
     if (d->tables) d->tables->release();
-    fR52Domain = nullptr; fR44Controller = nullptr;
+    fDomain = nullptr; fController = nullptr;
     IOFree(d, sizeof(*d));
     return true;
 }
 
 
-bool org_example_AMDMapperProbe::r44Invalidate(
+bool org_example_AMDMapperProbe::Invalidate(
     bool invalidateDevice, UInt64 address, UInt64 bytes,
     bool newMapping, bool *skipped) {
     if (skipped) *skipped = false;
-    R44Controller *c = fR44Controller;
-    if (!c || !fR52Domain) return false;
-    R52LockGuard guard(c->lock);
-    return r52InvalidateLocked(invalidateDevice, address, bytes, newMapping, skipped);
+    Controller *c = fController;
+    if (!c || !fDomain) return false;
+    LockGuard guard(c->lock);
+    return InvalidateLocked(invalidateDevice, address, bytes, newMapping, skipped);
 }
 
-bool org_example_AMDMapperProbe::r52InvalidateLocked(
+bool org_example_AMDMapperProbe::InvalidateLocked(
     bool invalidateDevice, UInt64 address, UInt64 bytes,
     bool newMapping, bool *skipped) {
     // Both the caller's mapper lock and shared controller lock are held.
     // One queue cursor and CompletionWait sequence serve all device domains.
     if (skipped) *skipped = false;
-    R44Controller *c = fR44Controller;
-    R52Domain *d = fR52Domain;
+    Controller *c = fController;
+    Domain *d = fDomain;
     if (!c || !d || !c->ready || c->command.failed) return false;
     const bool full = !d->active || invalidateDevice || !bytes;
     const UInt64 windowBytes = (UInt64)d->profilePages * 4096ULL;
     if (!full && (((address | bytes) & 4095ULL) ||
-        address < r44mapper::kBase ||
-        address - r44mapper::kBase >= windowBytes ||
-        bytes > windowBytes - (address - r44mapper::kBase)))
+        address < mapper_abi::kBase ||
+        address - mapper_abi::kBase >= windowBytes ||
+        bytes > windowBytes - (address - mapper_abi::kBase)))
         return false;
     OSSynchronizeIO();
     // Upper-level tables are prebuilt and ordinary maps fill only empty leaves.
     // Unmap still waits for invalidation before returning IOVA to the allocator.
     // With no non-present cache, a new mapping therefore needs no INV/CW.
     // First activation, explicit device flush and PM always retain their fence.
-    if (newMapping && !full && !(c->hardware.capabilityHeader & kR51NpCache)) {
+    if (newMapping && !full && !(c->hardware.capabilityHeader & kNpCache)) {
         ++d->mapInvalidationSkipped;
         if (skipped) *skipped = true;
         return true;
@@ -871,7 +871,7 @@ bool org_example_AMDMapperProbe::r52InvalidateLocked(
         dte[d->deviceID * 4 + 1] = d->domainID;
         dte[d->deviceID * 4] = (d->tablePA & M2B2_PTE_ADDR_MASK) |
             ((UInt64)M2B2_PAGE_MODE_4_LEVEL << M2B2_DEV_ENTRY_MODE_SHIFT) |
-            DTE_V | DTE_TV | (fR63DMAParked ? 0 : (DTE_IR | DTE_IW));
+            DTE_V | DTE_TV | (fDMAParked ? 0 : (DTE_IR | DTE_IW));
         OSSynchronizeIO();
         if (!m2b2Submit(c->base, &c->command, "r44-activate-device", d->deviceID,
                 ((UInt32)M2B2_CMD_INV_DEV_ENTRY << 28), 0, 0)) {
@@ -883,7 +883,7 @@ bool org_example_AMDMapperProbe::r52InvalidateLocked(
     }
     // First activation and power transitions still flush the complete domain
     // and PDE cache. Ordinary maps only edit leaves of the prebuilt IOVA tree.
-    M2B2CmdWords cmd[kR61MaxParts];
+    M2B2CmdWords cmd[kMaxParts];
     const UInt32 opcode = d->domainID | ((UInt32)M2B2_CMD_INV_IOMMU_PAGES << 28);
     UInt32 count = 1;
     UInt64 covered = 0;
@@ -891,7 +891,7 @@ bool org_example_AMDMapperProbe::r52InvalidateLocked(
         const UInt64 encoded = m2b2InvAddress();
         cmd[0] = {0, opcode, (UInt32)encoded | M2B2_CMD_PDE_MASK, (UInt32)(encoded >> 32)};
     } else {
-        count = r61PlanRange(opcode, address, bytes, cmd, covered);
+        count = PlanRange(opcode, address, bytes, cmd, covered);
     }
     if (!count || !m2b2SubmitBatch(c->base, &c->command, "r44-invalidate-pages", cmd, count)) {
         d->state = "failed-page-invalidation";
@@ -927,20 +927,20 @@ bool org_example_AMDMapperProbe::r52InvalidateLocked(
 
 // Caller holds its mapper lock. A shared-controller lock serializes the DTE
 // write and both fences with ordinary submissions from either requester.
-IOReturn org_example_AMDMapperProbe::r63SwitchRequesterDMA(bool park) {
-    auto *c = fR44Controller;
-    auto *d = fR52Domain;
+IOReturn org_example_AMDMapperProbe::SwitchRequesterDMA(bool park) {
+    auto *c = fController;
+    auto *d = fDomain;
     if (!c || !d) return kIOReturnNotReady;
-    R52LockGuard guard(c->lock);
+    LockGuard guard(c->lock);
     if (c->command.failed) return kIOReturnIOError;
     if (!c->ready || c->suspended) return kIOReturnNotReady;
     if (!d->active) return kIOReturnNotReady;
-    if (fR63DMAParked == park) return kIOReturnSuccess; // active on first enable
-    fR63DMAParked = park;
-    if (!r52InvalidateLocked(true, 0, 0, false, nullptr)) {
+    if (fDMAParked == park) return kIOReturnSuccess; // active on first enable
+    fDMAParked = park;
+    if (!InvalidateLocked(true, 0, 0, false, nullptr)) {
         // Do not start DMA or release backing after an unconfirmed transition.
         // With a failed queue, a deny in table memory is not proof of eviction.
-        fR63DMAParked = true;
+        fDMAParked = true;
         auto *dte = (volatile UInt64 *)c->devices->getBytesNoCopy();
         dte[d->deviceID * 4] &= ~(DTE_IR | DTE_IW);
         OSSynchronizeIO();
@@ -953,16 +953,16 @@ IOReturn org_example_AMDMapperProbe::r63SwitchRequesterDMA(bool park) {
     return kIOReturnSuccess;
 }
 
-IOReturn org_example_AMDMapperProbe::r66SetSystemPM(bool armed) {
-    R44Controller *c = fR44Controller;
-    if (!fR44Auto || fR52Owner || !c) return kIOReturnBadArgument;
-    R52LockGuard guard(c->lock);
+IOReturn org_example_AMDMapperProbe::SetSystemPM(bool armed) {
+    Controller *c = fController;
+    if (!fAuto || fOwner || !c) return kIOReturnBadArgument;
+    LockGuard guard(c->lock);
     if (armed) {
         if (!c->ready || c->suspended || c->powerFailed || c->domainCount != 2)
             return kIOReturnNotReady;
         UInt32 present = 0;
-        for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
-            R52Domain *domain = c->domains[i];
+        for (UInt32 i = 0; i < kMaxDomains; ++i) {
+            Domain *domain = c->domains[i];
             if (!domain) continue;
             ++present;
             if (!domain->active) return kIOReturnNotReady;
@@ -977,17 +977,17 @@ IOReturn org_example_AMDMapperProbe::r66SetSystemPM(bool armed) {
     return kIOReturnSuccess;
 }
 
-bool org_example_AMDMapperProbe::r52PowerSupported() const {
-    R44Controller *c = fR44Controller;
-    if (!c || !fR52Domain) return false;
-    R52LockGuard guard(c->lock);
+bool org_example_AMDMapperProbe::PowerSupported() const {
+    Controller *c = fController;
+    if (!c || !fDomain) return false;
+    LockGuard guard(c->lock);
     // Single-domain behavior remains unchanged. Two-domain PM is enabled
     // only by an explicit runtime arm after both NICs are fully initialized.
     if (c->domainCount == 1) return true;
     if (c->domainCount != 2 || !c->coordinatedPMArmed) return false;
     UInt32 present = 0;
-    for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
-        R52Domain *domain = c->domains[i];
+    for (UInt32 i = 0; i < kMaxDomains; ++i) {
+        Domain *domain = c->domains[i];
         if (!domain) continue;
         ++present;
         if (!domain->active) return false;
@@ -997,44 +997,44 @@ bool org_example_AMDMapperProbe::r52PowerSupported() const {
 
 // TODO(R47-PM-HARDWARE): validate the real suspend/resume sequence once this
 // AMD platform can sleep reliably. R47 acceptance does not invoke this path.
-bool org_example_AMDMapperProbe::r47SuspendAuto() {
+bool org_example_AMDMapperProbe::SuspendAuto() {
     // The mapper lock is held and admission is closed. Lucy's PM gate has
     // already completed the network family's disable/clearRxTxRings path.
-    R44Controller *c = fR44Controller;
-    R52Domain *d = fR52Domain;
+    Controller *c = fController;
+    Domain *d = fDomain;
     if (!c || !d) return false;
-    R52LockGuard guard(c->lock);
+    LockGuard guard(c->lock);
     if ((c->domainCount != 1 && c->domainCount != 2) ||
         !c->ready || c->suspended || c->powerFailed)
         return false;
     c->resumeRegistersRestored = false;
     c->sleepControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
-    if ((c->sleepControl & kR44Enabled) != kR44Enabled)
+    if ((c->sleepControl & kEnabled) != kEnabled)
         return c->powerFailure("failed-pm-suspend-controller-not-enabled");
     if (c->domainCount == 2) {
         if (d->pmSuspendReady) return false;
         if (d->pmResumeReady) {
             bool allResumed = true;
-            for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+            for (UInt32 i = 0; i < kMaxDomains; ++i)
                 if (c->domains[i] && !c->domains[i]->pmResumeReady) allResumed = false;
             if (!allResumed) return false;
-            for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+            for (UInt32 i = 0; i < kMaxDomains; ++i)
                 if (c->domains[i]) c->domains[i]->pmResumeReady = false;
         }
         // Fence this requester's own DTE/domain before publishing readiness.
         // The final participant performs the single shared-controller stop.
-        if (!r52InvalidateLocked(false, 0, 0, false, nullptr))
+        if (!InvalidateLocked(false, 0, 0, false, nullptr))
             return c->powerFailure("failed-pm-domain-suspend-fence");
         ++d->pmSuspends;
         d->pmSuspendSequence = c->command.completionSequence;
         d->pmSuspendReady = true;
         d->state = "pm-suspend-ready";
         bool allReady = true;
-        for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+        for (UInt32 i = 0; i < kMaxDomains; ++i)
             if (c->domains[i] && !c->domains[i]->pmSuspendReady) allReady = false;
         if (!allReady) return true;
     } else {
-        if (!r52InvalidateLocked(false, 0, 0, false, nullptr))
+        if (!InvalidateLocked(false, 0, 0, false, nullptr))
             return c->powerFailure("failed-pm-suspend-fence");
         ++d->pmSuspends;
         d->pmSuspendSequence = c->command.completionSequence;
@@ -1053,13 +1053,13 @@ bool org_example_AMDMapperProbe::r47SuspendAuto() {
 
 // TODO(R47-PM-HARDWARE): D0 readiness and retained BAR/MMIO across real system
 // sleep need hardware validation; normal interface down/up is not this test.
-bool org_example_AMDMapperProbe::r47ResumeAuto() {
+bool org_example_AMDMapperProbe::ResumeAuto() {
     // The PCI parent and Lucy's D0 transition are complete, but its normal
     // enable has not run. All tables, DMA objects and mapping records survive.
-    R44Controller *c = fR44Controller;
-    R52Domain *d = fR52Domain;
+    Controller *c = fController;
+    Domain *d = fDomain;
     if (!c || !d) return false;
-    R52LockGuard guard(c->lock);
+    LockGuard guard(c->lock);
     if ((c->domainCount != 1 && c->domainCount != 2) ||
         !c->suspended || c->powerFailed) {
         // The first requester restored the shared controller. Later requesters
@@ -1069,7 +1069,7 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
             c->suspendCount == c->resumeCount + 1) {
             // This is the second requester only after the first has restored
             // the engines. An incomplete suspend is NOT a restored controller.
-            if (!r52InvalidateLocked(true, 0, 0, false, nullptr))
+            if (!InvalidateLocked(true, 0, 0, false, nullptr))
                 return c->powerFailure("failed-pm-domain-resume-invalidation");
             d->recordPMResume();
             d->pmResumeReady = true;
@@ -1077,7 +1077,7 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
             c->resumeDevSequence = d->lastInvDevSequence;
             c->resumePagesSequence = d->lastInvPagesSequence;
             bool allReady = true;
-            for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+            for (UInt32 i = 0; i < kMaxDomains; ++i)
                 if (c->domains[i] && !c->domains[i]->pmResumeReady) allReady = false;
             if (allReady) {
                 c->resumeTime = mach_absolute_time();
@@ -1091,7 +1091,7 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
         return false;
     }
     if (c->domainCount == 2) {
-        for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+        for (UInt32 i = 0; i < kMaxDomains; ++i)
             if (c->domains[i] && !c->domains[i]->pmSuspendReady)
                 return c->powerFailure("failed-pm-resume-incomplete-suspend-barrier");
     }
@@ -1122,7 +1122,7 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
     mmioWrite64(c->base, M2B2_OFF_EVT_HEAD, 0);
     mmioWrite64(c->base, M2B2_OFF_EVT_TAIL, 0);
     mmioWrite32(c->base, M2B2_OFF_STATUS, M2B2_STATUS_EVT_OVERFLOW);
-    UInt64 control = c->sleepControl & ~kR44Enabled;
+    UInt64 control = c->sleepControl & ~kEnabled;
     mmioWrite64(c->base, M2B2_OFF_CONTROL, control | M2B2_CTRL_CMDBUF_EN);
     control |= M2B2_CTRL_CMDBUF_EN | M2B2_CTRL_EVT_LOG_EN;
     mmioWrite64(c->base, M2B2_OFF_CONTROL, control);
@@ -1149,7 +1149,7 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
     c->ready = true;
     // Force the device-cache invalidation even though the DTE remains active
     // in retained memory. Do not overwrite the original startup timestamps.
-    if (!r52InvalidateLocked(true, 0, 0, false, nullptr))
+    if (!InvalidateLocked(true, 0, 0, false, nullptr))
         return c->powerFailure("failed-pm-resume-invalidation");
     d->recordPMResume();
     c->resumeDevSequence = d->lastInvDevSequence;
@@ -1158,10 +1158,10 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
     if (c->domainCount == 2) {
         d->pmResumeReady = true;
         d->state = "pm-resume-ready";
-        for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+        for (UInt32 i = 0; i < kMaxDomains; ++i)
             if (c->domains[i]) c->domains[i]->pmSuspendReady = false;
         bool allReady = true;
-        for (UInt32 i = 0; i < kR52MaxDomains; ++i)
+        for (UInt32 i = 0; i < kMaxDomains; ++i)
             if (c->domains[i] && !c->domains[i]->pmResumeReady) allReady = false;
         if (allReady) {
             c->resumeTime = mach_absolute_time();
@@ -1178,11 +1178,11 @@ bool org_example_AMDMapperProbe::r47ResumeAuto() {
     return true;
 }
 
-void org_example_AMDMapperProbe::r44PublishAuto() {
-    R44Controller *c = fR44Controller;
-    R52Domain *d = fR52Domain;
+void org_example_AMDMapperProbe::PublishAuto() {
+    Controller *c = fController;
+    Domain *d = fDomain;
     if (!c || !d) return;
-    R52LockGuard guard(c->lock);
+    LockGuard guard(c->lock);
     // The per-device snapshot holds its mapper lock. The shared lock also
     // serializes event HEAD consumption and queue counters across both NICs.
     if (c->configured && !c->suspended) {
@@ -1202,7 +1202,7 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     setProperty("r47-pm-state", c->powerFailed ? "failed" :
                 (c->suspended ? "suspended" : "awake"));
     UInt32 pmSuspendReady = 0, pmResumeReady = 0;
-    for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
+    for (UInt32 i = 0; i < kMaxDomains; ++i) {
         if (!c->domains[i]) continue;
         pmSuspendReady += c->domains[i]->pmSuspendReady ? 1 : 0;
         pmResumeReady += c->domains[i]->pmResumeReady ? 1 : 0;
@@ -1242,14 +1242,14 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
     number("r44-event-pa", c->eventPA);
     number("r44-controller-ready-time", c->readyTime);
     number("r44-dte-active-time", d->activeTime);
-    setProperty("r63-dma-parked", c->command.failed ? "unknown" : (fR63DMAParked ? "yes" : "no"));
+    setProperty("r63-dma-parked", c->command.failed ? "unknown" : (fDMAParked ? "yes" : "no"));
     number("r63-park-count", d->parkCount);
     number("r63-restore-count", d->restoreCount);
     number("r63-last-dev-cw", d->gateDevSequence);
     number("r63-last-pages-cw", d->gatePagesSequence);
     number("r44-inv-dev-completed", d->invDevCompleted);
     number("r44-inv-pages-completed", d->invPagesCompleted);
-    number("r51-npcache", (c->hardware.capabilityHeader & kR51NpCache) ? 1 : 0);
+    number("r51-npcache", (c->hardware.capabilityHeader & kNpCache) ? 1 : 0);
     number("r51-map-invalidation-skipped", d->mapInvalidationSkipped);
     number("r50-inv-full-completed", d->invFullCompleted);
     number("r50-inv-range-completed", d->invRangeCompleted);
@@ -1294,16 +1294,16 @@ void org_example_AMDMapperProbe::r44PublishAuto() {
 }
 
 
-void org_example_AMDMapperProbe::r52PublishDomains() {
-    if (fR52Owner || !fR52AttachLock) return;
-    R52LockGuard attachment(fR52AttachLock);
-    OSArray *domains = OSArray::withCapacity(kR52MaxDomains);
+void org_example_AMDMapperProbe::PublishDomains() {
+    if (fOwner || !fAttachLock) return;
+    LockGuard attachment(fAttachLock);
+    OSArray *domains = OSArray::withCapacity(kMaxDomains);
     if (!domains) return;
-    for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
-        auto *mapper = fR52Mappers[i];
-        if (!mapper || !mapper->fR52Domain) continue;
+    for (UInt32 i = 0; i < kMaxDomains; ++i) {
+        auto *mapper = fMappers[i];
+        if (!mapper || !mapper->fDomain) continue;
         OSDictionary *properties = nullptr;
-        mapper->r44PublishMappings(&properties);
+        mapper->PublishMappings(&properties);
         if (!properties) continue;
         domains->setObject(properties);
         // Retain the historical single-device inspection surface on the owner.
@@ -1327,12 +1327,12 @@ void org_example_AMDMapperProbe::r52PublishDomains() {
     }
     setProperty("r52-domains", domains);
     setProperty("r52-domain-count", domains->getCount(), 32);
-    setProperty("r52-snapshot-sequence", ++fR52SnapshotSequence, 64);
+    setProperty("r52-snapshot-sequence", ++fSnapshotSequence, 64);
     setProperty("r52-snapshot-time", mach_absolute_time(), 64);
     domains->release();
-    R44Controller *c = fR44Controller;
+    Controller *c = fController;
     if (!c) return;
-    R52LockGuard guard(c->lock);
+    LockGuard guard(c->lock);
     if (c->configured && !c->suspended) c->collectEvents();
     auto number = [this](const char *key, UInt64 value) {
         setProperty(key, (unsigned long long)value, 64);
@@ -1354,25 +1354,25 @@ void org_example_AMDMapperProbe::r52PublishDomains() {
     setProperty("r52-controller-event-valid", c->eventInvalid ? "no" : "yes");
 }
 
-bool org_example_AMDMapperProbe::r44StopAuto() {
-    if (fR52Owner) {
+bool org_example_AMDMapperProbe::StopAuto() {
+    if (fOwner) {
         // Device stop closes only that domain. Its root and mapper remain owned
         // by the controller service until all domains can be stopped together.
         // In particular, interface disable/enable never stops this controller.
-        if (!r44QuiesceMappings()) {
+        if (!QuiesceMappings()) {
             setProperty("r52-device-stop", "retained-live-mappings");
             return false;
         }
-        r44PublishMappings();
+        PublishMappings();
         setProperty("r52-device-stop", "quiesced");
         return true;
     }
-    if (!fR52AttachLock) return !fR44Controller;
+    if (!fAttachLock) return !fController;
     {
-        R52LockGuard attachment(fR52AttachLock);
-        R44Controller *c = fR44Controller;
-        fR52Stopping = true;
-        for (auto *&device : fR54Offers) {
+        LockGuard attachment(fAttachLock);
+        Controller *c = fController;
+        fStopping = true;
+        for (auto *&device : fOffers) {
             if (!device) continue;
             if (device->getProperty(amd_iommu_policy::kOffer) == this) {
                 device->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
@@ -1381,15 +1381,15 @@ bool org_example_AMDMapperProbe::r44StopAuto() {
             device->release();
             device = nullptr;
         }
-        for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
-            auto *mapper = fR52Mappers[i];
-            if (!mapper || mapper->r44QuiesceMappings()) continue;
+        for (UInt32 i = 0; i < kMaxDomains; ++i) {
+            auto *mapper = fMappers[i];
+            if (!mapper || mapper->QuiesceMappings()) continue;
             setProperty("r44-state", "retained-live-mappings");
             if (c && !c->pinned) { c->pinned = true; retain(); }
             return false;
         }
         if (c) {
-            R52LockGuard guard(c->lock);
+            LockGuard guard(c->lock);
             if (!c->restore()) {
                 c->state = "retained-hardware-stop-failed";
                 setProperty("r44-state", c->state);
@@ -1397,20 +1397,20 @@ bool org_example_AMDMapperProbe::r44StopAuto() {
                 return false;
             }
         }
-        for (UInt32 i = 0; i < kR52MaxDomains; ++i) {
-            auto *mapper = fR52Mappers[i];
+        for (UInt32 i = 0; i < kMaxDomains; ++i) {
+            auto *mapper = fMappers[i];
             if (!mapper) continue;
             mapper->stop(this);
-            mapper->r52ReleaseDomain();
-            mapper->fR52Owner = nullptr;
+            mapper->ReleaseDomain();
+            mapper->fOwner = nullptr;
             mapper->detach(this);
             mapper->release();
-            fR52Mappers[i] = nullptr;
+            fMappers[i] = nullptr;
         }
         if (c) {
             const bool pinned = c->pinned;
             c->releaseBuffers();
-            fR44Controller = nullptr;
+            fController = nullptr;
             IOFree(c, sizeof(*c));
             if (pinned) release();
         }
@@ -1421,6 +1421,6 @@ bool org_example_AMDMapperProbe::r44StopAuto() {
 
 void org_example_AMDMapperProbe::free() {
     // A pre-open claim pins the owner (and hence this lock) until it returns.
-    if (fR52AttachLock) IOLockFree(fR52AttachLock);
+    if (fAttachLock) IOLockFree(fAttachLock);
     IOMapper::free();
 }

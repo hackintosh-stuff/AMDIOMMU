@@ -75,10 +75,10 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
         return false;
     }
     setProperty("m1b-stage", "2-super-start-ok");
-    if (fR52Owner) {
+    if (fOwner) {
         // This instance is attached to the controller service, not matched to
         // PCI. The owner prepares its domain before publishing iommu-parent.
-        fR44Auto = true;
+        fAuto = true;
         setProperty("r44-mode", "auto");
         setProperty("r52-role", "device");
         setProperty("r44-system-mapper", "no");
@@ -86,18 +86,18 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
     }
 
     char mode[32] = {};
-    fR44Auto = PE_parse_boot_argn("amdiommu", mode, sizeof(mode) - 1)
+    fAuto = PE_parse_boot_argn("amdiommu", mode, sizeof(mode) - 1)
             && (strcmp(mode, "auto") == 0 ||
                 strcmp(mode, "auto-attach") == 0);
     // R69: "auto-attach" additionally publishes iommu-parent at first publish,
     // because Apple's own kexts only call IOMapper::copyMapperForDevice() and
     // can never invoke the AMDIOMMUClaimRequesterV1 handshake. Plain "auto"
     // keeps the R54..R67 claim protocol and its analysis exactly as validated.
-    fR69AutoAttach = fR44Auto && strcmp(mode, "auto-attach") == 0;
-    if (fR44Auto) {
+    fAutoAttach = fAuto && strcmp(mode, "auto-attach") == 0;
+    if (fAuto) {
         // Explicit clients claim at pre-open; this owner keeps their domains
         // across ordinary interface down/up.
-        return r44StartAuto();
+        return StartAuto();
     }
 
     // ---- B2-b: first decide whether real devices are let through ----
@@ -258,22 +258,22 @@ IOReturn org_example_AMDMapperProbe::callPlatformFunction(
     void *unused3, void *unused4) {
     if (name && name->isEqualTo(amd_iommu_policy::kClaim)) {
         if (!target || operation || unused3 || unused4) return kIOReturnBadArgument;
-        return r44AttachAuto(static_cast<IOService *>(target), true)
+        return AttachAuto(static_cast<IOService *>(target), true)
             ? kIOReturnSuccess : kIOReturnNotReady;
     }
     if (name && name->isEqualTo("R63SetRequesterDMA")) {
-        if (!fR44Auto || !fNicDevice) return kIOReturnNotReady;
+        if (!fAuto || !fNicDevice) return kIOReturnNotReady;
         const uintptr_t op = (uintptr_t)operation;
         if (target != fNicDevice || unused3 || unused4 || (op != 1 && op != 2))
             return kIOReturnBadArgument;
-        return r63SetRequesterDMA(op == 1);
+        return SetRequesterDMA(op == 1);
     }
     if (name && name->isEqualTo("R47PowerTransition")) {
-        if (!fR44Auto || !fNicDevice) return kIOReturnNotReady;
+        if (!fAuto || !fNicDevice) return kIOReturnNotReady;
         const uintptr_t op = (uintptr_t)operation;
         if (target != fNicDevice || unused3 || unused4 || (op != 1 && op != 2))
             return kIOReturnBadArgument;
-        return r47PowerTransition((UInt32)op);
+        return PowerTransition((UInt32)op);
     }
     return super::callPlatformFunction(name, wait, target, operation,
                                       unused3, unused4);
@@ -285,20 +285,20 @@ IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
     if (pmArm) {
         if (pmArm != kOSBooleanTrue && pmArm != kOSBooleanFalse)
             return kIOReturnBadArgument;
-        return r66SetSystemPM(pmArm == kOSBooleanTrue);
+        return SetSystemPM(pmArm == kOSBooleanTrue);
     }
     OSObject *all = dict ? dict->getObject("R52Snapshot") : nullptr;
-    if (fR44Auto && all) {
+    if (fAuto && all) {
         if (all != kOSBooleanTrue) return kIOReturnBadArgument;
-        if (fR52Owner) return kIOReturnUnsupported;
-        r52PublishDomains();
+        if (fOwner) return kIOReturnUnsupported;
+        PublishDomains();
         return kIOReturnSuccess;
     }
     OSObject *snapshot = dict ? dict->getObject("R44Snapshot") : nullptr;
-    if (fR44Auto && snapshot) {
+    if (fAuto && snapshot) {
         if (snapshot != kOSBooleanTrue) return kIOReturnBadArgument;
-        if (fR52Owner) r44PublishMappings();
-        else r52PublishDomains();
+        if (fOwner) PublishMappings();
+        else PublishDomains();
         return kIOReturnSuccess;
     }
     OSObject *request = dict ? dict->getObject("R31Stop") : nullptr;
@@ -310,13 +310,13 @@ IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
 }
 
 void org_example_AMDMapperProbe::stop(IOService *provider) {
-    if (fR44Auto) {
+    if (fAuto) {
         if (fPublishNotifier) {
             fPublishNotifier->disable();
             fPublishNotifier->release();
             fPublishNotifier = nullptr;
         }
-        if (!r44StopAuto()) return;
+        if (!StopAuto()) return;
         if (fNicDevice) {
             if (fNicDevice->getProperty("iommu-parent") == this)
                 fNicDevice->removeProperty("iommu-parent");
@@ -412,8 +412,8 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     uint64_t *mapAddress,
     uint64_t *mapLength) {
 
-    if (fR44Auto)
-        return r44MapMemory(memory, descriptorOffset, length, mapOptions,
+    if (fAuto)
+        return MapMemory(memory, descriptorOffset, length, mapOptions,
                             mapSpecification, dmaCommand, pageList,
                             mapAddress, mapLength);
 
@@ -626,8 +626,8 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
 IOReturn org_example_AMDMapperProbe::iovmUnmapMemory(
     IOMemoryDescriptor *memory, IODMACommand *dmaCommand,
     uint64_t mapAddress, uint64_t mapLength) {
-    if (fR44Auto)
-        return r44UnmapMemory(memory, dmaCommand, mapAddress, mapLength);
+    if (fAuto)
+        return UnmapMemory(memory, dmaCommand, mapAddress, mapLength);
     (void)memory;
 
     fUnmapCalls++;
@@ -685,7 +685,7 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
     (void)physicalAddress; (void)length;
 
     fInsertCalls++;
-    if (fR44Auto) {
+    if (fAuto) {
         setProperty("r44-insert-rejects", (unsigned long long)fInsertCalls, 32);
         return kIOReturnUnsupported;
     }
@@ -701,9 +701,9 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
 
 // ===== AMDMapperProbe.cpp (original lines 7985..8007) =====
 uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress) {
-    if (fR44Auto) {
+    if (fAuto) {
         uint64_t pa = 0;
-        return r44Translate(mappedAddress, &pa) ? pa : 0;
+        return Translate(mappedAddress, &pa) ? pa : 0;
     }
     fPhysAddrCalls++;
 

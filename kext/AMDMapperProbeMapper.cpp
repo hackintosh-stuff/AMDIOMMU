@@ -12,8 +12,8 @@
 // cannot be confirmed, fail-stop before returning control to that caller.
 // Do not allocate, publish registry data, retry a failed ring, or drop the
 // domain lock here. This is containment, not recovery or proof of device idle.
-[[noreturn]] static void r70DMAFailStop(
-    const char *reason, const r44mapper::RecordHeader &record) {
+[[noreturn]] static void DMAFailStop(
+    const char *reason, const mapper_abi::RecordHeader &record) {
     panic("AMDMapperProbe: unsafe DMA retirement (%s), handle=%llu "
           "iova=0x%llx length=0x%llx state=0x%x",
           reason, (unsigned long long)record.handle,
@@ -21,11 +21,11 @@
           (unsigned long long)record.mapLength, (unsigned)record.state);
 }
 
-struct org_example_AMDMapperProbe::R44MapperState {
+struct org_example_AMDMapperProbe::MapperState {
     struct Mapping {
         IOMemoryDescriptor *memory;
         IODMACommand *command;
-        r44mapper::RecordHeader record;
+        mapper_abi::RecordHeader record;
     };
     IOLock *lock;
     volatile UInt64 *tables;
@@ -39,8 +39,8 @@ struct org_example_AMDMapperProbe::R44MapperState {
     volatile UInt64 **leaves;
     amdtx::RuntimeAllocator allocator;
     // Both scratch buffers are per-domain and used only while lock is held.
-    BoundedProbeLayout<r44mapper::kRuns> walkScratch;
-    r44mapper::Record exportScratch;
+    BoundedProbeLayout<mapper_abi::kRuns> walkScratch;
+    mapper_abi::Record exportScratch;
     Mapping *mappings;
     // Expected PA from the descriptor walk, independent of the actual leaf PTE.
     UInt64 *physicalByPage;
@@ -48,7 +48,7 @@ struct org_example_AMDMapperProbe::R44MapperState {
     amdtx::u64 *liveSlots;
     // Per-domain start index: zero means no mapping starts on this IOVA page.
     UInt16 *slotByStartPage;
-    r44mapper::Snapshot snapshot;
+    mapper_abi::Snapshot snapshot;
     OSData *suspendLive, *suspendPT, *resumeLive, *resumePT;
     UInt64 nextHandle;
     // R48 observes successful caller address constraints outside the raw ABI.
@@ -92,7 +92,7 @@ struct org_example_AMDMapperProbe::R44MapperState {
         else word &= ~mask;
     }
 
-    void exportRecord(const r44mapper::RecordHeader &header, r44mapper::Record &out) const {
+    void exportRecord(const mapper_abi::RecordHeader &header, mapper_abi::Record &out) const {
         out.header = header;
         const size_t used = header.pages * sizeof(out.physical[0]);
         memcpy(out.physical, physicalByPage + header.basePage, used);
@@ -101,7 +101,7 @@ struct org_example_AMDMapperProbe::R44MapperState {
 
     OSData *copyLiveRecords() {
         OSData *data = OSData::withCapacity((snapshot.liveCount ? snapshot.liveCount : 1) *
-                                            sizeof(r44mapper::Record));
+                                            sizeof(mapper_abi::Record));
         if (!data) return nullptr;
         auto &row = exportScratch;
         for (unsigned i = nextSlot(0, true); i < records;
@@ -126,9 +126,9 @@ struct org_example_AMDMapperProbe::R44MapperState {
 // R71-B: one carve order for both the prepared arena and a grown one. The
 // arithmetic lives in the ABI header so tests/ can verify it without compiling
 // the kext; it must match the carve below exactly.
-bool org_example_AMDMapperProbe::r44BuildArena(
-    R44MapperState *d, volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages,
-    UInt32 rootLevel, const r44mapper::Profile &profile) {
+bool org_example_AMDMapperProbe::BuildArena(
+    MapperState *d, volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages,
+    UInt32 rootLevel, const mapper_abi::Profile &profile) {
     if (!d || d->arena || !tables || !tablePA || (tablePA & 4095ULL) ||
         (rootLevel != 3 && rootLevel != 4)) return false;
     // Capacity is decided before the tables are published: the caller must have
@@ -140,10 +140,10 @@ bool org_example_AMDMapperProbe::r44BuildArena(
     const UInt32 leavesCount = profile.pages / 512;
     const UInt64 words = (profile.records + 63) / 64;
     const UInt64 pageWords = (profile.pages + 63) / 64;
-    const UInt64 blockBytes = r44mapper::arenaBytesFor(profile);
+    const UInt64 blockBytes = mapper_abi::arenaBytesFor(profile);
     IOLog("AMDMapperProbe: arena profile=%s records=%u pages=%u tables=%u bytes=%llu\n",
           profile.name, profile.records, profile.pages, tablePages, blockBytes);
-    if (!blockBytes || blockBytes > r44mapper::kMaxArenaBytes) return false;
+    if (!blockBytes || blockBytes > mapper_abi::kMaxArenaBytes) return false;
     void *arena = IOMalloc((vm_size_t)blockBytes);
     if (!arena) return false;
     bzero(arena, (size_t)blockBytes);
@@ -154,8 +154,8 @@ bool org_example_AMDMapperProbe::r44BuildArena(
     d->tables = tables;
     d->tablePA = tablePA;
     uint8_t *cursor = (uint8_t *)d->arena;
-    d->mappings = (R44MapperState::Mapping *)cursor;
-    cursor += (UInt64)profile.records * sizeof(R44MapperState::Mapping);
+    d->mappings = (MapperState::Mapping *)cursor;
+    cursor += (UInt64)profile.records * sizeof(MapperState::Mapping);
     d->physicalByPage = (UInt64 *)cursor;
     cursor += (UInt64)profile.pages * sizeof(UInt64);
     d->slotByStartPage = (UInt16 *)cursor;
@@ -173,7 +173,7 @@ bool org_example_AMDMapperProbe::r44BuildArena(
                                  tablePA, 0, 0, nullptr};
     for (UInt32 i = 0; i < leavesCount; ++i) {
         d->leaves[i] = amdtx::prepareAt(arenaMap,
-            r44mapper::kBase + (UInt64)i * 0x200000ULL, 512);
+            mapper_abi::kBase + (UInt64)i * 0x200000ULL, 512);
         if (!d->leaves[i]) {
             // Release only what this build allocated: the caller may still be
             // using the arena this build was meant to replace, so the lock, the
@@ -195,26 +195,26 @@ bool org_example_AMDMapperProbe::r44BuildArena(
         }
     }
     auto &s = d->snapshot;
-    s.version = r44mapper::kVersion; s.bytes = sizeof(s);
-    s.flags = r44mapper::kPrepared | r44mapper::kAccepting;
+    s.version = mapper_abi::kVersion; s.bytes = sizeof(s);
+    s.flags = mapper_abi::kPrepared | mapper_abi::kAccepting;
     s.capacityMaps = profile.records; s.capacityPages = profile.pages;
     s.maxMapPages = profile.mapPages; s.maxRuns = profile.runs;
-    s.iovaBase = r44mapper::kBase; s.iovaBytes = profile.pages * 4096ULL;
+    s.iovaBase = mapper_abi::kBase; s.iovaBytes = profile.pages * 4096ULL;
     s.rootPA = tablePA; s.ptBytes = tablePages * 4096ULL;
     s.rootLevel = rootLevel; s.tablePages = tablePages;
     return true;
 }
 
-bool org_example_AMDMapperProbe::r44PrepareMappings(
+bool org_example_AMDMapperProbe::PrepareMappings(
     volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel,
-    const r44mapper::Profile &profile) {
-    if (fR44Mapper) return false;
-    auto *d = (R44MapperState *)IOMalloc(sizeof(R44MapperState));
+    const mapper_abi::Profile &profile) {
+    if (fMapper) return false;
+    auto *d = (MapperState *)IOMalloc(sizeof(MapperState));
     if (!d) return false;
     bzero(d, sizeof(*d));
     d->lock = IOLockAlloc();
     if (!d->lock) { IOFree(d, sizeof(*d)); return false; }
-    if (!r44BuildArena(d, tables, tablePA, tablePages, rootLevel, profile)) {
+    if (!BuildArena(d, tables, tablePA, tablePages, rootLevel, profile)) {
         IOLockFree(d->lock);
         IOFree(d, sizeof(*d));
         return false;
@@ -224,7 +224,7 @@ bool org_example_AMDMapperProbe::r44PrepareMappings(
     d->growthTime = 0;
     d->snapshot.preparedAt = mach_absolute_time();
     OSSynchronizeIO();
-    fR44Mapper = d;
+    fMapper = d;
     return true;
 }
 
@@ -236,36 +236,36 @@ bool org_example_AMDMapperProbe::r44PrepareMappings(
 //
 // A failed growth is not a failed mapping: the prepared arena stays installed and
 // the capacity evidence records that the ceiling was needed but unavailable.
-bool org_example_AMDMapperProbe::r44GrowBeforeFirstMap(R44MapperState *d) {
+bool org_example_AMDMapperProbe::GrowBeforeFirstMap(MapperState *d) {
     if (!d || d->growthAttempted) return false;
     d->growthAttempted = true;
     // Normally unreachable: the caller only invokes this before activation.
-    if (!r44GrowthOpen() || d->snapshot.liveCount) {
+    if (!GrowthOpen() || d->snapshot.liveCount) {
         d->growthState = "closed-live";
         return false;
     }
-    const r44mapper::Profile *prepared = r44PreparedProfile();
-    const r44mapper::Profile *target =
-        r44mapper::profileForFirstMapGrowth(prepared, r44CeilingProfile());
+    const mapper_abi::Profile *prepared = PreparedProfile();
+    const mapper_abi::Profile *target =
+        mapper_abi::profileForFirstMapGrowth(prepared, CeilingProfile());
     if (!target) {
         d->growthState = "not-needed";
         return false;
     }
     IOBufferMemoryDescriptor *tables = nullptr;
     UInt64 tablePA = 0;
-    if (!r44AllocateTableArea(tables, (UInt64)target->tablePages * M2B2_PAGE_SIZE,
+    if (!AllocateTableArea(tables, (UInt64)target->tablePages * M2B2_PAGE_SIZE,
                               tablePA)) {
         d->growthState = "failed-tables";
         return false;
     }
-    auto *fresh = (R44MapperState *)IOMalloc(sizeof(R44MapperState));
+    auto *fresh = (MapperState *)IOMalloc(sizeof(MapperState));
     if (!fresh) {
         tables->release();
         d->growthState = "failed-state";
         return false;
     }
     bzero(fresh, sizeof(*fresh));
-    if (!r44BuildArena(fresh, (volatile UInt64 *)tables->getBytesNoCopy(), tablePA,
+    if (!BuildArena(fresh, (volatile UInt64 *)tables->getBytesNoCopy(), tablePA,
                        target->tablePages, M2B2_PAGE_MODE_4_LEVEL, *target)) {
         IOFree(fresh, sizeof(*fresh));
         tables->release();
@@ -298,7 +298,7 @@ bool org_example_AMDMapperProbe::r44GrowBeforeFirstMap(R44MapperState *d) {
     IOFree(fresh, sizeof(*fresh));
     // The domain is the platform's view of the same capacity; the DTE is written
     // from tablePA at first activation, which has not happened yet.
-    r44AdoptGrownTables(tables, tablePA, target->tablePages, *target);
+    AdoptGrownTables(tables, tablePA, target->tablePages, *target);
     if (oldArena) IOFree(oldArena, oldBytes);
     d->grown = true;
     d->growthState = "grown";
@@ -327,14 +327,14 @@ bool org_example_AMDMapperProbe::r44GrowBeforeFirstMap(R44MapperState *d) {
     return true;
 }
 
-bool org_example_AMDMapperProbe::r44QuiesceMappings() {
-    auto *d = fR44Mapper;
+bool org_example_AMDMapperProbe::QuiesceMappings() {
+    auto *d = fMapper;
     if (!d) return true;
     IOLockLock(d->lock);
     const bool drained = !d->snapshot.liveCount;
     if (drained) {
         d->accepting = false;
-        d->snapshot.flags &= ~r44mapper::kAccepting;
+        d->snapshot.flags &= ~mapper_abi::kAccepting;
     }
     IOLockUnlock(d->lock);
     return drained;
@@ -343,13 +343,13 @@ bool org_example_AMDMapperProbe::r44QuiesceMappings() {
 // TODO(R47-PM-HARDWARE): implemented from the existing lifetime/command
 // contracts; real system sleep/resume validation is pending. R47 exercises
 // normal networking only and does not trigger this transition for testing.
-IOReturn org_example_AMDMapperProbe::r47PowerTransition(UInt32 operation) {
-    auto *d = fR44Mapper;
+IOReturn org_example_AMDMapperProbe::PowerTransition(UInt32 operation) {
+    auto *d = fMapper;
     if (!d) return kIOReturnNotReady;
     // Lock order is Lucy command gate -> mapper lock. The backend never
     // calls into the driver. PTE edits, CWs, snapshots and PM share this lock.
     IOLockLock(d->lock);
-    if (!r52PowerSupported()) {
+    if (!PowerSupported()) {
         IOLockUnlock(d->lock);
         return kIOReturnUnsupported;
     }
@@ -361,43 +361,43 @@ IOReturn org_example_AMDMapperProbe::r47PowerTransition(UInt32 operation) {
     bool ok = false;
     if (operation == 1) {
         d->accepting = false;
-        d->snapshot.flags &= ~r44mapper::kAccepting;
+        d->snapshot.flags &= ~mapper_abi::kAccepting;
         if (d->resumeLive) { d->resumeLive->release(); d->resumeLive = nullptr; }
         if (d->resumePT) { d->resumePT->release(); d->resumePT = nullptr; }
         d->capturePowerBoundary(d->suspendLive, d->suspendPT);
-        ok = r47SuspendAuto();
+        ok = SuspendAuto();
     } else if (operation == 2) {
-        ok = r47ResumeAuto();
+        ok = ResumeAuto();
         if (ok) {
             // Exact retained records/PT are exported before any ordinary
             // mapping can run again. Allocation failure invalidates evidence,
             // but does not turn a successful hardware wake into a PM failure.
             d->capturePowerBoundary(d->resumeLive, d->resumePT);
             d->accepting = true;
-            d->snapshot.flags |= r44mapper::kAccepting;
+            d->snapshot.flags |= mapper_abi::kAccepting;
         }
     }
-    if (!ok) d->snapshot.flags |= r44mapper::kFailed;
+    if (!ok) d->snapshot.flags |= mapper_abi::kFailed;
     IOLockUnlock(d->lock);
     return ok ? kIOReturnSuccess : kIOReturnIOError;
 }
 
-IOReturn org_example_AMDMapperProbe::r63SetRequesterDMA(bool park) {
-    auto *m = fR44Mapper;
+IOReturn org_example_AMDMapperProbe::SetRequesterDMA(bool park) {
+    auto *m = fMapper;
     if (!m) return kIOReturnNotReady;
     IOLockLock(m->lock);
-    const IOReturn result = m->accepting ? r63SwitchRequesterDMA(park) : kIOReturnNotReady;
+    const IOReturn result = m->accepting ? SwitchRequesterDMA(park) : kIOReturnNotReady;
     if (result == kIOReturnIOError) {
         m->accepting = false;
-        m->snapshot.flags |= r44mapper::kFailed;
-        m->snapshot.flags &= ~r44mapper::kAccepting;
+        m->snapshot.flags |= mapper_abi::kFailed;
+        m->snapshot.flags &= ~mapper_abi::kAccepting;
     }
     IOLockUnlock(m->lock);
     return result;
 }
 
-UInt32 org_example_AMDMapperProbe::r44LiveMappings() const {
-    auto *d = fR44Mapper;
+UInt32 org_example_AMDMapperProbe::LiveMappings() const {
+    auto *d = fMapper;
     if (!d) return 0;
     IOLockLock(d->lock);
     const UInt32 count = d->snapshot.liveCount;
@@ -405,15 +405,15 @@ UInt32 org_example_AMDMapperProbe::r44LiveMappings() const {
     return count;
 }
 
-bool org_example_AMDMapperProbe::r44ReleaseMappings() {
-    auto *d = fR44Mapper;
+bool org_example_AMDMapperProbe::ReleaseMappings() {
+    auto *d = fMapper;
     if (!d) return true;
     // The platform closes admission and restores its hardware before release.
     IOLockLock(d->lock);
     const bool release = !d->accepting && !d->snapshot.liveCount;
     IOLockUnlock(d->lock);
     if (!release) return false;
-    fR44Mapper = nullptr;
+    fMapper = nullptr;
     if (d->suspendLive) d->suspendLive->release();
     if (d->suspendPT) d->suspendPT->release();
     if (d->resumeLive) d->resumeLive->release();
@@ -423,21 +423,21 @@ bool org_example_AMDMapperProbe::r44ReleaseMappings() {
     return true;
 }
 
-IOReturn org_example_AMDMapperProbe::r44MapMemory(
+IOReturn org_example_AMDMapperProbe::MapMemory(
     IOMemoryDescriptor *memory, uint64_t descriptorOffset, uint64_t length,
     uint32_t mapOptions, const IODMAMapSpecification *mapSpecification,
     IODMACommand *dmaCommand, const IODMAMapPageList *pageList,
     uint64_t *mapAddress, uint64_t *mapLength) {
     if (mapAddress) *mapAddress = 0;
     if (mapLength) *mapLength = 0;
-    auto *d = fR44Mapper;
+    auto *d = fMapper;
     if (!d) return kIOReturnNotReady;
     IOLockLock(d->lock);
     auto &s = d->snapshot;
     ++s.mapCalls;
     IOReturn result = kIOReturnUnsupported;
     do {
-        if (!d->accepting || fR63DMAParked) { result = kIOReturnNotReady; break; }
+        if (!d->accepting || fDMAParked) { result = kIOReturnNotReady; break; }
         if (!memory || !mapAddress || !mapLength || !length ||
             descriptorOffset > memory->getLength() ||
             length > memory->getLength() - descriptorOffset) {
@@ -445,13 +445,13 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         }
         // Publish the largest request actually seen so a capacity decision does
         // not have to guess what a third-party client asks for.
-        if (length > fR69MaxLength) fR69MaxLength = length;
+        if (length > fMaxLength) fMaxLength = length;
         if (length > (UInt64)d->allocator.maxMapPages * 4096ULL) {
-            ++fR69RejectedLength; break;
+            ++fRejectedLength; break;
         }
         if (mapOptions & (kIODMAMapFixedAddress | kIODMAMapIdentityMap |
                           kIODMAMapDeviceMemory)) {
-            ++fR69RejectedOptions; break;
+            ++fRejectedOptions; break;
         }
         const UInt64 permissions =
             ((mapOptions & kIODMAMapReadAccess) ? amdpte::PTE_IR : 0) |
@@ -461,19 +461,19 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
             ? mapSpecification->alignment : 1;
         const unsigned bits = (mapSpecification && mapSpecification->numAddressBits)
             ? mapSpecification->numAddressBits : 64;
-        if ((alignment & (alignment - 1)) || alignment > r44mapper::kBase ||
-            bits > 64 || bits < 32) { ++fR69RejectedBits; break; }
+        if ((alignment & (alignment - 1)) || alignment > mapper_abi::kBase ||
+            bits > 64 || bits < 32) { ++fRejectedBits; break; }
 
         // Use the public wired-descriptor walk; the SDK deliberately makes
         // upl_page_info opaque. A pageList provides the first-offset check.
         ++s.walks;
         auto &layout = d->walkScratch;
-        probeLayoutInto(layout, memory, descriptorOffset, length, r44mapper::kRuns);
-        if (layout.pages > fR69MaxPages) fR69MaxPages = layout.pages;
-        if (layout.runs > fR69MaxRuns) fR69MaxRuns = layout.runs;
+        probeLayoutInto(layout, memory, descriptorOffset, length, mapper_abi::kRuns);
+        if (layout.pages > fMaxPages) fMaxPages = layout.pages;
+        if (layout.runs > fMaxRuns) fMaxRuns = layout.runs;
         if (layout.error || !layout.runs || layout.totalBytes != length ||
             !layout.pages || layout.pages > d->allocator.maxMapPages) {
-            ++fR69RejectedLayout; break;
+            ++fRejectedLayout; break;
         }
         if ((pageList && pageList->pageOffset != layout.firstOffset) ||
             (layout.firstOffset & (alignment - 1))) break;
@@ -490,18 +490,18 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         // published and the DTE still names a passthrough root. Growth mutates d
         // in place, so every pointer above stays valid, including this one. The
         // call is a no-op unless the domain is still open for growth.
-        r44GrowBeforeFirstMap(d);
+        GrowBeforeFirstMap(d);
 
         const unsigned slot = d->nextSlot(0, false);
         if (slot == d->records) {
-            ++fR69RejectedRecords; result = kIOReturnNoResources; break;
+            ++fRejectedRecords; result = kIOReturnNoResources; break;
         }
         const unsigned alignmentPages = alignment > 4096 ? (unsigned)(alignment / 4096) : 1;
         unsigned basePage = 0;
         if (!d->allocateRange(layout.pages, basePage, alignmentPages)) {
-            ++fR69RejectedNoRange; result = kIOReturnNoResources; break;
+            ++fRejectedNoRange; result = kIOReturnNoResources; break;
         }
-        const UInt64 address = r44mapper::kBase + basePage * 4096ULL + layout.firstOffset;
+        const UInt64 address = mapper_abi::kBase + basePage * 4096ULL + layout.firstOffset;
         const UInt64 returnedLength = layout.discontig
             ? layout.pages * 4096ULL - layout.firstOffset : length;
         // Check the complete returned IOVA span against this caller's actual
@@ -516,8 +516,8 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
             if (d->leaf(basePage + i)) empty = false;
         if (!empty) {
             amdtx::release(d->allocator, basePage, layout.pages);
-            d->accepting = false; s.flags |= r44mapper::kFailed;
-            s.flags &= ~r44mapper::kAccepting;
+            d->accepting = false; s.flags |= mapper_abi::kFailed;
+            s.flags &= ~mapper_abi::kAccepting;
             result = kIOReturnInternalError; break;
         }
 
@@ -544,7 +544,7 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
             }
         }
         OSSynchronizeIO();
-        record.tPublish = mach_absolute_time(); record.state = r44mapper::kMapPublished;
+        record.tPublish = mach_absolute_time(); record.state = mapper_abi::kMapPublished;
         ++s.liveCount;
         if (s.liveCount > s.peakMaps) s.peakMaps = s.liveCount;
         if (layout.pages > s.maxObservedPages) s.maxObservedPages = layout.pages;
@@ -552,28 +552,28 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
         // First map activates the DTE. Later maps need an INV/CW only when
         // the actual controller can cache non-present translations.
         bool skipped = false;
-        const bool synchronized = r44Invalidate(false,
-            r44mapper::kBase + record.basePage * 4096ULL,
+        const bool synchronized = Invalidate(false,
+            mapper_abi::kBase + record.basePage * 4096ULL,
             record.pages * 4096ULL, true, &skipped);
         if (!skipped) ++s.invalidates;
         if (!synchronized) {
             ++s.invalidateFailures;
-            d->accepting = false; s.flags |= r44mapper::kFailed;
-            s.flags &= ~r44mapper::kAccepting;
+            d->accepting = false; s.flags |= mapper_abi::kFailed;
+            s.flags &= ~mapper_abi::kAccepting;
             d->exportRecord(record, s.lastMap);
-            r70DMAFailStop("map invalidation unconfirmed", record);
+            DMAFailStop("map invalidation unconfirmed", record);
         }
-        record.tMapComplete = mach_absolute_time(); record.state |= r44mapper::kMapConfirmed;
+        record.tMapComplete = mach_absolute_time(); record.state |= mapper_abi::kMapConfirmed;
         ++s.mapOk;
         // Mirror the counters the S3 measurement reads; published outside the
-        // lock by r69PublishCapacity() only when they change.
-        fR69MapOk = s.mapOk;
+        // lock by PublishCapacity() only when they change.
+        fMapOk = s.mapOk;
         // s.livePages/s.peakPages are only refreshed when a snapshot is
         // published, so read the allocator directly for the measurement.
-        fR69LiveMaps = s.liveCount;
-        fR69LivePages = d->allocator.livePages;
-        fR69PeakMaps = s.peakMaps;
-        fR69PeakPages = d->allocator.peakPages;
+        fLiveMaps = s.liveCount;
+        fLivePages = d->allocator.livePages;
+        fPeakMaps = s.peakMaps;
+        fPeakPages = d->allocator.peakPages;
         if (bits == 32) ++d->map32Ok;
         if (highPages) ++d->mapHighPAOk;
         d->mappedHighPAPages += highPages;
@@ -589,64 +589,64 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
     } while (false);
     if (result != kIOReturnSuccess) ++s.mapRejected;
     IOLockUnlock(d->lock);
-    r69PublishCapacity();
+    PublishCapacity();
     return result;
 }
 
 // Capacity evidence for third-party clients. Called without the mapper lock so
 // a property publication can never sit inside the DMA path's critical section.
-void org_example_AMDMapperProbe::r69PublishCapacity() {
-    const UInt64 rejects = (UInt64)fR69RejectedLength + fR69RejectedOptions +
-        fR69RejectedLayout + fR69RejectedRecords + fR69RejectedNoRange +
-        fR69RejectedBits;
+void org_example_AMDMapperProbe::PublishCapacity() {
+    const UInt64 rejects = (UInt64)fRejectedLength + fRejectedOptions +
+        fRejectedLayout + fRejectedRecords + fRejectedNoRange +
+        fRejectedBits;
     // Peak/max/reject changes are rare and must be published immediately. The
     // monotonic counters move on every map, so they are only republished once
     // 128 of them accumulate: this keeps the DMA path out of the registry for
     // all but one call in 128.
     const bool rareChange =
-        fR69MaxLength != fR69PublishedMaxLength ||
-        fR69MaxPages != fR69PublishedMaxPages ||
-        fR69MaxRuns != fR69PublishedMaxRuns ||
-        rejects != fR69PublishedRejects ||
-        fR69PeakMaps != fR69PublishedPeakMaps ||
-        fR69PeakPages != fR69PublishedPeakPages;
+        fMaxLength != fPublishedMaxLength ||
+        fMaxPages != fPublishedMaxPages ||
+        fMaxRuns != fPublishedMaxRuns ||
+        rejects != fPublishedRejects ||
+        fPeakMaps != fPublishedPeakMaps ||
+        fPeakPages != fPublishedPeakPages;
     const bool liveChange =
-        fR69LiveMaps != fR69PublishedLiveMaps ||
-        fR69LivePages != fR69PublishedLivePages ||
-        fR69MapOk - fR69PublishedMapOk >= 128 ||
-        fR69UnmapOk - fR69PublishedUnmapOk >= 128;
+        fLiveMaps != fPublishedLiveMaps ||
+        fLivePages != fPublishedLivePages ||
+        fMapOk - fPublishedMapOk >= 128 ||
+        fUnmapOk - fPublishedUnmapOk >= 128;
     if (!rareChange && !liveChange) return;
-    fR69PublishedMaxLength = fR69MaxLength;
-    fR69PublishedMaxPages = fR69MaxPages;
-    fR69PublishedMaxRuns = fR69MaxRuns;
-    fR69PublishedRejects = rejects;
-    fR69PublishedMapOk = fR69MapOk;
-    fR69PublishedUnmapOk = fR69UnmapOk;
-    fR69PublishedLiveMaps = fR69LiveMaps;
-    fR69PublishedLivePages = fR69LivePages;
-    fR69PublishedPeakMaps = fR69PeakMaps;
-    fR69PublishedPeakPages = fR69PeakPages;
-    setProperty("r44-map-ok-live", fR69MapOk, 64);
-    setProperty("r44-unmap-ok-live", fR69UnmapOk, 64);
-    setProperty("r44-live-maps-live", fR69LiveMaps, 32);
-    setProperty("r44-live-pages-live", fR69LivePages, 32);
-    setProperty("r44-peak-maps-live", fR69PeakMaps, 32);
-    setProperty("r44-peak-pages-live", fR69PeakPages, 32);
-    setProperty("r69-max-map-length", fR69MaxLength, 64);
-    setProperty("r69-max-map-pages", fR69MaxPages, 64);
-    setProperty("r69-max-map-runs", fR69MaxRuns, 64);
-    setProperty("r69-rejects-length", (unsigned long long)fR69RejectedLength, 32);
-    setProperty("r69-rejects-options", (unsigned long long)fR69RejectedOptions, 32);
-    setProperty("r69-rejects-layout", (unsigned long long)fR69RejectedLayout, 32);
-    setProperty("r69-rejects-records", (unsigned long long)fR69RejectedRecords, 32);
-    setProperty("r69-rejects-norange", (unsigned long long)fR69RejectedNoRange, 32);
-    setProperty("r69-rejects-bits", (unsigned long long)fR69RejectedBits, 32);
+    fPublishedMaxLength = fMaxLength;
+    fPublishedMaxPages = fMaxPages;
+    fPublishedMaxRuns = fMaxRuns;
+    fPublishedRejects = rejects;
+    fPublishedMapOk = fMapOk;
+    fPublishedUnmapOk = fUnmapOk;
+    fPublishedLiveMaps = fLiveMaps;
+    fPublishedLivePages = fLivePages;
+    fPublishedPeakMaps = fPeakMaps;
+    fPublishedPeakPages = fPeakPages;
+    setProperty("r44-map-ok-live", fMapOk, 64);
+    setProperty("r44-unmap-ok-live", fUnmapOk, 64);
+    setProperty("r44-live-maps-live", fLiveMaps, 32);
+    setProperty("r44-live-pages-live", fLivePages, 32);
+    setProperty("r44-peak-maps-live", fPeakMaps, 32);
+    setProperty("r44-peak-pages-live", fPeakPages, 32);
+    setProperty("r69-max-map-length", fMaxLength, 64);
+    setProperty("r69-max-map-pages", fMaxPages, 64);
+    setProperty("r69-max-map-runs", fMaxRuns, 64);
+    setProperty("r69-rejects-length", (unsigned long long)fRejectedLength, 32);
+    setProperty("r69-rejects-options", (unsigned long long)fRejectedOptions, 32);
+    setProperty("r69-rejects-layout", (unsigned long long)fRejectedLayout, 32);
+    setProperty("r69-rejects-records", (unsigned long long)fRejectedRecords, 32);
+    setProperty("r69-rejects-norange", (unsigned long long)fRejectedNoRange, 32);
+    setProperty("r69-rejects-bits", (unsigned long long)fRejectedBits, 32);
 }
 
-IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
+IOReturn org_example_AMDMapperProbe::UnmapMemory(
     IOMemoryDescriptor *memory, IODMACommand *dmaCommand,
     uint64_t mapAddress, uint64_t mapLength) {
-    auto *d = fR44Mapper;
+    auto *d = fMapper;
     if (!d) return kIOReturnNotReady;
     IOLockLock(d->lock);
     auto &s = d->snapshot;
@@ -655,8 +655,8 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
     // domain. Only an exact owned live mapping can put backing RAM at risk.
     IOReturn result = d->accepting ? kIOReturnBadArgument : kIOReturnNotReady;
     do {
-        if (mapAddress < r44mapper::kBase) break;
-        const UInt64 page = (mapAddress - r44mapper::kBase) / 4096;
+        if (mapAddress < mapper_abi::kBase) break;
+        const UInt64 page = (mapAddress - mapper_abi::kBase) / 4096;
         if (page >= d->pages) break;
         const UInt16 owner = d->slotByStartPage[page];
         if (!owner || owner > d->records) break;
@@ -668,39 +668,39 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
             record.mapLength != mapLength) break;
         // An earlier allocator failure may leave a record whose hardware
         // retirement already completed. Keep that safe leak closed, not fatal.
-        if (record.state & r44mapper::kUnmapConfirmed) {
+        if (record.state & mapper_abi::kUnmapConfirmed) {
             result = kIOReturnInternalError; break;
         }
         if (!d->accepting)
-            r70DMAFailStop("owned unmap while domain unavailable", record);
-        if (record.state != (r44mapper::kMapPublished | r44mapper::kMapConfirmed))
-            r70DMAFailStop("owned unmap with unretired state", record);
+            DMAFailStop("owned unmap while domain unavailable", record);
+        if (record.state != (mapper_abi::kMapPublished | mapper_abi::kMapConfirmed))
+            DMAFailStop("owned unmap with unretired state", record);
         for (unsigned i = 0; i < record.pages; ++i) d->leaf(record.basePage + i) = 0;
         OSSynchronizeIO();
-        record.tClear = mach_absolute_time(); record.state |= r44mapper::kClearPublished;
+        record.tClear = mach_absolute_time(); record.state |= mapper_abi::kClearPublished;
         ++s.invalidates;
-        if (!r44Invalidate(false, r44mapper::kBase + record.basePage * 4096ULL,
+        if (!Invalidate(false, mapper_abi::kBase + record.basePage * 4096ULL,
                            record.pages * 4096ULL)) {
             ++s.invalidateFailures;
-            d->accepting = false; s.flags |= r44mapper::kFailed;
-            s.flags &= ~r44mapper::kAccepting;
+            d->accepting = false; s.flags |= mapper_abi::kFailed;
+            s.flags &= ~mapper_abi::kAccepting;
             d->exportRecord(record, s.lastUnmap);
-            r70DMAFailStop("unmap invalidation unconfirmed", record);
+            DMAFailStop("unmap invalidation unconfirmed", record);
         }
-        record.tUnmapComplete = mach_absolute_time(); record.state |= r44mapper::kUnmapConfirmed;
+        record.tUnmapComplete = mach_absolute_time(); record.state |= mapper_abi::kUnmapConfirmed;
         d->exportRecord(record, s.lastUnmap);
         // A cleared PTE alone is not retirement: pages become reusable only
         // after the INV_IOMMU_PAGES CompletionWait has returned successfully.
         if (!amdtx::release(d->allocator, record.basePage, record.pages)) {
-            d->accepting = false; s.flags |= r44mapper::kFailed;
-            s.flags &= ~r44mapper::kAccepting;
+            d->accepting = false; s.flags |= mapper_abi::kFailed;
+            s.flags &= ~mapper_abi::kAccepting;
             result = kIOReturnInternalError; break;
         }
         d->slotByStartPage[page] = 0;
         --s.liveCount; ++s.unmapOk;
-        fR69UnmapOk = s.unmapOk;
-        fR69LiveMaps = s.liveCount;
-        fR69LivePages = d->allocator.livePages;
+        fUnmapOk = s.unmapOk;
+        fLiveMaps = s.liveCount;
+        fLivePages = d->allocator.livePages;
         s.lastUnmapAt = record.tUnmapComplete;
         d->setSlotLive(slot, false);
         mapping.memory = nullptr; mapping.command = nullptr;
@@ -711,23 +711,23 @@ IOReturn org_example_AMDMapperProbe::r44UnmapMemory(
     return result;
 }
 
-bool org_example_AMDMapperProbe::r44Translate(uint64_t address, uint64_t *physical) const {
-    auto *d = fR44Mapper;
-    if (!d || !physical || address < r44mapper::kBase ||
-        address - r44mapper::kBase >= (UInt64)d->pages * 4096ULL) return false;
+bool org_example_AMDMapperProbe::Translate(uint64_t address, uint64_t *physical) const {
+    auto *d = fMapper;
+    if (!d || !physical || address < mapper_abi::kBase ||
+        address - mapper_abi::kBase >= (UInt64)d->pages * 4096ULL) return false;
     IOLockLock(d->lock);
-    const auto decoded = amdpte::decodePte(d->leaf((unsigned)((address - r44mapper::kBase) / 4096)), 1);
+    const auto decoded = amdpte::decodePte(d->leaf((unsigned)((address - mapper_abi::kBase) / 4096)), 1);
     const bool present = decoded.kind == amdpte::PTE_LEAF_DEFAULT;
     if (present) *physical = decoded.outPA + (address & 4095ULL);
     IOLockUnlock(d->lock);
     return present;
 }
 
-void org_example_AMDMapperProbe::r44PublishMappings(OSDictionary **copy) {
+void org_example_AMDMapperProbe::PublishMappings(OSDictionary **copy) {
     if (copy) *copy = nullptr;
-    auto *d = fR44Mapper;
+    auto *d = fMapper;
     if (!d) {
-        r44PublishAuto();
+        PublishAuto();
         if (copy) *copy = dictionaryWithProperties();
         return;
     }
@@ -743,7 +743,7 @@ void org_example_AMDMapperProbe::r44PublishMappings(OSDictionary **copy) {
         setProperty("r44-mapper-raw", summary);
         setProperty("r44-live-raw", active);
         setProperty("r44-pt-raw", tables);
-        setProperty("r44-mapper-abi", r44mapper::kVersion, 32);
+        setProperty("r44-mapper-abi", mapper_abi::kVersion, 32);
         setProperty("r44-live-maps", s.liveCount, 32);
         setProperty("r44-live-pages", s.livePages, 32);
         // S3 measurement: peaks since this domain was prepared, published with
@@ -781,7 +781,7 @@ void org_example_AMDMapperProbe::r44PublishMappings(OSDictionary **copy) {
         d->suspendLive && d->suspendPT && d->resumeLive && d->resumePT ? "yes" : "no");
     // Keep this domain's raw state, PTE bytes and hardware counters in one
     // snapshot. Hardware export takes only the controller lock after this lock.
-    r44PublishAuto();
+    PublishAuto();
     if (copy) *copy = dictionaryWithProperties();
     IOLockUnlock(d->lock);
 }
