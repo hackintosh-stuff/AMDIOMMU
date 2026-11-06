@@ -149,12 +149,3 @@ Deploying a new build therefore means copying `build-m1a/AMDMapperProbe.kext`
 the EFI system partition varies, resolve it on the machine instead of hardcoding
 it. `build-m1a/` and `build-m1a-debug/` are build outputs only; they are not
 installed anywhere until copied to the ESP.
-
-## Source and evidence policy
-
-- `kext/`, `tools/` are canonical implementation and generator inputs. `include/`, `src/`, `tests/` contain existing modules, tests and reference inputs.
-- `reference/` holds the Apple xnu/IOPCIFamily and Linux v6.6 sources used to cross-check the implementation. They are kept locally but are not committed; the source comments cite them by file and line.
-- `fixtures/` holds captured firmware tables used by the offline tests. It is also local-only: `tests/InspectorSmoke.py` runs its synthetic cases when the real IVRS blob is absent, so a fresh clone passes without it.
-- Runtime evidence, kext binaries, SDKs, upstream tarballs and full patch-package before/after snapshots are not committed.
-
-Every future patch must name the full base commit and target this repository. Verify the expected working tree and use `git apply --check` before applying a patch. Never overwrite local changes or edit the baseline to force acceptance. Source identity in evidence is a Git commit hash, not a source snapshot. Logs, raw exports, binary identities and experiment results remain separate from provenance; repository commits do not constitute hardware validation.
