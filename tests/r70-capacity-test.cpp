@@ -217,6 +217,43 @@ void capacitySemantics() {
     check(!amdtx::allocate(runtime, 2, base), "per-map bound was ignored");
 }
 
+void growthPolicy() {
+    // R71-B: every domain is prepared at the legacy arena and may grow exactly
+    // once, at its first mapping, to the ceiling it was admitted for. The policy
+    // is a pure comparison, so the cases that matter are checked here.
+    const auto &legacy = r44mapper::kProfileLegacy;
+    const auto &rl10g = r44mapper::kProfileRl10g;
+    const auto &ceiling = r44mapper::kProfileRl10gMax;
+    check(r44mapper::profileForFirstMapGrowth(&legacy, &ceiling) == &ceiling,
+          "the first mapping must be able to grow the legacy arena");
+    check(r44mapper::profileForFirstMapGrowth(&legacy, &rl10g) == &rl10g,
+          "a 512 MiB ceiling must still be reachable from the legacy arena");
+    check(r44mapper::profileForFirstMapGrowth(&rl10g, &ceiling) == &ceiling,
+          "a domain below its ceiling must still be able to grow");
+    check(r44mapper::profileForFirstMapGrowth(&ceiling, &ceiling) == nullptr,
+          "a domain already at its ceiling must not grow");
+    check(r44mapper::profileForFirstMapGrowth(&ceiling, &rl10g) == nullptr,
+          "growth must never shrink the arena");
+    check(r44mapper::profileForFirstMapGrowth(&legacy, &legacy) == nullptr,
+          "a forced legacy ceiling must disable growth entirely");
+    check(r44mapper::profileForFirstMapGrowth(nullptr, &ceiling) == nullptr,
+          "a missing prepared profile must not grow");
+    check(r44mapper::profileForFirstMapGrowth(&legacy, nullptr) == nullptr,
+          "a missing ceiling must not grow");
+    // A ceiling that cannot describe its own window must be refused: growth would
+    // otherwise install a table area smaller than the IOVA range it advertises.
+    r44mapper::Profile shortTables = ceiling;
+    shortTables.tablePages = ceiling.pages / 512;
+    check(r44mapper::profileForFirstMapGrowth(&legacy, &shortTables) == nullptr,
+          "a ceiling that does not cover its own leaf tables must be refused");
+    // The grown window must keep the R70 measured peak (52,227 pages) covered
+    // with headroom, and the grown arena must stay inside the wired-memory guard.
+    check(ceiling.pages >= 4 * 52227,
+          "the growth ceiling no longer covers the measured 10 GbE peak");
+    check(r44mapper::arenaBytesFor(ceiling) <= r44mapper::kMaxArenaBytes,
+          "the growth ceiling exceeds the wired-memory guard");
+}
+
 } // namespace
 
 int main() {
@@ -224,6 +261,7 @@ int main() {
     profileTable();
     arenaArithmetic();
     devicePolicy();
+    growthPolicy();
     capacitySemantics();
     if (failures) {
         std::printf("R70_CAPACITY_FAILURES=%d\n", failures);

@@ -133,11 +133,19 @@ private:
     // S1 capacity profile (docs/m2-3az-round69-capacity-model.md). The legacy
     // entry is the default and reproduces the accepted ABI3 arena exactly; a
     // domain may only be prepared after the profile's page-table area exists.
-    // S2 derives the profile per device; a boot argument forces it for all.
+    // R71-B: capacity is no longer chosen per device at admission. Every domain
+    // is prepared at the legacy arena and may grow once, at its first mapping,
+    // to the ceiling in kProfileCeiling (see r44GrowBeforeFirstMap). The boot
+    // argument now names that ceiling; a device's identity table entry only
+    // decides how far a third-party client may grow.
     r44mapper::Profile fR44Profile = r44mapper::kProfileLegacy;
     bool fR44ProfileForced = false;
     bool r44SelectProfile();
     const r44mapper::Profile *r44ForcedProfile() const;
+    // Admission ceiling for this device: the boot-arg profile when it parses,
+    // otherwise the demand default. A forced value at or below the legacy arena
+    // disables growth, which keeps the R67-2 compatibility mode available.
+    const r44mapper::Profile *r44Ceiling(bool &forced) const;
     const r44mapper::Profile *r44ProfileForDevice(
         UInt32 vendor, UInt32 device, UInt32 classCode,
         r44mapper::ProfileSource *source = nullptr) const;
@@ -175,6 +183,26 @@ private:
     bool r47ResumeAuto();
     bool r44PrepareMappings(volatile UInt64 *, UInt64, UInt32, UInt32,
                             const r44mapper::Profile &);
+    // R71-B: shared by prepare and growth so the arena carve order exists once.
+    // `d` is zeroed and owns nothing; on failure it still owns nothing.
+    static bool r44BuildArena(R44MapperState *d, volatile UInt64 *tables,
+                              UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel,
+                              const r44mapper::Profile &profile);
+    // R71-B: called with the domain lock held, from the first admissible map.
+    // Rebuilds the arena and page-table area at the admission ceiling while the
+    // DTE still names a passthrough root, then adopts them in one step.
+    bool r44GrowBeforeFirstMap(R44MapperState *d);
+    // R52Domain is defined in AMDMapperProbeAuto.cpp, so the growth code (which
+    // owns R44MapperState) asks the platform side through these accessors
+    // instead of reaching into a type it cannot see.
+    bool r44GrowthOpen() const;
+    const r44mapper::Profile *r44PreparedProfile() const;
+    const r44mapper::Profile *r44CeilingProfile() const;
+    void r44AdoptGrownTables(IOBufferMemoryDescriptor *tables, UInt64 tablePA,
+                             UInt32 tablePages, const r44mapper::Profile &target);
+    // Same allocation the controller buffers use, so admission and growth cannot
+    // diverge on alignment or contiguity requirements.
+    bool r44AllocateTableArea(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa);
     bool r44QuiesceMappings();
     bool r44ReleaseMappings();
     UInt32 r44LiveMappings() const;

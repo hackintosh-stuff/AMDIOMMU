@@ -18,31 +18,53 @@ Two build variants exist and accept different boot-args:
 | | `auto-attach` | Publishes `iommu-parent` at first publish for selected requesters, so Apple's own Ethernet kexts (which only call `IOMapper::copyMapperForDevice()`) get the mapper. |
 | | absent / any other value (incl. `off`) | Inert: no notifier, no device arm, no MMIO. `off` is not a recognised value — it simply matches no mode. |
 | `amdiommu_devices=<ids>` | 1–3 four-hex-digit requester IDs, e.g. `n2200,n2201` or `n2300,n2301` | Selects PCI requesters (segment zero). **Prefix each ID with a non-hex character (`n`)**: this kernel's `PE_parse_boot_argn` rewrites an all-digit value into a 32-bit integer in the caller's buffer (`3400` arrived as `0x0D48`). The parser skips non-hex bytes before reading four hex digits. Omit for the legacy RTL8127 default. |
-| `amdiommu_profile=<name>` | `native-legacy` | Accepted ABI3 window (1024 records / 16 MiB). Default. |
-| | `rl-10g` | 16384 records / 131072 pages, 260 table pages. |
-| | `rl-10g-max` | 65535 records / 262144 pages (1 GiB), 516 table pages. |
-| | unknown name | Does **not** widen the arena: falls back to legacy and records `r44-profile=unsupported-name`. |
+| `amdiommu_profile=<name>` | `rl-10g-max` | Growth ceiling, and the default: 65535 records / 262144 pages (1 GiB), 516 table pages. |
+| | `rl-10g` | Ceiling at 16384 records / 131072 pages (512 MiB), 260 table pages. |
+| | `native-legacy` | Ceiling at the accepted ABI3 window (1024 records / 16 MiB): growth is disabled. |
+| | unknown name | Widen nothing: growth is disabled and `r44-profile-ceiling=unsupported-name` is recorded. |
 
-When omitted, `amdiommu_profile` is derived per device (`r44ProfileForDevice`).
-The derivation order is: boot-arg override, then vendor/device table, then a PCI
-class fallback, then `native-legacy`:
+`amdiommu_profile` names the **ceiling**, not the arena a domain is prepared
+with. Every domain is prepared at `native-legacy` and may grow **exactly once**,
+at its first mapping, to that ceiling:
 
-| Derived from | Matches | Profile |
+- the growth point is the first `iovmMapMemory` call that passes validation —
+  before any PTE is published and while the DTE is still a passthrough entry, so
+  nothing live has to be preserved or invalidated;
+- after the first activation capacity is frozen for the reason R69 §6.3 gave for
+  forbidding a runtime resize: a live domain must never change the meaning of an
+  address a client is already using;
+- a failed growth keeps the prepared arena and publishes `r44-growth-state`; it
+  never fails the mapping.
+
+The per-device identity table did not go away, but it is advisory now: it is the
+admission ceiling and the record of what identity-based sizing *would* have
+chosen. A missing entry can no longer leave a real client with 16 MiB, because
+the arena starts there and grows from actual demand.
+
+| Derived from | Matches | Suggested ceiling |
 |---|---|---|
 | vendor/device table | `15b3:1015/1017/1019/101b/101d`, `10ec:8124-8127` | `rl-10g-max` |
 | PCI class fallback | base class `0x02` (network) | `rl-10g-max` |
 | PCI class fallback | base class `0x01` (storage) | `rl-10g` |
 | otherwise | — | `native-legacy` |
 
-The choice is published per device as `r44-profile-source` =
-`boot-arg` \| `id-table` \| `class-table` \| `legacy-fallback` (plus
-`no-identity` when the registry lacks vendor/device properties). The class
-fallback applies only to the auto-attach path; claim-based clients keep the
-accepted ABI3 window. A forced name still applies to every attached device.
-`amdiommu_autoattach` was removed — `amdiommu=auto-attach` is the only switch.
+The suggestion is published per device as `r44-profile-suggested` with
+`r44-profile-source` = `boot-arg` \| `id-table` \| `class-table` \|
+`legacy-fallback`. A claim-based client (Lucy, the board RTL8111) keeps the
+accepted ABI3 arena: its ceiling stays `native-legacy` unless an operator raises
+it explicitly. `amdiommu_autoattach` was removed — `amdiommu=auto-attach` is the
+only switch.
 
-Current example (CX4 Lx on this machine). The profile can be omitted because
-`15b3:1015` is in the ID table:
+Growth evidence, per device: `r44-profile-prepared` (`native-legacy`),
+`r44-profile-ceiling`, `r44-profile-ceiling-source` (`boot-arg` | `default`),
+`r44-growth-policy` (`first-map` | `disabled`), `r44-capacity-grown`
+(`no` | `yes` | `no-growth-failed`), `r44-profile-grown-from`,
+`r44-map-window-bytes`, plus `r44-growth-state`/`r44-growth-time` in the mapper
+snapshot (`r44-growth-state` is `grown`, `not-needed`, `closed-live` or one of
+the `failed-*` reasons).
+
+Current example (CX4 Lx on this machine). No profile argument is needed because
+the arena now follows demand:
 
 ```
 amdiommu=auto-attach amdiommu_devices=n2300,n2301

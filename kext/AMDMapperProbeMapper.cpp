@@ -29,6 +29,8 @@ struct org_example_AMDMapperProbe::R44MapperState {
     };
     IOLock *lock;
     volatile UInt64 *tables;
+    // Root physical address of that table area; growth swaps both together.
+    UInt64 tablePA;
     // One wired block holds every capacity-dependent array; its size comes
     // from the selected profile at prepare time. The legacy profile allocates
     // the same bytes the static ABI3 arrays used to occupy.
@@ -55,6 +57,14 @@ struct org_example_AMDMapperProbe::R44MapperState {
     UInt32 minMapBits, maxMapBits;
     UInt32 records, pages;
     bool accepting;
+    // R71-B: growth is one-shot and only legal in [prepared, first activation).
+    // The state object itself is never replaced - a rebuild swaps the arena and
+    // the page tables inside it - so the domain lock and every address a caller
+    // already holds stay valid.
+    bool grown;
+    bool growthAttempted;
+    UInt64 growthTime;
+    const char *growthState;
 
     volatile UInt64 &leaf(unsigned page) { return leaves[page / 512][page % 512]; }
 
@@ -113,38 +123,36 @@ struct org_example_AMDMapperProbe::R44MapperState {
     }
 };
 
-bool org_example_AMDMapperProbe::r44PrepareMappings(
-    volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel,
-    const r44mapper::Profile &profile) {
-    if (fR44Mapper || !tables || !tablePA || (tablePA & 4095ULL) ||
+// R71-B: one carve order for both the prepared arena and a grown one. The
+// arithmetic lives in the ABI header so tests/ can verify it without compiling
+// the kext; it must match the carve below exactly.
+bool org_example_AMDMapperProbe::r44BuildArena(
+    R44MapperState *d, volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages,
+    UInt32 rootLevel, const r44mapper::Profile &profile) {
+    if (!d || d->arena || !tables || !tablePA || (tablePA & 4095ULL) ||
         (rootLevel != 3 && rootLevel != 4)) return false;
-    // Capacity is decided before the domain exists: the caller must have
-    // reserved this profile's page-table area, and the record count must fit
-    // the UInt16 slot encoding used by slotByStartPage.
+    // Capacity is decided before the tables are published: the caller must have
+    // reserved this profile's page-table area, and the record count must fit the
+    // UInt16 slot encoding used by slotByStartPage.
     if (!profile.records || profile.records > 0xffffU || !profile.pages ||
         (profile.pages % 512) || profile.tablePages < 11 ||
         tablePages < profile.tablePages) return false;
     const UInt32 leavesCount = profile.pages / 512;
     const UInt64 words = (profile.records + 63) / 64;
     const UInt64 pageWords = (profile.pages + 63) / 64;
-    // The arithmetic lives in the ABI header so tests/ can verify it without
-    // compiling the kext; it must match the carve order below exactly.
     const UInt64 blockBytes = r44mapper::arenaBytesFor(profile);
-    IOLog("AMDMapperProbe: prepare profile=%s records=%u pages=%u tables=%u arena=%llu\n",
+    IOLog("AMDMapperProbe: arena profile=%s records=%u pages=%u tables=%u bytes=%llu\n",
           profile.name, profile.records, profile.pages, tablePages, blockBytes);
     if (!blockBytes || blockBytes > r44mapper::kMaxArenaBytes) return false;
-    auto *d = (R44MapperState *)IOMalloc(sizeof(R44MapperState));
-    if (!d) return false;
-    bzero(d, sizeof(*d));
-    d->lock = IOLockAlloc();
-    if (!d->lock) { IOFree(d, sizeof(*d)); return false; }
-    d->arena = IOMalloc((vm_size_t)blockBytes);
-    if (!d->arena) { IOLockFree(d->lock); IOFree(d, sizeof(*d)); return false; }
-    bzero(d->arena, (size_t)blockBytes);
+    void *arena = IOMalloc((vm_size_t)blockBytes);
+    if (!arena) return false;
+    bzero(arena, (size_t)blockBytes);
+    d->arena = arena;
     d->arenaBytes = (size_t)blockBytes;
     d->records = profile.records;
     d->pages = profile.pages;
     d->tables = tables;
+    d->tablePA = tablePA;
     uint8_t *cursor = (uint8_t *)d->arena;
     d->mappings = (R44MapperState::Mapping *)cursor;
     cursor += (UInt64)profile.records * sizeof(R44MapperState::Mapping);
@@ -161,14 +169,28 @@ bool org_example_AMDMapperProbe::r44PrepareMappings(
     amdtx::u64 *ever = (amdtx::u64 *)cursor;
     d->allocator = amdtx::RuntimeAllocator{used, ever, profile.pages,
                                            profile.mapPages, 0, 0, 0};
-    amdsparse::Arena arena = {tables, tablePA, tablePages, 1, rootLevel,
-                              tablePA, 0, 0, nullptr};
+    amdsparse::Arena arenaMap = {tables, tablePA, tablePages, 1, rootLevel,
+                                 tablePA, 0, 0, nullptr};
     for (UInt32 i = 0; i < leavesCount; ++i) {
-        d->leaves[i] = amdtx::prepareAt(arena, r44mapper::kBase + (UInt64)i * 0x200000ULL, 512);
+        d->leaves[i] = amdtx::prepareAt(arenaMap,
+            r44mapper::kBase + (UInt64)i * 0x200000ULL, 512);
         if (!d->leaves[i]) {
-            IOLockFree(d->lock);
+            // Release only what this build allocated: the caller may still be
+            // using the arena this build was meant to replace, so the lock, the
+            // counters and the snapshot stay exactly as they were.
             IOFree(d->arena, d->arenaBytes);
-            IOFree(d, sizeof(*d));
+            d->arena = nullptr;
+            d->arenaBytes = 0;
+            d->records = 0;
+            d->pages = 0;
+            d->tables = nullptr;
+            d->tablePA = 0;
+            d->mappings = nullptr;
+            d->physicalByPage = nullptr;
+            d->slotByStartPage = nullptr;
+            d->liveSlots = nullptr;
+            d->leaves = nullptr;
+            bzero(&d->allocator, sizeof(d->allocator));
             return false;
         }
     }
@@ -180,10 +202,128 @@ bool org_example_AMDMapperProbe::r44PrepareMappings(
     s.iovaBase = r44mapper::kBase; s.iovaBytes = profile.pages * 4096ULL;
     s.rootPA = tablePA; s.ptBytes = tablePages * 4096ULL;
     s.rootLevel = rootLevel; s.tablePages = tablePages;
-    s.preparedAt = mach_absolute_time();
+    return true;
+}
+
+bool org_example_AMDMapperProbe::r44PrepareMappings(
+    volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel,
+    const r44mapper::Profile &profile) {
+    if (fR44Mapper) return false;
+    auto *d = (R44MapperState *)IOMalloc(sizeof(R44MapperState));
+    if (!d) return false;
+    bzero(d, sizeof(*d));
+    d->lock = IOLockAlloc();
+    if (!d->lock) { IOFree(d, sizeof(*d)); return false; }
+    if (!r44BuildArena(d, tables, tablePA, tablePages, rootLevel, profile)) {
+        IOLockFree(d->lock);
+        IOFree(d, sizeof(*d));
+        return false;
+    }
     d->accepting = true;
+    d->growthState = "prepared";
+    d->growthTime = 0;
+    d->snapshot.preparedAt = mach_absolute_time();
     OSSynchronizeIO();
     fR44Mapper = d;
+    return true;
+}
+
+// R71-B: the first real mapping request is the only moment the actual demand is
+// known, and the only moment a rebuild is provably safe. The DTE still names a
+// passthrough root and no PTE has been handed to the client, so the table area
+// can be replaced without invalidating anything and without a rollback path that
+// would have to undo published translations.
+//
+// A failed growth is not a failed mapping: the prepared arena stays installed and
+// the capacity evidence records that the ceiling was needed but unavailable.
+bool org_example_AMDMapperProbe::r44GrowBeforeFirstMap(R44MapperState *d) {
+    if (!d || d->growthAttempted) return false;
+    d->growthAttempted = true;
+    // Normally unreachable: the caller only invokes this before activation.
+    if (!r44GrowthOpen() || d->snapshot.liveCount) {
+        d->growthState = "closed-live";
+        return false;
+    }
+    const r44mapper::Profile *prepared = r44PreparedProfile();
+    const r44mapper::Profile *target =
+        r44mapper::profileForFirstMapGrowth(prepared, r44CeilingProfile());
+    if (!target) {
+        d->growthState = "not-needed";
+        return false;
+    }
+    IOBufferMemoryDescriptor *tables = nullptr;
+    UInt64 tablePA = 0;
+    if (!r44AllocateTableArea(tables, (UInt64)target->tablePages * M2B2_PAGE_SIZE,
+                              tablePA)) {
+        d->growthState = "failed-tables";
+        return false;
+    }
+    auto *fresh = (R44MapperState *)IOMalloc(sizeof(R44MapperState));
+    if (!fresh) {
+        tables->release();
+        d->growthState = "failed-state";
+        return false;
+    }
+    bzero(fresh, sizeof(*fresh));
+    if (!r44BuildArena(fresh, (volatile UInt64 *)tables->getBytesNoCopy(), tablePA,
+                       target->tablePages, M2B2_PAGE_MODE_4_LEVEL, *target)) {
+        IOFree(fresh, sizeof(*fresh));
+        tables->release();
+        d->growthState = "failed-arena";
+        return false;
+    }
+    // Adopt in one step. No field of d is cleared, so the lock, the counters and
+    // the accumulated snapshot evidence survive the swap untouched.
+    void *oldArena = d->arena;
+    const size_t oldBytes = d->arenaBytes;
+    d->arena = fresh->arena; d->arenaBytes = fresh->arenaBytes;
+    d->mappings = fresh->mappings;
+    d->physicalByPage = fresh->physicalByPage;
+    d->slotByStartPage = fresh->slotByStartPage;
+    d->liveSlots = fresh->liveSlots;
+    d->leaves = fresh->leaves;
+    d->allocator = fresh->allocator;
+    d->records = fresh->records; d->pages = fresh->pages;
+    d->tables = fresh->tables; d->tablePA = fresh->tablePA;
+    d->snapshot.capacityMaps = fresh->snapshot.capacityMaps;
+    d->snapshot.capacityPages = fresh->snapshot.capacityPages;
+    d->snapshot.maxMapPages = fresh->snapshot.maxMapPages;
+    d->snapshot.maxRuns = fresh->snapshot.maxRuns;
+    d->snapshot.iovaBytes = fresh->snapshot.iovaBytes;
+    d->snapshot.rootPA = fresh->snapshot.rootPA;
+    d->snapshot.ptBytes = fresh->snapshot.ptBytes;
+    d->snapshot.rootLevel = fresh->snapshot.rootLevel;
+    d->snapshot.tablePages = fresh->snapshot.tablePages;
+    fresh->arena = nullptr;   // ownership moved into d
+    IOFree(fresh, sizeof(*fresh));
+    // The domain is the platform's view of the same capacity; the DTE is written
+    // from tablePA at first activation, which has not happened yet.
+    r44AdoptGrownTables(tables, tablePA, target->tablePages, *target);
+    if (oldArena) IOFree(oldArena, oldBytes);
+    d->grown = true;
+    d->growthState = "grown";
+    d->growthTime = mach_absolute_time();
+    IOLog("AMDMapperProbe: grew %s -> %s (records=%u pages=%u tables=%u)\n",
+          prepared ? prepared->name : "unknown", target->name,
+          target->records, target->pages, target->tablePages);
+    // Publish the decision immediately: the raw snapshot is RPC-triggered, and a
+    // capacity change must not be invisible until somebody asks for one.
+    if (fNicDevice) {
+        fNicDevice->setProperty("r44-profile", target->name);
+        fNicDevice->setProperty("r44-capacity-grown", "yes");
+        fNicDevice->setProperty("r44-profile-grown-from",
+            prepared ? prepared->name : "unknown");
+        // The length argument is required: a bare UInt64 selects the bool
+        // overload and publishes "Yes" instead of the number.
+        fNicDevice->setProperty("r44-table-bytes",
+            (unsigned long long)((UInt64)target->tablePages * M2B2_PAGE_SIZE), 64);
+        fNicDevice->setProperty("r44-map-window-bytes",
+            (unsigned long long)((UInt64)target->pages * 4096ULL), 64);
+        fNicDevice->setProperty("r44-profile-records", target->records, 32);
+        fNicDevice->setProperty("r44-profile-pages", target->pages, 32);
+    }
+    setProperty("r44-capacity-grown", "yes");
+    setProperty("r44-growth-state", d->growthState);
     return true;
 }
 
@@ -344,6 +484,13 @@ IOReturn org_example_AMDMapperProbe::r44MapMemory(
                 run.bytes > (1ULL << 52) - run.pa) physicalValid = false;
         }
         if (!physicalValid) break;
+
+        // R71-B: the first admissible mapping is the only point where the real
+        // demand is known and a rebuild cannot disturb anything - no PTE has been
+        // published and the DTE still names a passthrough root. Growth mutates d
+        // in place, so every pointer above stays valid, including this one. The
+        // call is a no-op unless the domain is still open for growth.
+        r44GrowBeforeFirstMap(d);
 
         const unsigned slot = d->nextSlot(0, false);
         if (slot == d->records) {
@@ -613,6 +760,11 @@ void org_example_AMDMapperProbe::r44PublishMappings(OSDictionary **copy) {
         setProperty("r48-mapped-high-pa-pages", d->mappedHighPAPages, 64);
         setProperty("r48-map-min-bits", d->minMapBits, 32);
         setProperty("r48-map-max-bits", d->maxMapBits, 32);
+        // R71-B: growth state. Also published directly at the swap, because the
+        // raw snapshot above is only produced when a reader asks for one.
+        setProperty("r44-capacity-grown", d->grown ? "yes" : "no");
+        setProperty("r44-growth-state", d->growthState ? d->growthState : "unknown");
+        setProperty("r44-growth-time", d->growthTime, 64);
     }
     if (summary) summary->release();
     if (active) active->release();

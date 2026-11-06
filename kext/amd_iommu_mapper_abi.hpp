@@ -138,10 +138,50 @@ inline const Profile *profileForName(const char *name) {
 //
 // R70-S6: when neither the vendor table nor the Apple RL range matches, fall
 // back to the PCI class code so an unlisted device still gets a usable arena
-// instead of the 16 MiB ABI3 window. This is deliberately a fixed policy, not
-// a runtime measurement: sizing by observed demand would require rebuilding a
-// live domain, which is a separate (and riskier) change.
+// instead of the 16 MiB ABI3 window.
+//
+// R71-B changed what this table decides. It no longer sizes the arena a domain
+// is prepared with (that is always the legacy one now); it is the *admission
+// ceiling* a domain may grow to at its first mapping, and the record of what
+// identity-based sizing would have chosen. The arena the client actually gets
+// comes from profileForFirstMapGrowth(), not from this table, so a missing or
+// wrong entry can no longer leave a real client with 16 MiB.
 enum class ProfileSource { bootArg, idTable, classTable, legacy };
+
+// ---------------------------------------------------------------------------
+// R71-B: demand-driven growth (amends the R69 §6.1 "arena is fixed at
+// admission" contract; see docs/m2-3bd-round71-first-map-growth.md).
+//
+// S2 sized the arena from device identity before any client had mapped, which
+// can only ever be a guess: an unlisted device got 16 MiB, and a listed one
+// could still outgrow its table entry. Demand is only observable from a real
+// mapping request, and the only moment a rebuild is safe is just before the
+// first PTE is published: the DTE still names a passthrough root, the
+// controller has never walked these tables, so nothing has to be invalidated
+// and there is no live translation to preserve.
+//
+// A domain is therefore prepared at the smallest arena and may grow exactly
+// once, at its first admissible mapping, to the ceiling it was admitted for.
+// The decision is a pure comparison so tests/ can check it without a kext.
+//
+// Invariants:
+//   * growth never shrinks - a ceiling that is not strictly larger in both
+//     dimensions is not a growth target, it is a policy error;
+//   * the ceiling must cover its own leaf tables, or growth would install a
+//     table area that cannot describe the IOVA window it advertises;
+//   * after the first activation capacity is frozen for the reason R69 §6 gave
+//     for forbidding a runtime resize: a live domain must never change the
+//     meaning of an address the client is already using.
+// ---------------------------------------------------------------------------
+inline const Profile *profileForFirstMapGrowth(const Profile *prepared,
+                                              const Profile *ceiling) {
+    if (!prepared || !ceiling) return nullptr;
+    if (ceiling == prepared) return nullptr;
+    if (ceiling->pages <= prepared->pages) return nullptr;
+    if (ceiling->records <= prepared->records) return nullptr;
+    if (ceiling->tablePages < ceiling->pages / 512 + 2) return nullptr;
+    return ceiling;
+}
 
 inline const Profile *profileForClass(uint32_t classCode) {
     // class-code is the 24-bit PCI class in the usual base<<16 | sub<<8 | if

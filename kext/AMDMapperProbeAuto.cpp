@@ -95,6 +95,14 @@ bool r44Allocate(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
 }
 }
 
+// R71-B: growth allocates a domain's page-table area through the same helper the
+// controller buffers use, so admission and growth cannot diverge on the 4 KiB
+// alignment or on the physical-contiguity requirement.
+bool org_example_AMDMapperProbe::r44AllocateTableArea(
+    IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
+    return r44Allocate(md, bytes, pa);
+}
+
 
 struct org_example_AMDMapperProbe::R52Domain {
     IOBufferMemoryDescriptor *tables;
@@ -126,6 +134,9 @@ struct org_example_AMDMapperProbe::R52Domain {
     // or legacy domain cannot be mistaken for a pool-sized one.
     const char *profileName;
     UInt32 profileRecords, profilePages, tablePages;
+    // R71-B: the arena is prepared at profileName and may grow once, at the first
+    // mapping, to this ceiling (nullptr before prepare finishes).
+    const r44mapper::Profile *ceilingProfile;
     const char *state;
     bool active;
 };
@@ -293,30 +304,41 @@ bool org_example_AMDMapperProbe::r53ReadDeviceSelection() {
     return true;
 }
 
-// S1: the capacity profile is chosen before any domain is prepared. An
-// unknown name must never widen the arena, so it stays on the legacy profile
-// and records the request for the next round's evidence.
+// S1/R71-B: this selects the *ceiling* a domain may grow to, not the arena it is
+// prepared with. Growth happens at the first mapping (r44GrowBeforeFirstMap), so
+// the value published here says how far that growth may go.
 bool org_example_AMDMapperProbe::r44SelectProfile() {
     char requested[24] = {};
-    fR44Profile = r44mapper::kProfileLegacy;
-    fR44ProfileForced = false;
-    bool accepted = true;
-    if (PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1)) {
-        const r44mapper::Profile *picked = r44mapper::profileForName(requested);
-        setProperty("r44-profile-request", requested);
-        if (picked) { fR44Profile = *picked; fR44ProfileForced = true; }
-        else accepted = false;
-    }
-    setProperty("r44-profile-mode", fR44ProfileForced ? "forced" : "per-device");
-    setProperty("r44-profile", accepted
-        ? (fR44ProfileForced ? fR44Profile.name : "per-device")
-        : "unsupported-name");
-    if (fR44ProfileForced) {
-        setProperty("r44-profile-records", fR44Profile.records, 32);
-        setProperty("r44-profile-pages", fR44Profile.pages, 32);
-        setProperty("r44-profile-table-pages", fR44Profile.tablePages, 32);
-    }
-    return accepted;
+    const bool named = PE_parse_boot_argn("amdiommu_profile", requested,
+                                          sizeof(requested) - 1) != 0;
+    bool forced = false;
+    const r44mapper::Profile *ceiling = r44Ceiling(forced);
+    fR44Profile = *ceiling;
+    fR44ProfileForced = forced;
+    if (named) setProperty("r44-profile-request", requested);
+    setProperty("r44-profile-mode", forced ? "forced" : "first-map-growth");
+    setProperty("r44-profile", ceiling->name);
+    setProperty("r44-profile-ceiling", ceiling->name);
+    setProperty("r44-profile-records", ceiling->records, 32);
+    setProperty("r44-profile-pages", ceiling->pages, 32);
+    setProperty("r44-profile-table-pages", ceiling->tablePages, 32);
+    // An unknown name must never widen the pool. It is reported as refused and
+    // leaves the legacy ceiling in place, which also disables growth.
+    return !named || r44mapper::profileForName(requested) != nullptr;
+}
+
+// The ceiling is a per-instance decision: every attached device owns its own
+// mapper instance and the boot argument is parsed again for each of them, so an
+// override can never be lost to whichever instance ran first (R70-S3b).
+const r44mapper::Profile *org_example_AMDMapperProbe::r44Ceiling(bool &forced) const {
+    forced = false;
+    char requested[24] = {};
+    if (!PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1))
+        return &r44mapper::kProfileRl10gMax;
+    forced = true;
+    if (const r44mapper::Profile *picked = r44mapper::profileForName(requested))
+        return picked;
+    return &r44mapper::kProfileLegacy;
 }
 
 // Vendor/device IDs come from the device-tree properties OpenCore already
@@ -646,14 +668,29 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(
     d->deviceID = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
     d->state = "preparing";
-    // S2 admission with an S3b fallback chain. R70-S3 proved that refusing is
-    // NOT a safe passthrough for Apple's client: with no iommu-parent the
-    // client's kMapped IODMACommand gets NULL and IOSkywalk panics on
-    // 0xe00002be exactly like capacity exhaustion. So try the requested
-    // profile first, then progressively smaller arenas, and only give up when
-    // even the legacy arena cannot be prepared - and then say so loudly.
+    // R71-B: capacity is no longer guessed from identity before the client has
+    // ever mapped. R70-S3 proved that refusing is NOT a safe passthrough for
+    // Apple's client: with no iommu-parent its kMapped IODMACommand gets NULL and
+    // IOSkywalk panics on 0xe00002be exactly like capacity exhaustion. So every
+    // domain is prepared - at the legacy arena, the smallest one and the only one
+    // that cannot fail for size - and may grow at its first mapping to the
+    // ceiling this device is admitted for.
     r44mapper::ProfileSource source = sourceIn;
     if (!requested) requested = &r44mapper::kProfileLegacy;
+    char requestedName[24] = {};
+    const bool named = PE_parse_boot_argn("amdiommu_profile", requestedName,
+                                          sizeof(requestedName) - 1) != 0;
+    const bool unsupported =
+        named && r44mapper::profileForName(requestedName) == nullptr;
+    bool forcedCeiling = false;
+    const r44mapper::Profile *ceiling = r44Ceiling(forcedCeiling);
+    // The claim path is the verified R67-2 configuration: it keeps the arena it
+    // was accepted with unless an operator raises the ceiling explicitly.
+    if (!forcedCeiling && !(fR52Owner && fR52Owner->fR69AutoAttach))
+        ceiling = &r44mapper::kProfileLegacy;
+    const r44mapper::Profile *prepared = &r44mapper::kProfileLegacy;
+    const bool growth =
+        r44mapper::profileForFirstMapGrowth(prepared, ceiling) != nullptr;
     // Per-instance admission evidence: the device mapper is its own instance,
     // so record whether this instance saw the boot-arg override at all.
     nic->setProperty("r44-attach-forced", r44ForcedProfile() ? "yes" : "no");
@@ -663,62 +700,48 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(
         : (source == r44mapper::ProfileSource::idTable ? "id-table"
         : (source == r44mapper::ProfileSource::classTable ? "class-table"
                                                           : "legacy-fallback")));
-    const r44mapper::Profile *candidates[3] = {
-        requested, &r44mapper::kProfileRl10g, &r44mapper::kProfileLegacy};
-    const r44mapper::Profile *profile = nullptr;
-    for (unsigned i = 0; i < 3 && !profile; ++i) {
-        const r44mapper::Profile *p = candidates[i];
-        bool seen = false;
-        for (unsigned j = 0; j < i; ++j) if (candidates[j] == p) seen = true;
-        if (seen) continue;
-        const UInt32 tablePages = p->tablePages;
-        const UInt64 arenaBytes = r44mapper::arenaBytesFor(*p);
-        if (!arenaBytes || arenaBytes > r44mapper::kMaxArenaBytes ||
-            tablePages < p->pages / 512 + 2) {
-            IOLog("AMDMapperProbe: profile %s rejected arena=%llu tables=%u\n",
-                  p->name, arenaBytes, tablePages);
-            continue;
-        }
-        if (!r44Allocate(d->tables, (UInt64)tablePages * M2B2_PAGE_SIZE,
-                         d->tablePA)) {
-            IOLog("AMDMapperProbe: profile %s table allocation failed (%u pages)\n",
-                  p->name, tablePages);
-            d->tables = nullptr;
-            continue;
-        }
-        if (!r44PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
-                d->tablePA, tablePages, M2B2_PAGE_MODE_4_LEVEL, *p)) {
-            IOLog("AMDMapperProbe: profile %s prepare failed\n", p->name);
-            d->tables->release();
-            d->tables = nullptr;
-            continue;
-        }
-        profile = p;
-    }
-    if (!profile) {
+    // The identity table is advisory now: it sets the admission ceiling and
+    // records what identity-based sizing would have picked. It cannot cost a real
+    // client its arena any more, because the arena starts at legacy and grows
+    // from demand.
+    nic->setProperty("r44-profile-suggested", requested->name);
+    nic->setProperty("r44-profile-prepared", prepared->name);
+    nic->setProperty("r44-profile-ceiling-source",
+                     forcedCeiling ? "boot-arg" : "default");
+    nic->setProperty("r44-profile-ceiling",
+                     unsupported ? "unsupported-name" : ceiling->name);
+    nic->setProperty("r44-growth-policy", growth ? "first-map" : "disabled");
+    nic->setProperty("r44-capacity-grown", "no");
+    nic->setProperty("r44-profile", prepared->name);
+    const UInt64 preparedBytes = r44mapper::arenaBytesFor(*prepared);
+    const bool preparedOK = preparedBytes &&
+        preparedBytes <= r44mapper::kMaxArenaBytes &&
+        prepared->tablePages >= prepared->pages / 512 + 2 &&
+        r44AllocateTableArea(d->tables,
+            (UInt64)prepared->tablePages * M2B2_PAGE_SIZE, d->tablePA) &&
+        r44PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
+            d->tablePA, prepared->tablePages, M2B2_PAGE_MODE_4_LEVEL, *prepared);
+    if (!preparedOK) {
         nic->setProperty("r69-admission", "refused-no-arena");
-        IOLog("AMDMapperProbe: admission refused, no arena fits (requested %s)\n",
-              requested->name);
+        IOLog("AMDMapperProbe: admission refused, the legacy arena did not prepare\n");
         if (fR69AutoAttach)
-            panic("AMDMapperProbe: admission-refused: no arena fits (requested %s)",
-                  requested->name);
+            panic("AMDMapperProbe: admission-refused: legacy arena did not prepare");
+        if (d->tables) { d->tables->release(); d->tables = nullptr; }
         return false;
     }
-    d->profileName = profile->name;
-    d->profileRecords = profile->records;
-    d->profilePages = profile->pages;
-    d->tablePages = profile->tablePages;
-    nic->setProperty("r44-profile", profile->name);
-    nic->setProperty("r44-profile-requested", requested->name);
-    nic->setProperty("r44-profile-fallback", profile == requested ? "no" : "yes");
-    const char *admission = profile == &r44mapper::kProfileRl10g
-        ? "granted-rl-10g"
-        : (profile == &r44mapper::kProfileRl10gMax
-               ? "granted-rl-10g-max"
-               : "granted-native-legacy");
+    d->profileName = prepared->name;
+    d->profileRecords = prepared->records;
+    d->profilePages = prepared->pages;
+    d->tablePages = prepared->tablePages;
+    d->ceilingProfile = ceiling;
+    const char *admission = growth
+        ? (ceiling == &r44mapper::kProfileRl10gMax
+               ? "granted-rl-10g-max-on-demand" : "granted-rl-10g-on-demand")
+        : "granted-native-legacy";
     nic->setProperty("r69-admission", admission);
-    IOLog("AMDMapperProbe: domain %u ready profile=%s records=%u pages=%u tables=%u\n",
-          slot, profile->name, profile->records, profile->pages, profile->tablePages);
+    IOLog("AMDMapperProbe: domain %u prepared %s, ceiling %s (growth %s)\n",
+          slot, prepared->name, unsupported ? "unsupported-name" : ceiling->name,
+          growth ? "first-map" : "disabled");
     if (!fR52Owner->r52PrepareController(hardware)) return false;
     R44Controller *c = fR52Owner->fR44Controller;
     fR44Controller = c;
@@ -747,6 +770,41 @@ bool org_example_AMDMapperProbe::r52PrepareDomain(
     return true;
 }
 #pragma clang diagnostic pop
+
+// R71-B: growth reads and updates the domain through these four calls. The
+// domain struct is private to this file while the rebuild itself lives with
+// R44MapperState, so neither translation unit needs the other's type.
+bool org_example_AMDMapperProbe::r44GrowthOpen() const {
+    R52Domain *d = fR52Domain;
+    return d && !d->active;
+}
+
+const r44mapper::Profile *org_example_AMDMapperProbe::r44PreparedProfile() const {
+    R52Domain *d = fR52Domain;
+    return d ? r44mapper::profileForName(d->profileName) : nullptr;
+}
+
+const r44mapper::Profile *org_example_AMDMapperProbe::r44CeilingProfile() const {
+    R52Domain *d = fR52Domain;
+    return d ? d->ceilingProfile : nullptr;
+}
+
+void org_example_AMDMapperProbe::r44AdoptGrownTables(
+    IOBufferMemoryDescriptor *tables, UInt64 tablePA, UInt32 tablePages,
+    const r44mapper::Profile &target) {
+    R52Domain *d = fR52Domain;
+    if (!d) return;
+    // The DTE is written from tablePA at first activation, which is still ahead:
+    // nothing in the hardware refers to the area this call replaces.
+    IOBufferMemoryDescriptor *old = d->tables;
+    d->tables = tables;
+    d->tablePA = tablePA;
+    d->tablePages = tablePages;
+    d->profileName = target.name;
+    d->profileRecords = target.records;
+    d->profilePages = target.pages;
+    if (old) old->release();
+}
 
 bool org_example_AMDMapperProbe::r52ReleaseDomain() {
     R52Domain *d = fR52Domain;
