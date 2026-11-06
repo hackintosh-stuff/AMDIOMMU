@@ -1,0 +1,25 @@
+Round25 local validation record (Windows agent through WSL, no remote deployment)
+Workspace: C:\Users\ling\OneDrive\Documents\Agent\Hackintosh\MSI_X570\amd-iommu
+
+Commands executed successfully:
+python tools/abi/test-driver.py --emit tools/abi/test-r25-generated.cpp
+wsl -e sh -c 'g++ -w -std=c++17 -fsanitize=address,undefined -I tools/lucy-obs -I kext tools/abi/test-r25-generated.cpp -o /tmp/r25-driver-test && ASAN_OPTIONS=detect_leaks=0 /tmp/r25-driver-test'
+
+Observed compiler/test exit: 0
+Observed stdout:
+round25: 512 monotonic requests, 32-history wrap, four-slot auto-resume passed
+round21 window-edge tests: gate calls=20 fails=1 samples=3
+round23 multi-generation TX tests: slots=4
+round20 standard-mapper TX driver tests passed (direct maps=43 retires=43; std accepts/prepares/unmaps=0/530/528; cover calls=7)
+
+python tools/abi/test-protocol.py
+Observed output after adding peer coverage:
+....
+----------------------------------------------------------------------
+Ran 4 tests in 0.121s
+OK
+
+python -m py_compile tools/templates/tx-window.py tools/abi/protocol.py tools/abi/load.py tools/abi/peer.py tools/abi/test-protocol.py
+Observed exit: 0 (before final peer test addition; final test-protocol run imports and executes that file successfully).
+
+Scope: deterministic stub/native software validation only. This is not evidence of hardware DMA, hardware CompletionWait, real same-domain operation, or a deployed driver. Generated source was temporary and removed after validation. ASan leak checking disabled because existing legacy native cases intentionally retain fixtures; address/undefined checks enabled.

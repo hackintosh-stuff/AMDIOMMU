@@ -3913,7 +3913,7 @@ UInt32 RTL8125::r17TxRingOwn()
  * body means the packet never reaches an OWN bit, so the reference is released
  * here; a `true` means outputStart will set OWN and call r17TxPosted(), which
  * releases it. There is no third exit from outputStart between those two
- * points (verified against the generated source by tools/r21/test-driver.py). */
+ * points (verified against the generated source by tools/abi/test-driver.py). */
 /* The interface has ONE output thread. Test capacity BEFORE dequeue: the
  * interface queue remains the sole mbuf owner; no fifth packet reaches Map.
  * Publish waiting BEFORE scanning slots. Retirement may race either side of

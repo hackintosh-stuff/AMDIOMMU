@@ -54,14 +54,14 @@ by token req1..4 and one in-flight slot. Real physical segments are passed after
 coalescing and before any OWN; close-pointer completion only enqueues Retire.
 A dedicated workloop timer retires mappings, then quarantines at most 4 mbufs
 until explicit Disarm/drain/Detach. No probe discovery or identity fallback for
-selected traffic. See tools/r16/driver-template.py and RTL812xTxMap.hpp.
+selected traffic. See tools/templates/tx-stage.py and RTL812xTxMap.hpp.
 
 Round 17 (selected with `--tx 17`) replaces that TX module with the native one:
 the packet's own physical segments are mapped as they are (no staging copy, no
 numSegs flattening), descriptors carry the returned non-identity IOVAs, and each
 request's mbuf is released by its own retirement instead of being quarantined to
 Detach. Evidence records and the command budget stay finite; the DMA owner does
-not. See tools/r17/driver-template.py and RTL812xTxMapNative.hpp. The default
+not. See tools/templates/tx-native.py and RTL812xTxMapNative.hpp. The default
 remains 16 so the archived round-16 build stays reproducible.
 
 Round 33 keeps 1024 owned RX spares to standard mapper IOVAs
@@ -2106,27 +2106,27 @@ def write(path, text):
 # segments and recycles every request's mbuf. Both templates are kept so the
 # archived round-16 evidence stays reproducible from its own generator input.
 import runpy
-TX16 = runpy.run_path(os.path.join(HERE, 'r16', 'driver-template.py'))
-TX17 = runpy.run_path(os.path.join(HERE, 'r17', 'driver-template.py'))
-TX18 = runpy.run_path(os.path.join(HERE, 'r18', 'driver-template.py'))
-TX19 = runpy.run_path(os.path.join(HERE, 'r19', 'driver-template.py'))
+TX16 = runpy.run_path(os.path.join(HERE, 'templates', 'tx-stage.py'))
+TX17 = runpy.run_path(os.path.join(HERE, 'templates', 'tx-native.py'))
+TX18 = runpy.run_path(os.path.join(HERE, 'templates', 'tx-std.py'))
+TX19 = runpy.run_path(os.path.join(HERE, 'templates', 'tx-multiseg.py'))
 # Round 20 keeps the same standard path and adds: per-object identity coverage
 # for ordinary TX (kCover), the blocked-ring record, the paired complete() on
 # every pre-publish multi-range exit, and kSegments=8 in the std witness.
-TX20 = runpy.run_path(os.path.join(HERE, 'r20', 'driver-template.py'))
+TX20 = runpy.run_path(os.path.join(HERE, 'templates', 'tx-cover.py'))
 # Round21 keeps round 20's generator untouched and derives its own: the window
 # gate, the forced exit sample and the whitelisted control ops are round-21
 # behaviour, and leaving r20 selectable is what lets the archived round-20
 # evidence stay reproducible byte-for-byte.
-TX21 = runpy.run_path(os.path.join(HERE, 'r21', 'driver-template.py'))
-R44 = runpy.run_path(os.path.join(HERE, 'r44', 'driver-template.py'))
-R45 = runpy.run_path(os.path.join(HERE, 'r45', 'driver-template.py'))
-R46 = runpy.run_path(os.path.join(HERE, 'r46', 'driver-template.py'))
-R47 = runpy.run_path(os.path.join(HERE, 'r47', 'driver-template.py'))
-R48 = runpy.run_path(os.path.join(HERE, 'r48', 'driver-template.py'))
-R49 = runpy.run_path(os.path.join(HERE, 'r49', 'driver-template.py'))
-R52 = runpy.run_path(os.path.join(HERE, 'r52', 'driver-template.py'))
-R53 = runpy.run_path(os.path.join(HERE, 'r53', 'driver-template.py'))
+TX21 = runpy.run_path(os.path.join(HERE, 'templates', 'tx-window.py'))
+R44 = runpy.run_path(os.path.join(HERE, 'ordinary', 'driver-template.py'))
+R45 = runpy.run_path(os.path.join(HERE, 'tcp4', 'driver-template.py'))
+R46 = runpy.run_path(os.path.join(HERE, 'tcp6', 'driver-template.py'))
+R47 = runpy.run_path(os.path.join(HERE, 'discovery', 'driver-template.py'))
+R48 = runpy.run_path(os.path.join(HERE, 'dma32', 'driver-template.py'))
+R49 = runpy.run_path(os.path.join(HERE, 'dma32_64', 'driver-template.py'))
+R52 = runpy.run_path(os.path.join(HERE, 'mixed', 'driver-template.py'))
+R53 = runpy.run_path(os.path.join(HERE, 'dual', 'driver-template.py'))
 # round -> (module, [headers written into the driver tree, in include order])
 TXR = {'16': (TX16, ['RTL812xTxMap.hpp']),
        '17': (TX17, ['RTL812xTxMapNative.hpp']),
@@ -2176,7 +2176,7 @@ def select_rx(round_no):
     if round_no not in ('15', '27', '28', '29', '30', '31', '32', '33', '34'):
         raise SystemExit('unsupported RX module round: %r' % (round_no,))
     RX_SELECT = round_no
-    RX = runpy.run_path(os.path.join(HERE, 'r34' if round_no == '34' else 'r27',
+    RX = runpy.run_path(os.path.join(HERE, 'templates' if round_no == '34' else 'base',
                                    'driver-template.py')) if round_no != '15' else None
     RXMAP_NAMES = RX['HEADERS'] if RX else []
     POOL_METHODS = RX['pool_methods'](_POOL_METHODS_BASE) if RX else _POOL_METHODS_BASE

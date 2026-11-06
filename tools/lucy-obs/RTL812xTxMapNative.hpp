@@ -287,7 +287,7 @@ static_assert(sizeof(Configure) == 176,
 /* These numbers were MEASURED, not derived: an earlier draft of this guard
  * asserted mapper==104 and the compiler rejected it (actual 96), which is the
  * same "typed it from memory" failure that produced the 2328-vs-2320 block bug.
- * tools/r21/abi.py prints them from the real headers if they ever need updating. */
+ * tools/abi/abi.py prints them from the real headers if they ever need updating. */
 static_assert(__builtin_offsetof(Configure, deadline) == 24, "Configure::deadline moved");
 static_assert(__builtin_offsetof(Configure, callback) == 32, "Configure::callback moved");
 static_assert(__builtin_offsetof(Configure, context) == 40, "Configure::context moved");
