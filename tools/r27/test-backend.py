@@ -119,9 +119,9 @@ static bool r17ModeRequested(const char *,size_t) { return true; }
 
 TESTS = r'''
 struct Fixture {
-    org_example_AMDMapperProbe self;
-    org_example_AMDMapperProbe::R17Domain *domain=nullptr;
-    org_example_AMDMapperProbe::R27RxDomain rx{};
+    org_maz1_AMDMapperProbe self;
+    org_maz1_AMDMapperProbe::R17Domain *domain=nullptr;
+    org_maz1_AMDMapperProbe::R27RxDomain rx{};
     static constexpr UInt64 tableBase=0x80000000ULL;
     UInt64 tables[(M2B2_IOVA_RESERVED_PAGES+8)*512]={};
     UInt8 fakeMMIO=0;
@@ -331,8 +331,8 @@ public:
                                       '    // ---- B2 观测计数器')
     mmio = base.MMIO.replace('    struct R17Domain;',
                             DECLARATIONS + native_declarations + '    struct R17Domain;')
-    mmio = mmio.replace('class org_example_AMDMapperProbe {',
-                        'class org_example_AMDMapperProbe : public IOService {')
+    mmio = mmio.replace('class org_maz1_AMDMapperProbe {',
+                        'class org_maz1_AMDMapperProbe : public IOService {')
     mmio = mmio.replace('struct { UInt32 reserved=0; } fR15Request;',
                         'r15pool::Request fR15Request{};')
     mmio = mmio.replace('FakeService *fR15Service', 'IOService *fR15Service')
@@ -340,11 +340,11 @@ public:
     text += base.section(header, 'static inline void m2b2WriteCmd(', '// ---- m2b2InvAddress')
     text += base.section(header, 'static inline UInt64 m2b2InvAddress()', '// ---- M2B2 measurement')
     text += base.section(header, 'static inline bool m2b2Submit(', '// ---- m2b2ReadBar64')
-    text += base.section(tx, 'struct org_example_AMDMapperProbe::R17Domain {',
+    text += base.section(tx, 'struct org_maz1_AMDMapperProbe::R17Domain {',
                          '// Take a free active-record index')
     text += base.section(tx, 'static bool r17Invalidate(',
-                         'IOReturn org_example_AMDMapperProbe::r17Callback(')
-    text += tx[tx.index('bool org_example_AMDMapperProbe::r27RxRequested()'):]
+                         'IOReturn org_maz1_AMDMapperProbe::r17Callback(')
+    text += tx[tx.index('bool org_maz1_AMDMapperProbe::r27RxRequested()'):]
     return text + TESTS
 
 

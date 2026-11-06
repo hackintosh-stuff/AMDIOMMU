@@ -31,7 +31,7 @@ def require_offloads(info):
     params = info.get('IOKitPersonalities', {}).get('RTL8125', {}).get('Driver Parameters', {})
     if params.get('enableTSO4') is not True or params.get('enableTSO6') is not False:
         raise ValueError('Round45 requires enableTSO4=true and enableTSO6=false')
-    if info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != PROBE_VERSION:
+    if info.get('OSBundleLibraries', {}).get('org.maz1.AMDMapperProbe') != PROBE_VERSION:
         raise ValueError('Round45 Lucy must request AMDMapperProbe ' + PROBE_VERSION)
 
 

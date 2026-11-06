@@ -79,7 +79,7 @@ def leading_comments(lines, start):
         //
         // why ...
         (blank)
-        void org_example_AMDMapperProbe::runM20ConfigProbe() {
+        void org_maz1_AMDMapperProbe::runM20ConfigProbe() {
 
     Those comments belong to the function, not to the file, so they move with
     it. Blank lines between the comment block and the signature are swallowed
@@ -185,95 +185,95 @@ SHARED = [
 # src/Ivrs*.cpp are reused library units registered directly in build-m1a.sh.
 MEMBERS = [
     ('AMDMapperProbe.cpp', 'entry point, IOMapper contract, kmod glue', [
-        'bool org_example_AMDMapperProbe::initHardware',
-        'bool org_example_AMDMapperProbe::init(',
-        'bool org_example_AMDMapperProbe::start',
-        'void org_example_AMDMapperProbe::stop',
-        'IOReturn org_example_AMDMapperProbe::callPlatformFunction',
-        'IOReturn org_example_AMDMapperProbe::iovmMapMemory',
-        'IOReturn org_example_AMDMapperProbe::iovmUnmapMemory',
-        'IOReturn org_example_AMDMapperProbe::iovmInsert',
-        'uint64_t org_example_AMDMapperProbe::getPageSize',
-        'uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress',
+        'bool org_maz1_AMDMapperProbe::initHardware',
+        'bool org_maz1_AMDMapperProbe::init(',
+        'bool org_maz1_AMDMapperProbe::start',
+        'void org_maz1_AMDMapperProbe::stop',
+        'IOReturn org_maz1_AMDMapperProbe::callPlatformFunction',
+        'IOReturn org_maz1_AMDMapperProbe::iovmMapMemory',
+        'IOReturn org_maz1_AMDMapperProbe::iovmUnmapMemory',
+        'IOReturn org_maz1_AMDMapperProbe::iovmInsert',
+        'uint64_t org_maz1_AMDMapperProbe::getPageSize',
+        'uint64_t org_maz1_AMDMapperProbe::mapToPhysicalAddress',
     ]),
     ('AMDMapperProbeNic.cpp', 'NIC discovery, publish notifier, arming', [
-        'bool org_example_AMDMapperProbe::findTarget',
-        'bool org_example_AMDMapperProbe::publishHandler',
-        'bool org_example_AMDMapperProbe::armNic',
-        'void org_example_AMDMapperProbe::installPublishNotifier',
-        'bool org_example_AMDMapperProbe::findNic(',
-        'IOService *org_example_AMDMapperProbe::findNicServiceOnly',
+        'bool org_maz1_AMDMapperProbe::findTarget',
+        'bool org_maz1_AMDMapperProbe::publishHandler',
+        'bool org_maz1_AMDMapperProbe::armNic',
+        'void org_maz1_AMDMapperProbe::installPublishNotifier',
+        'bool org_maz1_AMDMapperProbe::findNic(',
+        'IOService *org_maz1_AMDMapperProbe::findNicServiceOnly',
     ]),
     ('AMDMapperProbeAuto.cpp', 'persistent per-device hardware lifecycle', [
-        'bool org_example_AMDMapperProbe::StartAuto',
-        'bool org_example_AMDMapperProbe::AttachAuto',
-        'bool org_example_AMDMapperProbe::StopAuto',
-        'bool org_example_AMDMapperProbe::Invalidate',
-        'bool org_example_AMDMapperProbe::SuspendAuto',
-        'bool org_example_AMDMapperProbe::ResumeAuto',
-        'void org_example_AMDMapperProbe::PublishAuto',
+        'bool org_maz1_AMDMapperProbe::StartAuto',
+        'bool org_maz1_AMDMapperProbe::AttachAuto',
+        'bool org_maz1_AMDMapperProbe::StopAuto',
+        'bool org_maz1_AMDMapperProbe::Invalidate',
+        'bool org_maz1_AMDMapperProbe::SuspendAuto',
+        'bool org_maz1_AMDMapperProbe::ResumeAuto',
+        'void org_maz1_AMDMapperProbe::PublishAuto',
     ]),
     ('AMDMapperProbeDiscovery.cpp', 'runtime IVRS and PCI controller discovery', [
         'bool DiscoverHardware',
     ]),
     ('AMDMapperProbeMapper.cpp', 'ordinary IOMapper allocation and translation', [
-        'bool org_example_AMDMapperProbe::PrepareMappings',
-        'bool org_example_AMDMapperProbe::QuiesceMappings',
-        'bool org_example_AMDMapperProbe::ReleaseMappings',
-        'UInt32 org_example_AMDMapperProbe::LiveMappings',
-        'IOReturn org_example_AMDMapperProbe::MapMemory',
-        'IOReturn org_example_AMDMapperProbe::UnmapMemory',
-        'bool org_example_AMDMapperProbe::Translate',
-        'IOReturn org_example_AMDMapperProbe::PowerTransition',
-        'void org_example_AMDMapperProbe::PublishMappings',
+        'bool org_maz1_AMDMapperProbe::PrepareMappings',
+        'bool org_maz1_AMDMapperProbe::QuiesceMappings',
+        'bool org_maz1_AMDMapperProbe::ReleaseMappings',
+        'UInt32 org_maz1_AMDMapperProbe::LiveMappings',
+        'IOReturn org_maz1_AMDMapperProbe::MapMemory',
+        'IOReturn org_maz1_AMDMapperProbe::UnmapMemory',
+        'bool org_maz1_AMDMapperProbe::Translate',
+        'IOReturn org_maz1_AMDMapperProbe::PowerTransition',
+        'void org_maz1_AMDMapperProbe::PublishMappings',
     ]),
     ('AMDMapperProbeB1B2Debug.cpp', 'M1 mapper self-tests (B1, B2, B2a, B2b)', [
-        'void org_example_AMDMapperProbe::runB1SelfTest',
-        'void org_example_AMDMapperProbe::runB2SelfTest',
-        'void org_example_AMDMapperProbe::runB2OneTest',
-        'void org_example_AMDMapperProbe::runB2aSelfTest',
-        'org_example_AMDMapperProbe::MapEntry *',
-        'bool org_example_AMDMapperProbe::freeMapEntry',
-        'uint32_t org_example_AMDMapperProbe::usedMapEntries',
-        'void org_example_AMDMapperProbe::publishB2bStats',
-        'void org_example_AMDMapperProbe::publishMapStats',
+        'void org_maz1_AMDMapperProbe::runB1SelfTest',
+        'void org_maz1_AMDMapperProbe::runB2SelfTest',
+        'void org_maz1_AMDMapperProbe::runB2OneTest',
+        'void org_maz1_AMDMapperProbe::runB2aSelfTest',
+        'org_maz1_AMDMapperProbe::MapEntry *',
+        'bool org_maz1_AMDMapperProbe::freeMapEntry',
+        'uint32_t org_maz1_AMDMapperProbe::usedMapEntries',
+        'void org_maz1_AMDMapperProbe::publishB2bStats',
+        'void org_maz1_AMDMapperProbe::publishMapStats',
     ]),
     ('AMDMapperProbeMmioDebug.cpp', 'M2-0/1/2a-1 MMIO read and write probes', [
-        'void org_example_AMDMapperProbe::runM20ConfigProbe',
-        'void org_example_AMDMapperProbe::runM21MmioProbe',
-        'void org_example_AMDMapperProbe::runM22aWriteProbe',
+        'void org_maz1_AMDMapperProbe::runM20ConfigProbe',
+        'void org_maz1_AMDMapperProbe::runM21MmioProbe',
+        'void org_maz1_AMDMapperProbe::runM22aWriteProbe',
     ]),
     ('AMDMapperProbeTableDebug.cpp', 'M2-2a-2/2a-3 device table, enable, cmd channel', [
-        'void org_example_AMDMapperProbe::runM22bTableProbe',
-        'void org_example_AMDMapperProbe::runM23EnableProbe',
-        'void org_example_AMDMapperProbe::runM2b1CmdProbe',
+        'void org_maz1_AMDMapperProbe::runM22bTableProbe',
+        'void org_maz1_AMDMapperProbe::runM23EnableProbe',
+        'void org_maz1_AMDMapperProbe::runM2b1CmdProbe',
     ]),
     ('AMDMapperProbeDmaDebug.cpp', 'DMA observation: rings, segments, event log', [
-        'bool org_example_AMDMapperProbe::m2b2ReadCloPtr',
-        'bool org_example_AMDMapperProbe::m2b2ReadTailPtr',
-        'void org_example_AMDMapperProbe::m2b2CollectTxSegments',
-        'void org_example_AMDMapperProbe::m2b2CollectRxSegments',
-        'void org_example_AMDMapperProbe::m2b2ScanTxWindowAfter',
-        'void org_example_AMDMapperProbe::m2b2PublishDmaDefaults',
-        'void org_example_AMDMapperProbe::observeDeviceDma',
+        'bool org_maz1_AMDMapperProbe::m2b2ReadCloPtr',
+        'bool org_maz1_AMDMapperProbe::m2b2ReadTailPtr',
+        'void org_maz1_AMDMapperProbe::m2b2CollectTxSegments',
+        'void org_maz1_AMDMapperProbe::m2b2CollectRxSegments',
+        'void org_maz1_AMDMapperProbe::m2b2ScanTxWindowAfter',
+        'void org_maz1_AMDMapperProbe::m2b2PublishDmaDefaults',
+        'void org_maz1_AMDMapperProbe::observeDeviceDma',
     ]),
     ('AMDMapperProbeObsDebug.cpp', 'driver observation log (wire v2) reader', [
-        'UInt32 org_example_AMDMapperProbe::m2b2ReadDeclaredBatch',
-        'int org_example_AMDMapperProbe::m2b2ScanTxDone',
-        'void org_example_AMDMapperProbe::m2b2CaptureNicIdentity',
-        'void org_example_AMDMapperProbe::m2b2ReadDriverObs',
+        'UInt32 org_maz1_AMDMapperProbe::m2b2ReadDeclaredBatch',
+        'int org_maz1_AMDMapperProbe::m2b2ScanTxDone',
+        'void org_maz1_AMDMapperProbe::m2b2CaptureNicIdentity',
+        'void org_maz1_AMDMapperProbe::m2b2ReadDriverObs',
     ]),
     ('AMDMapperProbePgtDebug.cpp', 'M2-2b-2 page-table experiment', [
-        'bool org_example_AMDMapperProbe::scheduleM22b2',
-        'void org_example_AMDMapperProbe::m22b2TimerFired',
-        'void org_example_AMDMapperProbe::runM22b2PageTableProbe',
+        'bool org_maz1_AMDMapperProbe::scheduleM22b2',
+        'void org_maz1_AMDMapperProbe::m22b2TimerFired',
+        'void org_maz1_AMDMapperProbe::runM22b2PageTableProbe',
     ]),
 ]
 
 PROLOGUE_FIRST = '#include "AMDMapperProbe.hpp"'
 PROLOGUE_LAST = '#endif'
 METACLASS_FIRST = '#define super IOMapper'
-METACLASS_LAST = 'OSDefineMetaClassAndStructors(org_example_AMDMapperProbe, IOMapper);'
+METACLASS_LAST = 'OSDefineMetaClassAndStructors(org_maz1_AMDMapperProbe, IOMapper);'
 # The kmod trailer must appear in exactly one translation unit.
 KMOD_FIRST = 'extern "C" {'
 KMOD_LAST = '}'
@@ -354,9 +354,9 @@ def main():
             # Up to (but not including) the next member definition.
             b = a
             for j in range(a, len(lines)):
-                if lines[j].startswith('bool org_example_AMDMapperProbe::') or \
-                   lines[j].startswith('void org_example_AMDMapperProbe::') or \
-                   lines[j].startswith('IOReturn org_example_AMDMapperProbe::'):
+                if lines[j].startswith('bool org_maz1_AMDMapperProbe::') or \
+                   lines[j].startswith('void org_maz1_AMDMapperProbe::') or \
+                   lines[j].startswith('IOReturn org_maz1_AMDMapperProbe::'):
                     b = j          # 1-based line of that definition is j+1
                     break
             else:
@@ -749,7 +749,7 @@ def main():
     # A banner looks like:
     #     // ------------------------------ M2-2a-1：最小 MMIO 写测试
     #     (blank)
-    #     void org_example_AMDMapperProbe::runM22aWriteProbe() {
+    #     void org_maz1_AMDMapperProbe::runM22aWriteProbe() {
     # It introduces the code beneath it, so it belongs to that block. Walking
     # forward over unclaimed comments and blanks, and stopping at the first
     # claimed line, gives exactly that.

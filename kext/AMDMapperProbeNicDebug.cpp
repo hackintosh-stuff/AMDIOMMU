@@ -55,7 +55,7 @@
 
 #if AMD_MAPPER_PROBE_DEBUG
 
-bool org_example_AMDMapperProbe::findTarget() {
+bool org_maz1_AMDMapperProbe::findTarget() {
     // Strategy 1: direct lookup by path (on the real machine acpi-path =
     // IOACPIPlane:/_SB/PCI0@0/IOMA@2)
     const char *paths[] = {
@@ -118,7 +118,7 @@ bool org_example_AMDMapperProbe::findTarget() {
     return found;
 }
 
-bool org_example_AMDMapperProbe::armNic(IOService *nic) {
+bool org_maz1_AMDMapperProbe::armNic(IOService *nic) {
     if (!nic) return false;
 
     if (fNicDevice && fNicDevice != nic) {
@@ -145,7 +145,7 @@ bool org_example_AMDMapperProbe::armNic(IOService *nic) {
     return true;
 }
 
-bool org_example_AMDMapperProbe::findNic() {
+bool org_maz1_AMDMapperProbe::findNic() {
     // ---- Strategies 1/2: direct lookup by path ----
     for (int i = 0; kNicPaths[i]; i++) {
         IORegistryEntry *e = IORegistryEntry::fromPath(kNicPaths[i]);
@@ -235,7 +235,7 @@ bool org_example_AMDMapperProbe::findNic() {
 //
 // Both paths reuse the same set of path constants, guaranteeing they find the
 // same device.
-IOService *org_example_AMDMapperProbe::findNicServiceOnly() {
+IOService *org_maz1_AMDMapperProbe::findNicServiceOnly() {
     for (int i = 0; kNicPaths[i]; i++) {
         IORegistryEntry *e = IORegistryEntry::fromPath(kNicPaths[i]);
         if (!e) continue;

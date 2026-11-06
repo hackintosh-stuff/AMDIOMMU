@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Parse AMDMapperProbe M2-2b-2 ioreg properties into a verdict.
 
-Reads `ioreg -l -w0 -c org_example_AMDMapperProbe` output (stdin or a file)
+Reads `ioreg -l -w0 -c org_maz1_AMDMapperProbe` output (stdin or a file)
 and prints a structured report focused on the questions this round must
 answer:
 
@@ -14,7 +14,7 @@ answer:
 
 Usage:
     py -3 analyze-m2b2.py props.txt
-    ssh ... 'ioreg -l -w0 -c org_example_AMDMapperProbe' | py -3 analyze-m2b2.py -
+    ssh ... 'ioreg -l -w0 -c org_maz1_AMDMapperProbe' | py -3 analyze-m2b2.py -
 """
 import re
 import sys

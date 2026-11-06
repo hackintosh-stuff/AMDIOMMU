@@ -19,7 +19,7 @@ KEYS = (
 
 def walk(node, out):
     if isinstance(node, dict):
-        if node.get('IOClass') == 'org_example_AMDMapperProbe':
+        if node.get('IOClass') == 'org_maz1_AMDMapperProbe':
             out.append(node)
         for value in node.values():
             walk(value, out)
@@ -30,7 +30,7 @@ def walk(node, out):
 
 def main():
     raw = subprocess.run(['ioreg', '-a', '-l', '-w0', '-c',
-                          'org_example_AMDMapperProbe'],
+                          'org_maz1_AMDMapperProbe'],
                          capture_output=True).stdout
     tree = plistlib.loads(raw)
     found = []

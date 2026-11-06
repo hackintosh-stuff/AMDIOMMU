@@ -229,8 +229,8 @@ def render(props, cmds):
     and every test failed with "no m2-b2-* properties found" -- the harness
     was wrong, not the analyser.
     """
-    lines = ["+-o AMDMapperProbe  <class org_example_AMDMapperProbe>", "  {",
-             '    "IOClass" = "org_example_AMDMapperProbe"']
+    lines = ["+-o AMDMapperProbe  <class org_maz1_AMDMapperProbe>", "  {",
+             '    "IOClass" = "org_maz1_AMDMapperProbe"']
     for k, v in props.items():
         lines.append('    "{}" = "{}"'.format(k, v))
     for i, (label, dwords, exp, obs, loops) in enumerate(cmds):

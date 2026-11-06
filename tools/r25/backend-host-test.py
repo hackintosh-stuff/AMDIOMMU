@@ -99,7 +99,7 @@ static void mmioWrite64(volatile UInt8 *, UInt32 off, UInt64 tail) {
     if (signalCompletion)
         semaphore=((UInt64)commandMemory[cw+3]<<32)|commandMemory[cw+2];
 }
-class org_example_AMDMapperProbe {
+class org_maz1_AMDMapperProbe {
 public:
     struct R17Domain;
     R17Domain *fR17=nullptr;
@@ -124,13 +124,13 @@ public:
     void publishStdStats() {}
     void r17PublishWindow() {}
 };
-static void setHexProperty(org_example_AMDMapperProbe *, const char *, UInt64) {}
+static void setHexProperty(org_maz1_AMDMapperProbe *, const char *, UInt64) {}
 '''
 
 TESTS = r'''
 struct Fixture {
-    org_example_AMDMapperProbe self;
-    org_example_AMDMapperProbe::R17Domain domain{};
+    org_maz1_AMDMapperProbe self;
+    org_maz1_AMDMapperProbe::R17Domain domain{};
     IOLock lock;
     UInt64 leaves[amdtx::kPages]={};
     UInt8 fakeMMIO=0;
@@ -360,16 +360,16 @@ def harness():
     text += section(header, 'static inline void m2b2WriteCmd(', '// ---- m2b2InvAddress')
     text += section(header, 'static inline UInt64 m2b2InvAddress()', '// ---- M2B2 measurement')
     text += section(header, 'static inline bool m2b2Submit(', '// ---- m2b2ReadBar64')
-    text += section(tx, 'struct org_example_AMDMapperProbe::R17Domain {',
+    text += section(tx, 'struct org_maz1_AMDMapperProbe::R17Domain {',
                     '// The pool owns mbufs;')
     text += section(tx, 'static const UInt32 kNoSlot', '// Round18: is the standard')
-    text += section(tx, 'void org_example_AMDMapperProbe::r17SyncCommand(',
-                    'void org_example_AMDMapperProbe::r17PublishWindow(')
-    text += section(tx, 'void org_example_AMDMapperProbe::r17Export(',
-                    'void org_example_AMDMapperProbe::r17Release(')
+    text += section(tx, 'void org_maz1_AMDMapperProbe::r17SyncCommand(',
+                    'void org_maz1_AMDMapperProbe::r17PublishWindow(')
+    text += section(tx, 'void org_maz1_AMDMapperProbe::r17Export(',
+                    'void org_maz1_AMDMapperProbe::r17Release(')
     text += section(tx, 'static inline UInt64 r18LeafFor(',
-                    'bool org_example_AMDMapperProbe::r18StdReady(')
-    text += section(tx, 'IOReturn org_example_AMDMapperProbe::r18StdMap(',
+                    'bool org_maz1_AMDMapperProbe::r18StdReady(')
+    text += section(tx, 'IOReturn org_maz1_AMDMapperProbe::r18StdMap(',
                     '// ================= Round28:')
     return text + TESTS
 

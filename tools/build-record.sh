@@ -291,7 +291,7 @@ echo "== 5. built artefact identity =="
                 runM22bTableProbe observeDeviceDma m2b2ReadDriverObs \
                 runM22b2PageTableProbe m2b2WalkBusinessRanges \
                 m2b2BindDriverInstance; do
-        if nm "$BIN" | grep -q "T .*org_example_AMDMapperProbe.*$name"; then
+        if nm "$BIN" | grep -q "T .*org_maz1_AMDMapperProbe.*$name"; then
             echo "  T  $name"
         else
             echo "  MISSING  $name"

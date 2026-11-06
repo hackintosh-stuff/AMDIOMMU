@@ -285,7 +285,7 @@ def main():
             return 1
 
     probe_node = ['    {',
-                  '      "IOClass" = "org_example_AMDMapperProbe"']
+                  '      "IOClass" = "org_maz1_AMDMapperProbe"']
     for k, v in props:
         probe_node.append('      "%s" = "%s"' % (k, v))
     probe_node.append('    }')

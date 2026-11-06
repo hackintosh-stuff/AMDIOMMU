@@ -51,8 +51,8 @@ def main():
     plist = read(PLIST)
     deploy = read(DEPLOY)
 
-    cpp_old = 'KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "%s"'
-    cpp_new = 'KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "%s"'
+    cpp_old = 'KMOD_EXPLICIT_DECL(org.maz1.AMDMapperProbe, "%s"'
+    cpp_new = 'KMOD_EXPLICIT_DECL(org.maz1.AMDMapperProbe, "%s"'
     n_cpp = cpp.count(cpp_old % OLD) + cpp.count(cpp_old % KMOD_STALE)
     cpp_at_new = cpp.count(cpp_new % NEW)
 

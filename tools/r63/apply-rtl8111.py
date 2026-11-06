@@ -48,7 +48,7 @@ def upgraded(cpp, info):
     pl = plistlib.loads(info)
     pl['CFBundleVersion'] = pl['CFBundleShortVersionString'] = VERSION
     pl['IOKitPersonalities']['RTL8111 PCIe Adapter']['DriverVersion'] = VERSION
-    pl['OSBundleLibraries']['org.example.AMDMapperProbe'] = '0.70.0'
+    pl['OSBundleLibraries']['org.maz1.AMDMapperProbe'] = '0.70.0'
     return cpp.encode(), plistlib.dumps(pl, sort_keys=False)
 
 

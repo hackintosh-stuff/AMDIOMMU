@@ -98,13 +98,13 @@ bool Allocate(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
 // R71-B: growth allocates a domain's page-table area through the same helper the
 // controller buffers use, so admission and growth cannot diverge on the 4 KiB
 // alignment or on the physical-contiguity requirement.
-bool org_example_AMDMapperProbe::AllocateTableArea(
+bool org_maz1_AMDMapperProbe::AllocateTableArea(
     IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
     return Allocate(md, bytes, pa);
 }
 
 
-struct org_example_AMDMapperProbe::Domain {
+struct org_maz1_AMDMapperProbe::Domain {
     IOBufferMemoryDescriptor *tables;
     UInt64 tablePA, activeTime;
     UInt32 deviceID, domainID;
@@ -141,7 +141,7 @@ struct org_example_AMDMapperProbe::Domain {
     bool active;
 };
 
-struct org_example_AMDMapperProbe::Controller {
+struct org_maz1_AMDMapperProbe::Controller {
     IOBufferMemoryDescriptor *devices, *commands, *semaphore, *events;
     IOLock *lock;
     Domain *domains[kMaxDomains];
@@ -257,7 +257,7 @@ struct org_example_AMDMapperProbe::Controller {
 };
 
 
-bool org_example_AMDMapperProbe::ReadDeviceSelection() {
+bool org_maz1_AMDMapperProbe::ReadDeviceSelection() {
     char selection[128] = {};
     fSelectionExplicit = PE_parse_boot_argn("amdiommu_devices", selection,
                                               sizeof(selection) - 1);
@@ -310,7 +310,7 @@ bool org_example_AMDMapperProbe::ReadDeviceSelection() {
 // way IOPCIFamily evaluates IOPCIMatch. The personality dictionary becomes the
 // instance property table at IOService::init, so the key is read with
 // getProperty() -- no OSKext API needed.
-bool org_example_AMDMapperProbe::ReadDefaultDevices() {
+bool org_maz1_AMDMapperProbe::ReadDefaultDevices() {
     fDefaultDeviceCount = 0;
     OSString *value = OSDynamicCast(OSString, getProperty("AMDMapperProbeDevices"));
     if (!value || !value->getCStringNoCopy()) {
@@ -386,7 +386,7 @@ bool org_example_AMDMapperProbe::ReadDefaultDevices() {
     return true;
 }
 
-bool org_example_AMDMapperProbe::DefaultDeviceMatches(
+bool org_maz1_AMDMapperProbe::DefaultDeviceMatches(
     UInt16 vendor, UInt16 device) const {
     const UInt32 identity = ((UInt32)device << 16) | vendor;
     for (UInt32 i = 0; i < fDefaultDeviceCount; ++i)
@@ -398,7 +398,7 @@ bool org_example_AMDMapperProbe::DefaultDeviceMatches(
 // S1/R71-B: this selects the *ceiling* a domain may grow to, not the arena it is
 // prepared with. Growth happens at the first mapping (GrowBeforeFirstMap), so
 // the value published here says how far that growth may go.
-bool org_example_AMDMapperProbe::SelectProfile() {
+bool org_maz1_AMDMapperProbe::SelectProfile() {
     char requested[24] = {};
     const bool named = PE_parse_boot_argn("amdiommu_profile", requested,
                                           sizeof(requested) - 1) != 0;
@@ -421,7 +421,7 @@ bool org_example_AMDMapperProbe::SelectProfile() {
 // The ceiling is a per-instance decision: every attached device owns its own
 // mapper instance and the boot argument is parsed again for each of them, so an
 // override can never be lost to whichever instance ran first (R70-S3b).
-const mapper_abi::Profile *org_example_AMDMapperProbe::Ceiling(bool &forced) const {
+const mapper_abi::Profile *org_maz1_AMDMapperProbe::Ceiling(bool &forced) const {
     forced = false;
     char requested[24] = {};
     if (!PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1))
@@ -446,7 +446,7 @@ static bool pciIdProperty(IORegistryEntry *entry, const char *key, UInt32 &value
 // depend on which instance happened to run SelectProfile first - R70-S3b
 // showed a device admitted with the legacy arena while the controller instance
 // reported the forced profile.
-const mapper_abi::Profile *org_example_AMDMapperProbe::ForcedProfile() const {
+const mapper_abi::Profile *org_maz1_AMDMapperProbe::ForcedProfile() const {
     char requested[24] = {};
     if (!PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1))
         return nullptr;
@@ -460,7 +460,7 @@ const mapper_abi::Profile *org_example_AMDMapperProbe::ForcedProfile() const {
 // must never touch the registry itself.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-const mapper_abi::Profile *org_example_AMDMapperProbe::ProfileForDevice(
+const mapper_abi::Profile *org_maz1_AMDMapperProbe::ProfileForDevice(
     UInt32 vendor, UInt32 device, UInt32 classCode,
     mapper_abi::ProfileSource *source) const {
     if (source) *source = mapper_abi::ProfileSource::legacy;
@@ -473,7 +473,7 @@ const mapper_abi::Profile *org_example_AMDMapperProbe::ProfileForDevice(
 }
 #pragma clang diagnostic pop
 
-bool org_example_AMDMapperProbe::StartAuto() {
+bool org_maz1_AMDMapperProbe::StartAuto() {
     IOLog("AMDMapperProbe: auto-start enter\n");
     setProperty("iommu-mode", "passive");
     setProperty("iommu-role", "controller");
@@ -511,7 +511,7 @@ bool org_example_AMDMapperProbe::StartAuto() {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-bool org_example_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
+bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
     if (!fAuto || fOwner || !fAttachLock) return false;
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
     if (!nic) return false;
@@ -594,7 +594,7 @@ bool org_example_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
         setProperty("attach-rejected-requester", requester, 32);
         return false;
     }
-    auto *mapper = new org_example_AMDMapperProbe;
+    auto *mapper = new org_maz1_AMDMapperProbe;
     if (!mapper) return false;
     if (!mapper->init()) { mapper->release(); return false; }
     mapper->fOwner = this;
@@ -618,7 +618,7 @@ bool org_example_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
 }
 #pragma clang diagnostic pop
 
-bool org_example_AMDMapperProbe::PrepareController(const HardwareInfo &hardware) {
+bool org_maz1_AMDMapperProbe::PrepareController(const HardwareInfo &hardware) {
     if (fController) {
         LockGuard guard(fController->lock);
         const auto &found = fController->hardware;
@@ -742,7 +742,7 @@ bool org_example_AMDMapperProbe::PrepareController(const HardwareInfo &hardware)
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-bool org_example_AMDMapperProbe::PrepareDomain(
+bool org_maz1_AMDMapperProbe::PrepareDomain(
     IOService *service, UInt32 slot, const mapper_abi::Profile *requestedIn,
     mapper_abi::ProfileSource sourceIn) {
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
@@ -864,22 +864,22 @@ bool org_example_AMDMapperProbe::PrepareDomain(
 // R71-B: growth reads and updates the domain through these four calls. The
 // domain struct is private to this file while the rebuild itself lives with
 // MapperState, so neither translation unit needs the other's type.
-bool org_example_AMDMapperProbe::GrowthOpen() const {
+bool org_maz1_AMDMapperProbe::GrowthOpen() const {
     Domain *d = fDomain;
     return d && !d->active;
 }
 
-const mapper_abi::Profile *org_example_AMDMapperProbe::PreparedProfile() const {
+const mapper_abi::Profile *org_maz1_AMDMapperProbe::PreparedProfile() const {
     Domain *d = fDomain;
     return d ? mapper_abi::profileForName(d->profileName) : nullptr;
 }
 
-const mapper_abi::Profile *org_example_AMDMapperProbe::CeilingProfile() const {
+const mapper_abi::Profile *org_maz1_AMDMapperProbe::CeilingProfile() const {
     Domain *d = fDomain;
     return d ? d->ceilingProfile : nullptr;
 }
 
-void org_example_AMDMapperProbe::AdoptGrownTables(
+void org_maz1_AMDMapperProbe::AdoptGrownTables(
     IOBufferMemoryDescriptor *tables, UInt64 tablePA, UInt32 tablePages,
     const mapper_abi::Profile &target) {
     Domain *d = fDomain;
@@ -896,7 +896,7 @@ void org_example_AMDMapperProbe::AdoptGrownTables(
     if (old) old->release();
 }
 
-bool org_example_AMDMapperProbe::ReleaseDomain() {
+bool org_maz1_AMDMapperProbe::ReleaseDomain() {
     Domain *d = fDomain;
     Controller *c = fController;
     if (!d) return QuiesceMappings() && ReleaseMappings();
@@ -917,7 +917,7 @@ bool org_example_AMDMapperProbe::ReleaseDomain() {
 }
 
 
-bool org_example_AMDMapperProbe::Invalidate(
+bool org_maz1_AMDMapperProbe::Invalidate(
     bool invalidateDevice, UInt64 address, UInt64 bytes,
     bool newMapping, bool *skipped) {
     if (skipped) *skipped = false;
@@ -927,7 +927,7 @@ bool org_example_AMDMapperProbe::Invalidate(
     return InvalidateLocked(invalidateDevice, address, bytes, newMapping, skipped);
 }
 
-bool org_example_AMDMapperProbe::InvalidateLocked(
+bool org_maz1_AMDMapperProbe::InvalidateLocked(
     bool invalidateDevice, UInt64 address, UInt64 bytes,
     bool newMapping, bool *skipped) {
     // Both the caller's mapper lock and shared controller lock are held.
@@ -1017,7 +1017,7 @@ bool org_example_AMDMapperProbe::InvalidateLocked(
 
 // Caller holds its mapper lock. A shared-controller lock serializes the DTE
 // write and both fences with ordinary submissions from either requester.
-IOReturn org_example_AMDMapperProbe::SwitchRequesterDMA(bool park) {
+IOReturn org_maz1_AMDMapperProbe::SwitchRequesterDMA(bool park) {
     auto *c = fController;
     auto *d = fDomain;
     if (!c || !d) return kIOReturnNotReady;
@@ -1043,7 +1043,7 @@ IOReturn org_example_AMDMapperProbe::SwitchRequesterDMA(bool park) {
     return kIOReturnSuccess;
 }
 
-IOReturn org_example_AMDMapperProbe::SetSystemPM(bool armed) {
+IOReturn org_maz1_AMDMapperProbe::SetSystemPM(bool armed) {
     Controller *c = fController;
     if (!fAuto || fOwner || !c) return kIOReturnBadArgument;
     LockGuard guard(c->lock);
@@ -1067,7 +1067,7 @@ IOReturn org_example_AMDMapperProbe::SetSystemPM(bool armed) {
     return kIOReturnSuccess;
 }
 
-bool org_example_AMDMapperProbe::PowerSupported() const {
+bool org_maz1_AMDMapperProbe::PowerSupported() const {
     Controller *c = fController;
     if (!c || !fDomain) return false;
     LockGuard guard(c->lock);
@@ -1087,7 +1087,7 @@ bool org_example_AMDMapperProbe::PowerSupported() const {
 
 // TODO(R47-PM-HARDWARE): validate the real suspend/resume sequence once this
 // AMD platform can sleep reliably. R47 acceptance does not invoke this path.
-bool org_example_AMDMapperProbe::SuspendAuto() {
+bool org_maz1_AMDMapperProbe::SuspendAuto() {
     // The mapper lock is held and admission is closed. Lucy's PM gate has
     // already completed the network family's disable/clearRxTxRings path.
     Controller *c = fController;
@@ -1143,7 +1143,7 @@ bool org_example_AMDMapperProbe::SuspendAuto() {
 
 // TODO(R47-PM-HARDWARE): D0 readiness and retained BAR/MMIO across real system
 // sleep need hardware validation; normal interface down/up is not this test.
-bool org_example_AMDMapperProbe::ResumeAuto() {
+bool org_maz1_AMDMapperProbe::ResumeAuto() {
     // The PCI parent and Lucy's D0 transition are complete, but its normal
     // enable has not run. All tables, DMA objects and mapping records survive.
     Controller *c = fController;
@@ -1268,7 +1268,7 @@ bool org_example_AMDMapperProbe::ResumeAuto() {
     return true;
 }
 
-void org_example_AMDMapperProbe::PublishAuto() {
+void org_maz1_AMDMapperProbe::PublishAuto() {
     Controller *c = fController;
     Domain *d = fDomain;
     if (!c || !d) return;
@@ -1384,7 +1384,7 @@ void org_example_AMDMapperProbe::PublishAuto() {
 }
 
 
-void org_example_AMDMapperProbe::PublishDomains() {
+void org_maz1_AMDMapperProbe::PublishDomains() {
     if (fOwner || !fAttachLock) return;
     LockGuard attachment(fAttachLock);
     OSArray *domains = OSArray::withCapacity(kMaxDomains);
@@ -1443,7 +1443,7 @@ void org_example_AMDMapperProbe::PublishDomains() {
     setProperty("iommu-controller-event-valid", c->eventInvalid ? "no" : "yes");
 }
 
-bool org_example_AMDMapperProbe::StopAuto() {
+bool org_maz1_AMDMapperProbe::StopAuto() {
     if (fOwner) {
         // Device stop closes only that domain. Its root and mapper remain owned
         // by the controller service until all domains can be stopped together.
@@ -1508,7 +1508,7 @@ bool org_example_AMDMapperProbe::StopAuto() {
     return true;
 }
 
-void org_example_AMDMapperProbe::free() {
+void org_maz1_AMDMapperProbe::free() {
     // A pre-open claim pins the owner (and hence this lock) until it returns.
     if (fAttachLock) IOLockFree(fAttachLock);
     IOMapper::free();

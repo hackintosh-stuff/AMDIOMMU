@@ -302,8 +302,8 @@ def render(props, cmds, walk):
     8's harness: every test failed with "no m2-b2-* properties found" and the
     harness looked broken when it was the renderer.
     """
-    lines = ["+-o AMDMapperProbe  <class org_example_AMDMapperProbe>", "  {",
-             '    "IOClass" = "org_example_AMDMapperProbe"']
+    lines = ["+-o AMDMapperProbe  <class org_maz1_AMDMapperProbe>", "  {",
+             '    "IOClass" = "org_maz1_AMDMapperProbe"']
     for k, v in props.items():
         lines.append('    "{}" = "{}"'.format(k, v))
     for i, (label, dwords, exp, obs, loops) in enumerate(cmds):

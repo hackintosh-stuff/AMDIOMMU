@@ -66,7 +66,7 @@ echo "dir   : $OUT"
 } > "$OUT/network.txt" 2>&1
 
 # ---- 3. the probe's own properties, unmodified --------------------------
-ioreg -l -w0 -c org_example_AMDMapperProbe > "$OUT/props.txt" 2>/dev/null || true
+ioreg -l -w0 -c org_maz1_AMDMapperProbe > "$OUT/props.txt" 2>/dev/null || true
 
 # ---- 4. the driver's observation log, as the driver published it --------
 #

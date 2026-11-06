@@ -55,7 +55,7 @@
 // ===== AMDMapperProbeB1B2.cpp (original lines 217..242) =====
 // ------------------------------------------------------------------ B1 self-test
 
-void org_example_AMDMapperProbe::runB1SelfTest() {
+void org_maz1_AMDMapperProbe::runB1SelfTest() {
     if (!fTarget) {
         setProperty("m1b-selftest", "SKIP-no-target");
         return;
@@ -91,7 +91,7 @@ void org_example_AMDMapperProbe::runB1SelfTest() {
 //
 // No hardware is involved at any point: the buffer is ours, and the IOVA is
 // never used by any device.
-void org_example_AMDMapperProbe::runB2SelfTest() {
+void org_maz1_AMDMapperProbe::runB2SelfTest() {
     const IOByteCount kBufSize = 16 * 4096;
 
     IOBufferMemoryDescriptor *bmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
@@ -181,7 +181,7 @@ void org_example_AMDMapperProbe::runB2SelfTest() {
 // Pass/fail is not judged via IOLog (which scrolls out of msgbuf); everything
 // lands in IORegistry properties.
 
-void org_example_AMDMapperProbe::runB2OneTest(
+void org_maz1_AMDMapperProbe::runB2OneTest(
     const char *tag, bool wantContiguous, IOByteCount size) {
 
     IOOptionBits opts = kIODirectionInOut;
@@ -271,7 +271,7 @@ void org_example_AMDMapperProbe::runB2OneTest(
 }
 
 // ===== AMDMapperProbeB1B2.cpp (original lines 489..521) =====
-void org_example_AMDMapperProbe::runB2aSelfTest() {
+void org_maz1_AMDMapperProbe::runB2aSelfTest() {
     // B2-0 just ran once (window closed -> counted in rejectOther). Zero
     // B2-a's own counters first so the numbers reported below reflect only
     // B2-a's two comparison cases, not mixed with B2-0's observation calls.
@@ -316,8 +316,8 @@ void org_example_AMDMapperProbe::runB2aSelfTest() {
 // mapped" from "what someone asked about", and unmap cannot validate its
 // arguments.
 
-org_example_AMDMapperProbe::MapEntry *
-org_example_AMDMapperProbe::allocMapEntry() {
+org_maz1_AMDMapperProbe::MapEntry *
+org_maz1_AMDMapperProbe::allocMapEntry() {
     for (int i = 0; i < kMaxActiveMaps; i++) {
         if (!fMaps[i].used) {
             fMaps[i].used = true;
@@ -333,7 +333,7 @@ org_example_AMDMapperProbe::allocMapEntry() {
 // Release by exact (pa,len) match. Under identity mapping pa is the IOVA, and
 // on unmap the kernel passes back exactly the value we originally returned
 // (IOMemoryDescriptor::dmaUnmap -> iovmUnmapMemory).
-bool org_example_AMDMapperProbe::freeMapEntry(uint64_t pa, uint64_t len) {
+bool org_maz1_AMDMapperProbe::freeMapEntry(uint64_t pa, uint64_t len) {
     for (int i = 0; i < kMaxActiveMaps; i++) {
         if (fMaps[i].used && fMaps[i].pa == pa && fMaps[i].len == len) {
             fMaps[i].used = false;
@@ -346,7 +346,7 @@ bool org_example_AMDMapperProbe::freeMapEntry(uint64_t pa, uint64_t len) {
 }
 
 // ===== AMDMapperProbeB1B2.cpp (original lines 556..562) =====
-uint32_t org_example_AMDMapperProbe::usedMapEntries() {
+uint32_t org_maz1_AMDMapperProbe::usedMapEntries() {
     uint32_t n = 0;
     for (int i = 0; i < kMaxActiveMaps; i++) {
         if (fMaps[i].used) n++;
@@ -355,7 +355,7 @@ uint32_t org_example_AMDMapperProbe::usedMapEntries() {
 }
 
 // ===== AMDMapperProbeB1B2.cpp (original lines 564..573) =====
-void org_example_AMDMapperProbe::publishB2bStats() {
+void org_maz1_AMDMapperProbe::publishB2bStats() {
     setHexProperty(this, "m1bb-realmapcalls", fRealMapCalls);
     setHexProperty(this, "m1bb-realmapok", fRealMapOk);
     setHexProperty(this, "m1bb-realfrag", fRealMapRejectFrag);
@@ -371,7 +371,7 @@ void org_example_AMDMapperProbe::publishB2bStats() {
 
 // Refresh only when the call count changes, avoiding a setProperty (which
 // keeps allocating memory) on every mapping.
-void org_example_AMDMapperProbe::publishMapStats(bool force) {
+void org_maz1_AMDMapperProbe::publishMapStats(bool force) {
     if (!force && fMapCalls == fPublishedMapCalls) return;
     fPublishedMapCalls = fMapCalls;
     setHexProperty(this, "m1b2-mapcalls", fMapCalls);

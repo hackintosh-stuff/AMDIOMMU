@@ -12,7 +12,7 @@
 set -eu
 
 KEXT=${1:-/tmp/m1a-build/AMDMapperProbe.kext}
-BUNDLE_ID=org.example.AMDMapperProbe
+BUNDLE_ID=org.maz1.AMDMapperProbe
 AUXKC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 DEST=/Library/Extensions/AMDMapperProbe.kext
 STAMP=$(date +%Y%m%d-%H%M%S)

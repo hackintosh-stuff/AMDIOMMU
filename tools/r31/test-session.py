@@ -159,7 +159,7 @@ struct Request { UInt32 poolId; struct { UInt32 state; } out; };
 }
 namespace r20tx { enum { kStageExit=3 }; }
 COMMAND_STRUCTS
-class org_example_AMDMapperProbe : public IOMapper {
+class org_maz1_AMDMapperProbe : public IOMapper {
 public:
     // This existing fixture exercises the legacy session branch.
     bool fR44Auto=false;
@@ -289,7 +289,7 @@ static void m2b2DoPostSample(void *p) {
     assert(!restoredAt); sample->tClo=m2b2NowNS(); sample->tTail=m2b2NowNS();
     sample->cloOk=sample->tailOk=true; lifecycle.emplace_back("post-sample");
 }
-void org_example_AMDMapperProbe::m2b2R15Finish() {
+void org_maz1_AMDMapperProbe::m2b2R15Finish() {
     assert(backendReleased && restoredAt && resourcesAlive());
     if (fR31Session) return;
     fR15Request.out.state=r15pool::kDisarmed;
@@ -298,7 +298,7 @@ void org_example_AMDMapperProbe::m2b2R15Finish() {
 '''
 
 SETUP = r'''
-void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
+void org_maz1_AMDMapperProbe::runM22b2PageTableProbe() {
     ++runs;
     assert(refs == 2 && !loop->inGate());
     assert(fArmed && fMapWindowOpen && fTarget && !fTarget->removed);
@@ -334,7 +334,7 @@ SETUP_HANDOFF
 '''
 
 FINISH = r'''
-void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
+void org_maz1_AMDMapperProbe::finishM22b2PageTableProbe(
     R33DeviceDomain *domain, bool finishWindow) {
     assert(domain && allocations.count(domain));
     assert(fR15Service == driver && driver->refs == 2 && resourcesAlive());
@@ -353,7 +353,7 @@ RESOURCE_RELEASE
 
 TEST = r'''
 int main() {
-    using Probe=org_example_AMDMapperProbe;
+    using Probe=org_maz1_AMDMapperProbe;
     Probe p; IOWorkLoop loop; R27ProbeTimer timer(&loop);
     IOService nic, target, notifier, driver;
     p.loop=&loop; p.fM22b2Timer=&timer; p.driver=&driver;
@@ -458,9 +458,9 @@ def main():
     internal = (ROOT / 'kext/AMDMapperProbeInternal.hpp').read_text()
     header = (ROOT / 'kext/AMDMapperProbe.hpp').read_text()
     rxset = (ROOT / 'kext/AMDMapperProbeRxSetDebug.cpp').read_text()
-    setup = body(pgt, 'void org_example_AMDMapperProbe::runM22b2PageTableProbe(')
-    finish = body(pgt, 'void org_example_AMDMapperProbe::finishM22b2PageTableProbe(')
-    domain = body(pgt, 'struct org_example_AMDMapperProbe::R33DeviceDomain {')
+    setup = body(pgt, 'void org_maz1_AMDMapperProbe::runM22b2PageTableProbe(')
+    finish = body(pgt, 'void org_maz1_AMDMapperProbe::finishM22b2PageTableProbe(')
+    domain = body(pgt, 'struct org_maz1_AMDMapperProbe::R33DeviceDomain {')
     domain_locals = domain[domain.index('{') + 1:domain.rindex('}')]
     # Initialize only fixture locals, while keeping each production field type.
     domain_locals = re.sub(r';', '{};', domain_locals)
@@ -491,15 +491,15 @@ def main():
                          for name in ['M2B2CmdRecord', 'M2B2CmdCtx', 'M2b2PostSample'])
     methods = [body(internal, 'static inline bool m2b2BeginEventWindow('),
                body(internal, 'static inline void m2b2EndEventWindow('),
-               body(entry, 'void org_example_AMDMapperProbe::r31RequestStop('),
-               body(entry, 'IOReturn org_example_AMDMapperProbe::setProperties('),
-               body(entry, 'void org_example_AMDMapperProbe::stop('),
-               body(pgt, 'void org_example_AMDMapperProbe::m22b2TimerFired('),
-               body(pgt, 'void org_example_AMDMapperProbe::r31SessionWorker('),
-               body(pgt, 'bool org_example_AMDMapperProbe::r33DomainStopPending('),
-               body(pgt, 'void org_example_AMDMapperProbe::r33ScheduleDomainStop('),
-               body(pgt, 'void org_example_AMDMapperProbe::r33DomainStopWorker('),
-               body(rxset, 'void org_example_AMDMapperProbe::m2b2R15Release(')]
+               body(entry, 'void org_maz1_AMDMapperProbe::r31RequestStop('),
+               body(entry, 'IOReturn org_maz1_AMDMapperProbe::setProperties('),
+               body(entry, 'void org_maz1_AMDMapperProbe::stop('),
+               body(pgt, 'void org_maz1_AMDMapperProbe::m22b2TimerFired('),
+               body(pgt, 'void org_maz1_AMDMapperProbe::r31SessionWorker('),
+               body(pgt, 'bool org_maz1_AMDMapperProbe::r33DomainStopPending('),
+               body(pgt, 'void org_maz1_AMDMapperProbe::r33ScheduleDomainStop('),
+               body(pgt, 'void org_maz1_AMDMapperProbe::r33DomainStopWorker('),
+               body(rxset, 'void org_maz1_AMDMapperProbe::m2b2R15Release(')]
     prefix = PREFIX.replace('COMMAND_STRUCTS', commands).replace('DOMAIN_STRUCT', domain)
     prefix = prefix.replace('WINDOW_STRUCT', body(header, '    struct M22b2EventWindow {'))
     prefix = prefix.replace('R15_SCOPE', body(header, '    struct R15Scope {'))

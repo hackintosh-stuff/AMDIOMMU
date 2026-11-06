@@ -121,7 +121,7 @@ BASE = {
 
 
 def render(props):
-    lines = ["+-o AMDMapperProbe  <class org_example_AMDMapperProbe>"]
+    lines = ["+-o AMDMapperProbe  <class org_maz1_AMDMapperProbe>"]
     for k, v in props.items():
         lines.append('    "%s" = %s' % (k, v))
     return "\n".join(lines) + "\n"

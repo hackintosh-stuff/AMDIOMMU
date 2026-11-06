@@ -142,7 +142,7 @@ def main():
     texts = {}
     for source, name, argv in (
             ('raw', 'props.raw.txt', ['ioreg', '-l', '-w0', '-p', 'IOService']),
-            ('probe', 'props.txt', ['ioreg', '-l', '-w0', '-r', '-c', 'org_example_AMDMapperProbe']),
+            ('probe', 'props.txt', ['ioreg', '-l', '-w0', '-r', '-c', 'org_maz1_AMDMapperProbe']),
             ('driver', 'driver-obs.txt', ['ioreg', '-l', '-w0', '-r', '-c', 'RTL8125'])):
         rc, text = command(argv)
         texts[source] = text

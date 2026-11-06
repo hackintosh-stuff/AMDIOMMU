@@ -128,7 +128,7 @@ echo "probe understands wire v2 OK"
 
 for name in m2b2WalkBusinessRanges m2b2BindDriverInstance \
             m2b2ReadDeclaredToken m2b2ReadDriverObs; do
-    nm "$PRB_BIN" 2>/dev/null | grep -q "T .*org_example_AMDMapperProbe.*$name" || {
+    nm "$PRB_BIN" 2>/dev/null | grep -q "T .*org_maz1_AMDMapperProbe.*$name" || {
         echo "FAIL: the probe does not define $name"; exit 1; }
 done
 echo "probe carries the round-11 entry points OK"
@@ -138,7 +138,7 @@ echo "probe carries the round-11 entry points OK"
 # declaration and the call site; the probe compiled and linked cleanly and the
 # failure only appeared at `kmutil create` time:
 #
-#   Failed to bind '__ZN26org_example_AMDMapperProbe14m2b2ScanTxDoneEv'
+#   Failed to bind '__ZN26org_maz1_AMDMapperProbe14m2b2ScanTxDoneEv'
 #
 # and the aux collection was left UNCHANGED, i.e. the old probe would have
 # loaded. Checking it here turns a 20-minute reboot-and-wonder into an
@@ -200,7 +200,7 @@ echo "auxkc mtime before=$BEFORE_MT after=$AFTER_MT"
 
 echo "== the collection must actually contain both bundles =="
 LIST=$(sudo kmutil inspect -A "$AUXKC" 2>/dev/null || true)
-for bid in com.insanelymac.RTL812xLucy org.example.AMDMapperProbe; do
+for bid in com.insanelymac.RTL812xLucy org.maz1.AMDMapperProbe; do
     echo "$LIST" | grep -q "$bid" || {
         echo "FAIL: $bid is NOT in the auxiliary collection"
         echo "--- collection ---"

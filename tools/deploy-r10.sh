@@ -72,7 +72,7 @@ echo "probe understands wire v2 OK"
 # the call site. The probe compiled and linked cleanly (the reference stayed
 # external), so the failure only appeared at `kmutil create` time:
 #
-#   Failed to bind '__ZN26org_example_AMDMapperProbe14m2b2ScanTxDoneEv'
+#   Failed to bind '__ZN26org_maz1_AMDMapperProbe14m2b2ScanTxDoneEv'
 #   ... could not find a kext which exports this symbol
 #
 # and the aux collection was left UNCHANGED, i.e. the old probe would have
@@ -140,7 +140,7 @@ echo "auxkc mtime before=$BEFORE_MT after=$AFTER_MT"
 
 echo "== the collection must actually contain both bundles =="
 LIST=$(sudo kmutil inspect -A "$AUXKC" 2>/dev/null || true)
-for bid in com.insanelymac.RTL812xLucy org.example.AMDMapperProbe; do
+for bid in com.insanelymac.RTL812xLucy org.maz1.AMDMapperProbe; do
     echo "$LIST" | grep -q "$bid" || {
         echo "FAIL: $bid is NOT in the auxiliary collection"
         echo "--- collection ---"

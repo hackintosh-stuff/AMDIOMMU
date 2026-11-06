@@ -95,7 +95,7 @@ def main():
                         except socket.timeout:
                             log('load_seed_echo : timeout nonmagic=1')
                     seeded = True
-                props = command('ioreg', '-l', '-w0', '-r', '-c', 'org_example_AMDMapperProbe', required=False)
+                props = command('ioreg', '-l', '-w0', '-r', '-c', 'org_maz1_AMDMapperProbe', required=False)
                 expression = r'"' + re.escape(a.authorize_key) + r'" = "' + re.escape(a.authorize_value) + r'"'
                 if re.search(expression, props) and '"m2-b2-r15-authorize" = "done"' in props:
                     stamp = re.search(r'"m2-b2-r15-inv-time" = "(0x[0-9a-fA-F]+)"', props)

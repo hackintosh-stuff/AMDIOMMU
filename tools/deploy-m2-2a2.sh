@@ -14,7 +14,7 @@ set -eu
 DO_TABLE=0
 [ "${1:-}" = "--table" ] && DO_TABLE=1
 
-BUNDLE_ID=org.example.AMDMapperProbe
+BUNDLE_ID=org.maz1.AMDMapperProbe
 LUCY_ID=com.insanelymac.RTL812xLucy
 AUXKC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 DEST_PROBE=/Library/Extensions/AMDMapperProbe.kext
@@ -119,12 +119,12 @@ cat <<EOF
 重启后验证：
 
   [惰性模式]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-2b'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-2b'
     期望：m2-2b-gate = "closed"，m2-2b-stage = "1-skipped-no-bootarg"
     确认无回归：m1bb-realmapok = 0x3
 
   [建表模式]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-2b'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-2b'
 
     核心判据：
       m2-2b-2mib        "ok" 表示拿到了 2 MiB 连续内存；

@@ -13,8 +13,8 @@ mkdir -p "$OUT"
 
 echo "capturing to $OUT"
 
-ioreg -l -w0 -c org_example_AMDMapperProbe > "$OUT/props.txt" 2>/dev/null || true
-ioreg -l -w0 -c org_example_AMDMapperProbe > "$OUT/props.txt" 2>/dev/null || true
+ioreg -l -w0 -c org_maz1_AMDMapperProbe > "$OUT/props.txt" 2>/dev/null || true
+ioreg -l -w0 -c org_maz1_AMDMapperProbe > "$OUT/props.txt" 2>/dev/null || true
 
 {
     echo "=== uname ==="

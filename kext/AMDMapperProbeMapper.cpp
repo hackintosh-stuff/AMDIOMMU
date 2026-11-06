@@ -21,7 +21,7 @@
           (unsigned long long)record.mapLength, (unsigned)record.state);
 }
 
-struct org_example_AMDMapperProbe::MapperState {
+struct org_maz1_AMDMapperProbe::MapperState {
     struct Mapping {
         IOMemoryDescriptor *memory;
         IODMACommand *command;
@@ -126,7 +126,7 @@ struct org_example_AMDMapperProbe::MapperState {
 // R71-B: one carve order for both the prepared arena and a grown one. The
 // arithmetic lives in the ABI header so tests/ can verify it without compiling
 // the kext; it must match the carve below exactly.
-bool org_example_AMDMapperProbe::BuildArena(
+bool org_maz1_AMDMapperProbe::BuildArena(
     MapperState *d, volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages,
     UInt32 rootLevel, const mapper_abi::Profile &profile) {
     if (!d || d->arena || !tables || !tablePA || (tablePA & 4095ULL) ||
@@ -205,7 +205,7 @@ bool org_example_AMDMapperProbe::BuildArena(
     return true;
 }
 
-bool org_example_AMDMapperProbe::PrepareMappings(
+bool org_maz1_AMDMapperProbe::PrepareMappings(
     volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel,
     const mapper_abi::Profile &profile) {
     if (fMapper) return false;
@@ -236,7 +236,7 @@ bool org_example_AMDMapperProbe::PrepareMappings(
 //
 // A failed growth is not a failed mapping: the prepared arena stays installed and
 // the capacity evidence records that the ceiling was needed but unavailable.
-bool org_example_AMDMapperProbe::GrowBeforeFirstMap(MapperState *d) {
+bool org_maz1_AMDMapperProbe::GrowBeforeFirstMap(MapperState *d) {
     if (!d || d->growthAttempted) return false;
     d->growthAttempted = true;
     // Normally unreachable: the caller only invokes this before activation.
@@ -327,7 +327,7 @@ bool org_example_AMDMapperProbe::GrowBeforeFirstMap(MapperState *d) {
     return true;
 }
 
-bool org_example_AMDMapperProbe::QuiesceMappings() {
+bool org_maz1_AMDMapperProbe::QuiesceMappings() {
     auto *d = fMapper;
     if (!d) return true;
     IOLockLock(d->lock);
@@ -343,7 +343,7 @@ bool org_example_AMDMapperProbe::QuiesceMappings() {
 // TODO(R47-PM-HARDWARE): implemented from the existing lifetime/command
 // contracts; real system sleep/resume validation is pending. R47 exercises
 // normal networking only and does not trigger this transition for testing.
-IOReturn org_example_AMDMapperProbe::PowerTransition(UInt32 operation) {
+IOReturn org_maz1_AMDMapperProbe::PowerTransition(UInt32 operation) {
     auto *d = fMapper;
     if (!d) return kIOReturnNotReady;
     // Lock order is Lucy command gate -> mapper lock. The backend never
@@ -382,7 +382,7 @@ IOReturn org_example_AMDMapperProbe::PowerTransition(UInt32 operation) {
     return ok ? kIOReturnSuccess : kIOReturnIOError;
 }
 
-IOReturn org_example_AMDMapperProbe::SetRequesterDMA(bool park) {
+IOReturn org_maz1_AMDMapperProbe::SetRequesterDMA(bool park) {
     auto *m = fMapper;
     if (!m) return kIOReturnNotReady;
     IOLockLock(m->lock);
@@ -396,7 +396,7 @@ IOReturn org_example_AMDMapperProbe::SetRequesterDMA(bool park) {
     return result;
 }
 
-UInt32 org_example_AMDMapperProbe::LiveMappings() const {
+UInt32 org_maz1_AMDMapperProbe::LiveMappings() const {
     auto *d = fMapper;
     if (!d) return 0;
     IOLockLock(d->lock);
@@ -405,7 +405,7 @@ UInt32 org_example_AMDMapperProbe::LiveMappings() const {
     return count;
 }
 
-bool org_example_AMDMapperProbe::ReleaseMappings() {
+bool org_maz1_AMDMapperProbe::ReleaseMappings() {
     auto *d = fMapper;
     if (!d) return true;
     // The platform closes admission and restores its hardware before release.
@@ -423,7 +423,7 @@ bool org_example_AMDMapperProbe::ReleaseMappings() {
     return true;
 }
 
-IOReturn org_example_AMDMapperProbe::MapMemory(
+IOReturn org_maz1_AMDMapperProbe::MapMemory(
     IOMemoryDescriptor *memory, uint64_t descriptorOffset, uint64_t length,
     uint32_t mapOptions, const IODMAMapSpecification *mapSpecification,
     IODMACommand *dmaCommand, const IODMAMapPageList *pageList,
@@ -595,7 +595,7 @@ IOReturn org_example_AMDMapperProbe::MapMemory(
 
 // Capacity evidence for third-party clients. Called without the mapper lock so
 // a property publication can never sit inside the DMA path's critical section.
-void org_example_AMDMapperProbe::PublishCapacity() {
+void org_maz1_AMDMapperProbe::PublishCapacity() {
     const UInt64 rejects = (UInt64)fRejectedLength + fRejectedOptions +
         fRejectedLayout + fRejectedRecords + fRejectedNoRange +
         fRejectedBits;
@@ -643,7 +643,7 @@ void org_example_AMDMapperProbe::PublishCapacity() {
     setProperty("mapper-rejects-bits", (unsigned long long)fRejectedBits, 32);
 }
 
-IOReturn org_example_AMDMapperProbe::UnmapMemory(
+IOReturn org_maz1_AMDMapperProbe::UnmapMemory(
     IOMemoryDescriptor *memory, IODMACommand *dmaCommand,
     uint64_t mapAddress, uint64_t mapLength) {
     auto *d = fMapper;
@@ -711,7 +711,7 @@ IOReturn org_example_AMDMapperProbe::UnmapMemory(
     return result;
 }
 
-bool org_example_AMDMapperProbe::Translate(uint64_t address, uint64_t *physical) const {
+bool org_maz1_AMDMapperProbe::Translate(uint64_t address, uint64_t *physical) const {
     auto *d = fMapper;
     if (!d || !physical || address < mapper_abi::kBase ||
         address - mapper_abi::kBase >= (UInt64)d->pages * 4096ULL) return false;
@@ -723,7 +723,7 @@ bool org_example_AMDMapperProbe::Translate(uint64_t address, uint64_t *physical)
     return present;
 }
 
-void org_example_AMDMapperProbe::PublishMappings(OSDictionary **copy) {
+void org_maz1_AMDMapperProbe::PublishMappings(OSDictionary **copy) {
     if (copy) *copy = nullptr;
     auto *d = fMapper;
     if (!d) {

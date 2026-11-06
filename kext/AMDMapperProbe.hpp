@@ -56,8 +56,8 @@ struct HardwareInfo;
 //   - fragmented buffers are not supported (the interface cannot express them;
 //     see m1b-b2-0-result.md §6)
 //   - no third-party driver is modified
-class org_example_AMDMapperProbe : public IOMapper {
-    OSDeclareDefaultStructors(org_example_AMDMapperProbe);
+class org_maz1_AMDMapperProbe : public IOMapper {
+    OSDeclareDefaultStructors(org_maz1_AMDMapperProbe);
 
 protected:
     bool initHardware(IOService *provider) override;
@@ -106,8 +106,8 @@ private:
     // (page tables, IOVA arena, DTE) and they all share one IOMMU controller.
     // 16 aligns the boot-arg/offer capacity with the Info.plist default list.
     static constexpr UInt32 kMaxDomains = 16;
-    org_example_AMDMapperProbe *fOwner = nullptr;
-    org_example_AMDMapperProbe *fMappers[kMaxDomains] = {};
+    org_maz1_AMDMapperProbe *fOwner = nullptr;
+    org_maz1_AMDMapperProbe *fMappers[kMaxDomains] = {};
     IOLock *fAttachLock = nullptr;
     UInt64 fSnapshotSequence = 0;
     bool fStopping = false;
@@ -1639,7 +1639,7 @@ public:
     void m2b2R15Finish();
     void m2b2R15Release();
     struct R15Scope {
-        org_example_AMDMapperProbe *self;
+        org_maz1_AMDMapperProbe *self;
         bool transferred = false;
         ~R15Scope() { if (!transferred) self->m2b2R15Release(); }
     };

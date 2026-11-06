@@ -18,7 +18,7 @@ def require_offloads(info):
     params = info.get('IOKitPersonalities', {}).get('RTL8125', {}).get('Driver Parameters', {})
     if any(params.get(key) is not True for key in ('enableTSO4', 'enableTSO6')):
         raise ValueError('R52 requires enableTSO4=true and enableTSO6=true')
-    if info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != PROBE_VERSION:
+    if info.get('OSBundleLibraries', {}).get('org.maz1.AMDMapperProbe') != PROBE_VERSION:
         raise ValueError('Lucy Probe compatibility version differs')
 
 

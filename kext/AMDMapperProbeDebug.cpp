@@ -62,7 +62,7 @@
 #if AMD_MAPPER_PROBE_DEBUG
 
 // ===== AMDMapperProbe.cpp (original lines 7584..7713) =====
-bool org_example_AMDMapperProbe::start(IOService *provider) {
+bool org_maz1_AMDMapperProbe::start(IOService *provider) {
     setProperty("probe-stage", "0-entered-start");
 
     // Safety gate: must happen before super::start().
@@ -242,7 +242,7 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
 }
 
 // ===== AMDMapperProbe.cpp (original lines 7715..7747) =====
-void org_example_AMDMapperProbe::r31RequestStop() {
+void org_maz1_AMDMapperProbe::r31RequestStop() {
     // RPC/service-stop callers only register a request. The worker owns every
     // state publication, RX/TX drain and hardware restoration operation.
     UInt64 expected = 0;
@@ -253,7 +253,7 @@ void org_example_AMDMapperProbe::r31RequestStop() {
     r33ScheduleDomainStop();
 }
 
-IOReturn org_example_AMDMapperProbe::callPlatformFunction(
+IOReturn org_maz1_AMDMapperProbe::callPlatformFunction(
     const OSSymbol *name, bool wait, void *target, void *operation,
     void *unused3, void *unused4) {
     if (name && name->isEqualTo(amd_iommu_policy::kClaim)) {
@@ -279,7 +279,7 @@ IOReturn org_example_AMDMapperProbe::callPlatformFunction(
                                       unused3, unused4);
 }
 
-IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
+IOReturn org_maz1_AMDMapperProbe::setProperties(OSObject *properties) {
     OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
     OSObject *pmArm = dict ? dict->getObject("R66ArmSystemPM") : nullptr;
     if (pmArm) {
@@ -309,7 +309,7 @@ IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
     return kIOReturnSuccess;
 }
 
-void org_example_AMDMapperProbe::stop(IOService *provider) {
+void org_maz1_AMDMapperProbe::stop(IOService *provider) {
     if (fAuto) {
         if (fPublishNotifier) {
             fPublishNotifier->disable();
@@ -377,7 +377,7 @@ void org_example_AMDMapperProbe::stop(IOService *provider) {
 }
 
 // ===== AMDMapperProbe.cpp (original lines 7749..7751) =====
-uint64_t org_example_AMDMapperProbe::getPageSize() const {
+uint64_t org_maz1_AMDMapperProbe::getPageSize() const {
     return 4096;
 }
 
@@ -401,7 +401,7 @@ uint64_t org_example_AMDMapperProbe::getPageSize() const {
 //       state->fIOVMAddr = fLocalMapperAlloc + offset - fPreparedOffset
 //   which is exactly the identity mapping.
 
-IOReturn org_example_AMDMapperProbe::iovmMapMemory(
+IOReturn org_maz1_AMDMapperProbe::iovmMapMemory(
     IOMemoryDescriptor *memory,
     uint64_t descriptorOffset,
     uint64_t length,
@@ -623,7 +623,7 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
 }
 
 // ===== AMDMapperProbe.cpp (original lines 7945..7972) =====
-IOReturn org_example_AMDMapperProbe::iovmUnmapMemory(
+IOReturn org_maz1_AMDMapperProbe::iovmUnmapMemory(
     IOMemoryDescriptor *memory, IODMACommand *dmaCommand,
     uint64_t mapAddress, uint64_t mapLength) {
     if (fAuto)
@@ -678,7 +678,7 @@ IOReturn org_example_AMDMapperProbe::iovmUnmapMemory(
 }
 
 // ===== AMDMapperProbe.cpp (original lines 7974..7983) =====
-IOReturn org_example_AMDMapperProbe::iovmInsert(
+IOReturn org_maz1_AMDMapperProbe::iovmInsert(
     uint32_t options, uint64_t mapAddress, uint64_t offset,
     uint64_t physicalAddress, uint64_t length) {
     (void)options; (void)mapAddress; (void)offset;
@@ -700,7 +700,7 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
 }
 
 // ===== AMDMapperProbe.cpp (original lines 7985..8007) =====
-uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress) {
+uint64_t org_maz1_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress) {
     if (fAuto) {
         uint64_t pa = 0;
         return Translate(mappedAddress, &pa) ? pa : 0;

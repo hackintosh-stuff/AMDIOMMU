@@ -71,7 +71,7 @@
 //     ver 6 -> HW_CLO_PTR0_8125BP = 0x0D34 / SW_TAIL_PTR0_8125BP = 0x0D30
 //   RTL812xLucyHardware.cpp:1178 rtl812xGetHwCloPtr()
 //     ver 3 -> RTL_R16, otherwise RTL_R32
-bool org_example_AMDMapperProbe::m2b2ReadCloPtr(volatile UInt8 *bar,
+bool org_maz1_AMDMapperProbe::m2b2ReadCloPtr(volatile UInt8 *bar,
                                                 UInt32 *out) {
     if (!bar || !out) return false;
     const amdobs::CloPtrSpec spec =
@@ -88,7 +88,7 @@ bool org_example_AMDMapperProbe::m2b2ReadCloPtr(volatile UInt8 *bar,
 }
 
 // ===== AMDMapperProbeDma.cpp (original lines 3118..3126) =====
-bool org_example_AMDMapperProbe::m2b2ReadTailPtr(volatile UInt8 *bar,
+bool org_maz1_AMDMapperProbe::m2b2ReadTailPtr(volatile UInt8 *bar,
                                                  UInt32 *out) {
     if (!bar || !out) return false;
     const amdobs::CloPtrSpec spec =
@@ -125,7 +125,7 @@ bool org_example_AMDMapperProbe::m2b2ReadTailPtr(volatile UInt8 *bar,
 //   compared with the close pointer. A slot may already hold a later
 //   generation's descriptor, so the lifecycle must be computed as "the
 //   descriptor this slot holds now", not "the descriptor this slot once held".
-void org_example_AMDMapperProbe::m2b2CollectTxSegments(const UInt8 *ring,
+void org_maz1_AMDMapperProbe::m2b2CollectTxSegments(const UInt8 *ring,
                                                        UInt32 count,
                                                        UInt32 tailCum,
                                                        UInt32 cloCum) {
@@ -226,7 +226,7 @@ void org_example_AMDMapperProbe::m2b2CollectTxSegments(const UInt8 *ring,
 }
 
 // ===== AMDMapperProbeDma.cpp (original lines 3235..3275) =====
-void org_example_AMDMapperProbe::m2b2CollectRxSegments(const UInt8 *ring,
+void org_maz1_AMDMapperProbe::m2b2CollectRxSegments(const UInt8 *ring,
                                                        UInt32 count) {
     if (!ring) return;
     const UInt32 kBatch = 256;
@@ -305,7 +305,7 @@ void org_example_AMDMapperProbe::m2b2CollectRxSegments(const UInt8 *ring,
 //   - If window submissions reach the ring size, the earliest entries have
 //     already been overwritten. They are counted in winOverwritten rather
 //     than silently dropped.
-void org_example_AMDMapperProbe::m2b2ScanTxWindowAfter(const UInt8 *ring,
+void org_maz1_AMDMapperProbe::m2b2ScanTxWindowAfter(const UInt8 *ring,
                                                        UInt32 count) {
     fM22b2Dma.winSubmits = fM22b2Dma.winCompletes = 0;
     fM22b2Dma.winVisited = fM22b2Dma.winDecoded = 0;
@@ -513,7 +513,7 @@ void org_example_AMDMapperProbe::m2b2ScanTxWindowAfter(const UInt8 *ring,
 }
 
 // ===== AMDMapperProbeDma.cpp (original lines 4477..4601) =====
-void org_example_AMDMapperProbe::m2b2PublishDmaDefaults() {
+void org_maz1_AMDMapperProbe::m2b2PublishDmaDefaults() {
     setProperty("m2-b2-dma-layout-known",
                 fM22b2Dma.layoutKnown ? "yes" : "no");
     setHexProperty(this, "m2-b2-dma-tx-slots", fM22b2Dma.txSlots);
@@ -644,7 +644,7 @@ void org_example_AMDMapperProbe::m2b2PublishDmaDefaults() {
 }
 
 // ===== AMDMapperProbeDma.cpp (original lines 4603..5183) =====
-void org_example_AMDMapperProbe::observeDeviceDma() {
+void org_maz1_AMDMapperProbe::observeDeviceDma() {
     fM22b2Dma.ran = false;
     fM22b2Dma.barMapped = false;
     fM22b2Dma.barBase = 0;

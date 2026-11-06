@@ -56,10 +56,10 @@
 #include "AMDMapperProbeInternal.hpp"
 
 #define super IOMapper
-OSDefineMetaClassAndStructors(org_example_AMDMapperProbe, IOMapper);
+OSDefineMetaClassAndStructors(org_maz1_AMDMapperProbe, IOMapper);
 
 // ===== AMDMapperProbe.cpp (original lines 76..142) =====
-bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
+bool org_maz1_AMDMapperProbe::initHardware(IOService *provider) {
     (void)provider;
     fTarget = nullptr;
     fNicDevice = nullptr;
@@ -149,7 +149,7 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
 // tools/build-m1a-debug.sh with AMD_MAPPER_PROBE_DEBUG=1.
 #if !AMD_MAPPER_PROBE_DEBUG
 
-bool org_example_AMDMapperProbe::start(IOService *provider) {
+bool org_maz1_AMDMapperProbe::start(IOService *provider) {
     setProperty("probe-stage", "0-entered-start");
 
     // Safety gate: must precede super::start(). When fIsSystem is true,
@@ -186,7 +186,7 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
     return true;
 }
 
-IOReturn org_example_AMDMapperProbe::callPlatformFunction(
+IOReturn org_maz1_AMDMapperProbe::callPlatformFunction(
     const OSSymbol *name, bool wait, void *target, void *operation,
     void *unused3, void *unused4) {
     if (name && name->isEqualTo(amd_iommu_policy::kClaim)) {
@@ -212,7 +212,7 @@ IOReturn org_example_AMDMapperProbe::callPlatformFunction(
                                       unused3, unused4);
 }
 
-IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
+IOReturn org_maz1_AMDMapperProbe::setProperties(OSObject *properties) {
     OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
     OSObject *pmArm = dict ? dict->getObject("R66ArmSystemPM") : nullptr;
     if (pmArm) {
@@ -237,7 +237,7 @@ IOReturn org_example_AMDMapperProbe::setProperties(OSObject *properties) {
     return super::setProperties(properties);
 }
 
-void org_example_AMDMapperProbe::stop(IOService *provider) {
+void org_maz1_AMDMapperProbe::stop(IOService *provider) {
     if (fAuto) {
         if (fPublishNotifier) {
             fPublishNotifier->disable();
@@ -255,11 +255,11 @@ void org_example_AMDMapperProbe::stop(IOService *provider) {
     super::stop(provider);
 }
 
-uint64_t org_example_AMDMapperProbe::getPageSize() const {
+uint64_t org_maz1_AMDMapperProbe::getPageSize() const {
     return 4096;
 }
 
-IOReturn org_example_AMDMapperProbe::iovmMapMemory(
+IOReturn org_maz1_AMDMapperProbe::iovmMapMemory(
     IOMemoryDescriptor *memory,
     uint64_t descriptorOffset,
     uint64_t length,
@@ -278,7 +278,7 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     return kIOReturnUnsupported;
 }
 
-IOReturn org_example_AMDMapperProbe::iovmUnmapMemory(
+IOReturn org_maz1_AMDMapperProbe::iovmUnmapMemory(
     IOMemoryDescriptor *memory, IODMACommand *dmaCommand,
     uint64_t mapAddress, uint64_t mapLength) {
     if (fAuto)
@@ -286,7 +286,7 @@ IOReturn org_example_AMDMapperProbe::iovmUnmapMemory(
     return kIOReturnUnsupported;
 }
 
-IOReturn org_example_AMDMapperProbe::iovmInsert(
+IOReturn org_maz1_AMDMapperProbe::iovmInsert(
     uint32_t options, uint64_t mapAddress, uint64_t offset,
     uint64_t physicalAddress, uint64_t length) {
     (void)options; (void)mapAddress; (void)offset;
@@ -298,7 +298,7 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
     return kIOReturnUnsupported;
 }
 
-uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress) {
+uint64_t org_maz1_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress) {
     if (fAuto) {
         uint64_t pa = 0;
         return Translate(mappedAddress, &pa) ? pa : 0;
@@ -312,7 +312,7 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
-KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.97.0", _start, _stop);
+KMOD_EXPLICIT_DECL(org.maz1.AMDMapperProbe, "0.97.0", _start, _stop);
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = nullptr;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = nullptr;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

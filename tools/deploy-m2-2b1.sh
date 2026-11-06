@@ -15,7 +15,7 @@ set -eu
 DO_CMD=0
 [ "${1:-}" = "--cmd" ] && DO_CMD=1
 
-BUNDLE_ID=org.example.AMDMapperProbe
+BUNDLE_ID=org.maz1.AMDMapperProbe
 LUCY_ID=com.insanelymac.RTL812xLucy
 AUXKC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 DEST_PROBE=/Library/Extensions/AMDMapperProbe.kext
@@ -120,11 +120,11 @@ cat <<EOF
 重启后验证：
 
   [惰性模式]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-b1'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-b1'
     期望：m2-b1-gate = "closed"，m2-b1-stage = "1-skipped-no-bootarg"
 
   [命令测试模式]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-b1'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-b1'
 
     核心判据：
       m2-b1-identity       必须 "confirmed"

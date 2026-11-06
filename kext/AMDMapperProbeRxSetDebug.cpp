@@ -106,7 +106,7 @@
 // host test can drive it. This function is the IOKit part: find the driver
 // node, copy the property, hash it, export it. Keeping them separate is what
 // lets the test cover the decode without a kernel.
-bool org_example_AMDMapperProbe::m2b2RxSetRead(bool beforeWindow) {
+bool org_maz1_AMDMapperProbe::m2b2RxSetRead(bool beforeWindow) {
     fM22b2Dma.rxsetPresent = false;
     fM22b2Dma.rxsetWhy = "not-read";
     fM22b2Dma.rxsetSetWhy = "not-built";
@@ -341,7 +341,7 @@ bool org_example_AMDMapperProbe::m2b2RxSetRead(bool beforeWindow) {
 //     the same three PTEs. The sample is still re-checkable: the analyser
 //     verifies the sampled paths against the raw PTEs and separately verifies
 //     that the COUNTS add up (walked == ok + fail + capped).
-void org_example_AMDMapperProbe::m2b2WalkRxSet(
+void org_maz1_AMDMapperProbe::m2b2WalkRxSet(
         const volatile UInt64 *dte, UInt32 tgt,
         const volatile UInt64 *ptv, UInt64 ptBase, UInt64 ptBytes) {
     fM22b2Dma.rxsetWalked = 0;
@@ -473,7 +473,7 @@ void org_example_AMDMapperProbe::m2b2WalkRxSet(
 // + fromRearm - fromBoth) without parsing 3072 property lines. That identity is
 // what makes "all covered" a claim about the whole set rather than about the
 // exported sample.
-void org_example_AMDMapperProbe::m2b2PublishRxSet() {
+void org_maz1_AMDMapperProbe::m2b2PublishRxSet() {
     setProperty("m2-b2-rxset", fM22b2Dma.rxsetPresent ? "present"
                                                       : "SKIP-not-read");
     setProperty("m2-b2-rxset-why",
@@ -636,7 +636,7 @@ void org_example_AMDMapperProbe::m2b2PublishRxSet() {
 // Round 15. No caller-supplied addresses reach the driver's posting path.
 // Prepare obtains a stable allocation domain while the driver holds every
 // object; authorize permits only entries from that immutable domain.
-bool org_example_AMDMapperProbe::m2b2R15Call(UInt32 op) {
+bool org_maz1_AMDMapperProbe::m2b2R15Call(UInt32 op) {
     // A native session has its own ring lifecycle; it never prepares,
     // authorizes or disarms the experimental pool.
     if (fR31Session || !fR15Service) return false;
@@ -663,7 +663,7 @@ bool org_example_AMDMapperProbe::m2b2R15Call(UInt32 op) {
     return kr == kIOReturnSuccess;
 }
 
-bool org_example_AMDMapperProbe::m2b2R15PrepareMap(
+bool org_maz1_AMDMapperProbe::m2b2R15PrepareMap(
         volatile UInt64 *pt, UInt64 ptBase,
         UInt32 totalPages, UInt32 basePages) {
     IOService *nic = findNicServiceOnly();
@@ -792,7 +792,7 @@ bool org_example_AMDMapperProbe::m2b2R15PrepareMap(
     return true;
 }
 
-bool org_example_AMDMapperProbe::m2b2R15Authorize() {
+bool org_maz1_AMDMapperProbe::m2b2R15Authorize() {
     if (fR31Session) return r34RxAuthorize();
     if (!fR15Service || !fR15MapTicks || !fR15InvTicks) return false;
     // Zero keeps the current cyclic RX session authorized until Disarm.
@@ -811,7 +811,7 @@ bool org_example_AMDMapperProbe::m2b2R15Authorize() {
     return ok;
 }
 
-void org_example_AMDMapperProbe::m2b2R15Finish() {
+void org_maz1_AMDMapperProbe::m2b2R15Finish() {
     if (fR31Session) return; // Native ResumePhysical follows register restore.
     if (!fR15Service || !fR15Request.poolId) return;
     if (!m2b2R15Call(r15pool::kDisarm)) {
@@ -834,7 +834,7 @@ void org_example_AMDMapperProbe::m2b2R15Finish() {
     setProperty("m2-b2-r15", s.completions ? "replacement-used" : "no-new-buffer-completion");
 }
 
-void org_example_AMDMapperProbe::m2b2R15Release() {
+void org_maz1_AMDMapperProbe::m2b2R15Release() {
     if (!fR15Service) return;
     if (fR31Session) {
         // Also unfreeze a Prepare-only ring when setup exits before install.

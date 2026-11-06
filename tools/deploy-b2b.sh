@@ -16,7 +16,7 @@ set -eu
 ARM=0
 [ "${1:-}" = "--arm" ] && ARM=1
 
-BUNDLE_ID=org.example.AMDMapperProbe
+BUNDLE_ID=org.maz1.AMDMapperProbe
 LUCY_ID=com.insanelymac.RTL812xLucy
 AUXKC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 DEST_PROBE=/Library/Extensions/AMDMapperProbe.kext
@@ -114,7 +114,7 @@ cat <<EOF
 重启：  sudo reboot
 
 重启后验证（探针）：
-  ioreg -l -w0 -c org_example_AMDMapperProbe | grep -E 'm1bb-|m1b2a-selftest'
+  ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep -E 'm1bb-|m1b2a-selftest'
   # 期望（未 arm）：m1bb-armed = "no"，m1bb-parent = "not-armed"
   # 期望（已 arm）：m1bb-armed = "yes"，m1bb-parent = "set"
   #                 m1bb-nic-busy 必须是 "no-good-timing"

@@ -20,7 +20,7 @@ set -eu
 DO_MMIO=0
 [ "${1:-}" = "--mmio" ] && DO_MMIO=1
 
-BUNDLE_ID=org.example.AMDMapperProbe
+BUNDLE_ID=org.maz1.AMDMapperProbe
 LUCY_ID=com.insanelymac.RTL812xLucy
 AUXKC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 DEST_PROBE=/Library/Extensions/AMDMapperProbe.kext
@@ -121,14 +121,14 @@ cat <<EOF
 重启后验证：
 
   [惰性模式，未加 --mmio]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-m1'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-m1'
     期望：m2-m1-gate = "closed"
           m2-m1-stage = "1-skipped-no-bootarg"
     同时确认无回归：
           m1bb-realmapok = 0x3，m1bb-publishhits = 0x1
 
   [MMIO 模式，已加 --mmio]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-m1'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-m1'
     核心判据：
       m2-m1-efr      必须 == 0x58f77ef22294a5a
       m2-m1-verdict  必须 == "PASS-efr-match"

@@ -26,7 +26,7 @@ python3 "$HERE/preflight.py" > "$LOAD/preflight.txt" 2>&1 || {
 mkdir -p "$OUT"
 cp -p "$LOAD/preflight.txt" "$OUT/preflight.txt"
 ioreg -l -w0 -p IOService > "$OUT/props.raw.txt"
-ioreg -l -w0 -r -c org_example_AMDMapperProbe > "$OUT/props.txt"
+ioreg -l -w0 -r -c org_maz1_AMDMapperProbe > "$OUT/props.txt"
 ioreg -l -w0 -r -c RTL8125 > "$OUT/driver-obs.txt"
 [ -s "$OUT/props.txt" ] || { echo 'FAIL: probe node missing' >&2; exit 1; }
 python3 "$HERE/../r11/extract_snapshot.py" "$OUT"

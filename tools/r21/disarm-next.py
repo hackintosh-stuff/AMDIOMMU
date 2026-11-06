@@ -20,7 +20,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 def main():
     props = subprocess.check_output(
-        ['ioreg', '-l', '-w0', '-r', '-c', 'org_example_AMDMapperProbe'], text=True)
+        ['ioreg', '-l', '-w0', '-r', '-c', 'org_maz1_AMDMapperProbe'], text=True)
     if '"m2-3b-cleanup" = "detached-after-restore-confirmed"' not in props:
         raise ValueError('TX cleanup not confirmed; do not alter outstanding experiment')
     if '"m2-3b-owners-held" = "0x0"' not in props:

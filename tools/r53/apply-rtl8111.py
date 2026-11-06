@@ -488,7 +488,7 @@ def versioned_plist(data, version):
     info = plistlib.loads(plist_text.encode("utf-8"))
     info["CFBundleVersion"] = info["CFBundleShortVersionString"] = version
     info["IOKitPersonalities"]["RTL8111 PCIe Adapter"]["DriverVersion"] = version
-    info["OSBundleLibraries"]["org.example.AMDMapperProbe"] = "0.61.0"
+    info["OSBundleLibraries"]["org.maz1.AMDMapperProbe"] = "0.61.0"
     return plistlib.dumps(info, sort_keys=False)
 
 

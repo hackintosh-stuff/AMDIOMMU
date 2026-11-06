@@ -23,7 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 TARGET = os.path.join(ROOT, 'kext', 'AMDMapperProbePgtDebug.cpp')
 BODY = os.path.join(ROOT, 'build-work-r12', 'bizwalk-body.cpp.txt')
 
-SIG = 'void org_example_AMDMapperProbe::m2b2WalkBusinessRanges('
+SIG = 'void org_maz1_AMDMapperProbe::m2b2WalkBusinessRanges('
 
 
 def main():
@@ -88,10 +88,10 @@ def main():
 
     # Every other method definition must survive.
     methods_before = set(re.findall(
-        r'^\w[\w:<>\*\s]*org_example_AMDMapperProbe::(\w+)\s*\(', src,
+        r'^\w[\w:<>\*\s]*org_maz1_AMDMapperProbe::(\w+)\s*\(', src,
         re.M))
     methods_after = set(re.findall(
-        r'^\w[\w:<>\*\s]*org_example_AMDMapperProbe::(\w+)\s*\(',
+        r'^\w[\w:<>\*\s]*org_maz1_AMDMapperProbe::(\w+)\s*\(',
         before + body + after, re.M))
     lost = methods_before - methods_after
     if lost:

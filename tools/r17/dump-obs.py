@@ -21,7 +21,7 @@ SPEC.loader.exec_module(A)
 def main():
     token = int(sys.argv[1], 0) if len(sys.argv) > 1 else 0
     text = subprocess.check_output(
-        ['ioreg', '-l', '-w0', '-r', '-c', 'org_example_AMDMapperProbe'], text=True)
+        ['ioreg', '-l', '-w0', '-r', '-c', 'org_maz1_AMDMapperProbe'], text=True)
     matches = re.findall(r'"m2-b2-obs-snapshot-used"\s*=\s*<([0-9a-fA-F]+)>', text)
     if len(matches) != 1:
         print('snapshot property missing or duplicated: %d' % len(matches))

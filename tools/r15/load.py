@@ -75,7 +75,7 @@ def main():
                         seed.close()
                         seeded = True
                 props = subprocess.run(['ioreg', '-l', '-w0', '-r', '-c',
-                    'org_example_AMDMapperProbe'], capture_output=True,
+                    'org_maz1_AMDMapperProbe'], capture_output=True,
                     text=True).stdout
                 if '"m2-b2-r15-authorize" = "done"' in props:
                     match = re.search(r'"m2-b2-r15-inv-time" = "(0x[0-9a-fA-F]+)"', props)

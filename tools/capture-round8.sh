@@ -44,7 +44,7 @@ echo "dir   : $OUT"
 } > "$OUT/system.txt"
 
 # ---- 2. the probe's own properties, unmodified --------------------------
-ioreg -l -w0 -c org_example_AMDMapperProbe > "$OUT/props.txt" 2>/dev/null || true
+ioreg -l -w0 -c org_maz1_AMDMapperProbe > "$OUT/props.txt" 2>/dev/null || true
 
 # ---- 3. probe binary identity ------------------------------------------
 PROBE=/Library/Extensions/AMDMapperProbe.kext

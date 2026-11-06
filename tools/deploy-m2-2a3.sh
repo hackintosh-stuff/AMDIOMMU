@@ -16,7 +16,7 @@ set -eu
 DO_ENABLE=0
 [ "${1:-}" = "--enable" ] && DO_ENABLE=1
 
-BUNDLE_ID=org.example.AMDMapperProbe
+BUNDLE_ID=org.maz1.AMDMapperProbe
 LUCY_ID=com.insanelymac.RTL812xLucy
 AUXKC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 DEST_PROBE=/Library/Extensions/AMDMapperProbe.kext
@@ -121,12 +121,12 @@ cat <<EOF
 重启后验证：
 
   [惰性模式]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-3'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-3'
     期望：m2-3-gate = "closed"，m2-3-stage = "1-skipped-no-bootarg"
     确认无回归：m1bb-realmapok = 0x3
 
   [使能模式]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-3'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-3'
 
     核心判据：
       m2-3-identity      必须 "confirmed"（写前 EFR 复验）

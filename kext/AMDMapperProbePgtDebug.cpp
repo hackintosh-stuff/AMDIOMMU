@@ -75,7 +75,7 @@ R27ProbeTimer *R27ProbeTimer::create(OSObject *owner, Action action) {
 // The service owns these objects while the device translates through them.
 // Active TX/RX callbacks borrow the table/MMIO pointers; the setup stack owns
 // none of their lifetime after the Round33 handoff.
-struct org_example_AMDMapperProbe::R33DeviceDomain {
+struct org_maz1_AMDMapperProbe::R33DeviceDomain {
     bool resourcesReleased;
     IOBufferMemoryDescriptor *ptMem;
     IOBufferMemoryDescriptor *tbl;
@@ -132,7 +132,7 @@ struct org_example_AMDMapperProbe::R33DeviceDomain {
 };
 
 // ===== AMDMapperProbePgt.cpp (original lines 5206..5278) =====
-bool org_example_AMDMapperProbe::scheduleM22b2() {
+bool org_maz1_AMDMapperProbe::scheduleM22b2() {
     if (!parsePgtBootArg()) {
         setProperty("m2-b2-gate", "closed");
         setProperty("m2-b2-stage", "1-skipped-no-bootarg");
@@ -192,7 +192,7 @@ bool org_example_AMDMapperProbe::scheduleM22b2() {
     }
 
     fM22b2Timer = R27ProbeTimer::create(
-        this, &org_example_AMDMapperProbe::m22b2TimerFired);
+        this, &org_maz1_AMDMapperProbe::m22b2TimerFired);
     if (!fM22b2Timer) {
         setProperty("m2-b2-verdict", "FAIL-no-timer");
         setProperty("m2-b2-stage", "1-FAIL-no-timer");
@@ -220,11 +220,11 @@ bool org_example_AMDMapperProbe::scheduleM22b2() {
 }
 
 // ===== AMDMapperProbePgt.cpp (original lines 5280..5293) =====
-void org_example_AMDMapperProbe::m22b2TimerFired(
+void org_maz1_AMDMapperProbe::m22b2TimerFired(
     OSObject *owner, IOTimerEventSource *sender) {
     (void)sender;
-    org_example_AMDMapperProbe *self =
-        OSDynamicCast(org_example_AMDMapperProbe, owner);
+    org_maz1_AMDMapperProbe *self =
+        OSDynamicCast(org_maz1_AMDMapperProbe, owner);
     if (!self) return;
 
     // The timer is one-shot: it does not reschedule after firing.
@@ -238,7 +238,7 @@ void org_example_AMDMapperProbe::m22b2TimerFired(
         self->retain();
         thread_t worker = THREAD_NULL;
         const kern_return_t kr = kernel_thread_start(
-            &org_example_AMDMapperProbe::r31SessionWorker, self, &worker);
+            &org_maz1_AMDMapperProbe::r31SessionWorker, self, &worker);
         if (kr != KERN_SUCCESS) {
             self->setProperty("m2-3l-session-state", "failed");
             self->setProperty("m2-3n-domain-state", "failed");
@@ -258,11 +258,11 @@ void org_example_AMDMapperProbe::m22b2TimerFired(
     self->runM22b2PageTableProbe();
 }
 
-void org_example_AMDMapperProbe::r31SessionWorker(
+void org_maz1_AMDMapperProbe::r31SessionWorker(
     void *parameter, wait_result_t result) {
     (void)result;
-    org_example_AMDMapperProbe *self =
-        static_cast<org_example_AMDMapperProbe *>(parameter);
+    org_maz1_AMDMapperProbe *self =
+        static_cast<org_maz1_AMDMapperProbe *>(parameter);
     self->runM22b2PageTableProbe();
     if (!__atomic_load_n(&self->fR33Domain, __ATOMIC_ACQUIRE)) {
         self->setProperty("m2-3l-session-state", "failed");
@@ -279,12 +279,12 @@ void org_example_AMDMapperProbe::r31SessionWorker(
     thread_terminate(current_thread());
 }
 
-bool org_example_AMDMapperProbe::r33DomainStopPending() const {
+bool org_maz1_AMDMapperProbe::r33DomainStopPending() const {
     return __atomic_load_n(&fR33Domain, __ATOMIC_ACQUIRE) &&
         __atomic_load_n(&fR33TeardownState, __ATOMIC_ACQUIRE) != 2;
 }
 
-void org_example_AMDMapperProbe::r33ScheduleDomainStop() {
+void org_maz1_AMDMapperProbe::r33ScheduleDomainStop() {
     if (!fR31Session ||
         !__atomic_load_n(&fR31StopRequested, __ATOMIC_ACQUIRE) ||
         !__atomic_load_n(&fR33Domain, __ATOMIC_ACQUIRE) ||
@@ -301,7 +301,7 @@ void org_example_AMDMapperProbe::r33ScheduleDomainStop() {
     retain();
     thread_t worker = THREAD_NULL;
     const kern_return_t kr = kernel_thread_start(
-        &org_example_AMDMapperProbe::r33DomainStopWorker, this, &worker);
+        &org_maz1_AMDMapperProbe::r33DomainStopWorker, this, &worker);
     if (kr != KERN_SUCCESS) {
         setProperty("m2-3l-session-state", "failed");
         setProperty("m2-3n-domain-state", "failed");
@@ -314,10 +314,10 @@ void org_example_AMDMapperProbe::r33ScheduleDomainStop() {
     thread_deallocate(worker);
 }
 
-void org_example_AMDMapperProbe::r33DomainStopWorker(
+void org_maz1_AMDMapperProbe::r33DomainStopWorker(
     void *parameter, wait_result_t result) {
     (void)result;
-    auto *self = static_cast<org_example_AMDMapperProbe *>(parameter);
+    auto *self = static_cast<org_maz1_AMDMapperProbe *>(parameter);
     R33DeviceDomain *domain = __atomic_load_n(&self->fR33Domain, __ATOMIC_ACQUIRE);
     setHexProperty(self, "m2-3n-teardown-start", mach_absolute_time());
     self->setProperty("m2-3n-domain-state", "stopping");
@@ -341,7 +341,7 @@ void org_example_AMDMapperProbe::r33DomainStopWorker(
 }
 
 // ===== AMDMapperProbePgt.cpp (original lines 5310..7405) =====
-void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
+void org_maz1_AMDMapperProbe::runM22b2PageTableProbe() {
     setProperty("m2-b2-stage", "0-start");
     fR15Service = nullptr;
     bzero(&fR15Request, sizeof(fR15Request));
@@ -381,15 +381,15 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     //   no events" from "never ran at all".
     // [v0.21.7] The window structs moved to members, no longer on the stack.
     //
-    // Each org_example_AMDMapperProbe::M22b2EventWindow is 0x1A8 = 424 bytes
+    // Each org_maz1_AMDMapperProbe::M22b2EventWindow is 0x1A8 = 424 bytes
     // (including 16*4 raw UInt32 events). Two of them total 848 bytes -- the
     // last straw that pushed this function's frame past the __chkstk threshold
     // (measured 0x1040 = 4160). Round 5's reduction of
-    // org_example_AMDMapperProbe::kM22b2RawKeep from 32 to 16 only papered over
+    // org_maz1_AMDMapperProbe::kM22b2RawKeep from 32 to 16 only papered over
     // the symptom; moving the structs to members is the real fix for the weak
     // reference.
-    org_example_AMDMapperProbe::M22b2EventWindow &winPre = fM22b2WinPre;
-    org_example_AMDMapperProbe::M22b2EventWindow &winMain = fM22b2WinMain;
+    org_maz1_AMDMapperProbe::M22b2EventWindow &winPre = fM22b2WinPre;
+    org_maz1_AMDMapperProbe::M22b2EventWindow &winMain = fM22b2WinMain;
     for (UInt32 t = 0; t < 16; t++) {
         winPre.typeCount[t] = 0;
         winMain.typeCount[t] = 0;
@@ -1650,7 +1650,7 @@ recover:
     finishM22b2PageTableProbe(domain, false);
 }
 
-void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
+void org_maz1_AMDMapperProbe::finishM22b2PageTableProbe(
     R33DeviceDomain *domain, bool finishWindow) {
     auto &winPre = fM22b2WinPre;
     auto &winMain = fM22b2WinMain;
@@ -3256,7 +3256,7 @@ recover:
 // probe and the host regression from **the same** code. This site only: fetch
 // the DTE, bound readEntry, publish the results, and account separately for
 // expected/count/ok/fail/capped.
-void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
+void org_maz1_AMDMapperProbe::m2b2WalkBusinessRanges(
         const volatile UInt64 *dte, UInt32 tgt,
         const volatile UInt64 *ptv, UInt64 ptBase, UInt64 ptBytes) {
     // The four ledgers are independent. Round 11's bizWalkFail was ++-ed in an

@@ -1200,7 +1200,7 @@ static inline void m2b2DoPostSample(void *ctx) {
 // worker records the beginning and returns; teardown records the end while the
 // service-owned resources and translation are still active.
 static inline bool m2b2BeginEventWindow(
-    volatile UInt8 *base, org_example_AMDMapperProbe::M22b2EventWindow *w) {
+    volatile UInt8 *base, org_maz1_AMDMapperProbe::M22b2EventWindow *w) {
     w->valid = false;
     w->invalidReason = "not-run";
     w->tStart = 0; w->tEnd = 0; w->durMS = 0;
@@ -1255,7 +1255,7 @@ static inline bool m2b2BeginEventWindow(
 
 static inline void m2b2EndEventWindow(
     volatile UInt8 *base, volatile UInt32 *evtBuf, UInt32 tgtDevid,
-    org_example_AMDMapperProbe::M22b2EventWindow *w,
+    org_maz1_AMDMapperProbe::M22b2EventWindow *w,
     void (*postSample)(void *) = nullptr, void *postCtx = nullptr) {
     // In-window post-sample: done at end-of-window measurement, before tEnd is
     // recorded.
@@ -1350,7 +1350,7 @@ static inline void m2b2EndEventWindow(
             w->devidMismatch++;
         }
 
-        if (w->rawCount < org_example_AMDMapperProbe::kM22b2RawKeep) {
+        if (w->rawCount < org_maz1_AMDMapperProbe::kM22b2RawKeep) {
             w->raw[w->rawCount][0] = r0;
             w->raw[w->rawCount][1] = r1;
             w->raw[w->rawCount][2] = r2;
@@ -1376,7 +1376,7 @@ static inline void m2b2EndEventWindow(
 // Historical finite observations share the same endpoint implementation.
 static inline void m2b2SampleEvents(
     volatile UInt8 *base, volatile UInt32 *evtBuf, UInt32 measureSecs,
-    UInt32 tgtDevid, org_example_AMDMapperProbe::M22b2EventWindow *w,
+    UInt32 tgtDevid, org_maz1_AMDMapperProbe::M22b2EventWindow *w,
     void (*postSample)(void *) = nullptr, void *postCtx = nullptr) {
     if (!m2b2BeginEventWindow(base, w)) return;
     IOSleep(measureSecs * 1000);

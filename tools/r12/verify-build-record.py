@@ -104,7 +104,7 @@ def make_stubs(tmp):
         'cat > "$K/Contents/Info.plist" <<EOF\n'
         '<?xml version="1.0"?><plist version="1.0"><dict>\n'
         '<key>CFBundleVersion</key><string>1.2.0</string>\n'
-        '<key>CFBundleIdentifier</key><string>org.example.AMDMapperProbe</string>\n'
+        '<key>CFBundleIdentifier</key><string>org.maz1.AMDMapperProbe</string>\n'
         '</dict></plist>\n'
         'EOF\n'
         'printf "%s\\n" "$K" > latest-m1a-build.txt\n')

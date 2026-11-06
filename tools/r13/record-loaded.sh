@@ -258,7 +258,7 @@ fi
     echo
 
     echo "## ioreg: the probe's own instance"
-    if ioreg -l 2>/dev/null | grep -q 'org_example_AMDMapperProbe'; then
+    if ioreg -l 2>/dev/null | grep -q 'org_maz1_AMDMapperProbe'; then
         echo "  probe_instance  : PRESENT"
         ioreg -l 2>/dev/null | grep -m1 '"m2-b2-verdict"' | sed 's/^/  /'
     else

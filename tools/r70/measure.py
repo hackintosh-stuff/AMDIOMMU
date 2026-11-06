@@ -41,7 +41,7 @@ PROBE_KEYS = (
 def snapshot(args):
     values = {}
     text = subprocess.run(['ioreg', '-l', '-w0', '-r', '-c',
-                           'org_example_AMDMapperProbe'],
+                           'org_maz1_AMDMapperProbe'],
                           capture_output=True, text=True).stdout
     for key in PROBE_KEYS:
         out = subprocess.run(['grep', '-oE', '"%s" = [^,}]+' % key],

@@ -157,7 +157,7 @@ BASE_CMDS = [
 
 
 def render(props, descs, cmds):
-    lines = ["+-o org_example_AMDMapperProbe  <class org_example_AMDMapperProbe>"]
+    lines = ["+-o org_maz1_AMDMapperProbe  <class org_maz1_AMDMapperProbe>"]
     lines.append("  | {")
     for k, v in props.items():
         lines.append('  |   "{}" = "{}"'.format(k, v))
@@ -789,7 +789,7 @@ def command_record_claims_fail_but_equal():
     text_ok = True
     # Rebuild with the record marked not-ok by post-processing.
     descs = dict(BASE_DESC)
-    lines = ["+-o org_example_AMDMapperProbe"]
+    lines = ["+-o org_maz1_AMDMapperProbe"]
     lines.append("  | {")
     for k, v in p.items():
         lines.append('  |   "{}" = "{}"'.format(k, v))

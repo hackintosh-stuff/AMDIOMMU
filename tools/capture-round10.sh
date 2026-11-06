@@ -31,16 +31,16 @@ echo "== capturing to $OUT =="
 
 # ---- 1. the probe's properties, unmodified ------------------------------
 #
-# The probe's IOClass is `org_example_AMDMapperProbe` (the C++ class name), NOT
+# The probe's IOClass is `org_maz1_AMDMapperProbe` (the C++ class name), NOT
 # `AMDMapperProbe` (the bundle name). Using the bundle name here silently
 # produced a ZERO-BYTE props.txt on the first capture attempt, and a zero-byte
 # file is exactly the kind of "the layer said success, the evidence is empty"
 # failure this round is supposed to stop producing. The size is asserted below.
 ioreg -l -w0 -p IOService > "$OUT/props.raw.txt" 2>/dev/null || true
-ioreg -l -w0 -r -c org_example_AMDMapperProbe > "$OUT/props.txt" 2>/dev/null || true
+ioreg -l -w0 -r -c org_maz1_AMDMapperProbe > "$OUT/props.txt" 2>/dev/null || true
 if [ ! -s "$OUT/props.txt" ]; then
     echo "FAIL: props.txt is empty -- the probe node was not matched" >&2
-    echo "      (expected IOClass org_example_AMDMapperProbe)" >&2
+    echo "      (expected IOClass org_maz1_AMDMapperProbe)" >&2
     exit 1
 fi
 

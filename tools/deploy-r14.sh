@@ -85,7 +85,7 @@ echo "round-14 RX post tables present in the driver OK"
 
 # ---- round 14: the probe must carry the RX set code ----------------------
 for name in m2b2RxSetRead m2b2WalkRxSet m2b2PublishRxSet; do
-    nm "$PRB_BIN" 2>/dev/null | grep -q "T .*org_example_AMDMapperProbe.*$name" || {
+    nm "$PRB_BIN" 2>/dev/null | grep -q "T .*org_maz1_AMDMapperProbe.*$name" || {
         echo "FAIL: the probe does not define $name"; exit 1; }
 done
 # The stable tokens the probe publishes for this round. Their presence is
@@ -103,7 +103,7 @@ echo "round-14 RX set present in the probe OK"
 # ---- round 13's remaining requirements ---------------------------------
 for name in m2b2WalkBusinessRanges m2b2BindDriverInstance \
             m2b2ReadDeclaredToken m2b2ReadDriverObs; do
-    nm "$PRB_BIN" 2>/dev/null | grep -q "T .*org_example_AMDMapperProbe.*$name" || {
+    nm "$PRB_BIN" 2>/dev/null | grep -q "T .*org_maz1_AMDMapperProbe.*$name" || {
         echo "FAIL: the probe does not define $name"; exit 1; }
 done
 for tok in identity-unknown page-table-evidence-failed \
@@ -162,7 +162,7 @@ echo "auxkc mtime before=$BEFORE_MT after=$AFTER_MT"
 
 echo "== the collection must actually contain both bundles =="
 LIST=$(sudo kmutil inspect -A "$AUXKC" 2>/dev/null || true)
-for bid in com.insanelymac.RTL812xLucy org.example.AMDMapperProbe; do
+for bid in com.insanelymac.RTL812xLucy org.maz1.AMDMapperProbe; do
     echo "$LIST" | grep -q "$bid" || {
         echo "FAIL: $bid is NOT in the auxiliary collection"
         echo "--- collection ---"

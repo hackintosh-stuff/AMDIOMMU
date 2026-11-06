@@ -65,7 +65,7 @@
 //   **definition** was replaced wholesale, leaving only the declaration in the
 //   header and the call in step 16d. It surfaced at link time: kmutil reported
 //
-//     Failed to bind '__ZN26org_example_AMDMapperProbe14m2b2ScanTxDoneEv'
+//     Failed to bind '__ZN26org_maz1_AMDMapperProbe14m2b2ScanTxDoneEv'
 //     ... could not find a kext which exports this symbol
 //
 //   This is exactly the failure shape that kept recurring in round 9: it
@@ -124,7 +124,7 @@
 // The token is parsed by the same bounded hex/dec scanner used for the count.
 static inline bool m2b2ParseHexOrDec(const char **qp, UInt32 *out);
 
-UInt32 org_example_AMDMapperProbe::m2b2ReadDeclaredBatch() {
+UInt32 org_maz1_AMDMapperProbe::m2b2ReadDeclaredBatch() {
     // WHERE THE DECLARATION ACTUALLY COMES FROM, AND TWO DEAD ENDS
     // ------------------------------------------------------------
     // Attempt 1: a personality key on our own IORegistry node. That does NOT
@@ -212,7 +212,7 @@ static inline bool m2b2ParseHexOrDec(const char **qp, UInt32 *out) {
 // load generator starts at 1, and the driver refuses to publish a parsed
 // record whose token is 0 (see obsParseBiz()). So "not declared" and
 // "declared as 0" cannot be confused.
-UInt32 org_example_AMDMapperProbe::m2b2ReadDeclaredToken() {
+UInt32 org_maz1_AMDMapperProbe::m2b2ReadDeclaredToken() {
     char val[128];
     val[0] = 0;
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) return 0;
@@ -276,7 +276,7 @@ UInt32 org_example_AMDMapperProbe::m2b2ReadDeclaredToken() {
 //   That step runs **after** the window. Taking the epoch there would let the
 //   object under test define the test's own standard. The binding point must
 //   precede the window -- that is why this is a separate function.
-void org_example_AMDMapperProbe::m2b2BindDriverInstance() {
+void org_maz1_AMDMapperProbe::m2b2BindDriverInstance() {
     fM22b2Dma.epochBound = 0;
     setProperty("m2-b2-epoch-bind", "not-attempted");
 
@@ -344,7 +344,7 @@ void org_example_AMDMapperProbe::m2b2BindDriverInstance() {
 }
 
 // ===== AMDMapperProbeObs.cpp (original lines 3613..3641) =====
-int org_example_AMDMapperProbe::m2b2ScanTxDone() {
+int org_maz1_AMDMapperProbe::m2b2ScanTxDone() {
     if (!fM22b2Dma.ran || !fM22b2Dma.haveTxRing) return -1;
 
     const UInt64 bytes = 1024ULL * amdobs::TX_DESC_STRIDE;
@@ -418,7 +418,7 @@ int org_example_AMDMapperProbe::m2b2ScanTxDone() {
 //   function**, not globally (consistent with runM20ConfigProbe()).
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
+void org_maz1_AMDMapperProbe::m2b2CaptureNicIdentity() {
     fM22b2Dma.nicIdentityKnown = false;
     fM22b2Dma.devid = 0;
     fM22b2Dma.vendorId = 0;
@@ -638,7 +638,7 @@ void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
 }
 
 // ===== AMDMapperProbeObs.cpp (original lines 4031..4474) =====
-void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
+void org_maz1_AMDMapperProbe::m2b2ReadDriverObs() {
     fM22b2Dma.obsPresent = false;
     fM22b2Dma.obsWhy = "not-read";
     fM22b2Dma.obsIdentityWhy = "not-checked";

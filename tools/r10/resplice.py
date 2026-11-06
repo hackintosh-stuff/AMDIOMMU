@@ -23,7 +23,7 @@ IDENT_START = ('// =============================================================
                '// \u7b2c\u5341\u8f6e\uff1a\u91c7\u96c6\u76ee\u6807\u7f51\u5361\u7684\u8eab\u4efd\n')
 OBS_START = ('// ===========================================================================\n'
              '// \u7b2c\u5341\u8f6e\uff1a\u8bfb\u9a71\u52a8\u4fa7\u89c2\u6d4b\u65e5\u5fd7\uff08\u7ebf\u683c\u5f0f v2\uff09\n')
-OBS_END_MARK = '\nvoid org_example_AMDMapperProbe::m2b2PublishDmaDefaults()'
+OBS_END_MARK = '\nvoid org_maz1_AMDMapperProbe::m2b2PublishDmaDefaults()'
 
 
 def main():

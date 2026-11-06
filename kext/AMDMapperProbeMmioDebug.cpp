@@ -96,7 +96,7 @@
 //   not globally.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-void org_example_AMDMapperProbe::runM20ConfigProbe() {
+void org_maz1_AMDMapperProbe::runM20ConfigProbe() {
     setProperty("m2-stage", "0-config-probe-start");
 
     if (!fTarget) {
@@ -257,7 +257,7 @@ void org_example_AMDMapperProbe::runM20ConfigProbe() {
 
 
 // ===== AMDMapperProbeMmio.cpp (original lines 1116..1226) =====
-void org_example_AMDMapperProbe::runM21MmioProbe() {
+void org_maz1_AMDMapperProbe::runM21MmioProbe() {
     setProperty("m2-m1-stage", "0-start");
 
     // ---- Gated: not executed by default ----
@@ -432,7 +432,7 @@ void org_example_AMDMapperProbe::runM21MmioProbe() {
 #define M22_IMPL_MASK       0x000FFFFFFFFFFFFFULL
 
 // ===== AMDMapperProbeMmio.cpp (original lines 1269..1391) =====
-void org_example_AMDMapperProbe::runM22aWriteProbe() {
+void org_maz1_AMDMapperProbe::runM22aWriteProbe() {
     setProperty("m2-2a-stage", "0-start");
 
     // Gated: runs only for amdiommu=write.

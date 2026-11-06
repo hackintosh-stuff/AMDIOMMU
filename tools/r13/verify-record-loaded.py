@@ -87,7 +87,7 @@ case "$1" in
     case "$(cat "$STUB_STATE/query_mode")" in
       ok-both)
         echo "Index Refs Address            Size       Wired      Name (Version) UUID <Linked Against>"
-        echo "   42    0 0xffffff8000000000 0x12000    0x12000    org.example.AMDMapperProbe (1.0.0) A07C2D88-8190-3B86-ACB9-834F1E70A104 <...>"
+        echo "   42    0 0xffffff8000000000 0x12000    0x12000    org.maz1.AMDMapperProbe (1.0.0) A07C2D88-8190-3B86-ACB9-834F1E70A104 <...>"
         echo "   43    0 0xffffff8000100000 0x1f000    0x1f000    com.insanelymac.RTL812xLucy (1.1.200) 35B9EBC1-DB51-3C2E-9432-F156FB91ACCB <...>"
         exit 0 ;;
       ok-one)
@@ -113,8 +113,8 @@ case "$(cat "$STUB_STATE/ioreg_mode")" in
     echo '    | |   +-o RTL8125  <class RTL8125>'
     echo '    | |     "IOClass" = "RTL8125"'
     echo '    | |     "rtl812x-obs-epoch" = 14'
-    echo '    +-o AMDMapperProbe  <class org_example_AMDMapperProbe>'
-    echo '      "IOClass" = "org_example_AMDMapperProbe"'
+    echo '    +-o AMDMapperProbe  <class org_maz1_AMDMapperProbe>'
+    echo '      "IOClass" = "org_maz1_AMDMapperProbe"'
     echo '      "m2-b2-verdict" = "PASS-CANDIDATE-controlled-chain"'
     exit 0 ;;
   absent) exit 0 ;;

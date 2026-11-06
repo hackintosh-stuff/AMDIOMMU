@@ -36,7 +36,7 @@ for a in "$@"; do
     esac
 done
 
-PROBE_ID=org.example.AMDMapperProbe
+PROBE_ID=org.maz1.AMDMapperProbe
 LUCY_ID=com.insanelymac.RTL812xLucy
 DEST_PROBE=/Library/Extensions/AMDMapperProbe.kext
 DEST_LUCY=/Library/Extensions/RTL812xLucy.kext

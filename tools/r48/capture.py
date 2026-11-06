@@ -41,7 +41,7 @@ def main():
     stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     installed = C.collect_system(out, stamp, VERSIONS, 'r48', 'ordinary-device-mapper1')
     for name, command in (
-            ('probe.txt', ['ioreg', '-l', '-w0', '-r', '-c', 'org_example_AMDMapperProbe']),
+            ('probe.txt', ['ioreg', '-l', '-w0', '-r', '-c', 'org_maz1_AMDMapperProbe']),
             ('driver.txt', ['ioreg', '-l', '-w0', '-r', '-c', 'RTL8125']),
             ('boot-args.txt', ['sysctl', '-n', 'kern.bootargs']),
             ('network.txt', ['ifconfig', 'en2']),

@@ -23,7 +23,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--efi', required=True, help='already mounted exact target EFI')
     args = parser.parse_args()
-    props = D.output('ioreg', '-l', '-w0', '-r', '-c', 'org_example_AMDMapperProbe')
+    props = D.output('ioreg', '-l', '-w0', '-r', '-c', 'org_maz1_AMDMapperProbe')
     for key, value in (('m2-3g-mode', 'all-standard'),
                        ('m2-3b-cleanup', 'detached-after-restore-confirmed'),
                        ('m2-3e-after-exit', 'ordinary-output-resumed')):

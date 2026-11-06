@@ -54,7 +54,7 @@
 
 // ===== AMDMapperProbeTable.cpp (original lines 1442..1662) =====
 
-void org_example_AMDMapperProbe::runM22bTableProbe() {
+void org_maz1_AMDMapperProbe::runM22bTableProbe() {
     setProperty("m2-2b-stage", "0-start");
 
     if (!parseTableBootArg()) {
@@ -332,7 +332,7 @@ void org_example_AMDMapperProbe::runM22bTableProbe() {
 
 // ===== AMDMapperProbeTable.cpp (original lines 1706..1914) =====
 
-void org_example_AMDMapperProbe::runM23EnableProbe() {
+void org_maz1_AMDMapperProbe::runM23EnableProbe() {
     setProperty("m2-3-stage", "0-start");
 
     if (!parseEnableBootArg()) {
@@ -545,7 +545,7 @@ void org_example_AMDMapperProbe::runM23EnableProbe() {
 }
 
 // ===== AMDMapperProbeTable.cpp (original lines 1965..2211) =====
-void org_example_AMDMapperProbe::runM2b1CmdProbe() {
+void org_maz1_AMDMapperProbe::runM2b1CmdProbe() {
     setProperty("m2-b1-stage", "0-start");
 
     if (!parseCmdBootArg()) {

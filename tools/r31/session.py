@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 
-SERVICE = 'org_example_AMDMapperProbe'
+SERVICE = 'org_maz1_AMDMapperProbe'
 PREFIX = 'm2-3l-'
 FIELDS = ('session-mode', 'session-state', 'session-start',
           'stop-request-time', 'session-end', 'tx-deadline')

@@ -24,7 +24,7 @@ def require_offloads(info):
     params = info.get('IOKitPersonalities', {}).get('RTL8125', {}).get('Driver Parameters', {})
     if any(params.get(key) is not True for key in ('enableTSO4', 'enableTSO6')):
         raise ValueError('Lucy requires enableTSO4=true and enableTSO6=true')
-    if info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != LUCY_DEPENDENCY:
+    if info.get('OSBundleLibraries', {}).get('org.maz1.AMDMapperProbe') != LUCY_DEPENDENCY:
         raise ValueError('Lucy Probe compatibility version differs')
 
 
@@ -35,7 +35,7 @@ def bundle_identity(bundle, version, symbol):
     if bundle.stem == 'RealtekRTL8111':
         info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
         if (info.get('CFBundleIdentifier') != RTL8111_ID or
-                info.get('OSBundleLibraries', {}).get('org.example.AMDMapperProbe') != CLIENT_DEPENDENCY):
+                info.get('OSBundleLibraries', {}).get('org.maz1.AMDMapperProbe') != CLIENT_DEPENDENCY):
             raise ValueError('RTL8111 bundle identity or mapper startup dependency differs')
     if bundle.stem == 'AMDMapperProbe' and (RUN.installed_client_dependency or RUN.retained_lucy_dependency):
         info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())

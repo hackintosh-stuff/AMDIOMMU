@@ -143,7 +143,7 @@ else
 fi
 for name in $MODULE_NAMES
 do
-    nm "$BIN" | grep -q "T .*org_example_AMDMapperProbe.*$name" || {
+    nm "$BIN" | grep -q "T .*org_maz1_AMDMapperProbe.*$name" || {
         echo "missing module symbol: $name"; exit 1; }
 done
 # Firmware discovery reuses the host parser as independent translation units.

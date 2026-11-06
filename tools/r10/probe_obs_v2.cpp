@@ -141,7 +141,7 @@ static UInt32 m2b2ObsPubIdOf(const OSData *d) {
     return amdobs::obsRd32(b + 28);
 }
 
-void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
+void org_maz1_AMDMapperProbe::m2b2ReadDriverObs() {
     fM22b2Dma.obsPresent = false;
     fM22b2Dma.obsWhy = "not-read";
     fM22b2Dma.obsIdentityWhy = "not-checked";

@@ -371,7 +371,7 @@ def main():
     # uses. Getting this wrong the first time produced a fixture that looked
     # plausible and had every property read as None.
     probe_node = ['    {',
-                  '      "IOClass" = "org_example_AMDMapperProbe"']
+                  '      "IOClass" = "org_maz1_AMDMapperProbe"']
     for k, v in props:
         probe_node.append('      "%s" = "%s"' % (k, v))
     # The exported snapshot itself, as an OSData hex blob. This is the whole

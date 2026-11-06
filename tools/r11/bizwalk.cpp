@@ -7,7 +7,7 @@
 // which only surfaced at link time as a kmutil bind failure). So the block is
 // kept here, spliced at a named anchor, and the splice is verified by compiling.
 
-void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
+void org_maz1_AMDMapperProbe::m2b2WalkBusinessRanges(
         const volatile UInt64 *dte, UInt32 tgt,
         const volatile UInt64 *ptv, UInt64 ptBase, UInt64 ptBytes) {
     fM22b2Dma.bizWalkCount = 0;

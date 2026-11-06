@@ -6,7 +6,7 @@ STAMP="${1:?usage: capture-round5.sh <stamp>}"
 D="$HOME/iommu-work/evidence/$STAMP"
 mkdir -p "$D"
 
-ioreg -l -w0 -c org_example_AMDMapperProbe > "$D/props.txt" 2>/dev/null || true
+ioreg -l -w0 -c org_maz1_AMDMapperProbe > "$D/props.txt" 2>/dev/null || true
 
 {
     echo "=== uname ==="

@@ -147,7 +147,7 @@ fi
     echo
 
     echo "## ioreg: the probe's own instance"
-    if ioreg -l 2>/dev/null | grep -q 'org_example_AMDMapperProbe'; then
+    if ioreg -l 2>/dev/null | grep -q 'org_maz1_AMDMapperProbe'; then
         echo "  probe_instance  : PRESENT"
         # The probe publishes its verdict; recording it here ties the load
         # identity to the run that used it.

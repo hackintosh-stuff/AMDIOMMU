@@ -5,8 +5,8 @@ import sys
 CPP = r"MSI_X570\amd-iommu\kext\AMDMapperProbe.cpp"
 PLIST = r"MSI_X570\amd-iommu\kext\AMDMapperProbe-Info.plist"
 
-OLD = 'KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.14.0", _start, _stop)'
-NEW = 'KMOD_EXPLICIT_DECL(org.example.AMDMapperProbe, "0.15.0", _start, _stop)'
+OLD = 'KMOD_EXPLICIT_DECL(org.maz1.AMDMapperProbe, "0.14.0", _start, _stop)'
+NEW = 'KMOD_EXPLICIT_DECL(org.maz1.AMDMapperProbe, "0.15.0", _start, _stop)'
 
 OLD_P = "<string>0.14.0</string>"
 NEW_P = "<string>0.15.0</string>"

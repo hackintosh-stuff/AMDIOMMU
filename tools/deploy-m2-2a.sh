@@ -18,7 +18,7 @@ set -eu
 DO_WRITE=0
 [ "${1:-}" = "--write" ] && DO_WRITE=1
 
-BUNDLE_ID=org.example.AMDMapperProbe
+BUNDLE_ID=org.maz1.AMDMapperProbe
 LUCY_ID=com.insanelymac.RTL812xLucy
 AUXKC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 DEST_PROBE=/Library/Extensions/AMDMapperProbe.kext
@@ -127,13 +127,13 @@ cat <<EOF
 重启后验证：
 
   [惰性模式，未加 --write]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-2a'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-2a'
     期望：m2-2a-gate = "closed"
           m2-2a-stage = "1-skipped-no-bootarg"
     同时确认无回归：m1bb-realmapok = 0x3
 
   [写测试模式，已加 --write]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-2a'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-2a'
 
     核心判据（按顺序）：
       m2-2a-identity        必须 "confirmed"（写前 EFR 复验通过）

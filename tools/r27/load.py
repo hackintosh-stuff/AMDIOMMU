@@ -123,7 +123,7 @@ def drain_tail(s, peer, token, emit):
             emit('client_tail_timeout pending=%s' % ','.join(map(str, sorted(pending))))
             break
         props = command('ioreg', '-l', '-w0', '-r', '-c',
-                        'org_example_AMDMapperProbe', required=False)
+                        'org_maz1_AMDMapperProbe', required=False)
         if '"m2-3h-rx-state" = "draining"' not in props:
             released = '"m2-3h-rx-state" = "drained-and-unmapped"' in props
             if released:
@@ -140,7 +140,7 @@ def drain_tail(s, peer, token, emit):
     while '"m2-3i-tail-state" = "waiting"' not in props and time.monotonic() < wait_end:
         time.sleep(.02)
         props = command('ioreg', '-l', '-w0', '-r', '-c',
-                        'org_example_AMDMapperProbe', required=False)
+                        'org_maz1_AMDMapperProbe', required=False)
     remaining = deadline - time.monotonic()
     if ('"m2-3h-rx-state" = "drained-and-unmapped"' not in props or
             '"m2-3i-tail-state" = "waiting"' not in props or remaining <= 0):
@@ -423,7 +423,7 @@ def main():
                         ord_probe(pre, (a.peer, a.port), ord.next(),
                                   pre_lines.append, 'pre')
                 props = command('ioreg', '-l', '-w0', '-r', '-c',
-                                'org_example_AMDMapperProbe', required=False)
+                                'org_maz1_AMDMapperProbe', required=False)
                 expression = r'"' + re.escape(a.authorize_key) + r'" = "' + \
                     re.escape(a.authorize_value) + r'"'
                 if re.search(expression, props):
@@ -531,7 +531,7 @@ def main():
                 deadline2 = time.monotonic() + 90
                 while time.monotonic() < deadline2:
                     props = command('ioreg', '-l', '-w0', '-r', '-c',
-                                    'org_example_AMDMapperProbe', required=False)
+                                    'org_maz1_AMDMapperProbe', required=False)
                     # Stop makes no network requests. The driver stops DMA,
                     # retires the ring locally and restores ordinary traffic.
                     if ('"m2-3e-after-exit" = "ordinary-output-resumed"' in props and

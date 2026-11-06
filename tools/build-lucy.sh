@@ -270,7 +270,7 @@ cat > "$KEXT/Contents/Info.plist" <<PLIST
 		     range (OSBundleCompatibleVersion <= requested <= CFBundleVersion),
 		     otherwise kmutil cannot resolve the dependency at all.
 		     Select the minimum needed by this client's RX grouping and pre-open claim. -->
-		<key>org.example.AMDMapperProbe</key>
+		<key>org.maz1.AMDMapperProbe</key>
 		<string>$PROBE_DEP</string>
 	</dict>
 	<key>OSBundleRequired</key>

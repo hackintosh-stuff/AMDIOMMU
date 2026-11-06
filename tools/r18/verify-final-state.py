@@ -26,7 +26,7 @@ def main():
     assert not daemon.exists()
     job = subprocess.run(['launchctl', 'print', 'system/org.example.round18load'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     assert job.returncode != 0 and 'Could not find service' in job.stdout, job.stdout
-    props = run('ioreg', '-l', '-w0', '-r', '-c', 'org_example_AMDMapperProbe')
+    props = run('ioreg', '-l', '-w0', '-r', '-c', 'org_maz1_AMDMapperProbe')
     assert '"m2-3b-cleanup" = "detached-before-DTE-restore"' in props
     result = {
         'status': 'PASS',

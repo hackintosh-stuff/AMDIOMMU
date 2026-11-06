@@ -34,7 +34,7 @@
 //   （与 runM20ConfigProbe() 的处理方式一致）。
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
+void org_maz1_AMDMapperProbe::m2b2CaptureNicIdentity() {
     fM22b2Dma.nicIdentityKnown = false;
     fM22b2Dma.devid = 0;
     fM22b2Dma.vendorId = 0;

@@ -27,7 +27,7 @@ def upgraded(files):
     info = plistlib.loads(files['Info.plist'])
     info['CFBundleVersion'] = info['CFBundleShortVersionString'] = VERSION
     info['IOKitPersonalities']['RTL8111 PCIe Adapter']['DriverVersion'] = VERSION
-    info['OSBundleLibraries']['org.example.AMDMapperProbe'] = DEPENDENCY
+    info['OSBundleLibraries']['org.maz1.AMDMapperProbe'] = DEPENDENCY
     result['Info.plist'] = plistlib.dumps(info, sort_keys=False)
     return result
 

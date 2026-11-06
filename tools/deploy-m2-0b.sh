@@ -15,7 +15,7 @@
 
 set -eu
 
-BUNDLE_ID=org.example.AMDMapperProbe
+BUNDLE_ID=org.maz1.AMDMapperProbe
 LUCY_ID=com.insanelymac.RTL812xLucy
 AUXKC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 DEST_PROBE=/Library/Extensions/AMDMapperProbe.kext
@@ -86,7 +86,7 @@ cat <<EOF
 重启：  sudo reboot
 
 重启后验证（M2-0b 新增属性）：
-  ioreg -l -w0 -c org_example_AMDMapperProbe | grep -E 'm2-'
+  ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep -E 'm2-'
 
   关键判据（按重要性排序）：
     m2-config            必须是 "channel-ok" 或 "capability-found"

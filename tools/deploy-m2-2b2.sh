@@ -22,7 +22,7 @@ set -eu
 DO_PGT=0
 [ "${1:-}" = "--pgt" ] && DO_PGT=1
 
-BUNDLE_ID=org.example.AMDMapperProbe
+BUNDLE_ID=org.maz1.AMDMapperProbe
 LUCY_ID=com.insanelymac.RTL812xLucy
 AUXKC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 DEST_PROBE=/Library/Extensions/AMDMapperProbe.kext
@@ -180,11 +180,11 @@ cat <<EOF
 重启后验证：
 
   [惰性模式]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-b2'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-b2'
     期望：m2-b2-gate = "closed"，m2-b2-stage = "1-skipped-no-bootarg"
 
   [页表测试模式]
-    ioreg -l -w0 -c org_example_AMDMapperProbe | grep 'm2-b2'
+    ioreg -l -w0 -c org_maz1_AMDMapperProbe | grep 'm2-b2'
 
     内存布局（先看这些，地址不对后面都不可信）：
       m2-b2-pt-pa          页表物理基址，必须 4 KiB 对齐
@@ -241,7 +241,7 @@ cat <<EOF
       m2-b2-final-devicetable / -cmdbuf / -evtbuf  必须回到原值
 
     一键汇总（在 Mac 上）：
-      ioreg -l -w0 -c org_example_AMDMapperProbe | python3 tools/analyze-m2b2.py -
+      ioreg -l -w0 -c org_maz1_AMDMapperProbe | python3 tools/analyze-m2b2.py -
 
     关于事件类型：
       IO_PAGE_FAULT  页表没覆盖这个地址，或大小编码/权限位错

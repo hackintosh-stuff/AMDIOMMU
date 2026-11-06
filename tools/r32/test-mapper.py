@@ -24,7 +24,7 @@ spec.loader.exec_module(host)
 
 
 IOKIT = r'''
-class org_example_AMDMapperProbe;
+class org_maz1_AMDMapperProbe;
 enum { kIODirectionInOut=3, kIOMemoryPhysicallyContiguous=4,
        kIODMACommandOutputHost64=0 };
 static void *kernel_task=nullptr;
@@ -64,12 +64,12 @@ class IODMACommand {
 public:
     struct Segment64 { UInt64 fIOVMAddr, fLength; };
     enum { kMapped=1 };
-    org_example_AMDMapperProbe *mapper=nullptr;
+    org_maz1_AMDMapperProbe *mapper=nullptr;
     IOMemoryDescriptor *memory=nullptr;
     uint64_t mapAddress=0, mapLength=0;
     bool prepared=false;
     static IODMACommand *withSpecification(unsigned, unsigned, unsigned,
-        unsigned, unsigned, unsigned, org_example_AMDMapperProbe *, void *);
+        unsigned, unsigned, unsigned, org_maz1_AMDMapperProbe *, void *);
     IOReturn setMemoryDescriptor(IOMemoryDescriptor *, bool);
     IOReturn gen64IOVMSegments(UInt64 *, Segment64 *, UInt32 *);
     IOReturn complete(bool, bool);
@@ -82,7 +82,7 @@ public:
 
 DMA_ADAPTER = r'''
 IODMACommand *IODMACommand::withSpecification(unsigned, unsigned, unsigned,
-    unsigned, unsigned, unsigned, org_example_AMDMapperProbe *mapper, void *) {
+    unsigned, unsigned, unsigned, org_maz1_AMDMapperProbe *mapper, void *) {
     auto *cmd=new IODMACommand; cmd->mapper=mapper; return cmd;
 }
 IOReturn IODMACommand::setMemoryDescriptor(IOMemoryDescriptor *md, bool prepare) {
@@ -113,13 +113,13 @@ IOReturn IODMACommand::complete(bool, bool) {
 
 TESTS = r'''
 struct Fixture {
-    org_example_AMDMapperProbe self;
-    org_example_AMDMapperProbe::R17Domain *domain;
+    org_maz1_AMDMapperProbe self;
+    org_maz1_AMDMapperProbe::R17Domain *domain;
     IOLock lock;
     UInt64 leaves[amdtx::kPages]={};
     UInt8 fakeMMIO=0;
     M2B2CmdCtx caller{};
-    Fixture() : domain(new org_example_AMDMapperProbe::R17Domain{}) {
+    Fixture() : domain(new org_maz1_AMDMapperProbe::R17Domain{}) {
         std::memset(commandMemory,0,sizeof(commandMemory));
         commandMemory[M23_CMD_BUF_SIZE/4]=0xfeedbeef;
         semaphore=hardwareHead=tailWrites=0; signalCompletion=true;
@@ -256,14 +256,14 @@ def harness():
     text += host.section(header, 'static inline void m2b2WriteCmd(', '// ---- m2b2InvAddress')
     text += host.section(header, 'static inline UInt64 m2b2InvAddress()', '// ---- M2B2 measurement')
     text += host.section(header, 'static inline bool m2b2Submit(', '// ---- m2b2ReadBar64')
-    text += host.section(tx, 'struct org_example_AMDMapperProbe::R17Domain {',
+    text += host.section(tx, 'struct org_maz1_AMDMapperProbe::R17Domain {',
                          '// The pool owns mbufs;')
     text += host.section(tx, 'static const UInt32 kNoSlot',
-                         'IOReturn org_example_AMDMapperProbe::r17Callback(')
-    text += host.section(tx, 'void org_example_AMDMapperProbe::r17SyncCommand(',
-                         'void org_example_AMDMapperProbe::r17PublishWindow(')
-    text += host.section(tx, 'void org_example_AMDMapperProbe::r17Export(',
-                         'void org_example_AMDMapperProbe::r17Release(')
+                         'IOReturn org_maz1_AMDMapperProbe::r17Callback(')
+    text += host.section(tx, 'void org_maz1_AMDMapperProbe::r17SyncCommand(',
+                         'void org_maz1_AMDMapperProbe::r17PublishWindow(')
+    text += host.section(tx, 'void org_maz1_AMDMapperProbe::r17Export(',
+                         'void org_maz1_AMDMapperProbe::r17Release(')
     text += host.section(tx, 'static inline UInt64 r18LeafFor(',
                          '// ================= Round28:')
     return text + TESTS

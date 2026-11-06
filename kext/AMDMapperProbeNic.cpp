@@ -76,12 +76,12 @@
 // Note: the handler must return true, otherwise the notification is
 // automatically removed.
 
-bool org_example_AMDMapperProbe::publishHandler(
+bool org_maz1_AMDMapperProbe::publishHandler(
     void *target, void *refCon, IOService *newService, IONotifier *notifier) {
     (void)refCon; (void)notifier;
 
-    org_example_AMDMapperProbe *self =
-        (org_example_AMDMapperProbe *)target;
+    org_maz1_AMDMapperProbe *self =
+        (org_maz1_AMDMapperProbe *)target;
     if (!self || !newService) return true;
     if (self->fAuto) {
         // One path for explicit requester offers and the Info.plist default
@@ -120,7 +120,7 @@ bool org_example_AMDMapperProbe::publishHandler(
 // notification callback.
 
 // ===== AMDMapperProbeNic.cpp (original lines 646..669) =====
-void org_example_AMDMapperProbe::installPublishNotifier() {
+void org_maz1_AMDMapperProbe::installPublishNotifier() {
     // Matching dictionary: only IOPCIDevice matters here. The device-id is
     // verified in the handler, because during the publish phase not all
     // properties may be in place yet, and filtering via propertyMatching
@@ -134,7 +134,7 @@ void org_example_AMDMapperProbe::installPublishNotifier() {
     fPublishNotifier = IOService::addMatchingNotification(
         gIOFirstPublishNotification,
         matching,
-        &org_example_AMDMapperProbe::publishHandler,
+        &org_maz1_AMDMapperProbe::publishHandler,
         this,       // target
         nullptr,    // refCon
         0);         // priority
@@ -150,7 +150,7 @@ void org_example_AMDMapperProbe::installPublishNotifier() {
 
 // R52 auto mode enumerates endpoints, never a first match or a saved NIC path.
 // The first-publish callback uses the same per-requester attach routine.
-void org_example_AMDMapperProbe::AttachExistingDevices() {
+void org_maz1_AMDMapperProbe::AttachExistingDevices() {
     OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
     if (!matching) return;
     OSIterator *it = IOService::getMatchingServices(matching);

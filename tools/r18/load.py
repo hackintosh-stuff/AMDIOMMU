@@ -124,7 +124,7 @@ def main():
                             log('load_seed_echo : timeout nonmagic=1')
                     seeded = True
                 props = command('ioreg', '-l', '-w0', '-r', '-c',
-                                'org_example_AMDMapperProbe', required=False)
+                                'org_maz1_AMDMapperProbe', required=False)
                 expression = r'"' + re.escape(a.authorize_key) + r'" = "' + \
                     re.escape(a.authorize_value) + r'"'
                 if re.search(expression, props) and '"m2-b2-r15-authorize" = "done"' in props:

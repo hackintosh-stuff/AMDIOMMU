@@ -47,7 +47,7 @@ def main(round_id=52, abi='two-device-mapper-ABI2'):
     stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     installed = C.collect_system(out, stamp, VERSIONS, 'r%d' % round_id, abi)
     commands = [('boot-args.txt', ['sysctl', '-n', 'kern.bootargs']),
-                ('probe.txt', ['ioreg', '-l', '-w0', '-r', '-c', 'org_example_AMDMapperProbe']),
+                ('probe.txt', ['ioreg', '-l', '-w0', '-r', '-c', 'org_maz1_AMDMapperProbe']),
                 ('driver.txt', ['ioreg', '-l', '-w0', '-r', '-c', 'RTL8125'])]
     commands += [('network-' + role + '.txt', ['ifconfig', endpoint['interface']])
                  for role, endpoint in run['roles'].items()]

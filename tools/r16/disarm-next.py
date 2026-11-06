@@ -5,7 +5,7 @@ import plistlib
 import subprocess
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 def main():
-    props=subprocess.check_output(['ioreg','-l','-w0','-r','-c','org_example_AMDMapperProbe'],text=True)
+    props=subprocess.check_output(['ioreg','-l','-w0','-r','-c','org_maz1_AMDMapperProbe'],text=True)
     if '"m2-3a-cleanup" = "detached-before-DTE-restore"' not in props:
         raise ValueError('TX cleanup not confirmed; do not alter outstanding experiment')
     before=plistlib.loads(subprocess.check_output(['diskutil','info','-plist','disk2s1']))
