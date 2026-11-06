@@ -13,8 +13,8 @@ if p.is_absolute():
     raise SystemExit('upstream input must be relative to the fixed repository')
 p.resolve().relative_to(Path.cwd().resolve())
 PY
-python3 -B tools/apply-lucy-obs2.py "$SRC" --tx21 --rx34 --r59
+python3 -B tools/build/patch-lucy-obs.py "$SRC" --tx21 --rx34 --r59
 python3 -B tools/r21/abi.py --check-r59
-sh tools/build-lucy.sh --r59 "$SRC"
-sh tools/build-m1a.sh
+sh tools/build/lucy.sh --r59 "$SRC"
+sh tools/build/probe.sh
 printf '%s\n' 'Round59 built: Probe 0.66.0 and Lucy 1.1.240 with 8 x 128-page RX groups; retain RealtekRTL8111 3.0.54'

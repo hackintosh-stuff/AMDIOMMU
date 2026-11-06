@@ -4,9 +4,9 @@
 
 Two build variants exist and accept different boot-args:
 
-- **Production** (default): `sh tools/build-m1a.sh` → `build-m1a/AMDMapperProbe.kext`.
+- **Production** (default): `sh tools/build/probe.sh` → `build-m1a/AMDMapperProbe.kext`.
   Compiles the six production translation units only.
-- **Debug**: `sh tools/build-m1a-debug.sh` → `build-m1a-debug/AMDMapperProbe.kext`.
+- **Debug**: `sh tools/build/probe-debug.sh` → `build-m1a-debug/AMDMapperProbe.kext`.
   Adds `kext/*Debug.cpp` and `-DAMD_MAPPER_PROBE_DEBUG=1`, restoring the retired
   M2 experiment modes. See "Retired M2 experiment modes" below.
 

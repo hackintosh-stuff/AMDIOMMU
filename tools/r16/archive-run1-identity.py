@@ -52,7 +52,7 @@ def deps(root,script,driver=False):
   src=next(root.glob('RTL812xLucy-*'));rel=src.name
   variables={'SDK':rel+'/MacKernelSDK','SRC':rel,'DRV':rel+'/RTL812xLucy'}
   cf=flags(text,'CFLAGS',variables);cc=flags(text,'CFLAGS_C',variables)
-  sources=sorted((src/'RTL812xLucy').glob('*.cpp'))+sorted((src/'RTL812xLucy').glob('*.c'))+[root/'tools/lucy-kmod-info.cpp']
+  sources=sorted((src/'RTL812xLucy').glob('*.cpp'))+sorted((src/'RTL812xLucy').glob('*.c'))+[root/'tools/build/lucy-kmod-info.cpp']
  else:
   sdk=run(['xcrun','--sdk','macosx','--show-sdk-path']).strip()
   ver=run(['xcrun','--sdk','macosx','--show-sdk-version']).strip()
@@ -104,15 +104,15 @@ def main():
  if out.exists():raise RuntimeError('refuse overwrite '+str(out))
  ds=next(DRIVER.glob('RTL812xLucy-*'))
  paths={'driver':set(),'probe':set(),'external':{Path(__file__).resolve()}}
- for rel in [str(ds.relative_to(DRIVER))+'/RTL812xLucy',str(ds.relative_to(DRIVER))+'/KernelSPI',str(ds.relative_to(DRIVER))+'/MacKernelSDK','tools/apply-lucy-obs2.py','tools/build-lucy.sh','tools/lucy-kmod-info.cpp','tools/lucy-obs','tools/r16','build-lucy/RTL812xLucy.kext',a.driver_log,'build-identity.json','test-driver-staging.log']:
+ for rel in [str(ds.relative_to(DRIVER))+'/RTL812xLucy',str(ds.relative_to(DRIVER))+'/KernelSPI',str(ds.relative_to(DRIVER))+'/MacKernelSDK','tools/build/patch-lucy-obs.py','tools/build/lucy.sh','tools/build/lucy-kmod-info.cpp','tools/lucy-obs','tools/r16','build-lucy/RTL812xLucy.kext',a.driver_log,'build-identity.json','test-driver-staging.log']:
   paths['driver'].update(tree(DRIVER/rel))
- for rel in ['kext','tools/build-m1a.sh','tools/layout-check.cpp','tools/lucy-obs','tools/r16','build-m1a/AMDMapperProbe.kext']:
+ for rel in ['kext','tools/build/probe.sh','tools/dev/layout-check.cpp','tools/lucy-obs','tools/r16','build-m1a/AMDMapperProbe.kext']:
   paths['probe'].update(tree(PROBE/rel))
  # Existing probe build logs, if present (not invented by this post-run capture).
  logs=[q for q in PROBE.glob('*') if q.is_file() and q.suffix in ('.log','.txt') and ('build' in q.name or 'r16' in q.name)]
  paths['probe'].update(logs)
- dc,dr,di=deps(DRIVER,Path('tools/build-lucy.sh'),True)
- pc,pr,pi=deps(PROBE,Path('tools/build-m1a.sh'))
+ dc,dr,di=deps(DRIVER,Path('tools/build/lucy.sh'),True)
+ pc,pr,pi=deps(PROBE,Path('tools/build/probe.sh'))
  for q in di|pi:
   if str(q).startswith(str(DRIVER)+'/'):paths['driver'].add(q)
   elif str(q).startswith(str(PROBE)+'/'):paths['probe'].add(q)
@@ -169,8 +169,8 @@ def main():
   'probe archive: complete kext/ plus actual build script/shared headers and final bundle/build logs found.\n'
   'external archive: compiler -M dependency closure outside project roots plus SDKSettings/libkmod; original absolute paths recorded as root-relative members.\n'
   'Compiler executable hashes and versions identify provenance; compiler executables are NOT backed up.\n'
-  'To rebuild driver: extract driver archive into a new writable directory, then sh tools/build-lucy.sh (requires matching CLT toolchain). It replaces ONLY the new directory build-lucy/.\n'
-  'To rebuild probe: extract probe archive into new directory, sh tools/build-m1a.sh with matching CLT/macOS SDK. Probe uses -g; original compilation root /Users/ling/r12work is encoded in debug information. Different replay root may change UUID/hash; preserve/rebase debug compilation directory if checking exact bytes.\n'
+  'To rebuild driver: extract driver archive into a new writable directory, then sh tools/build/lucy.sh (requires matching CLT toolchain). It replaces ONLY the new directory build-lucy/.\n'
+  'To rebuild probe: extract probe archive into new directory, sh tools/build/probe.sh with matching CLT/macOS SDK. Probe uses -g; original compilation root /Users/ling/r12work is encoded in debug information. Different replay root may change UUID/hash; preserve/rebase debug compilation directory if checking exact bytes.\n'
   'Binary UUID equality with captured loaded UUID links build to running image identity; binary SHA equality links build to captured load-source files, not an independently hashed running kernel image.\n')
  print('ARCHIVE DONE',out)
  print(json.dumps({k:v for k,v in identities.items() if k.endswith('comparison')},indent=2))

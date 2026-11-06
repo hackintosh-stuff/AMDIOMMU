@@ -2349,7 +2349,7 @@ void RTL8125::obsFree()
  * last writer writes, so a writer whose slot was taken mid-body still
  * overwrites the new owner's fields and the new owner then stamps the
  * result. The surviving record is one writer's seq over two writers' bytes.
- * tools/r11/verify-write-protocol.py reproduces exactly that: 13 of 13 body
+ * tools/verify/write-protocol.py reproduces exactly that: 13 of 13 body
  * fields foreign.
  *
  * Round 11 holds a bounded spin lock across "claim ticket, claim slot, fill

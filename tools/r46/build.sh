@@ -12,9 +12,9 @@ import sys
 root = Path.cwd().resolve()
 (root / sys.argv[1]).resolve().relative_to(root)
 PY
-python3 -B tools/apply-lucy-obs2.py "$SRC" --tx21 --rx34
+python3 -B tools/build/patch-lucy-obs.py "$SRC" --tx21 --rx34
 # Round46 changes the Lucy TSO path; the accepted Round44 mapper ABI is unchanged.
 python3 -B tools/r21/abi.py --check-r44
-sh tools/build-lucy.sh "$SRC"
-sh tools/build-m1a.sh
+sh tools/build/lucy.sh "$SRC"
+sh tools/build/probe.sh
 printf '%s\n' 'Round46 built: RTL812xLucy 1.1.231; IPv4 TSO on / IPv6 TSO on; AMDMapperProbe 0.53.0 unchanged; ordinary per-device IOMapper ABI1; finite TCP6 before/after normal down/up'

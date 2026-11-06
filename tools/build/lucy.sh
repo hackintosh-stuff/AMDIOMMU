@@ -1,7 +1,7 @@
 #!/bin/sh
 # build-lucy.sh — 从源码构建 RTL812xLucy，不依赖 Xcode.app（只需 Command Line Tools）。
 #
-# 用法： sh tools/build-lucy.sh [source-dir]
+# 用法： sh tools/build/lucy.sh [source-dir]
 # 相对源码目录基于项目根目录；兼容既有显式绝对路径；省略时自动选择。
 # 输出： build-lucy/RTL812xLucy.kext
 #
@@ -16,7 +16,7 @@
 #   混用系统头容易版本不一致。
 
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT"
 
 LUCY_VERSION=1.1.239
@@ -30,7 +30,7 @@ elif [ "$#" -gt 0 ] && [ "$1" = "--r59" ]; then
     LUCY_VERSION=1.1.240
     PROBE_DEP=0.66.0
 fi
-[ "$#" -le 1 ] || { echo "usage: sh tools/build-lucy.sh [--r59|--r64] [source-dir]"; exit 2; }
+[ "$#" -le 1 ] || { echo "usage: sh tools/build/lucy.sh [--r59|--r64] [source-dir]"; exit 2; }
 SRC=${1:-}
 if [ -z "$SRC" ]; then
     SRC=$(ls -d RTL812xLucy-*/ 2>/dev/null | head -1)
@@ -149,7 +149,7 @@ done
 # xcodebuild 会跑 CreateKModInfo.perl 自动生成 kmod_info；我们绕开 Xcode，
 # 就必须自己提供，否则二进制没有 _kmod_info，kextload 会直接拒绝。
 echo "== kmod_info =="
-xcrun clang++ $CFLAGS "-DLUCY_KMOD_VERSION=\"$LUCY_VERSION\"" -c tools/lucy-kmod-info.cpp -o "$W/lucy-kmod-info.o"
+xcrun clang++ $CFLAGS "-DLUCY_KMOD_VERSION=\"$LUCY_VERSION\"" -c tools/build/lucy-kmod-info.cpp -o "$W/lucy-kmod-info.o"
 OBJS="$OBJS $W/lucy-kmod-info.o"
 
 # ---- 链接 ----

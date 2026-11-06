@@ -62,7 +62,7 @@ def main():
         raise ValueError('unexpected finite job target')
     wanted = next_boot_args(current)
     D.run(['sudo', '-n', 'true'])
-    D.run([sys.executable, ROOT / 'tools/r13/set-bootarg.py', config, 'amdiommu=off'])
+    D.run([sys.executable, ROOT / 'tools/dev/set-bootarg.py', config, 'amdiommu=off'])
     D.run(['sudo', '-n', 'nvram', 'boot-args=' + wanted])
     got = D.output('nvram', 'boot-args').split(None, 1)[1].strip()
     back = plistlib.loads(config.read_bytes())['NVRAM']['Add'][D.NVRAM_GUID]['boot-args']

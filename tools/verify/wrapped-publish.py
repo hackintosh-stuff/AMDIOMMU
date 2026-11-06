@@ -30,7 +30,7 @@ WHY THIS TEST COMPILES THE REAL PUBLISH EXPRESSION
 --------------------------------------------------
 Fixing `tools/lucy-obs/RTL812xObsWrite.hpp` alone would change nothing: the
 defect was in the DRIVER's publish path, which lives in
-`tools/apply-lucy-obs2.py` as a text template. A test that re-implemented
+`tools/build/patch-lucy-obs.py` as a text template. A test that re-implemented
 "publish" would prove nothing about what the driver does.
 
 So this script:
@@ -113,7 +113,7 @@ def patched_publish_body():
 
     THE PATCH TEMPLATE IS AUTHORITATIVE.
     -----------------------------------
-    `tools/apply-lucy-obs2.py` is what produces the driver's `obsPublish()`; a
+    `tools/build/patch-lucy-obs.py` is what produces the driver's `obsPublish()`; a
     tree that was patched in an earlier round is a different artefact and may
     predate the fix. So the template is read first, and any patched tree that
     happens to be on this host is used only as a CROSS-CHECK -- if the two
@@ -138,7 +138,7 @@ def patched_publish_body():
     if not m2:
         raise SystemExit('refused: obsPublish() not found in the template')
     body = extract_body(template, m2.end() - 1)
-    provenance = 'the OBS_METHODS template in tools/apply-lucy-obs2.py'
+    provenance = 'the OBS_METHODS template in tools/build/patch-lucy-obs.py'
 
     # Cross-check against a patched tree, if this host has one.
     for cand in ('RTL812xLucy-639144d1f284a9fee222a518691b01494f5e265d',

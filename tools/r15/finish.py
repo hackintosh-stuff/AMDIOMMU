@@ -22,7 +22,7 @@ root = pathlib.Path(__file__).resolve().parents[2]
 guid = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 # `arm` permits ordinary device attachment but does not select pgt/MMIO/DTE
 # experiments. Preserve every other existing NVRAM argument exactly in order.
-subprocess.run(['python3', str(root/'tools/r13/set-bootarg.py'),
+subprocess.run(['python3', str(root/'tools/dev/set-bootarg.py'),
                 str(config), 'amdiommu=arm'], check=True)
 args = plistlib.loads(config.read_bytes())['NVRAM']['Add'][guid]['boot-args']
 subprocess.run(['sudo', 'nvram', 'boot-args=' + args], check=True)

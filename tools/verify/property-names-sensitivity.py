@@ -3,7 +3,7 @@
 
 WHY THIS EXISTS
 ---------------
-The first version of tools/r14/verify-property-names.py used one regex with
+The first version of tools/verify/property-names.py used one regex with
 `[^,]+` for the leading argument, so it required a comma before the property key.
 Every two-argument `setProperty("key", value)` was skipped, and the script
 reported "no collisions" -- while the collision it exists for was present in the
@@ -79,7 +79,7 @@ def main():
     # The work tree is created under the PROJECT, not under the platform temp
     # directory: the Windows sandbox refuses writes to a temp path it created for
     # another process, and a PermissionError there would read as a checker
-    # failure. tools/r13/patch-rmtree.py's force-delete handles the read-only
+    # failure. tools/dev/patch-rmtree.py's force-delete handles the read-only
     # bits a copied tree inherits.
     work = os.path.join(ROOT, 'build-work-r14', 'propname-case')
     shutil.rmtree(work, ignore_errors=True)

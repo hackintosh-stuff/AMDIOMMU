@@ -97,7 +97,7 @@ static void finish(RTL8125&d,IOService&o){auto c=control(r16tx::kDisarm);
 def main():
  p=argparse.ArgumentParser();p.add_argument('--emit');p.add_argument('--source');a=p.parse_args()
  # Structural integration checks validate the real generator placements.
- g=runpy.run_path(str(ROOT/'tools/apply-lucy-obs2.py'))
+ g=runpy.run_path(str(ROOT/'tools/build/patch-lucy-obs.py'))
  assert 'r16TxMap' not in g['OUTPUT_FILL_NEW']  # never after OWN stores
  if a.source:
   cpp=Path(a.source).read_text()

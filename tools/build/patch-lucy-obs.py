@@ -94,14 +94,14 @@ groups and three fixed commands; normal down/up retains these resources.
 Select --tx 21 --rx 34.
 
 Usage:
-    py -3 tools/apply-lucy-obs2.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33|34]
+    py -3 tools/build/patch-lucy-obs.py <path-to-RTL812xLucy-commit-dir> [--tx 16..21] [--rx 15|27|28|29|30|31|32|33|34]
 Exit 0 = applied (or already applied). Non-zero = refused, with the reason.
 """
 import os
 import re
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HDR_SRC = os.path.join(HERE, "lucy-obs", "RTL812xObsLog.hpp")
 # Round 11: the write/publish protocol lives in its own header so the host test
 # can drive the very same code the driver runs. See that file's comment for
@@ -832,7 +832,7 @@ void RTL8125::obsFree()
  * last writer writes, so a writer whose slot was taken mid-body still
  * overwrites the new owner's fields and the new owner then stamps the
  * result. The surviving record is one writer's seq over two writers' bytes.
- * tools/r11/verify-write-protocol.py reproduces exactly that: 13 of 13 body
+ * tools/verify/write-protocol.py reproduces exactly that: 13 of 13 body
  * fields foreign.
  *
  * Round 11 holds a bounded spin lock across "claim ticket, claim slot, fill
@@ -2430,7 +2430,7 @@ def main():
     # header changed in tools/lucy-obs/ a re-run reported "already applied" and
     # left the driver compiling the OLD header. That is a silent divergence
     # between the file the manifest hashes and the file the build uses, and
-    # tools/r13/deps.sh now fails on it.
+    # tools/verify/deps.sh now fails on it.
     #
     # So an already-applied tree still gets its header copies refreshed, and the
     # exit status says whether anything changed.
@@ -2458,7 +2458,7 @@ def main():
                 print()
                 print("      rm -rf %s" % root)
                 print("      # re-extract RTL812xLucy-<commit> from the tarball")
-                print("      python3 tools/apply-lucy-obs2.py <dir>")
+                print("      python3 tools/build/patch-lucy-obs.py <dir>")
                 return 1
             candidate_hpp = hpp_text
             fresh, stale = body_is_current(cpp_text)
@@ -2520,7 +2520,7 @@ def main():
                 print()
                 print("      rm -rf %s" % root)
                 print("      # re-extract RTL812xLucy-<commit> from the tarball")
-                print("      python3 tools/apply-lucy-obs2.py <dir>")
+                print("      python3 tools/build/patch-lucy-obs.py <dir>")
                 return 1
             # Do not rewrite the installed generator input before the full
             # accepted-body checks above pass. Only the grouping macro changes.

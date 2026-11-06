@@ -77,7 +77,7 @@ def main():
     tokenarg='amdiommu=pgt.batch4.t0x%08x'%a.token
     args=old.split(None,1)[1].strip().split()
     bootargs=' '.join([x for x in args if not x.startswith('amdiommu=')]+[tokenarg])
-    run(['python3',str(ROOT/'tools/r13/set-bootarg.py'),str(config),tokenarg])
+    run(['python3',str(ROOT/'tools/dev/set-bootarg.py'),str(config),tokenarg])
     run(['sudo','nvram','boot-args='+bootargs])
     cfg=plistlib.loads(config.read_bytes())
     if cfg['NVRAM']['Add']['7C436110-AB2A-4BBB-A880-FE41995C9F82']['boot-args']!=bootargs: raise ValueError('EFI/NVRAM differ')

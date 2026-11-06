@@ -5,7 +5,7 @@ import plistlib
 import re
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 errors = []
 count = 0
 readme = ROOT / "README.md"

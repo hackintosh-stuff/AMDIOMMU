@@ -20,7 +20,7 @@ def main():
         raise ValueError('wrong EFI disk; no write')
     current=subprocess.check_output(['nvram','boot-args'],text=True).split(None,1)[1].strip()
     args=' '.join([s for s in current.split() if not s.startswith('amdiommu=')]+['amdiommu=arm'])
-    subprocess.run(['python3',str(ROOT/'tools/r13/set-bootarg.py'),'/Volumes/EFI/EFI/OC/config.plist','amdiommu=arm'],check=True)
+    subprocess.run(['python3',str(ROOT/'tools/dev/set-bootarg.py'),'/Volumes/EFI/EFI/OC/config.plist','amdiommu=arm'],check=True)
     subprocess.run(['sudo','nvram','boot-args='+args],check=True)
     actual=subprocess.check_output(['nvram','boot-args'],text=True).split(None,1)[1].strip()
     cfg=plistlib.loads(pathlib.Path('/Volumes/EFI/EFI/OC/config.plist').read_bytes())

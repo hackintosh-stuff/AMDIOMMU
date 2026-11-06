@@ -31,13 +31,13 @@
 //
 // Every assertion is about the PROTOCOL's observable contract, not about the
 // implementation's internals, so the same test also runs against round 10's
-// protocol in tools/r11/verify-write-protocol.py and must fail there.
+// protocol in tools/verify/write-protocol.py and must fail there.
 // WHY THE INCLUDE IS NOT A RELATIVE PATH
 // --------------------------------------
 // This test must be compilable against SEVERAL versions of the protocol header
 // -- round 10's, round 11's and the shipped one -- because "the suite passes on
 // round 12" only means something if the same suite FAILS on the older ones
-// (tools/r11/verify-write-protocol.py does exactly that).
+// (tools/verify/write-protocol.py does exactly that).
 //
 // A relative `#include "../tools/lucy-obs/RTL812xObsWrite.hpp"` defeats that:
 // the path resolves from this file's directory, so `-I <other-dir>` is ignored

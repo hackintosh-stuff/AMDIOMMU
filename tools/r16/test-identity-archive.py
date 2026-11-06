@@ -13,7 +13,7 @@ with tempfile.TemporaryDirectory() as td:
   binary.write_bytes(struct.pack('<8I',0xfeedfacf,0x1000007,3,11,1,24,0,0)+struct.pack('<II',0x1b,24)+uuid.UUID(ident).bytes)
   (path/'Contents/Info.plist').write_text('fixture plist')
  for base in (driver,probe):
-  (base/'tools').mkdir(parents=True);(base/'tools/build-lucy.sh').write_text('fixture only')
+  (base/'tools').mkdir(parents=True);(base/'tools/build/lucy.sh').write_text('fixture only')
  (driver/'RTL812xLucy-fixture/RTL812xLucy').mkdir(parents=True)
  (driver/'RTL812xLucy-fixture/RTL812xLucy/A.cpp').write_text('fixture source')
  (driver/'build-driver-staging.log').write_text('fixture build log')

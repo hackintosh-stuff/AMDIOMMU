@@ -44,7 +44,7 @@ if supp.exists():
  meta=json.loads((supp/'manifest.json').read_text())
  assert digest(supp/'layout-check-source.tar.gz')==meta['archive_sha256']
  with tarfile.open(supp/'layout-check-source.tar.gz') as t:
-  assert t.getnames()==['tools/layout-check.cpp']
-  data=t.extractfile('tools/layout-check.cpp').read()
+  assert t.getnames()==['tools/dev/layout-check.cpp']
+  data=t.extractfile('tools/dev/layout-check.cpp').read()
   assert len(data)==meta['source_size'] and hashlib.sha256(data).hexdigest()==meta['source_sha256']
 print(json.dumps({'status':'PASS','layout_supplement_verified':supp.exists(),'verified_file_counts':counts,'total_input_bytes':total,'archives_sha256':archives,'identity':{k:v for k,v in identity.items() if k.endswith('comparison')}},indent=2))

@@ -582,7 +582,7 @@ static void testEveryReasonHasText() {
 // holes appeared in the first place.
 static void testGateIsCalledByProduction() {
     // The probe source is not available at runtime, so this is asserted by
-    // tools/r12/verify-gate-wiring.py, which reads the .cpp. Here we assert the
+    // tools/verify/gate-wiring.py, which reads the .cpp. Here we assert the
     // property the wiring depends on: that a single function decides, and that
     // breaking any one term changes its answer. That is what makes the wiring
     // meaningful -- if the gate returned nullptr for everything, wiring it up

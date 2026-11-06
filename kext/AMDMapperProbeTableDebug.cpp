@@ -1,7 +1,7 @@
 // AMDMapperProbeTable.cpp -- M2-2a-2/2a-3 device table, enable, cmd channel
 //
 // Part of the AMDMapperProbe kext. Split out of the original
-// single-file AMDMapperProbe.cpp by tools/split-probe.py; the
+// single-file AMDMapperProbe.cpp by tools/dev/split-probe.py; the
 // function bodies are unchanged and in their original order.
 
 #include "AMDMapperProbe.hpp"

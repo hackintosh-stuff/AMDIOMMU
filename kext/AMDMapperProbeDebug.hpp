@@ -4,7 +4,7 @@
 // Only included by the Debug build (AMD_MAPPER_PROBE_DEBUG=1); the production
 // build's main switch accepts just amdiommu=passive / auto-attach. The legacy
 // experiment modules live in kext/*Debug.cpp and are built by
-// tools/build-m1a-debug.sh.
+// tools/build/probe-debug.sh.
 
 #ifndef AMDMapperProbeDebug_hpp
 #define AMDMapperProbeDebug_hpp

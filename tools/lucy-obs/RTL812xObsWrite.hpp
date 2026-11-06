@@ -115,7 +115,7 @@
  *
  * The fix is one authority, the same shape `dropped` already had: the writer
  * takes the counter the caller will publish and never writes the ring header's
- * copy. `tools/r13/verify-wrapped-publish.py` compiles the REAL `obsPublish()`
+ * copy. `tools/verify/wrapped-publish.py` compiles the REAL `obsPublish()`
  * body -- extracted from the patched driver source, not a restatement of it --
  * against this header, and requires the published value to equal the number of
  * slots actually displaced.
@@ -135,7 +135,7 @@
  *
  * Kept here rather than included from RTL812xObsLog.hpp so the host test can
  * compile without the driver's IOKit headers. The numbers are asserted against
- * that header by tools/r11/check-obs-layout.py, so the two cannot drift.
+ * that header by tools/verify/obs-layout.py, so the two cannot drift.
  */
 #ifndef RTL812xObsWire_hpp
 #define RTL812xObsWire_hpp

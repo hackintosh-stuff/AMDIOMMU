@@ -37,8 +37,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-CURRENT = os.path.join(ROOT, 'tools', 'r13', 'record-loaded.sh')
-FROZEN = os.path.join(ROOT, 'tools', 'r12', 'record-loaded.sh')
+CURRENT = os.path.join(ROOT, 'tools', 'verify', 'record-loaded.sh')
+FROZEN = os.path.join(ROOT, 'tools', 'verify', 'record-loaded-frozen.sh')
 WORK = os.path.join(ROOT, 'build-work-r13', 'recordloaded')
 
 FAILS = []

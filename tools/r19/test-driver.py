@@ -219,7 +219,7 @@ def main():
     ap.add_argument('--source')
     a = ap.parse_args()
     # Structural checks against the real generator, not against a copy of it.
-    g = runpy.run_path(str(ROOT / 'tools/apply-lucy-obs2.py'))
+    g = runpy.run_path(str(ROOT / 'tools/build/patch-lucy-obs.py'))
     assert 'r17TxMap' not in g['OUTPUT_FILL_NEW']  # never after OWN stores
     tx18 = g['select_tx']('18')
     g['select_tx']('16')                            # selection must be reversible

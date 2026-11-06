@@ -11,7 +11,7 @@
 # That list was a claim about the build, not a record of it. It omitted, among
 # other things:
 #
-#   * tools/lucy-kmod-info.cpp -- a real translation unit of the DRIVER build
+#   * tools/build/lucy-kmod-info.cpp -- a real translation unit of the DRIVER build
 #     (build-lucy.sh compiles it and links it in), absent from the manifest;
 #   * the driver's linux/ headers, which the .c files include;
 #   * the SDK and MacKernelSDK headers, which decide what the code MEANS;
@@ -57,21 +57,21 @@ SRC=${SRC%/}
 DRV="$SRC/RTL812xLucy"
 # THE DRIVER'S SDK HAS ITS OWN NAME HERE.
 #
-# tools/build-lucy.sh calls the MacKernelSDK directory `SDK`, and
-# tools/build-m1a.sh calls the macOS SDK directory `SDK`. Both names are right
+# tools/build/lucy.sh calls the MacKernelSDK directory `SDK`, and
+# tools/build/probe.sh calls the macOS SDK directory `SDK`. Both names are right
 # in their own script; in one script they would collide. So the two are named
 # SYS_SDK (macOS SDK, used by the probe) and MSDK (MacKernelSDK, used by the
-# driver), and tools/r13/verify-build-inputs.py resolves each script's own
+# driver), and tools/verify/build-inputs.py resolves each script's own
 # variable definitions before comparing the flag strings. Comparing the raw text
 # would fail on the naming difference alone and could hide a real one behind it.
 SYS_SDK="$SDK"
 MSDK="$SRC/MacKernelSDK"
 
-# ---- the probe's flags, copied from tools/build-m1a.sh -------------------
+# ---- the probe's flags, copied from tools/build/probe.sh -------------------
 #
 # COPIED, not sourced: build-m1a.sh is a build script, not a library, and
 # sourcing it would run the build. The duplication is checked by
-# tools/r13/verify-build-inputs.py, which reads both files and requires the
+# tools/verify/build-inputs.py, which reads both files and requires the
 # flag strings to be identical -- so a change in one without the other is a
 # test failure rather than a silent divergence.
 PROBE_CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
@@ -90,7 +90,7 @@ PROBE_SRCS="kext/AMDMapperProbe.cpp \
       kext/AMDMapperProbeObsDebug.cpp \
       kext/AMDMapperProbePgtDebug.cpp"
 
-# ---- the driver's flags, copied from tools/build-lucy.sh -----------------
+# ---- the driver's flags, copied from tools/build/lucy.sh -----------------
 LUCY_CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
  -nostdinc++ -std=gnu++17 -O0 \
  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -D__APPLE_KEXT__ \
@@ -192,9 +192,9 @@ if [ -d "$DRV" ]; then
             exit 1; }
     done
     # THE TRANSLATION UNIT ROUND 12 NEVER LISTED.
-    echo "### tools/lucy-kmod-info.cpp" >> "$OUT/lucy-deps.raw.txt"
+    echo "### tools/build/lucy-kmod-info.cpp" >> "$OUT/lucy-deps.raw.txt"
     # shellcheck disable=SC2086
-    xcrun clang++ $LUCY_CFLAGS -M tools/lucy-kmod-info.cpp >> "$OUT/lucy-deps.raw.txt" 2>&1 || {
+    xcrun clang++ $LUCY_CFLAGS -M tools/build/lucy-kmod-info.cpp >> "$OUT/lucy-deps.raw.txt" 2>&1 || {
         echo "FAIL: the compiler refused to list dependencies for lucy-kmod-info.cpp" >&2
         exit 1; }
 else

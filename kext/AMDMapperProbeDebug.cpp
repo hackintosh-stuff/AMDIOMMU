@@ -3,7 +3,7 @@
 //
 // The production build does NOT compile this file: AMDMapperProbe.cpp provides
 // the auto/auto-attach-only versions of the same member functions, guarded by
-// #if !AMD_MAPPER_PROBE_DEBUG. Build with tools/build-m1a-debug.sh to get the
+// #if !AMD_MAPPER_PROBE_DEBUG. Build with tools/build/probe-debug.sh to get the
 // historical amdiommu=arm/mmio/write/table/enable/cmd/pgt* modes back.
 
 #include "AMDMapperProbe.hpp"

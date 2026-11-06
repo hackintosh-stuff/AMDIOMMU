@@ -78,7 +78,7 @@ def check(name, ok, detail=''):
 
 # ---------------------------------------------------------------------------
 # The round-11 script, frozen. This is the text that produced the round-11
-# evidence, reproduced from tools/en2-run.sh as it stood at the end of round 11
+# evidence, reproduced from tools/dev/en2-run.sh as it stood at the end of round 11
 # (only the round-12 additions are absent).
 # ---------------------------------------------------------------------------
 ROUND11 = r'''#!/bin/sh

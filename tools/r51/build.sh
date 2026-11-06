@@ -12,9 +12,9 @@ import sys
 root = Path.cwd().resolve()
 (root / sys.argv[1]).resolve().relative_to(root)
 PY
-python3 -B tools/apply-lucy-obs2.py "$SRC" --tx21 --rx34
+python3 -B tools/build/patch-lucy-obs.py "$SRC" --tx21 --rx34
 # Round51 retains R49 ABI2 and its 64-page decoder/layout contract.
 python3 -B tools/r21/abi.py --check-r49
-sh tools/build-lucy.sh "$SRC"
-sh tools/build-m1a.sh
+sh tools/build/lucy.sh "$SRC"
+sh tools/build/probe.sh
 printf '%s\n' 'Round51 built: RTL812xLucy 1.1.236; IPv4 TSO on / IPv6 TSO on; AMDMapperProbe 0.58.0; ordinary DMA32 / low IOVA pool / NPCache-aware map invalidation; 16 RX groups of 64 pages; IVRS/PCI discovery; per-device IOMapper ABI2; finite TCP6 before/after normal down/up'

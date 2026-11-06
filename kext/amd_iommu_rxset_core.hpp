@@ -120,7 +120,7 @@ struct RearmRec {
 //
 // Offsets, not a struct: the reader must not depend on the compiler's padding
 // of a type it does not share with the driver. These are asserted against the
-// driver's own header by tools/r14/check-rxpost-layout.py, which parses both
+// driver's own header by tools/verify/rxpost-layout.py, which parses both
 // declarations.
 enum {
     RXB_MAGIC          = 0,

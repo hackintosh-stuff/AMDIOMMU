@@ -28,9 +28,9 @@ if a.layout_supplement:
  supplement=Path(a.layout_supplement);meta=json.loads((supplement/'manifest.json').read_text())
  assert hashlib.sha256((supplement/'layout-check-source.tar.gz').read_bytes()).hexdigest()==meta['archive_sha256']
  with tarfile.open(supplement/'layout-check-source.tar.gz') as t:
-  assert t.getnames()==['tools/layout-check.cpp'];data=t.extractfile('tools/layout-check.cpp').read()
+  assert t.getnames()==['tools/dev/layout-check.cpp'];data=t.extractfile('tools/dev/layout-check.cpp').read()
  assert len(data)==meta['source_size'] and hashlib.sha256(data).hexdigest()==meta['source_sha256']
- path=scratch/'probe/tools/layout-check.cpp';assert not path.exists()
+ path=scratch/'probe/tools/dev/layout-check.cpp';assert not path.exists()
  with path.open('xb') as f:f.write(data)
 helpers=list((scratch/'external').rglob('archive-run1-identity.py'));assert len(helpers)==1
 spec=importlib.util.spec_from_file_location('identity',helpers[0]);helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
@@ -83,7 +83,7 @@ def build(label,normalized=False):
 build('driver');build('probe')
 if not results['probe']['binary_sha256_matches_original']:
  # A second bounded replay preserves original debug paths; no original files changed.
- path=scratch/'probe/tools/build-m1a.sh';text=path.read_text()
+ path=scratch/'probe/tools/build/probe.sh';text=path.read_text()
  options=' -fdebug-compilation-dir='+shlex.quote(summary['probe_root'])+' -fdebug-prefix-map='+shlex.quote(str(scratch/'probe')+'='+summary['probe_root'])+' -fdebug-prefix-map='+shlex.quote(str(external)+'=')+' -fdebug-prefix-map='+shlex.quote(str(scratch/'sdk-overlay')+'='+summary['sys_sdk'])
  text=text.replace('CFLAGS="','CFLAGS="'+options+' ',1);path.write_text(text)
  build('probe',True)

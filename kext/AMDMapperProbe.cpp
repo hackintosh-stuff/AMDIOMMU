@@ -1,7 +1,7 @@
 // AMDMapperProbe.cpp -- entry point, IOMapper contract, kmod glue
 //
 // Part of the AMDMapperProbe kext. Split out of the original
-// single-file AMDMapperProbe.cpp by tools/split-probe.py; the
+// single-file AMDMapperProbe.cpp by tools/dev/split-probe.py; the
 // function bodies are unchanged and in their original order.
 
 #include "AMDMapperProbe.hpp"
@@ -117,7 +117,7 @@ bool org_maz1_AMDMapperProbe::initHardware(IOService *provider) {
     //
     //   fAllocName only exists in the XNU_KERNEL_PRIVATE view (IOMapper.h:75);
     //   third-party kexts cannot see that name, but in the SDK view it lands
-    //   in __reserved[6] (offset 48..56). tools/layout-check.cpp has verified
+    //   in __reserved[6] (offset 48..56). tools/dev/layout-check.cpp has verified
     //   this aliasing mechanically with offsetof (48 == 48).
     //
     //   On the normal path fAllocName is allocated by
@@ -146,7 +146,7 @@ bool org_maz1_AMDMapperProbe::initHardware(IOService *provider) {
 // The main switch now accepts only amdiommu=passive and amdiommu=auto-attach.
 // The retired M2 experiment modes (arm/mmio/write/table/enable/cmd/pgt*)
 // and their entry points live in AMDMapperProbeDebug.cpp, compiled by
-// tools/build-m1a-debug.sh with AMD_MAPPER_PROBE_DEBUG=1.
+// tools/build/probe-debug.sh with AMD_MAPPER_PROBE_DEBUG=1.
 #if !AMD_MAPPER_PROBE_DEBUG
 
 bool org_maz1_AMDMapperProbe::start(IOService *provider) {

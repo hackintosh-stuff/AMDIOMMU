@@ -44,7 +44,7 @@ def main():
     wanted = ' '.join([x for x in current.split() if not x.startswith('amdiommu=')]
                       + ['amdiommu=arm'])
     D.run(['sudo', '-n', 'true'])
-    D.run([sys.executable, ROOT / 'tools/r13/set-bootarg.py', config, 'amdiommu=arm'])
+    D.run([sys.executable, ROOT / 'tools/dev/set-bootarg.py', config, 'amdiommu=arm'])
     D.run(['sudo', '-n', 'nvram', 'boot-args=' + wanted])
     got = D.output('nvram', 'boot-args').split(None, 1)[1].strip()
     back = plistlib.loads(config.read_bytes())['NVRAM']['Add'][D.NVRAM_GUID]['boot-args']

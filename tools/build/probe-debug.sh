@@ -3,9 +3,9 @@
 # subsystem (kext/*Debug.cpp) and the historical amdiommu=<mode> values.
 #
 # Output: build-m1a-debug/AMDMapperProbe.kext
-# The production build (sh tools/build-m1a.sh) is unchanged and accepts
+# The production build (sh tools/build/probe.sh) is unchanged and accepts
 # only amdiommu=passive / auto-attach.
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT"
-PROBE_DEBUG=1 sh tools/build-m1a.sh "$@"
+PROBE_DEBUG=1 sh tools/build/probe.sh "$@"

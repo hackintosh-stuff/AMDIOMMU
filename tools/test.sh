@@ -2,7 +2,7 @@
 # Userspace tests only. No network, installation, or hardware access.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-python3 "$ROOT/tools/check_source.py"
+python3 "$ROOT/tools/verify/source.py"
 WORK=$(mktemp -d "$ROOT/test-work.XXXXXX")
 CXX=${CXX:-clang++}
 # Sanitizers are enabled by default; do not silently retry without them.
@@ -22,7 +22,7 @@ printf 'TEST_COMPILER=%s\nSANITIZER_FLAGS=%s\n' "$CXX" "$SAN_FLAGS"
     -o "$WORK/offline-tests"
 "$WORK/offline-tests"
 "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g $SAN_FLAGS \
-    -I "$ROOT/include" "$ROOT/src/Ivrs.cpp" "$ROOT/tools/ivrs-inspect.cpp" \
+    -I "$ROOT/include" "$ROOT/src/Ivrs.cpp" "$ROOT/tools/dev/ivrs-inspect.cpp" \
     -o "$WORK/ivrs-inspect"
 python3 "$ROOT/tests/InspectorSmoke.py" "$WORK/ivrs-inspect" "$WORK" "$ROOT/fixtures"
 
@@ -98,7 +98,7 @@ printf '\n== round-12 cores ==\n'
 
 # The gate is only worth anything if the PRODUCTION verdict consults it. That
 # is a property of the source, so it is checked by reading the source.
-python3 "$ROOT/tools/r12/verify-gate-wiring.py"
+python3 "$ROOT/tools/verify/gate-wiring.py"
 
 # ---- round 14: the RX posted-buffer set --------------------------------
 #
@@ -116,7 +116,7 @@ printf '\n== round-14 RX set ==\n'
 # offsets, test). A drift does not fail to compile -- it decodes `capacity` out
 # of the middle of `addr` and yields plausible wrong ranges. So the three are
 # compared mechanically.
-python3 "$ROOT/tools/r14/check-rxpost-layout.py"
+python3 "$ROOT/tools/verify/rxpost-layout.py"
 
 # And the geometry assertion must be SENSITIVE. Round 14's first real-machine run
 # failed with `ragged-rearm-body` because publishCopy() started its copy at
@@ -124,22 +124,22 @@ python3 "$ROOT/tools/r14/check-rxpost-layout.py"
 # origin on both sides. Adding an assertion is not enough -- it has to fail on
 # the broken code. This reintroduces that one-line defect and requires the
 # geometry checks to catch it.
-python3 "$ROOT/tools/r14/verify-rxpost-geometry.py"
+python3 "$ROOT/tools/verify/rxpost-geometry.py"
 
 # Round 14's second real-machine run lost its RX blob because the probe published
 # the OSData and then a status STRING under the SAME property name; IOKit
 # replaces a property, so the blob vanished with no error. This scans every
 # setProperty call site for a name carrying two different kinds of value, and the
 # sensitivity check proves the scanner can actually see one.
-python3 "$ROOT/tools/r14/verify-property-names.py"
-python3 "$ROOT/tools/r14/verify-property-names-sensitivity.py"
+python3 "$ROOT/tools/verify/property-names.py"
+python3 "$ROOT/tools/verify/property-names-sensitivity.py"
 
 # Round 14's run 5 PANICKED in rxpostRecordRearm because kRxPostRegionBytes was
 # defined as kRxPostSnapshotMax -- one slot array too small -- while rxpostInit()
 # places the rearm ring after TWO slot arrays. The tail of the ring fell outside
 # the IOBufferMemoryDescriptor's mapping and the write faulted minutes later.
 # This check restores that exact definition and requires the build to reject it.
-python3 "$ROOT/tools/r14/verify-region-size.py"
+python3 "$ROOT/tools/verify/region-size.py"
 
 # The write protocol needs threads, so it is built with -pthread and without
 # ASan (TSan and ASan cannot be combined). It is run under TSan instead, which
@@ -148,7 +148,7 @@ python3 "$ROOT/tools/r14/verify-region-size.py"
 # ROUND 12: the include path is explicit (-I tools/lucy-obs) because the test
 # includes the protocol header by BARE NAME. That is deliberate: the same test
 # source is compiled against round-10 and round-11 headers by
-# tools/r11/verify-write-protocol.py, and a relative include would silently
+# tools/verify/write-protocol.py, and a relative include would silently
 # resolve to the shipped header in every build, making the substitution a no-op.
 "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g -pthread \
     -fsanitize=thread -I "$ROOT/kext" -I "$ROOT/tests" \
@@ -159,17 +159,17 @@ python3 "$ROOT/tools/r14/verify-region-size.py"
 # The protocol header duplicates four offsets from the wire header (it cannot
 # include it: the host test has no IOKit). That duplication is checked against
 # the real struct definitions rather than trusted.
-python3 "$ROOT/tools/r11/check-obs-layout.py"
+python3 "$ROOT/tools/verify/obs-layout.py"
 
 # ROUND 13: the `wrapped` counter had two authorities and only one was
 # published. Fixing tools/lucy-obs/RTL812xObsWrite.hpp alone changes nothing --
 # the defect was in the DRIVER's publish path, which lives in
-# tools/apply-lucy-obs2.py as a template. So this compiles the REAL obsPublish()
+# tools/build/patch-lucy-obs.py as a template. So this compiles the REAL obsPublish()
 # body, extracted from that template, against the real header, and requires the
 # published `wrapped` to equal the number of slots actually displaced. It also
 # requires the round-12 variant to FAIL the same assertion, so the check is
 # known to be sensitive to the defect.
-python3 "$ROOT/tools/r13/verify-wrapped-publish.py"
+python3 "$ROOT/tools/verify/wrapped-publish.py"
 
 # The round-11 split checker (tools/r11/verify-split.py) was retired here: its
 # invariants (original-line markers, a single metaclass block, production
@@ -179,7 +179,7 @@ python3 "$ROOT/tools/r13/verify-wrapped-publish.py"
 # Round 12: the write protocol is only verified if the SAME test source FAILS
 # against the round-10 and round-11 headers. This rebuilds the real test binary
 # three times and requires exactly that, plus a TSan run of the shipped header.
-python3 "$ROOT/tools/r11/verify-write-protocol.py"
+python3 "$ROOT/tools/verify/write-protocol.py"
 
 # ---- round 12: the scripts that are only ever READ ---------------------
 #
@@ -190,8 +190,8 @@ python3 "$ROOT/tools/r11/verify-write-protocol.py"
 # a FROZEN earlier version (or a single-point mutation of one) so that "the
 # cases pass" means "the old defect is caught", not merely "the script exits 0".
 printf '\n== round-12 scripts ==\n'
-python3 "$ROOT/tools/r12/verify-build-record.py"
-python3 "$ROOT/tools/r12/verify-en2run.py"
+python3 "$ROOT/tools/verify/build-record.py"
+python3 "$ROOT/tools/verify/en2run.py"
 
 # ---- round 13: the four defects that survived round 12's own suite ------
 #
@@ -204,12 +204,12 @@ printf '\n== round-13 checks ==\n'
 # (AMDMapperProbePgtDebug.cpp), and the refactor changed the branch shape the
 # derivation anchors on. Keeping it would assert a tree that no longer exists.
 # record-loaded.sh must not report "not loaded" when its own query failed.
-python3 "$ROOT/tools/r13/verify-record-loaded.py"
+python3 "$ROOT/tools/verify/record-loaded.py"
 # The patch writes obsWrite()/obsPublish() by TEXT SUBSTITUTION, so editing the
 # template does nothing to an already-patched tree. This needs the REAL upstream
 # tarball and REFUSES (exit 2) without it, rather than reporting a weaker result
 # as the same one.
-python3 "$ROOT/tools/r13/verify-patch-freshness.py" || {
+python3 "$ROOT/tools/verify/patch-freshness.py" || {
     rc=$?
     if [ "$rc" -ne 2 ]; then exit "$rc"; fi
     printf '  (patch freshness REFUSED: no upstream tarball on this host)\n'
@@ -218,7 +218,7 @@ python3 "$ROOT/tools/r13/verify-patch-freshness.py" || {
 }
 # The build is NOT byte-reproducible for the probe. Measure it, and record what
 # the measurement says, instead of repeating round 12's untested claim.
-python3 "$ROOT/tools/r13/verify-reproducibility.py"
+python3 "$ROOT/tools/verify/reproducibility.py"
 
 # The round-12 analyser, its fixture generators and its negative suite were
 # retired together with the shared decoder (tools/analyze-round12.py) and the
@@ -238,8 +238,8 @@ printf 'CORE_OK=%s %s %s %s %s %s %s\n' "$WORK/dma-observe-test" \
 (cd "$ROOT" && shasum -a 256 include/amd_iommu/*.hpp src/*.cpp \
     kext/amd_iommu_*.hpp kext/AMDMapperProbe*.cpp kext/AMDMapperProbe*.hpp \
     tools/lucy-obs/*.hpp \
-    tests/*.cpp tests/InspectorSmoke.py tools/test.sh tools/ivrs-inspect.cpp \
-    tools/check_source.py tools/r11/*.py tools/r12/*.py tools/r13/*.py \
+    tests/*.cpp tests/InspectorSmoke.py tools/test.sh tools/dev/ivrs-inspect.cpp \
+    tools/verify/source.py tools/r11/*.py tools/r12/*.py tools/r13/*.py \
     tools/r14/*.py fixtures/*.bin) \
     > "$WORK/test-source-manifest.sha256"
 printf '%s\n' "$WORK" > "$ROOT/latest-tests.txt"

@@ -6,13 +6,13 @@ import hashlib,importlib.util,json,shlex,struct,subprocess,tarfile
 from pathlib import Path
 archive=Path('/Users/ling/r16-run2-source-identity-v2');scratch=Path('/Users/ling/r16-run2-replay');probe=scratch/'probe'
 supp=Path('/Users/ling/r16-run2-layout-supplement');assert not supp.exists();supp.mkdir()
-source=Path('/Users/ling/r12work/tools/layout-check.cpp');assert source.stat().st_size<65536
-with tarfile.open(str(supp/'layout-check-source.tar.gz'),'x:gz') as t:t.add(str(source),arcname='tools/layout-check.cpp',recursive=False)
+source=Path('/Users/ling/r12work/tools/dev/layout-check.cpp');assert source.stat().st_size<65536
+with tarfile.open(str(supp/'layout-check-source.tar.gz'),'x:gz') as t:t.add(str(source),arcname='tools/dev/layout-check.cpp',recursive=False)
 meta={'source_original_path':str(source),'source_size':source.stat().st_size,'source_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),'archive_sha256':hashlib.sha256((supp/'layout-check-source.tar.gz').read_bytes()).hexdigest(),'scope':'Postbuild user-space layout-check source only; uses installed matching CLT standard C++ headers/runtime. Does not participate in probe kext binary.'}
 (supp/'manifest.json').write_text(json.dumps(meta,indent=2)+'\n')
 with tarfile.open(supp/'layout-check-source.tar.gz') as t:
- data=t.extractfile('tools/layout-check.cpp').read();assert hashlib.sha256(data).hexdigest()==meta['source_sha256']
- out=probe/'tools/layout-check.cpp';assert not out.exists()
+ data=t.extractfile('tools/dev/layout-check.cpp').read();assert hashlib.sha256(data).hexdigest()==meta['source_sha256']
+ out=probe/'tools/dev/layout-check.cpp';assert not out.exists()
  with out.open('xb') as f:f.write(data)
 helperfile=next((scratch/'external').rglob('archive-run1-identity.py'))
 spec=importlib.util.spec_from_file_location('identity',helperfile);helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
@@ -43,14 +43,14 @@ def capture(label):
  print(label,json.dumps({k:v for k,v in item.items() if k not in ('built','postbuild_layout_source_supplement')}),flush=True)
 capture('probe')
 with (scratch/'probe-layout-check-supplement.log').open('xb') as f:
- subprocess.run(['xcrun','clang++','-std=c++17','-O0','-o',str(scratch/'probe-layout-check'),'tools/layout-check.cpp'],cwd=probe,stdout=f,stderr=subprocess.STDOUT,check=True)
+ subprocess.run(['xcrun','clang++','-std=c++17','-O0','-o',str(scratch/'probe-layout-check'),'tools/dev/layout-check.cpp'],cwd=probe,stdout=f,stderr=subprocess.STDOUT,check=True)
  subprocess.run([str(scratch/'probe-layout-check')],stdout=f,stderr=subprocess.STDOUT,check=True)
 if not results['probe']['binary_sha256_matches_original']:
- script=probe/'tools/build-m1a.sh';text=script.read_text();external=scratch/'external'
+ script=probe/'tools/build/probe.sh';text=script.read_text();external=scratch/'external'
  options=' -fdebug-compilation-dir='+scope['probe_root']+' -fdebug-prefix-map='+str(probe)+'='+scope['probe_root']+' -fdebug-prefix-map='+str(external)+'='+' -fdebug-prefix-map='+str(scratch/'sdk-overlay')+'='+scope['sys_sdk']
  script.write_text(text.replace('CFLAGS="','CFLAGS="'+options+' ',1))
  target=(probe/'build-m1a').resolve();assert target.parent==probe.resolve() and probe.resolve().parent==scratch
  print('Verified scratch-only cleanup target:',target,flush=True)
- with (scratch/'probe-normalized-build.log').open('xb') as f:subprocess.run(['sh','tools/build-m1a.sh'],cwd=probe,stdout=f,stderr=subprocess.STDOUT,check=True)
+ with (scratch/'probe-normalized-build.log').open('xb') as f:subprocess.run(['sh','tools/build/probe.sh'],cwd=probe,stdout=f,stderr=subprocess.STDOUT,check=True)
  capture('probe_normalized')
 print('Bounded probe continuation done; installed bundles and original archives untouched.',flush=True)

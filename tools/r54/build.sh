@@ -16,9 +16,9 @@ for value in sys.argv[1:]:
         raise SystemExit('upstream inputs must be relative to the fixed repository')
     (root / path).resolve().relative_to(root)
 PY
-python3 -B tools/apply-lucy-obs2.py "$LUCY_SRC" --tx21 --rx34
+python3 -B tools/build/patch-lucy-obs.py "$LUCY_SRC" --tx21 --rx34
 python3 -B tools/r21/abi.py --check-r49
-sh tools/build-lucy.sh "$LUCY_SRC"
-sh tools/build-m1a.sh
+sh tools/build/lucy.sh "$LUCY_SRC"
+sh tools/build/probe.sh
 sh tools/r53/build-rtl8111.sh "$RTL_SRC" "$LUCY_SRC"
 printf '%s\n' 'Round54 built: RTL812xLucy 1.1.239; RealtekRTL8111 3.0.54; AMDMapperProbe 0.61.0; explicit pre-open requester claims'

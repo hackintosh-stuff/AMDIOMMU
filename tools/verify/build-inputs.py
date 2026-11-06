@@ -5,12 +5,12 @@ WHY THIS IS SEPARATE FROM verify-build-record.py
 ------------------------------------------------
 That script drives build-record.sh against stubs, so it can verify the record's
 LOGIC but not the CONTENT of a dependency list -- there is no compiler in the
-stub workspace. This one runs the real tools/r13/deps.sh on the real toolchain
+stub workspace. This one runs the real tools/verify/deps.sh on the real toolchain
 and checks the properties that make the list trustworthy:
 
   1. the list comes from `clang -M`, and the raw output is kept;
   2. it contains inputs round 12 omitted entirely:
-        tools/lucy-kmod-info.cpp        a driver translation unit
+        tools/build/lucy-kmod-info.cpp        a driver translation unit
         <driver>/linux/*.h              headers the .c files include
         <sdk>/...                       the SDK headers
   3. it contains the observation-log headers the driver ACTUALLY compiles
@@ -37,7 +37,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-DEPS = os.path.join(ROOT, 'tools', 'r13', 'deps.sh')
+DEPS = os.path.join(ROOT, 'tools', 'verify', 'deps.sh')
 WORK = os.path.join(ROOT, 'build-work-r13', 'inputs')
 
 FAILS = []
@@ -186,7 +186,7 @@ def main():
     lp = os.path.join(WORK, 'lucy-inputs.list')
     lucy = [l.strip() for l in open(lp)] if os.path.exists(lp) else []
     joined = '\n'.join(lucy)
-    check('tools/lucy-kmod-info.cpp is listed',
+    check('tools/build/lucy-kmod-info.cpp is listed',
           any('lucy-kmod-info.cpp' in f for f in lucy),
           'this is a real translation unit of the driver build')
     check('the driver\'s linux/ headers are listed',
@@ -264,9 +264,9 @@ def main():
     # normalisation: a flag added to a build script without a matching change in
     # deps.sh means the dependency list describes a DIFFERENT build.
     pairs = [
-        ('tools/build-m1a.sh', 'CFLAGS', 'tools/r13/deps.sh', 'PROBE_CFLAGS'),
-        ('tools/build-lucy.sh', 'CFLAGS', 'tools/r13/deps.sh', 'LUCY_CFLAGS'),
-        ('tools/build-lucy.sh', 'CFLAGS_C', 'tools/r13/deps.sh',
+        ('tools/build/probe.sh', 'CFLAGS', 'tools/verify/deps.sh', 'PROBE_CFLAGS'),
+        ('tools/build/lucy.sh', 'CFLAGS', 'tools/verify/deps.sh', 'LUCY_CFLAGS'),
+        ('tools/build/lucy.sh', 'CFLAGS_C', 'tools/verify/deps.sh',
          'LUCY_CFLAGS_C'),
     ]
     for build_script, build_var, deps_script, deps_var in pairs:

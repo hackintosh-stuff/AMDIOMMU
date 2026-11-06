@@ -47,7 +47,7 @@ WORK = os.path.join(ROOT, 'build-work-r12', 'writeproto')
 CXX = os.environ.get('CXX', 'clang++')
 
 # ---------------------------------------------------------------------------
-# Round 10's protocol, verbatim from tools/apply-lucy-obs2.py as it stood at
+# Round 10's protocol, verbatim from tools/build/patch-lucy-obs.py as it stood at
 # the end of round 10. The ONLY differences from round 12 are the ones under
 # test: no lock around the body, an unconditional slot exchange, and plain
 # counters.

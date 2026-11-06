@@ -33,7 +33,7 @@ This version:
   * refuses to report a delta across a counter reset
 
 Usage:
-    py -3 tools/correlate-dma.py <dma-window.tsv> <props.txt> [--json]
+    py -3 tools/dev/correlate-dma.py <dma-window.tsv> <props.txt> [--json]
 
 Exit codes:
     0  window covered and traffic observed

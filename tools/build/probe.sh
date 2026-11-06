@@ -9,7 +9,7 @@
 # 独立的编译单元，最后一起链接进同一个 kext。
 
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT"
 
 SDK=$(xcrun --sdk macosx --show-sdk-path)
@@ -189,7 +189,7 @@ codesign --force --sign - --timestamp=none "$KEXT"
 codesign --verify --strict "$KEXT" && echo "codesign OK"
 
 echo "== 布局检查 =="
-xcrun clang++ -std=c++17 -O0 -o "$W/layout-check" tools/layout-check.cpp
+xcrun clang++ -std=c++17 -O0 -o "$W/layout-check" tools/dev/layout-check.cpp
 "$W/layout-check"
 
 echo "== 导入符号 =="

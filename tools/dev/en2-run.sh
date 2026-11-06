@@ -124,7 +124,7 @@
 # So the intended use is:
 #
 #   from the OPERATOR machine (Windows):
-#       ssh <mac-en2-ip> 'sh ~/r12work/tools/en2-run.sh --run <cmd...>'
+#       ssh <mac-en2-ip> 'sh ~/r12work/tools/dev/en2-run.sh --run <cmd...>'
 #
 #   en2-run.sh --check              step 1 only, from the Mac (changes nothing)
 #   en2-run.sh --run <cmd...>       steps 2..6 around <cmd>
@@ -1106,7 +1106,7 @@ INTENDED USE: run this ON THE MAC, invoked over an SSH connection that
 arrived via the TARGET interface:
 
   # from the operator machine:
-  ssh <mac-en2-ip> 'sh ~/r12work/tools/en2-run.sh --run <cmd...>'
+  ssh <mac-en2-ip> 'sh ~/r12work/tools/dev/en2-run.sh --run <cmd...>'
 
 That way bringing the management interface down cannot cut your session.
 --run refuses unless the session arrived on the TARGET interface's own

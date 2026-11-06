@@ -2,7 +2,7 @@
 //
 // Part of the AMDMapperProbe kext. Added as its own translation unit rather
 // than appended to AMDMapperProbePgt.cpp so that "did this round's code run?"
-// is answerable from the binary (tools/build-m1a.sh names its entry points).
+// is answerable from the binary (tools/build/probe.sh names its entry points).
 //
 // ===========================================================================
 // WHAT THIS MODULE ANSWERS, AND WHY THE OLD ANSWER WAS NOT ENOUGH
@@ -91,7 +91,7 @@
 // The driver's wire header is deliberately NOT included here. The blob is
 // decoded through amd_iommu_rxset_core.hpp, which carries the offsets as
 // numbers and asserts them against that header in the host test
-// (tools/r14/check-rxpost-layout.py). Including the driver's header in the
+// (tools/verify/rxpost-layout.py). Including the driver's header in the
 // probe would make the probe depend on a file the driver build owns, and a
 // drift between the two would then be a compile error in whichever tree was
 // built second rather than a checked property.

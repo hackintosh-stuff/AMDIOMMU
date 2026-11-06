@@ -219,7 +219,7 @@ def main():
     inspected = run(['sudo', 'kmutil', 'inspect', '-A', aux, '--show-kext-uuids'], capture=True)
     if not all(item['uuid'].lower() in inspected.lower() for item in expected.values()):
         raise ValueError('new UUID absent from rebuilt Auxiliary KC')
-    run([sys.executable, ROOT / 'tools/r13/set-bootarg.py', config, tokenarg])
+    run([sys.executable, ROOT / 'tools/dev/set-bootarg.py', config, tokenarg])
     run(['sudo', 'nvram', 'boot-args=' + bootargs])
     actual_args = output('nvram', 'boot-args').split(None, 1)[1].strip()
     actual_cfg = plistlib.loads(config.read_bytes())['NVRAM']['Add'][NVRAM_GUID]['boot-args']

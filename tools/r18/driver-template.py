@@ -1,6 +1,6 @@
 """Round18 generator templates (standard IOMapper/IODMACommand TX path).
 
-Loaded by tools/apply-lucy-obs2.py, not by any kext. Every body below is
+Loaded by tools/build/patch-lucy-obs.py, not by any kext. Every body below is
 compiled into the real driver by text substitution, so the host test that
 exercises these exact functions (tools/r18/test-driver.py) is testing the
 driver's own code rather than a model of it.

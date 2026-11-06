@@ -79,11 +79,11 @@ def make_stubs(tmp):
     allocation, copying, verification, the three-fact separation -- without
     needing a toolchain or a 4-minute build.
 
-    ROUND 13: the record now also runs tools/r13/deps.sh, which shells out to
+    ROUND 13: the record now also runs tools/verify/deps.sh, which shells out to
     `clang -M` and `xcrun`. Those are stubbed with a script that writes the same
     OUTPUT FILES deps.sh writes, so the record's handling of them is exercised
     without a compiler. That is a deliberate boundary: the dependency list's
-    CONTENT is verified by tools/r13/verify-build-inputs.py against the real
+    CONTENT is verified by tools/verify/build-inputs.py against the real
     toolchain; this harness verifies only that build-record.sh FAILS when
     deps.sh fails, and records what deps.sh produced when it succeeds.
     """
@@ -148,11 +148,11 @@ def make_stubs(tmp):
 
     # ---- ROUND 13: the compiler-derived input list ----------------------
     #
-    # build-record.sh runs tools/r13/deps.sh. The stub writes the same FILES
+    # build-record.sh runs tools/verify/deps.sh. The stub writes the same FILES
     # with plausible content, so the record's handling is exercised. Its
     # behaviour is switchable so the "deps failed" case can be produced.
     os.makedirs(os.path.join(ws, 'tools', 'r13'), exist_ok=True)
-    open(os.path.join(ws, 'tools', 'r13', 'deps.sh'), 'w').write(
+    open(os.path.join(ws, 'tools', 'verify', 'deps.sh'), 'w').write(
         '#!/bin/sh\n'
         'OUT=${1:?outdir}\n'
         'if [ -f "$PWD/DEPS_FAIL" ]; then\n'
@@ -166,18 +166,18 @@ def make_stubs(tmp):
         'echo "### stub" > "$OUT/lucy-deps.raw.txt"\n'
         'printf "kext/AMDMapperProbe.cpp\\nkext/AMDMapperProbe.hpp\\n"'
         ' > "$OUT/probe-inputs.list"\n'
-        'printf "tools/lucy-kmod-info.cpp\\nRTL812xLucy-1.1.2/RTL812xLucy/'
+        'printf "tools/build/lucy-kmod-info.cpp\\nRTL812xLucy-1.1.2/RTL812xLucy/'
         'RTL812xLucy.cpp\\n" > "$OUT/lucy-inputs.list"\n'
         'printf "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
         'aaaaaaaaaaaaaaaa  1  project-kext  kext/AMDMapperProbe.cpp\\n"'
         ' > "$OUT/probe-inputs.sha256"\n'
         'printf "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-        'bbbbbbbbbbbbbbbb  1  project-tools  tools/lucy-kmod-info.cpp\\n"'
+        'bbbbbbbbbbbbbbbb  1  project-tools  tools/build/lucy-kmod-info.cpp\\n"'
         ' > "$OUT/lucy-inputs.sha256"\n'
         'echo "MATCH    RTL812xObsLog.hpp" > "$OUT/obs-header-identity.txt"\n'
         'echo "MATCH    RTL812xObsWrite.hpp" >> "$OUT/obs-header-identity.txt"\n'
         'echo "deps stub done"\n')
-    os.chmod(os.path.join(ws, 'tools', 'r13', 'deps.sh'), 0o755)
+    os.chmod(os.path.join(ws, 'tools', 'verify', 'deps.sh'), 0o755)
 
     # Tools the script calls. shasum/stat/dwarfdump/otool/nm/plutil etc. all
     # exist on macOS, so only the ones that would touch the real system are
@@ -277,7 +277,7 @@ def main():
               'round 12 recorded only a hand-written file list')
     li = open(os.path.join(out1, 'lucy-inputs.sha256')).read() \
         if os.path.exists(os.path.join(out1, 'lucy-inputs.sha256')) else ''
-    check('the driver input list includes tools/lucy-kmod-info.cpp',
+    check('the driver input list includes tools/build/lucy-kmod-info.cpp',
           'lucy-kmod-info' in li,
           'round 12 omitted this translation unit entirely')
     bc = open(os.path.join(out1, 'build-commands.txt')).read() \

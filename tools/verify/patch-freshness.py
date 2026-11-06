@@ -3,7 +3,7 @@
 
 THE DEFECT THIS CATCHES
 -----------------------
-`tools/apply-lucy-obs2.py` writes `obsWrite()` and `obsPublish()` into the
+`tools/build/patch-lucy-obs.py` writes `obsWrite()` and `obsPublish()` into the
 driver by TEXT SUBSTITUTION from a template (`OBS_METHODS`). Editing the
 template therefore changes nothing in a tree that was already patched: the
 script's idempotence check sees its marker, prints "already applied", and exits

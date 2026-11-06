@@ -47,7 +47,7 @@
 #     installed the binary present in /Library/Extensions now
 #     loaded    what the running kernel reports (only a rebooted run can say)
 #
-# The `loaded` section is written by tools/r12/record-loaded.sh AFTER a reboot,
+# The `loaded` section is written by tools/verify/record-loaded-frozen.sh AFTER a reboot,
 # into the same record directory, so the three sit side by side and a reader can
 # see which of them exist.
 #
@@ -57,7 +57,7 @@
 # does not reboot. Deployment is a separate authorised step.
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT"
 
 # ---- one directory per build, never reused ------------------------------
@@ -90,12 +90,12 @@ echo "== 1. source inventory =="
 #
 # Round 12 listed the eight modules plus a set of headers and called that the
 # source manifest. It was a CLAIM about the build, not a record of it, and it
-# omitted real inputs: tools/lucy-kmod-info.cpp (a driver translation unit),
+# omitted real inputs: tools/build/lucy-kmod-info.cpp (a driver translation unit),
 # the driver's linux/ headers, the SDK headers, and the compiler/linker command
 # lines. It also hashed tools/lucy-obs/*.hpp while the build compiles the
 # COPIES the patch installs into the driver directory.
 #
-# So the authoritative list now comes from the COMPILER: tools/r13/deps.sh runs
+# So the authoritative list now comes from the COMPILER: tools/verify/deps.sh runs
 # `clang -M` with the same flags the build uses and writes every file the
 # preprocessor opened, classified and hashed. The explicit list is kept below
 # as a NAMED SUBSET -- the files a reader is most likely to want to check by
@@ -113,7 +113,7 @@ HEADERS="kext/AMDMapperProbe.hpp kext/amd_iommu_dma_observe.hpp \
          kext/amd_iommu_pte_core.hpp kext/amd_iommu_bizwalk_core.hpp \
          kext/AMDMapperProbe-Info.plist kext/Info.plist"
 # The OTHER artefact: the driver patch and the headers it installs.
-DRIVER_PATCH="tools/apply-lucy-obs2.py"
+DRIVER_PATCH="tools/build/patch-lucy-obs.py"
 DRIVER_HEADERS="tools/lucy-obs/RTL812xObsLog.hpp \
                 tools/lucy-obs/RTL812xObsWrite.hpp"
 
@@ -149,7 +149,7 @@ cat "$OUT/probe-source-manifest.sha256"
     echo "# observation log. Both are recorded."
     echo "#"
     echo "# NOT the complete list: lucy-inputs.sha256 is the compiler-derived"
-    echo "# one, and it includes tools/lucy-kmod-info.cpp and the driver's"
+    echo "# one, and it includes tools/build/lucy-kmod-info.cpp and the driver's"
     echo "# linux/ headers, neither of which round 12 recorded at all."
     echo "# generated $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo
@@ -161,11 +161,11 @@ cat "$OUT/probe-source-manifest.sha256"
     done
     echo
     echo "# the driver translation unit round 12 omitted entirely"
-    if [ -f tools/lucy-kmod-info.cpp ]; then
+    if [ -f tools/build/lucy-kmod-info.cpp ]; then
         printf '%s  %8d  %s\n' \
-               "$(shasum -a 256 tools/lucy-kmod-info.cpp | awk '{print $1}')" \
-               "$(stat -f %z tools/lucy-kmod-info.cpp)" \
-               "tools/lucy-kmod-info.cpp"
+               "$(shasum -a 256 tools/build/lucy-kmod-info.cpp | awk '{print $1}')" \
+               "$(stat -f %z tools/build/lucy-kmod-info.cpp)" \
+               "tools/build/lucy-kmod-info.cpp"
     fi
     echo
     echo "# the upstream baseline"
@@ -202,7 +202,7 @@ cat "$OUT/lucy-source-manifest.sha256"
 # a file the build does not use.
 echo
 echo "== 1b. compiler-derived input list =="
-if ! sh tools/r13/deps.sh "$OUT" > "$OUT/deps.log" 2>&1; then
+if ! sh tools/verify/deps.sh "$OUT" > "$OUT/deps.log" 2>&1; then
     echo "FAIL: the compiler-derived input list could not be produced." >&2
     tail -20 "$OUT/deps.log" >&2
     exit 1
@@ -228,7 +228,7 @@ echo "== 2. toolchain =="
 # ---- 3. build the probe -------------------------------------------------
 echo
 echo "== 3. build the probe (clean, in its own directory) =="
-if ! sh tools/build-m1a.sh > "$OUT/probe-build.log" 2>&1; then
+if ! sh tools/build/probe.sh > "$OUT/probe-build.log" 2>&1; then
     echo "BUILD FAILED -- see $OUT/probe-build.log" >&2
     tail -30 "$OUT/probe-build.log" >&2
     exit 1
@@ -253,7 +253,7 @@ echo "  binary: $BIN"
 # ---- 4. build the driver ------------------------------------------------
 echo
 echo "== 4. patch and build RTL812xLucy =="
-if ! sh tools/build-lucy.sh > "$OUT/lucy-build.log" 2>&1; then
+if ! sh tools/build/lucy.sh > "$OUT/lucy-build.log" 2>&1; then
     echo "BUILD FAILED -- see $OUT/lucy-build.log" >&2
     tail -30 "$OUT/lucy-build.log" >&2
     exit 1
@@ -344,7 +344,7 @@ BUILT_LUCY_SHA=$(shasum -a 256 "$LBIN" | awk '{print $1}')
     echo "# THIS IS NOT A LOAD IDENTITY. A file can be installed and not loaded,"
     echo "# loaded from an older auxiliary collection, or replaced while the"
     echo "# running kernel still holds the previous one. The load identity is"
-    echo "# written by tools/r13/record-loaded.sh after a reboot, and only the"
+    echo "# written by tools/verify/record-loaded.sh after a reboot, and only the"
     echo "# running kernel can supply it."
     echo "#"
     echo "# ROUND 13: this section runs BEFORE any deployment, so unless"
@@ -448,7 +448,7 @@ done
     echo
     echo "THE INPUT LIST IS THE COMPILER'S, NOT A HAND-WRITTEN ONE"
     echo "  Round 12 recorded a list of files it believed the build used. That"
-    echo "  list omitted tools/lucy-kmod-info.cpp (a real translation unit of the"
+    echo "  list omitted tools/build/lucy-kmod-info.cpp (a real translation unit of the"
     echo "  driver), the driver's linux/ headers, and every SDK header. The"
     echo "  authoritative lists here come from 'clang -M' run with the build's own"
     echo "  flags, so they cannot go stale without the build going stale too."

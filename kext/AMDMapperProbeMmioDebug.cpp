@@ -1,7 +1,7 @@
 // AMDMapperProbeMmio.cpp -- M2-0/1/2a-1 MMIO read and write probes
 //
 // Part of the AMDMapperProbe kext. Split out of the original
-// single-file AMDMapperProbe.cpp by tools/split-probe.py; the
+// single-file AMDMapperProbe.cpp by tools/dev/split-probe.py; the
 // function bodies are unchanged and in their original order.
 
 #include "AMDMapperProbe.hpp"

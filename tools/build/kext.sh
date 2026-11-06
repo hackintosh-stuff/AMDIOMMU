@@ -2,8 +2,8 @@
 # Compile/package ONLY. Writes fresh user-owned output beneath this project.
 # Does not resolve installed-KC dependencies or claim runtime ABI compatibility.
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-python3 "$ROOT/tools/check_source.py"
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+python3 "$ROOT/tools/verify/source.py"
 SDK=$(xcrun --sdk macosx --show-sdk-path)
 SDK_VERSION=$(xcrun --sdk macosx --show-sdk-version)
 HEADERS="$SDK/System/Library/Frameworks/Kernel.framework/Versions/A/Headers"
@@ -46,7 +46,7 @@ xcrun dwarfdump --uuid "$BIN"
 } > "$WORK/toolchain.txt"
 (cd "$ROOT" && shasum -a 256 include/amd_iommu/IdentityMap.hpp \
     src/IdentityMap.cpp kext/AMDIdentityMapper.hpp kext/AMDIdentityMapper.cpp \
-    kext/Info.plist tools/build-kext.sh tools/check_source.py) \
+    kext/Info.plist tools/build/kext.sh tools/verify/source.py) \
     > "$WORK/source-manifest.sha256"
 shasum -a 256 "$HEADERS/IOKit/IOMapper.h" \
     "$HEADERS/IOKit/IOMemoryDescriptor.h" "$HEADERS/IOKit/IODMACommand.h" \

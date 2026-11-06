@@ -12,9 +12,9 @@ import sys
 root = Path.cwd().resolve()
 (root / sys.argv[1]).resolve().relative_to(root)
 PY
-python3 -B tools/apply-lucy-obs2.py "$SRC" --tx21 --rx34
+python3 -B tools/build/patch-lucy-obs.py "$SRC" --tx21 --rx34
 # Round48 uses 32-bit command constraints and a low IOVA pool; ABI1 is unchanged.
 python3 -B tools/r21/abi.py --check-r44
-sh tools/build-lucy.sh "$SRC"
-sh tools/build-m1a.sh
+sh tools/build/lucy.sh "$SRC"
+sh tools/build/probe.sh
 printf '%s\n' 'Round48 built: RTL812xLucy 1.1.233; IPv4 TSO on / IPv6 TSO on; AMDMapperProbe 0.55.0; ordinary DMA32 / low IOVA pool; IVRS/PCI discovery; per-device IOMapper ABI1; finite TCP6 before/after normal down/up'

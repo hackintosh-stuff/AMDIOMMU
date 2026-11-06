@@ -1,7 +1,7 @@
 // AMDMapperProbePgt.cpp -- M2-2b-2 page-table experiment
 //
 // Part of the AMDMapperProbe kext. Split out of the original
-// single-file AMDMapperProbe.cpp by tools/split-probe.py; the
+// single-file AMDMapperProbe.cpp by tools/dev/split-probe.py; the
 // function bodies are unchanged and in their original order.
 
 #include "AMDMapperProbe.hpp"

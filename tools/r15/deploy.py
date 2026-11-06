@@ -114,7 +114,7 @@ def main():
     token_arg = 'amdiommu=pgt.batch4.t0x%08x' % a.token
     args = old_args.split(None, 1)[1].strip().split()
     new_args = ' '.join([x for x in args if not x.startswith('amdiommu=')] + [token_arg])
-    run(['python3', str(ROOT/'tools/r13/set-bootarg.py'), str(config), token_arg])
+    run(['python3', str(ROOT/'tools/dev/set-bootarg.py'), str(config), token_arg])
     run(['sudo', 'nvram', 'boot-args=' + new_args])
     actual = subprocess.check_output(['nvram', 'boot-args'], text=True).split(None, 1)[1].strip()
     cfg = plistlib.loads(config.read_bytes())

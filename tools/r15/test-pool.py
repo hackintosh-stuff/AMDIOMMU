@@ -445,7 +445,7 @@ int main() {
 
 
 def generate(mainline=False):
-    n = runpy.run_path(str(ROOT / 'tools/apply-lucy-obs2.py'))
+    n = runpy.run_path(str(ROOT / 'tools/build/patch-lucy-obs.py'))
     if mainline:
         n['select_rx']('33')
         n = n['select_rx'].__globals__

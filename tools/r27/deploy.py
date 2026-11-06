@@ -195,7 +195,7 @@ def record_recovery_plan(backup, plan, sources, previous_boot_args):
 
 
 def write_boot_config(config, cfg, bootargs, tokenarg):
-    run([sys.executable, ROOT / 'tools/r13/set-bootarg.py', config, tokenarg])
+    run([sys.executable, ROOT / 'tools/dev/set-bootarg.py', config, tokenarg])
 
 
 def main(add_arguments=None, check_peer=None):
