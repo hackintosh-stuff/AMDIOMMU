@@ -108,12 +108,21 @@ private:
     IOLock *fAttachLock = nullptr;
     UInt64 fSnapshotSequence = 0;
     bool fStopping = false;
-    // R53 explicit segment-zero requester selection; an empty list keeps R52.
+    // R53 explicit segment-zero requester selection (boot-arg amdiommu_devices).
     bool fSelectionExplicit = false;
     UInt32 fRequesters[kMaxDomains] = {};
     UInt32 fRequesterCount = 0;
     bool ReadDeviceSelection();
     IOService *fOffers[kMaxDomains] = {};  // retained by selector index
+    // Default selection used when amdiommu_devices is omitted: identities in
+    // IOPCIMatch format read from the Info.plist personality key
+    // AMDMapperProbeDevices. Compared as (device << 16 | vendor) & mask.
+    struct DefaultDevice { UInt32 idMasked; UInt32 mask; };
+    static constexpr UInt32 kMaxDefaultDevices = 16;
+    DefaultDevice fDefaultDevices[kMaxDefaultDevices] = {};
+    UInt32 fDefaultDeviceCount = 0;
+    bool ReadDefaultDevices();
+    bool DefaultDeviceMatches(UInt16 vendor, UInt16 device) const;
     // R69: a selected third-party client that cannot call our claim handshake
     // (Apple's own Ethernet kexts call only IOMapper::copyMapperForDevice) gets
     // its iommu-parent at first publish instead of at claim. Off by default so

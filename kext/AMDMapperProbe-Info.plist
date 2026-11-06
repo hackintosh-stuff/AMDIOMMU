@@ -174,6 +174,18 @@
             <key>IOMatchCategory</key><string>AMDMapperProbe</string>
             <key>IOProviderClass</key><string>IOResources</string>
             <key>IOResourceMatch</key><string>IOBSD</string>
+            <!-- Default device selection used when the amdiommu_devices
+                 boot-arg is omitted. IOPCIMatch format: whitespace-separated
+                 "0xVVVVDDDD" words with an optional "&0xMMMMMMMM" mask each;
+                 VVVV is the PCI vendor, DDDD the device, compared as
+                 (device << 16 | vendor) & mask. The personality dictionary
+                 becomes the instance property table, so the kext reads this
+                 key with getProperty().
+                 Verified adapter set: Mellanox CX4 Lx family driven by Apple's
+                 MLX5 client, and the Realtek range driven by Apple's Ethernet
+                 Realtek driver. -->
+            <key>AMDMapperProbeDevices</key>
+            <string>0x101515b3 0x101715b3 0x101915b3 0x101b15b3 0x101d15b3 0x812410ec 0x812510ec 0x812610ec 0x812710ec</string>
         </dict>
     </dict>
     <key>OSBundleLibraries</key>

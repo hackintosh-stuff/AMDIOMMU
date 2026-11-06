@@ -84,8 +84,8 @@ bool org_example_AMDMapperProbe::publishHandler(
         (org_example_AMDMapperProbe *)target;
     if (!self || !newService) return true;
     if (self->fAuto) {
-        // One path for explicit requester offers and the legacy default.
-        // It also marks known unselected clients for physical DMA.
+        // One path for explicit requester offers and the Info.plist default
+        // identity list.
         self->AttachAuto(newService);
         return true;
     }

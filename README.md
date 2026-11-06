@@ -18,7 +18,7 @@ Two build variants exist and accept different boot-args:
 | | `auto-attach` | Publishes `iommu-parent` at first publish for selected requesters, so Apple's own Ethernet kexts (which only call `IOMapper::copyMapperForDevice()`) get the mapper. |
 | | `auto-attach` | Publishes `iommu-parent` at first publish for selected requesters, so Apple's own Ethernet kexts (which only call `IOMapper::copyMapperForDevice()`) get the mapper. |
 | | absent / any other value (incl. `off`) | Inert: no notifier, no device arm, no MMIO. `off` is not a recognised value — it simply matches no mode. |
-| `amdiommu_devices=<ids>` | 1–3 four-hex-digit requester IDs, e.g. `n2200,n2201` or `n2300,n2301` | Selects PCI requesters (segment zero). **Prefix each ID with a non-hex character (`n`)**: this kernel's `PE_parse_boot_argn` rewrites an all-digit value into a 32-bit integer in the caller's buffer (`3400` arrived as `0x0D48`). The parser skips non-hex bytes before reading four hex digits. Omit for the legacy RTL8127 default. |
+| `amdiommu_devices=<ids>` | 1–3 four-hex-digit requester IDs, e.g. `n2200,n2201` or `n2300,n2301` | Selects PCI requesters (segment zero). **Prefix each ID with a non-hex character (`n`)**: this kernel's `PE_parse_boot_argn` rewrites an all-digit value into a 32-bit integer in the caller's buffer (`3400` arrived as `0x0D48`). The parser skips non-hex bytes before reading four hex digits. Omit to fall back to the identity list in the kext's `Info.plist` (`AMDMapperProbeDevices`, see below). |
 | `amdiommu_profile=<name>` | `rl-10g-max` | Growth ceiling, and the default: 65535 records / 262144 pages (1 GiB), 516 table pages. |
 | | `rl-10g` | Ceiling at 16384 records / 131072 pages (512 MiB), 260 table pages. |
 | | `native-legacy` | Ceiling at the accepted ABI3 window (1024 records / 16 MiB): growth is disabled. |
@@ -81,6 +81,29 @@ amdiommu=auto-attach amdiommu_devices=n2300,n2301
 
 `serial=5`, `io=0xffffffff`, `debug=` and `-v` are XNU/OpenCore arguments, **not**
 parsed by this kext.
+
+### Default device selection from Info.plist
+
+When `amdiommu_devices` is omitted, the kext matches devices by identity against
+the `AMDMapperProbeDevices` value inside its own `Info.plist` personality
+(`IOKitPersonalities/AMDMapperProbe`). The value uses the **`IOPCIMatch`
+format**: whitespace-separated `0xVVVVDDDD` words, each optionally followed by
+`&0xMMMMMMMM`; `VVVV` is the PCI vendor, `DDDD` the device, compared as
+`(device << 16 | vendor) & mask`. The personality dictionary becomes the driver
+instance's property table, so the kext reads it with `getProperty()`.
+
+The checked-in list is the verified adapter set:
+
+- Mellanox CX4 Lx family driven by Apple's MLX5 client:
+  `0x101515b3 0x101715b3 0x101915b3 0x101b15b3 0x101d15b3`
+- Realtek range driven by Apple's Ethernet Realtek driver:
+  `0x812410ec 0x812510ec 0x812610ec 0x812710ec`
+
+Everything outside this list keeps physical (pass-through) DMA. Identity
+matching does not define offer slots, so `claim` is only honoured for
+boot-arg-selected requesters; a plist-matched device attaches at first publish
+in `auto-attach` mode and without a claim in `passive` mode, exactly like the
+former hardcoded RTL8127 default.
 
 ### Retired M2 experiment modes (Debug build only)
 

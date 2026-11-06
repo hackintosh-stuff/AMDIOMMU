@@ -263,8 +263,7 @@ bool org_example_AMDMapperProbe::ReadDeviceSelection() {
                                               sizeof(selection) - 1);
     fRequesterCount = 0;
     if (!fSelectionExplicit) {
-        setProperty("device-selection", "default-rtl8127");
-        return true;
+        return ReadDefaultDevices();
     }
     // One to kMaxDomains four-hex-digit segment-zero requester IDs, no
     // saved BDFs. The third slot is reserved for a Mellanox adapter next to the
@@ -302,6 +301,98 @@ bool org_example_AMDMapperProbe::ReadDeviceSelection() {
     setProperty("device-selection", selection);
     setProperty("device-selection-count", fRequesterCount, 32);
     return true;
+}
+
+// Default selection from the Info.plist personality. The AMDMapperProbeDevices
+// value uses the IOPCIMatch format: whitespace-separated "0xVVVVDDDD" words,
+// each optionally followed by "&0xMMMMMMMM"; VVVV is the PCI vendor and DDDD
+// the device. Comparison is (device << 16 | vendor) & mask == id & mask, the
+// way IOPCIFamily evaluates IOPCIMatch. The personality dictionary becomes the
+// instance property table at IOService::init, so the key is read with
+// getProperty() -- no OSKext API needed.
+bool org_example_AMDMapperProbe::ReadDefaultDevices() {
+    fDefaultDeviceCount = 0;
+    OSString *value = OSDynamicCast(OSString, getProperty("AMDMapperProbeDevices"));
+    if (!value || !value->getCStringNoCopy()) {
+        setProperty("device-selection", "plist-missing");
+        return true;  // no default devices: every later publish is rejected
+    }
+    const char *cursor = value->getCStringNoCopy();
+    while (*cursor) {
+        while (*cursor == ' ' || *cursor == '\t') ++cursor;
+        if (!*cursor) break;
+        if (fDefaultDeviceCount == kMaxDefaultDevices) {
+            setProperty("device-selection", "plist-too-many-entries");
+            fDefaultDeviceCount = 0;
+            return true;
+        }
+        if (cursor[0] != '0' || (cursor[1] != 'x' && cursor[1] != 'X')) {
+            setProperty("device-selection", "plist-parse-failed");
+            fDefaultDeviceCount = 0;
+            return true;
+        }
+        cursor += 2;
+        UInt64 id = 0;
+        UInt32 digits = 0;
+        while (IsHexDigit(*cursor) && digits < 8) {
+            const char digit = *cursor++;
+            const UInt32 nibble = digit <= '9' ? digit - '0'
+                : (digit <= 'F' ? digit - 'A' + 10 : digit - 'a' + 10);
+            id = (id << 4) | nibble;
+            ++digits;
+        }
+        if (!digits) {
+            setProperty("device-selection", "plist-parse-failed");
+            fDefaultDeviceCount = 0;
+            return true;
+        }
+        UInt32 mask = 0xffffffffU;
+        if (*cursor == '&') {
+            ++cursor;
+            if (cursor[0] != '0' || (cursor[1] != 'x' && cursor[1] != 'X')) {
+                setProperty("device-selection", "plist-parse-failed");
+                fDefaultDeviceCount = 0;
+                return true;
+            }
+            cursor += 2;
+            UInt64 parsed = 0;
+            digits = 0;
+            while (IsHexDigit(*cursor) && digits < 8) {
+                const char digit = *cursor++;
+                const UInt32 nibble = digit <= '9' ? digit - '0'
+                    : (digit <= 'F' ? digit - 'A' + 10 : digit - 'a' + 10);
+                parsed = (parsed << 4) | nibble;
+                ++digits;
+            }
+            if (!digits) {
+                setProperty("device-selection", "plist-parse-failed");
+                fDefaultDeviceCount = 0;
+                return true;
+            }
+            mask = (UInt32)(parsed & 0xffffffffU);
+        }
+        if (*cursor && *cursor != ' ' && *cursor != '\t') {
+            setProperty("device-selection", "plist-parse-failed");
+            fDefaultDeviceCount = 0;
+            return true;
+        }
+        fDefaultDevices[fDefaultDeviceCount].idMasked =
+            (UInt32)(id & 0xffffffffU) & mask;
+        fDefaultDevices[fDefaultDeviceCount].mask = mask;
+        ++fDefaultDeviceCount;
+    }
+    setProperty("device-selection", value->getCStringNoCopy());
+    setProperty("device-selection-count", fDefaultDeviceCount, 32);
+    return true;
+}
+
+bool org_example_AMDMapperProbe::DefaultDeviceMatches(
+    UInt16 vendor, UInt16 device) const {
+    const UInt32 identity = ((UInt32)device << 16) | vendor;
+    for (UInt32 i = 0; i < fDefaultDeviceCount; ++i)
+        if ((identity & fDefaultDevices[i].mask) == fDefaultDevices[i].idMasked)
+            return true;
+    return false;
 }
 
 // S1/R71-B: this selects the *ceiling* a domain may grow to, not the arena it is
@@ -436,13 +527,12 @@ bool org_example_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
     UInt32 match = 0;
     while (match < fRequesterCount && fRequesters[match] != requester) ++match;
     if (match == fRequesterCount) {
-        // Only the legacy default and known unselected clients need model IDs.
-        if (claim || vendor16 != 0x10ec) return false;
-        if (device16 != 0x8127 && device16 != 0x8168) return false;
-        if (fSelectionExplicit || device16 != 0x8127) {
-            nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kPassthrough);
-            return false;
-        }
+        // No boot-arg requester match. The default selection is the
+        // IOPCIMatch-style identity list from the Info.plist personality
+        // (AMDMapperProbeDevices); a claim is only defined for a
+        // boot-arg-selected requester, and everything else stays pass-through.
+        if (claim) return false;
+        if (!DefaultDeviceMatches(vendor16, device16)) return false;
     }
     // Registry identity and profile must be resolved before fAttachLock:
     // a device property lookup performed while the attach lock was held stalled
