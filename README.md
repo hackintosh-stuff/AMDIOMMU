@@ -1,4 +1,4 @@
-# AMDIOMMU — authoritative source repository
+# AMDIOMMU — experimental AMD IOMMU driver
 
 ## Boot arguments
 
@@ -112,6 +112,14 @@ Available only with `AMD_MAPPER_PROBE_DEBUG=1`. The parsers live in
 | | `pgt`, `pgt4k`, `pgthold`, `pgtsleep`, `pgt3l` | M2-2b-2 page-table translation experiments (4-level identity table, 4 KiB leaves, 20 s held-translation window, sleep-only control, 3-level table). `pgt` is a prefix match, so `pgt4k` also opens the main gate. |
 | | `.batch<N>`, `.t0x<N>` / `.token<N>`, `.std`, `.alltx`, `.rxstd`, `.session` | Suffixes inside the same `amdiommu=` value, e.g. `amdiommu=pgt.batch512.t0x2a.std.alltx.rxstd.session`. The parser scans every `.key` segment; a separate trailing boot-arg is not a dependable channel on this kernel. |
 | `m2b2delay=<seconds>` | 1–300 | Delay before the one-shot M2-2b-2 page-table probe (default 20000 ms). |
+
+## Compatibility
+
+Which PCIe devices have actually run through this mapper, on which board and
+CPU, and with which driver: see [COMPATIBILITY.md](COMPATIBILITY.md). That table
+lists only combinations verified on hardware, and only where the endpoint is
+driven by a driver shipped with macOS; unverified boards and third-party driver
+stacks are out of scope.
 
 ## Install location (target machine)
 
