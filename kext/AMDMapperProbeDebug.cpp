@@ -12,17 +12,20 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
-// IOPCIDevice.h 在 SDK 里自身会触发两个 -Werror 级警告：
-//   1. IOPCIDevice 被标 __kpi_deprecated("Use PCIDriverKit")
-//   2. 其内部的 setProperty 重载未标 override（-Winconsistent-missing-override）
+// IOPCIDevice.h itself triggers two -Werror-level warnings from within the SDK:
+//   1. IOPCIDevice is marked __kpi_deprecated("Use PCIDriverKit")
+//   2. Its internal setProperty overload is not marked override (-Winconsistent-missing-override)
 //
-// 这两条都是 **Apple 头文件自身的问题**，不是本项目的代码缺陷：
-//   - PCIDriverKit 是用户态 DriverKit 框架，无法实现 IOMapper 子类，
-//     本项目必须是内核内 IOKit kext，只能用 IOPCIDevice。
-//   - override 警告来自 SDK 声明，我们无法也不应修改 SDK 头。
+// Both are **problems in Apple's own headers**, not defects in this project's code:
+//   - PCIDriverKit is a userspace DriverKit framework and cannot implement an
+//     IOMapper subclass; this project must be an in-kernel IOKit kext and can
+//     only use IOPCIDevice.
+//   - The override warning comes from SDK declarations; we cannot and should
+//     not modify SDK headers.
 //
-// 因此仅在包含该头时抑制这两条，不全局关闭——其他真正的
-// deprecation / override 问题仍会照常报错。
+// Therefore suppress only these two while including that header, without
+// disabling them globally -- other genuine deprecation / override issues
+// will still be reported as errors as usual.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"
@@ -37,13 +40,15 @@
 #include <libkern/c++/OSBoolean.h>
 #include <libkern/c++/OSDictionary.h>
 
-// 页表编码/解码的唯一实现。生产代码与 host 回归测试**包含同一个文件**，
-// 测试跑的就是这里的分支，不是另写一份 Python 复述。
-// 见 tests/pte-core-test.cpp 与 docs/m2-2b-2-round5-result.md。
+// The single implementation of page table encoding/decoding. Production code
+// and the host regression tests **include the same file**, so the tests run
+// exactly these branches rather than a separately written Python restatement.
+// See tests/pte-core-test.cpp and docs/m2-2b-2-round5-result.md.
 #include "amd_iommu_pte_core.hpp"
 
-// OSPtr<T> 的定义取决于 IOKIT_ENABLE_SHARED_PTR（SDK libkern/c++/OSPtr.h）：
-//   定义时 = OSSharedPtr<T>；未定义时 = T*。SDK 默认未定义。
+// The definition of OSPtr<T> depends on IOKIT_ENABLE_SHARED_PTR (SDK
+// libkern/c++/OSPtr.h): defined = OSSharedPtr<T>; undefined = T*.
+// The SDK default is undefined.
 #if defined(IOKIT_ENABLE_SHARED_PTR)
     #define M1A_HAS_SHARED_PTR 1
 #else
@@ -60,8 +65,9 @@
 bool org_example_AMDMapperProbe::start(IOService *provider) {
     setProperty("m1b-stage", "0-entered-start");
 
-    // 安全闸门：必须在 super::start() 之前。
-    // IOMapper::start() 在 fIsSystem 为真时会 gSystem = this，全局副作用且不可撤销。
+    // Safety gate: must happen before super::start().
+    // When fIsSystem is true, IOMapper::start() sets gSystem = this -- a global
+    // side effect that cannot be undone.
     fIsSystem = false;
 
     if (!super::start(provider)) {
@@ -94,25 +100,29 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
         return r44StartAuto();
     }
 
-    // ---- B2-b：先决定是否放行真实设备 ----
+    // ---- B2-b: first decide whether real devices are let through ----
     fArmed = parseArmBootArg();
     setProperty("m1bb-armed", fArmed ? "yes" : "no");
 
-    // ---- B2-b：安装发布通知，抢在 Lucy probe 之前挂 iommu-parent ----
+    // ---- B2-b: install the publish notification, attaching iommu-parent
+    //      before Lucy probes ----
     //
-    // 这是解决 0.6.0 竞态的关键。之前直接在 start() 里设属性，
-    // 与 Lucy 读属性的顺序没有保证，导致三次重启成功/失败/成功。
-    // 现在改由 gIOFirstPublishNotification 在设备注册瞬间挂属性，
-    // 一定早于任何驱动的 probe/start。
+    // This is the fix for the 0.6.0 race. Previously the property was set
+    // directly in start(), with no ordering guarantee versus Lucy reading it,
+    // causing success/failure/success across three reboots. Now
+    // gIOFirstPublishNotification attaches the property at the instant the
+    // device registers, which is always before any driver's probe/start.
     //
-    // 同时保留 start() 里的兜底查找：若通知因某种原因没赶上
-    // （例如网卡在探针 start() 之前就已发布完），仍尝试直接挂，
-    // 并用 m1bb-nic-busy = yes-too-late 标记「这次可能太晚了」。
+    // The fallback lookup in start() is kept: if the notification somehow
+    // missed (e.g. the NIC published before the probe's start()), still try to
+    // attach directly and mark "this may be too late" with
+    // m1bb-nic-busy = yes-too-late.
     if (fArmed) {
         installPublishNotifier();
 
-        // 兜底：设备若已存在（通知不会重放已发布实例的 FirstPublish），
-        // 直接找一次。
+        // Fallback: if the device already exists (FirstPublish is not replayed
+        // for already-published instances by the notification), look it up
+        // directly once.
         if (!fNicDevice) {
             if (findNic()) {
                 armNic(fNicDevice);
@@ -126,60 +136,67 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
         setProperty("m1bb-parent", "not-armed");
     }
 
-    // ---- B1：真实设备拿到 mapper ----
+    // ---- B1: the real device obtains the mapper ----
     if (!findTarget()) {
         setProperty("m1b-stage", "3-target-not-found");
     } else {
         setProperty("m1b-stage", "3-target-found");
         runB1SelfTest();
 
-        // ---- M2-0b：只读 PCI 配置空间，取 IOMMU 自己的 BAR ----
+        // ---- M2-0b: read-only PCI config space, get the IOMMU's own BAR ----
         //
-        // 放在 B1 之后而不是之前：runB1SelfTest() 会调
-        // copyMapperForDevice()，它会给 fAllocName 分配记录名，
-        // 属于 B1 的既有行为。M2-0b 完全独立、只读，顺序不影响它，
-        // 但放在后面可以让失败时 m1b-stage 先反映 B1 的结果。
+        // Placed after B1 rather than before: runB1SelfTest() calls
+        // copyMapperForDevice(), which allocates the record name for
+        // fAllocName -- pre-existing B1 behaviour. M2-0b is fully independent
+        // and read-only; ordering does not affect it, but placing it later lets
+        // m1b-stage reflect B1's result first on failure.
         runM20ConfigProbe();
     }
 
-    // ---- M2-1：只读 MMIO 探测（boot-arg 门控，默认不执行）----
+    // ---- M2-1: read-only MMIO probing (boot-arg gated, not run by default) ----
     //
-    // 放在最后：它是本轮唯一真正接触 MMIO 的代码，
-    // 让它前面的所有既有阶段先跑完，失败时 m1b-stage 已经反映完毕，
-    // 不会掩盖任何回归。
+    // Placed last: it is this round's only code that actually touches MMIO.
+    // Letting all pre-existing stages run first means that on failure
+    // m1b-stage is already fully reflected and no regression is masked.
     runM21MmioProbe();
 
-    // ---- M2-2a-1：最小 MMIO 写测试（boot-arg 门控，默认不执行）----
+    // ---- M2-2a-1: minimal MMIO write test (boot-arg gated, not run by default) ----
     //
-    // 放在最后：它是本项目第一次写硬件。
-    // 前面所有只读阶段先跑完，任何回归都能在它之前被看到。
+    // Placed last: this is the project's first hardware write.
+    // All preceding read-only stages finish first, so any regression is seen
+    // before it.
     runM22aWriteProbe();
 
-    // ---- M2-2a-2：建设备表（boot-arg 门控，默认不执行）----
+    // ---- M2-2a-2: build the device table (boot-arg gated, not run by default) ----
     //
-    // 建一张全直通的设备表并写进基址寄存器，但**不使能 IOMMU**。
-    // IOMMU 关闭时硬件不读这张表，所以系统行为必须完全不变。
+    // Build an all-pass-through device table and write it into the base
+    // register, but **do not enable the IOMMU**. With the IOMMU off the
+    // hardware never reads this table, so system behaviour must be completely
+    // unchanged.
     runM22bTableProbe();
 
-    // ---- M2-2a-3：短窗口使能测试（boot-arg 门控，默认不执行）----
+    // ---- M2-2a-3: short-window enable test (boot-arg gated, not run by default) ----
     //
-    // 最高风险的一步：使能 IOMMU 后全系统 DMA 走设备表。
-    // 但窗口极短——使能、读状态、立即禁用。
-    // 放在最后，前面所有阶段先跑完。
+    // The highest-risk step: once enabled, all system DMA goes through the
+    // device table. But the window is extremely short -- enable, read status,
+    // immediately disable. Placed last; all preceding stages run first.
     runM23EnableProbe();
 
-    // ---- M2-2b-1：命令通道验证（boot-arg 门控，默认不执行）----
+    // ---- M2-2b-1: command channel verification (boot-arg gated, not run by default) ----
     //
-    // M2-2a-3 只配置了命令缓冲，从未真正发过命令。
-    // 这一步发一条 CMD_COMPL_WAIT，验证命令通道真的能用。
-    // 仍是短窗口：使能 → 发一条 → 轮询 → 立即禁用。
+    // M2-2a-3 only configured the command buffer, never actually issuing a
+    // command. This step issues one CMD_COMPL_WAIT to verify the command
+    // channel really works. Still a short window: enable -> issue one ->
+    // poll -> immediately disable.
     runM2b1CmdProbe();
 
-    // ---- M2-2b-2：4 级恒等页表 + 单设备 DTE 切换（boot-arg 门控）----
+    // ---- M2-2b-2: 4-level identity page table + single-device DTE switch (boot-arg gated) ----
     //
-    // 【不能在这里直接跑】探针的 start() 早于 PCI 枚举完成与 Lucy 配置网卡，
-    // 那时目标设备还没有 DMA，"切换后 0 fault"测不到任何东西。
-    // 改为挂一次性定时器，延迟到系统稳定后再执行。
+    // [Cannot run directly here] The probe's start() runs before PCI
+    // enumeration completes and before Lucy configures the NIC; at that point
+    // the target device has no DMA yet, and "0 faults after switching" would
+    // measure nothing. Instead a one-shot timer is scheduled to run later,
+    // once the system is stable.
     /* Round 10: the DECLARED size of this round's controlled batch.
      *
      * controlledBatchComplete answers "did every request THIS ROUND
@@ -206,10 +223,10 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
 
     scheduleM22b2();
 
-    // ---- B2-0：观察调用契约（窗口关闭，行为与 0.4.0 相同）----
+    // ---- B2-0: observe the call contract (window closed, behaviour same as 0.4.0) ----
     runB2SelfTest();
 
-    // ---- B2-a：真正实现恒等映射 ----
+    // ---- B2-a: actually implement identity mapping ----
     runB2aSelfTest();
 
     publishB2bStats();
@@ -338,7 +355,8 @@ void org_example_AMDMapperProbe::stop(IOService *provider) {
     fMapWindowOpen = false;
     fArmed = false;
 
-    // 先摘通知，避免 stop 之后回调仍被投递（那时对象正在拆除）
+    // Remove the notification first so callbacks are not delivered after stop
+    // (at that point the object is being torn down)
     if (fPublishNotifier) {
         fPublishNotifier->disable();
         fPublishNotifier->release();
@@ -364,21 +382,24 @@ uint64_t org_example_AMDMapperProbe::getPageSize() const {
 }
 
 // ===== AMDMapperProbe.cpp (original lines 7753..7943) =====
-// ------------------------------------------------------ IOMapper 子类接口实现
+// ------------------------------------------------------ IOMapper subclass interface implementation
 //
-// B2-a 的语义：**只支持物理连续的单段**，且必须返回恰好 length。
+// B2-a semantics: **only a physically contiguous single segment is supported**,
+// and mapLength must be returned as exactly length.
 //
-// 为什么 mapLength 必须恰好等于 length（这是整个实现的安全支点）：
-//   IODMACommand::prepare() 拿到返回值后立刻检查
+// Why mapLength must be exactly length (the safety pivot of the whole
+// implementation):
+//   After IODMACommand::prepare() gets the return value it immediately checks
 //       if (kIOReturnSuccess == ret && mapArgs.fAllocLength
-//           && (mapArgs.fAllocLength != mapArgs.fLength))   → 多段分支
-//   而多段分支第一行就是
+//           && (mapArgs.fAllocLength != mapArgs.fLength))   -> multi-segment path
+//   and the first line of the multi-segment path is
 //       assert(mapArgs.fAllocLength > mapArgs.fLength);      // IODMACommand.cpp:946
-//   恒等映射永远给不出比请求更长的区间。所以只要我们不等于 length，
-//   内核就会在 assert 上 panic。返回恰好 length 则整个多段分支被跳过，
-//   genIOVMSegments 走 fMapSegmentsCount==0 的快路径：
+//   An identity mapping can never produce a longer range than requested. So as
+//   soon as we return anything != length, the kernel panics on the assert.
+//   Returning exactly length skips the whole multi-segment path and
+//   genIOVMSegments takes the fMapSegmentsCount==0 fast path:
 //       state->fIOVMAddr = fLocalMapperAlloc + offset - fPreparedOffset
-//   正是恒等映射。
+//   which is exactly the identity mapping.
 
 IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     IOMemoryDescriptor *memory,
@@ -398,7 +419,8 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
 
     fMapCalls++;
 
-    // 只记录第一次调用的完整参数，避免属性无限增长。
+    // Record the full arguments of the first call only, so properties do not
+    // grow without bound.
     if (fMapCalls == 1) {
         setHexProperty(this, "m1b2-first-offset", descriptorOffset);
         setHexProperty(this, "m1b2-first-length", length);
@@ -427,14 +449,16 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     if (mapAddress) *mapAddress = 0;
     if (mapLength)  *mapLength  = 0;
 
-    // ---- 分流：探针自己发起的调用 还是 真实设备 ----
+    // ---- Triage: probe-initiated call vs real device ----
     //
-    // 判据是 fProbeCallActive，**不是** fMapWindowOpen。
-    // 这两者的区别正是 0.6.0 首次部署暴露的 bug：
-    //   B2-0 是「探针发起、窗口关闭」（刻意保留旧行为做基线），
-    //   若用窗口判断，它会被当成真实设备调用，使 m1bb-realmapcalls 虚高。
-    // 实测第一次部署就报了 realmapcalls=1、first-len=0x10000，
-    // 而那正是 B2-0 的 16 KiB buffer，不是网卡。
+    // The criterion is fProbeCallActive, **not** fMapWindowOpen.
+    // The difference between the two is exactly the bug exposed by the first
+    // 0.6.0 deployment:
+    //   B2-0 is "probe-initiated, window closed" (deliberately keeping the old
+    //   behaviour as a baseline); judged by the window it would be counted as
+    //   a real device call, inflating m1bb-realmapcalls.
+    // The first deployment indeed reported realmapcalls=1, first-len=0x10000
+    // -- which was B2-0's 16 KiB buffer, not the NIC.
     bool isProbeCall = fProbeCallActive;
 
     // Fixed descriptor rings/tally own separate standard DMA command pairs.
@@ -472,11 +496,11 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     }
 
     if (!isProbeCall) {
-        // 真实设备调用
+        // Real device call
         fRealMapCalls++;
 
         if (!fArmed) {
-            // 未授权：保持 B2-a 的行为，拒绝并计数。
+            // Not authorized: keep B2-a behaviour, reject and count.
             fMapRejectOtherCalls++;
             if (fRealMapCalls == 1) {
                 setProperty("m1bb-first-unarmed", "rejected");
@@ -501,9 +525,10 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
         }
 
         if (!rrun.contiguous) {
-            // 真实设备遇到碎片：恒等映射表达不了，只能拒绝。
-            // 这正是 useAppleVTD 为真时数据包 buffer 会撞上的情况，
-            // 也是 M2 页表要解决的真正问题。
+            // A real device hits fragmentation: identity mapping cannot express
+            // it, so the only option is to reject. This is exactly the case a
+            // packet buffer hits when useAppleVTD is true, and the real problem
+            // the M2 page tables exist to solve.
             fRealMapRejectFrag++;
             if (fRealMapRejectFrag == 1) {
                 setHexProperty(this, "m1bb-firstfrag-len", length);
@@ -523,7 +548,7 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
         e->len = length;
 
         *mapAddress = rrun.firstPA;
-        *mapLength  = length;        // 同样必须恰好等于 length
+        *mapLength  = length;        // must also be exactly length
 
         fRealMapOk++;
         if (fRealMapOk == 1) {
@@ -540,10 +565,10 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
         return kIOReturnSuccess;
     }
 
-    // ---- 探针自身发起的调用 ----
+    // ---- Probe-initiated calls ----
     //
-    // 只有窗口打开时（B2-a 的两组对照）才返回成功；
-    // B2-0 的调用窗口关闭，保持旧行为（返回 kIOReturnUnsupported）。
+    // Success is returned only while the window is open (B2-a's two comparison
+    // cases); B2-0's calls keep the old behaviour (kIOReturnUnsupported).
     if (!fMapWindowOpen || dmaCommand != fExpectedCmd) {
         fMapRejectOtherCalls++;
         publishMapStats(false);
@@ -564,8 +589,9 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
     }
 
     if (!run.contiguous) {
-        // 碎片化：恒等映射无法用单个标量描述，只能拒绝。
-        // 这不是实现缺陷，是 iovmMapMemory 接口表达力的边界。
+        // Fragmented: identity mapping cannot be described by a single scalar,
+        // so the only option is to reject. This is not an implementation defect
+        // but the limit of the iovmMapMemory interface's expressiveness.
         fMapRejectFragCalls++;
         if (fMapRejectFragCalls == 1) {
             setHexProperty(this, "m1b2a-firstfrag-segs", run.segCount);
@@ -575,11 +601,12 @@ IOReturn org_example_AMDMapperProbe::iovmMapMemory(
         return kIOReturnUnsupported;
     }
 
-    // 物理连续 → 恒等映射：IOVA 直接等于物理地址。
+    // Physically contiguous -> identity mapping: IOVA equals the physical address.
     *mapAddress = run.firstPA;
-    *mapLength  = length;        // 必须**恰好**等于 length，见上方注释
+    *mapLength  = length;        // must be **exactly** length; see comment above
 
-    // 自测的映射也登记进表，让 mapToPhysicalAddress 统一按表查询。
+    // Self-test mappings are registered in the table too, so
+    // mapToPhysicalAddress consults it uniformly.
     {
         MapEntry *e = allocMapEntry();
         if (e) { e->pa = run.firstPA; e->len = length; }
@@ -624,19 +651,23 @@ IOReturn org_example_AMDMapperProbe::iovmUnmapMemory(
         return kr;
     }
 
-    // 判断这是真实设备的 unmap 还是自测的：自测期间 dmaCommand 是探针的，
-    // 而 IODMACommand::complete() 调用 unmap 时 fMapWindowOpen 已经关了，
-    // 所以不能用窗口判断。改用「表里是否有这一项」——
-    // 两类映射都登记在同一张表里，按 (pa,len) 精确匹配即可。
+    // Decide whether this is a real device's unmap or a self-test one: during
+    // self-test dmaCommand is the probe's, and by the time
+    // IODMACommand::complete() calls unmap, fMapWindowOpen is already closed,
+    // so the window cannot be used for the decision. Instead use "is this entry
+    // in the table" -- both kinds of mapping are registered in the same table
+    // and matched exactly by (pa,len).
     bool freed = freeMapEntry(mapAddress, mapLength);
 
     if (freed) {
         fUnmapOkCalls++;
     }
 
-    // 真实设备的 unmap 单独计数：判据是 dmaCommand 不是探针的预期命令。
-    // 注意 fExpectedCmd 在自测结束后已被置空，所以自测的 unmap 也会
-    // 落到这一支；为区分，额外要求 fArmed 为真（只有装了卡才会开）。
+    // Real-device unmaps are counted separately: the criterion is that
+    // dmaCommand is not the probe's expected command. Note fExpectedCmd has
+    // been cleared after self-test ends, so a self-test unmap would also land
+    // in this branch; to distinguish, fArmed is additionally required (only
+    // true once the card is installed).
     if (fArmed && dmaCommand && dmaCommand != fExpectedCmd) {
         fRealUnmapCalls++;
         publishB2bStats();
@@ -700,21 +731,23 @@ uint64_t org_example_AMDMapperProbe::mapToPhysicalAddress(uint64_t mappedAddress
 
     publishMapStats(false);
 
-    // 只对**我们确实映射过**的区间返回恒等结果。
-    // 区间之外一律返回 0，表示「我不知道」，而不是假装翻译成功。
+    // Return identity results only for ranges **we actually mapped**.
+    // Outside mapped ranges always return 0, meaning "I don't know", rather
+    // than pretending the translation succeeded.
     //
-    // 这一点很重要：IOMemoryDescriptor 会在某些路径上用
-    //     mapper->mapToPhysicalAddress(addr) 与真实 PA 比对（见 xnu 里
-    //     被 #if 0 包住的那段 panic 检查），如果我们在未映射区间乱返回，
-    //     就会把错误地址喂给驱动。
+    // This matters: on some paths IOMemoryDescriptor compares
+    //     mapper->mapToPhysicalAddress(addr) against the real PA (see the
+    //     panic check wrapped in #if 0 in xnu); if we returned arbitrary
+    //     values for unmapped ranges, wrong addresses would be fed to drivers.
     //
-    // B2-b 起改为查表：真实设备会同时持有多个映射（Lucy 有三个描述符环），
-    // 单变量无法表达。
+    // From B2-b this becomes a table lookup: a real device holds several
+    // mappings at once (Lucy has three descriptor rings), which a single
+    // variable cannot express.
     for (int i = 0; i < kMaxActiveMaps; i++) {
         if (!fMaps[i].used) continue;
         if (mappedAddress >= fMaps[i].pa
             && mappedAddress < (fMaps[i].pa + fMaps[i].len)) {
-            return mappedAddress;   // 恒等：IOVA == PA
+            return mappedAddress;   // identity: IOVA == PA
         }
     }
     return 0;

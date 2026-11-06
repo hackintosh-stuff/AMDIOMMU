@@ -15,7 +15,8 @@
 #if AMD_MAPPER_PROBE_DEBUG
 
 // ---- parseM22b2Delay (original lines 5295..5308) ----
-// 解析 m2b2delay=<秒>，返回毫秒。上限 300 秒，避免挂一个永不触发的定时器。
+// Parses m2b2delay=<seconds> and returns milliseconds. Capped at 300 s to
+// avoid hanging a timer that never fires.
 static inline bool parseM22b2Delay(uint32_t *outMS) {
     char val[32];
     if (!PE_parse_boot_argn("m2b2delay", val, sizeof(val))) return false;
@@ -31,18 +32,21 @@ static inline bool parseM22b2Delay(uint32_t *outMS) {
 }
 
 // ---- parseArmBootArg (original lines 7419..7437) ----
-// ------------------------------------------------------------------ 生命周期
+// ------------------------------------------------------------------ Lifecycle
 
-// 解析启动参数里的 amdiommu=arm。
+// Parses amdiommu=arm from the boot arguments.
 //
-// 为什么用 boot-arg 而不是自动检测：
-//   装了 RTL8127 不等于应该放行。一旦放行，Lucy 的描述符环映射会真的
-//   经过我们，若我们的实现有缺陷，后果是网卡不工作甚至 panic。
-//   所以做成**显式开关**：没有 `amdiommu=arm` 时行为与 0.5.0 完全一致，
-//   随时可以去掉参数回到安全状态。
+// Why a boot-arg instead of auto-detection:
+//   Having an RTL8127 installed does not mean it should be let through. Once
+//   let through, Lucy's descriptor ring mappings really pass through us; if
+//   our implementation is defective the consequence is a non-working NIC or
+//   even a panic. So this is an **explicit switch**: without `amdiommu=arm`
+//   the behaviour is identical to 0.5.0, and the parameter can be removed at
+//   any time to return to the safe state.
 //
-// 用 PE_parse_boot_argn 而不是查 IORegistry：boot-arg 是内核早期解析的，
-// 我们的 start() 运行时它一定已经可用。
+// PE_parse_boot_argn instead of querying the IORegistry: boot-args are parsed
+// early by the kernel and are guaranteed to be available by the time our
+// start() runs.
 static inline bool parseArmBootArg() {
     char val[32];
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) {
@@ -52,18 +56,19 @@ static inline bool parseArmBootArg() {
 }
 
 // ---- boot-arg parsers (original lines 7439..7583) ----
-// 解析 amdiommu=mmio —— M2-1 的 MMIO 探测门控。
+// Parses amdiommu=mmio -- the gate for M2-1 MMIO probing.
 //
-// 为什么必须单独一个值而不是复用 "arm"：
-//   arm 只影响 B2-b（让网卡映射经过我们），已在本机验证稳定。
-//   mmio 会让代码第一次去访问 IOMMU 的 MMIO 窗口，风险性质不同。
-//   两者必须能独立开关：出问题时能只关 mmio 而保留 arm，
-//   从而把变量隔离到最小。
+// Why a separate value instead of reusing "arm":
+//   arm only affects B2-b (letting the NIC's mappings pass through us) and is
+//   verified stable on this machine. mmio makes the code touch the IOMMU's
+//   MMIO window for the first time -- a different kind of risk. The two must
+//   be independently switchable so that on a problem mmio can be turned off
+//   while arm is kept, isolating variables to the minimum.
 //
-// 注意 PE_parse_boot_argn 只能取到一个值，所以不能同时写
-// amdiommu=arm 和 amdiommu=mmio。本轮的用法是：
-//   amdiommu=mmio  → 只跑 MMIO 探测，不放行网卡（最安全）
-//   amdiommu=arm   → 只放行网卡，不碰 MMIO（B2-b 状态）
+// Note that PE_parse_boot_argn can only take one value, so amdiommu=arm and
+// amdiommu=mmio cannot both be written. This round's usage:
+//   amdiommu=mmio  -> run MMIO probing only, NIC not let through (safest)
+//   amdiommu=arm   -> let the NIC through only, no MMIO (B2-b state)
 static inline bool parseMmioBootArg() {
     char val[32];
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) {
@@ -72,16 +77,18 @@ static inline bool parseMmioBootArg() {
     return strncmp(val, "mmio", 4) == 0;
 }
 
-// 解析 amdiommu=write —— M2-2a-1 的最小写测试门控。
+// Parses amdiommu=write -- the gate for the M2-2a-1 minimal write test.
 //
-// 三级递进，每级风险不同，必须能独立开关：
-//   amdiommu=arm    → 只放行网卡（B2-b 已验证稳定）
-//   amdiommu=mmio   → 只读 MMIO（M2-1 已验证通过）
-//   amdiommu=write  → 允许写 MMIO（M2-2a-1，本轮新增）
+// Three escalating levels, each with a different risk, independently
+// switchable:
+//   amdiommu=arm    -> let the NIC through only (B2-b, verified stable)
+//   amdiommu=mmio   -> read-only MMIO (M2-1, verified passing)
+//   amdiommu=write  -> allow MMIO writes (M2-2a-1, new this round)
 //
-// 为什么用独立的值而不是在 mmio 上加一个子标志：
-//   PE_parse_boot_argn 一次只能取一个值，用独立值最清晰，
-//   且出问题时能把变量隔离到"是否允许写"这一个维度上。
+// Why an independent value instead of a sub-flag on mmio:
+//   PE_parse_boot_argn takes one value at a time; separate values are
+//   clearest, and on a problem the variable is isolated to the single
+//   dimension "are writes allowed".
 static inline bool parseWriteBootArg() {
     char val[32];
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) {
@@ -90,13 +97,13 @@ static inline bool parseWriteBootArg() {
     return strncmp(val, "write", 5) == 0;
 }
 
-// 解析 amdiommu=table —— M2-2a-2 的门控。
+// Parses amdiommu=table -- the gate for M2-2a-2.
 //
-// 四级递进，风险递增：
-//   arm   → 放行网卡（B2-b）
-//   mmio  → 只读 MMIO（M2-1）
-//   write → 单寄存器写测试（M2-2a-1）
-//   table → 建设备表并写基址寄存器（M2-2a-2，本轮）
+// Four escalating levels, increasing risk:
+//   arm   -> let the NIC through (B2-b)
+//   mmio  -> read-only MMIO (M2-1)
+//   write -> single-register write test (M2-2a-1)
+//   table -> build a device table and write the base register (M2-2a-2, this round)
 static inline bool parseTableBootArg() {
     char val[32];
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) {
@@ -105,17 +112,17 @@ static inline bool parseTableBootArg() {
     return strncmp(val, "table", 5) == 0;
 }
 
-// 解析 amdiommu=enable —— M2-2a-3 的门控。
+// Parses amdiommu=enable -- the gate for M2-2a-3.
 //
-// 五级递进，风险递增：
-//   arm    → 放行网卡（B2-b）
-//   mmio   → 只读 MMIO（M2-1）
-//   write  → 单寄存器写测试（M2-2a-1）
-//   table  → 建设备表（M2-2a-2）
-//   enable → 使能 IOMMU（M2-2a-3，本轮，最高风险）
+// Five escalating levels, increasing risk:
+//   arm    -> let the NIC through (B2-b)
+//   mmio   -> read-only MMIO (M2-1)
+//   write  -> single-register write test (M2-2a-1)
+//   table  -> build the device table (M2-2a-2)
+//   enable -> enable the IOMMU (M2-2a-3, this round, highest risk)
 //
-// 注意 strncmp 的长度：必须用完整字符串长度，否则 "enable" 会匹配 "enableX"。
-// 这里 6 = strlen("enable")。
+// Note on strncmp length: the full string length must be used, otherwise
+// "enable" also matches "enableX". Here 6 = strlen("enable").
 static inline bool parseEnableBootArg() {
     char val[32];
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) {
@@ -124,11 +131,12 @@ static inline bool parseEnableBootArg() {
     return strncmp(val, "enable", 6) == 0;
 }
 
-// 解析 amdiommu=cmd —— M2-2b-1 命令通道验证的门控。
+// Parses amdiommu=cmd -- the gate for M2-2b-1 command channel verification.
 //
-// 六级递进：
-//   arm → mmio → write → table → enable → cmd
-// 每一级都是独立可回退的开关，出问题时能把变量隔离到最小。
+// Six escalating levels:
+//   arm -> mmio -> write -> table -> enable -> cmd
+// Each level is an independently revertible switch, isolating variables to the
+// minimum when something goes wrong.
 static inline bool parseCmdBootArg() {
     char val[32];
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) {
@@ -137,27 +145,29 @@ static inline bool parseCmdBootArg() {
     return strncmp(val, "cmd", 3) == 0;
 }
 
-// 解析 amdiommu=pgt —— M2-2b-2 的门控。
+// Parses amdiommu=pgt -- the gate for M2-2b-2.
 //
-// 七级递进：
-//   arm → mmio → write → table → enable → cmd → pgt
+// Seven escalating levels:
+//   arm -> mmio -> write -> table -> enable -> cmd -> pgt
 //
-// 这是 M2 里第一次让硬件**真的用我们建的页表去翻译 DMA**。
-// 前面六步全部是"配置寄存器"或"全直通"，硬件从不看页表。
+// This is the first step in M2 where the hardware **really translates DMA
+// through a page table we built**. The previous six steps were all "configure
+// registers" or "full pass-through"; the hardware never looked at a page table.
 static inline bool parsePgtBootArg() {
     char val[32];
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) {
         return false;
     }
-    // 注意：必须用 strncmp(val, "pgt", 3)，这样 "pgt4k" 也匹配——
-    // 它是 pgt 的变体（4 KiB 叶子模式），门控应当同样打开。
+    // Note: strncmp(val, "pgt", 3) must be used so that "pgt4k" also
+    // matches -- it is a pgt variant (4 KiB leaf mode) and the gate should
+    // open for it too.
     return strncmp(val, "pgt", 3) == 0;
 }
 
-// 解析 amdiommu=pgt4k —— 4 KiB 叶子页判别实验。
+// Parses amdiommu=pgt4k -- the 4 KiB leaf page discrimination experiment.
 //
-// 必须比 parsePgtBootArg 更严格：用完整 5 字符比较，
-// 否则 "pgt" 也会命中。
+// Must be stricter than parsePgtBootArg: a full 5-character comparison is
+// used, otherwise "pgt" would also match.
 static inline bool parsePgt4kBootArg() {
     char val[32];
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) {
@@ -166,11 +176,14 @@ static inline bool parsePgt4kBootArg() {
     return strncmp(val, "pgt4k", 5) == 0;
 }
 
-// 解析 amdiommu=pgthold —— 保持翻译生效的长时间观察模式。
+// Parses amdiommu=pgthold -- a long observation mode that keeps translation
+// active.
 //
-// 与前两个模式的区别：pgthold 把观察窗口从 2 秒延长到 20 秒，
-// 期间 DTE 一直指向翻译表。这样可以从外部用 netstat 观察
-// en2 的收发包计数是否继续增长——那才是"页表能不能用"的直接证据。
+// Difference from the previous two modes: pgthold extends the observation
+// window from 2 s to 20 s with the DTE pointing at the translation table the
+// whole time. This allows observing from outside whether en2's RX/TX packet
+// counters keep growing via netstat -- that is the direct evidence of whether
+// the page table actually works.
 static inline bool parsePgtHoldBootArg() {
     char val[32];
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) {
@@ -179,7 +192,8 @@ static inline bool parsePgtHoldBootArg() {
     return strncmp(val, "pgthold", 7) == 0;
 }
 
-// 解析 amdiommu=pgtsleep —— 纯睡眠对照（保持直通，只做同样的长睡眠）。
+// Parses amdiommu=pgtsleep -- a pure-sleep control (keeps pass-through, only
+// performs the same long sleep).
 static inline bool parsePgtSleepBootArg() {
     char val[32];
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) {
@@ -188,7 +202,7 @@ static inline bool parsePgtSleepBootArg() {
     return strncmp(val, "pgtsleep", 8) == 0;
 }
 
-// 解析 amdiommu=pgt3l —— 3 级页表模式。
+// Parses amdiommu=pgt3l -- 3-level page table mode.
 static inline bool parsePgt3lBootArg() {
     char val[32];
     if (!PE_parse_boot_argn("amdiommu", val, sizeof(val))) {

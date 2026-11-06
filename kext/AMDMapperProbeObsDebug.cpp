@@ -9,17 +9,20 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
-// IOPCIDevice.h 在 SDK 里自身会触发两个 -Werror 级警告：
-//   1. IOPCIDevice 被标 __kpi_deprecated("Use PCIDriverKit")
-//   2. 其内部的 setProperty 重载未标 override（-Winconsistent-missing-override）
+// IOPCIDevice.h itself triggers two -Werror-level warnings from within the SDK:
+//   1. IOPCIDevice is marked __kpi_deprecated("Use PCIDriverKit")
+//   2. Its internal setProperty overload is not marked override (-Winconsistent-missing-override)
 //
-// 这两条都是 **Apple 头文件自身的问题**，不是本项目的代码缺陷：
-//   - PCIDriverKit 是用户态 DriverKit 框架，无法实现 IOMapper 子类，
-//     本项目必须是内核内 IOKit kext，只能用 IOPCIDevice。
-//   - override 警告来自 SDK 声明，我们无法也不应修改 SDK 头。
+// Both are **problems in Apple's own headers**, not defects in this project's code:
+//   - PCIDriverKit is a userspace DriverKit framework and cannot implement an
+//     IOMapper subclass; this project must be an in-kernel IOKit kext and can
+//     only use IOPCIDevice.
+//   - The override warning comes from SDK declarations; we cannot and should
+//     not modify SDK headers.
 //
-// 因此仅在包含该头时抑制这两条，不全局关闭——其他真正的
-// deprecation / override 问题仍会照常报错。
+// Therefore suppress only these two while including that header, without
+// disabling them globally -- other genuine deprecation / override issues
+// will still be reported as errors as usual.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"
@@ -32,13 +35,15 @@
 #include <kern/clock.h>
 #include <libkern/OSByteOrder.h>
 
-// 页表编码/解码的唯一实现。生产代码与 host 回归测试**包含同一个文件**，
-// 测试跑的就是这里的分支，不是另写一份 Python 复述。
-// 见 tests/pte-core-test.cpp 与 docs/m2-2b-2-round5-result.md。
+// The single implementation of page table encoding/decoding. Production code
+// and the host regression tests **include the same file**, so the tests run
+// exactly these branches rather than a separately written Python restatement.
+// See tests/pte-core-test.cpp and docs/m2-2b-2-round5-result.md.
 #include "amd_iommu_pte_core.hpp"
 
-// OSPtr<T> 的定义取决于 IOKIT_ENABLE_SHARED_PTR（SDK libkern/c++/OSPtr.h）：
-//   定义时 = OSSharedPtr<T>；未定义时 = T*。SDK 默认未定义。
+// The definition of OSPtr<T> depends on IOKIT_ENABLE_SHARED_PTR (SDK
+// libkern/c++/OSPtr.h): defined = OSSharedPtr<T>; undefined = T*.
+// The SDK default is undefined.
 #if defined(IOKIT_ENABLE_SHARED_PTR)
     #define M1A_HAS_SHARED_PTR 1
 #else
@@ -49,40 +54,47 @@
 
 // ===== AMDMapperProbeObs.cpp (original lines 3497..3611) =====
 // ===========================================================================
-// 第十轮：重新实现 m2b2ScanTxDone()
+// Round 10: re-implementing m2b2ScanTxDone()
 // ===========================================================================
 //
-// 【为什么这个函数被重写而不是"找回原文"】
+// [Why this function was rewritten rather than "the original text recovered"]
 //
-//   第十轮把 v2 读取器拼进 AMDMapperProbe.cpp 时，拼接区间的终点取在
-//   `m2b2PublishDmaDefaults()` 之前，而 m2b2ScanTxDone() 恰好位于这两个
-//   标记之间——它的**定义**被整段替换掉了，只剩头文件里的声明和第 16d 步
-//   的调用。链接阶段才暴露：kmutil 报
+//   When round 10 spliced the v2 reader into AMDMapperProbe.cpp, the end of
+//   the spliced range was taken just before `m2b2PublishDmaDefaults()`, and
+//   m2b2ScanTxDone() happened to sit between those two markers -- its
+//   **definition** was replaced wholesale, leaving only the declaration in the
+//   header and the call in step 16d. It surfaced at link time: kmutil reported
 //
 //     Failed to bind '__ZN26org_example_AMDMapperProbe14m2b2ScanTxDoneEv'
 //     ... could not find a kext which exports this symbol
 //
-//   这正是第九轮反复出现的那种失效形态：编译通过、安装"成功"、集合重建
-//   失败，而唯一症状是证据里什么都没有。本轮把它当成缺陷修掉，并把
-//   "链接后必须能解析所有 driver 符号"写进 deploy 脚本。
+//   This is exactly the failure shape that kept recurring in round 9: it
+//   compiles, installation "succeeds", set reconstruction fails, and the only
+//   symptom is that the evidence contains nothing. This round fixes it as a
+//   defect and writes "all driver symbols must resolve after linking" into the
+//   deploy script.
 //
-// 【它做什么】
+// [What it does]
 //
-//   读一次 TX 环，返回 `doneWithAddr` —— 既已交还（DescOwn 清零）又带
-//   非零地址的描述符数量。
+//   Reads the TX ring once and returns `doneWithAddr` -- the number of
+//   descriptors that are both handed back (DescOwn cleared) and carry a
+//   non-zero address.
 //
-//   这个数**不是**完成证据。DescOwn 在本芯片上不被硬件清除，所以这个
-//   差值连续四轮都恒为 0（done == zeroaddr）。保留它只有一个用途：
-//   让"DescOwn 不是完成信号"这件事每次实验都可见，而不是变成一段传闻。
-//   真正的完成证据是驱动自己写的 tx-done 记录与硬件关闭指针。
+//   This number is **not** completion evidence. DescOwn is not cleared by the
+//   hardware on this chip, so this delta has been constantly 0 for four rounds
+//   (done == zeroaddr). It is kept for exactly one purpose: to make "DescOwn
+//   is not a completion signal" visible on every experiment instead of turning
+//   into hearsay. The real completion evidence is the driver's own tx-done
+//   records and the hardware close pointer.
 //
-// 【为什么先过两道门】
+// [Why two gates come first]
 //
-//   plausibleRingBase()  —— 寄存器里的地址看起来像不像一个环
-//   readVerdictDeviceReported() —— 这个物理地址能不能安全读
+//   plausibleRingBase()          -- does the register's address look like a ring
+//   readVerdictDeviceReported()  -- can this physical address be read safely
 //
-//   两者任一不通过就返回 -1，绝不"读读看"。第七轮的教训：把设备报的地址
-//   直接映射进来读过一次，代价是两次 panic。
+//   If either fails the function returns -1 and never "just tries to read".
+//   Round 7's lesson: mapping in a device-reported address and reading it once
+//   cost two panics.
 // The declared batch size for this round.
 //
 // WHERE IT COMES FROM, AND WHY NOT FROM THE RECORDS
@@ -229,36 +241,41 @@ UInt32 org_example_AMDMapperProbe::m2b2ReadDeclaredToken() {
 }
 
 // ===========================================================================
-// 第十一轮：绑定本次驱动实例
+// Round 11: binding this driver instance
 // ===========================================================================
 //
-// 【要解决的问题】
+// [The problem to solve]
 //
-//   快照头部有 epoch（驱动在 obsInit() 里取的"开机后秒数"）。第十轮的
-//   读侧把 want.epoch 写成 0，而 obsIdentityMatches() 把 0 解释为
-//   "不检查"。于是这一整条保护**从未生效**：
+//   The snapshot header carries an epoch (the "seconds since boot" the driver
+//   took in obsInit()). Round 10's reader wrote want.epoch = 0, and
+//   obsIdentityMatches() interprets 0 as "don't check". So this entire
+//   protection **never took effect**:
 //
-//     同一块卡、同一份 MAC、同一个 BSD unit，
-//     驱动重载或控制器 reset 之后产生的新实例，
-//     其快照会被当成"本次实例"的证据。
+//     the same card, the same MAC, the same BSD unit -- a new instance
+//     produced after a driver reload or controller reset would have its
+//     snapshot accepted as evidence "of this instance".
 //
-// 【怎么绑】
+// [How it is bound]
 //
-//   优先用驱动自己发布的实例标识。驱动在驱动节点上发布
-//   `rtl812x-obs-epoch`（与快照头部同源）。探针在**窗口打开之前**读它，
-//   记住，之后要求快照头部的 epoch 与它相等。
+//   Prefer the instance identity the driver publishes itself. The driver
+//   publishes `rtl812x-obs-epoch` on its node (same source as the snapshot
+//   header). The probe reads it **before the window opens**, remembers it, and
+//   afterwards requires the snapshot header's epoch to equal it.
 //
-//   驱动没有发布时，退而求其次：读一次快照，用它头部的 epoch 作为绑定值，
-//   但**必须同时记录它来自哪一份 publication**，并且这个 publication
-//   必须是窗口之前的那一份。这样"绑定"仍然发生在窗口之前，不是从被判定的
-//   那份快照里抄出来的。
+//   When the driver publishes nothing, fall back: read one snapshot and use
+//   its header epoch as the binding value, but **the source publication must
+//   also be recorded**, and that publication must be the one from before the
+//   window. The binding then still happens before the window -- it is not
+//   copied out of the very snapshot being judged.
 //
-//   两条路都走不通时 epochBound 保持 0，m2b2ReadDriverObs() 会拒绝通过。
-//   这不是"少检查一项"，而是"这一轮没有资格下结论"。
+//   If neither path works, epochBound stays 0 and m2b2ReadDriverObs() refuses
+//   to pass. This is not "one fewer check"; it is "this round has no standing
+//   to conclude anything".
 //
-// 【为什么不在 m2b2ReadDriverObs() 里面绑】
-//   那一步在窗口**之后**。在那里取 epoch 等于用被检验的对象去定义检验
-//   标准。绑定点必须在窗口之前，这是这一段单独成函数的原因。
+// [Why it is not bound inside m2b2ReadDriverObs()]
+//   That step runs **after** the window. Taking the epoch there would let the
+//   object under test define the test's own standard. The binding point must
+//   precede the window -- that is why this is a separate function.
 void org_example_AMDMapperProbe::m2b2BindDriverInstance() {
     fM22b2Dma.epochBound = 0;
     setProperty("m2-b2-epoch-bind", "not-attempted");
@@ -359,39 +376,46 @@ int org_example_AMDMapperProbe::m2b2ScanTxDone() {
 
 // ===== AMDMapperProbeObs.cpp (original lines 3643..3886) =====
 // ===========================================================================
-// 第十轮：采集目标网卡的身份
+// Round 10: collecting the target NIC's identity
 // ===========================================================================
 //
-// 【为什么必须单独做这一步】
+// [Why this step must exist separately]
 //
-//   第九轮的负载绑定的是 en0 的 192.168.50.204，而目标设备是
-//   0x25:00.0 → RTL8125 → en2（MAC 1c:86:0b:3b:0b:bd）。en0 是另一块
-//   网卡（00:e0:4c:68:ab:03）。于是那一轮归档的"受控 TCP 链"根本没有
-//   经过被观测的设备——它证明的是另一块网卡的 DMA。
+//   Round 9's load was bound to en0's 192.168.50.204, while the target device
+//   is 0x25:00.0 -> RTL8125 -> en2 (MAC 1c:86:0b:3b:0b:bd). en0 is a different
+//   NIC (00:e0:4c:68:ab:03). So that round's archived "controlled TCP chain"
+//   never passed through the observed device at all -- it proved another
+//   NIC's DMA.
 //
-//   根因不是打错了地址，而是**没有把"接口"与"PCI 功能"绑成同一件事**。
-//   默认路由、源地址 bind、甚至 ifconfig 里看到一个 inet 都不构成
-//   "报文从这个 BDF 出去"的证据。
+//   The root cause was not a mistyped address but **failing to bind "the
+//   interface" and "the PCI function" into one thing**. The default route, a
+//   source-address bind, even seeing one inet in ifconfig -- none of these
+//   constitute evidence that "packets leave through this BDF".
 //
-//   所以这里把四个事实一次性取齐并发布：
-//       DeviceId/BDF  ← 设备表里的这一条（kNicPaths 解析出来的）
-//       vendor/device ← 该 IOPCIDevice 的配置空间
-//       MAC           ← 该 IOPCIDevice 的 IOMACAddress，或驱动实例上的
-//       BSD unit/name ← IOInterfaceUnit / BSD Name，且必须是它的子节点
+//   So here four facts are collected in one pass and published:
+//       DeviceId/BDF  <- this entry in the device table (resolved via kNicPaths)
+//       vendor/device <- that IOPCIDevice's config space
+//       MAC           <- that IOPCIDevice's IOMACAddress, or the driver
+//                        instance's
+//       BSD unit/name <- IOInterfaceUnit / BSD Name, and it must be a child
+//                        node
 //
-//   分析器把这一组与驱动快照头部逐项比对。任何一项不符，快照就不属于
-//   这个设备，结论降级——而不是"看起来像就当成是"。
+//   The analyser compares this set item by item against the driver's snapshot
+//   header. Any mismatch means the snapshot does not belong to this device and
+//   the conclusion is downgraded -- never "it looks right, so accept it".
 //
-// 【为什么不写死 en2】
-//   接口编号随驱动加载顺序变化，写死会把一次成功变成不可复现。
-//   这里每次现取，并把取到的值发布出去供分析器核对。
+// [Why en2 is not hard-coded]
+//   Interface numbers change with driver load order; hard-coding turns one
+//   success into something irreproducible. It is fetched fresh every time and
+//   the fetched values are published for the analyser to verify.
 //
-// 【关于 IOPCIDevice 的 deprecated 警告】
-//   SDK 把 IOPCIDevice 标成 __kpi_deprecated("Use PCIDriverKit")。该建议
-//   对本项目不适用——PCIDriverKit 是用户态 DriverKit 框架，无法实现
-//   IOMapper 子类，本项目必须是内核内 kext。这里只用**只读**的
-//   configRead16 与属性读取。因此只在**本函数内**关掉该警告，不做全局抑制
-//   （与 runM20ConfigProbe() 的处理方式一致）。
+// [On IOPCIDevice's deprecation warning]
+//   The SDK marks IOPCIDevice __kpi_deprecated("Use PCIDriverKit"). That advice
+//   does not apply to this project -- PCIDriverKit is a userspace DriverKit
+//   framework and cannot implement an IOMapper subclass; this project must be
+//   an in-kernel kext. Only the **read-only** configRead16 and property reads
+//   are used here. Therefore the warning is disabled only **inside this
+//   function**, not globally (consistent with runM20ConfigProbe()).
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
@@ -411,36 +435,42 @@ void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
 
     bool haveBdf = false, haveVd = false, haveMac = false, haveUnit = false;
 
-    // ---- BDF：从 IOPCIDevice 自己的属性取 ----
+    // ---- BDF: taken from IOPCIDevice's own properties ----
     //
-    // 【为什么不用 configRead 反推】
-    //   configRead 只能读到 vendor/device，读不到"我这个功能在总线上的
-    //   编号"。而 IORegistry 里 IOPCIDevice 的 "reg" 属性就是
-    //   (space, addr, len) 三元组，addr 的高位正是 bus/dev/fn。
-    //   用属性比用寄存器更直接，也更难出错。
+    // [Why not derived backwards via configRead]
+    //   configRead can only read vendor/device; it cannot read "which
+    //   bus/dev/fn number this function has". The IOPCIDevice "reg" property
+    //   in the IORegistry is the (space, addr, len) triple, and addr's high
+    //   bits are exactly bus/dev/fn. The property is more direct than the
+    //   registers and harder to get wrong.
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, svc);
     if (pci) {
         OSData *reg = OSDynamicCast(OSData, pci->copyProperty("reg"));
         if (reg && reg->getLength() >= 4) {
             const UInt8 *p = (const UInt8 *)reg->getBytesNoCopy();
-            // 【为什么只读前 4 个字节，而不是"找那个看起来像 BDF 的字"】
+            // [Why read only the first 4 bytes, rather than "find the word
+            // that looks like a BDF"]
             //
-            //   这块板子的 `reg` 属性是 80 字节：
+            //   This board's `reg` property is 80 bytes:
             //
             //     00002500 00000000 00000000 00000000 00000000
             //     10002501 00000000 ...
             //     18002502 00000000 ...
             //
-            //   这是 OpenFirmware 的 `reg = <addr-hi addr-lo size-hi size-lo>`
-            //   形式：**第一个 32 位大端字就是 (bus<<8)|(dev<<3)|fn**，即
-            //   0x2500 = 25:00.0；后面每 20 字节一组是 BAR。
+            //   This is OpenFirmware's
+            //   `reg = <addr-hi addr-lo size-hi size-lo>` form: **the first
+            //   32-bit big-endian word is (bus<<8)|(dev<<3)|fn**, i.e.
+            //   0x2500 = 25:00.0; each subsequent 20-byte group is a BAR.
             //
-            //   我第一版把第 3 个字（p[8..11]）当 BDF，于是读到 0，而驱动
-            //   快照里正确写着 0x2500 —— 身份核对因此报 bdf-mismatch，
-            //   整轮降级为 INDETERMINATE。**解析错了，不是设备不对。**
+            //   My first version took the 3rd word (p[8..11]) as the BDF, read
+            //   0, while the driver snapshot correctly said 0x2500 -- identity
+            //   checking then reported bdf-mismatch and the whole round
+            //   downgraded to INDETERMINATE. **The parsing was wrong, not the
+            //   device.**
             //
-            //   这里直接取大端首字，并用 PCI 的编码约束自检：bus 任意，
-            //   dev 必须 < 32，fn 必须 < 8。
+            //   Here the big-endian first word is taken directly, with a
+            //   self-check against PCI's encoding constraints: bus is free,
+            //   dev must be < 32, fn must be < 8.
             const UInt32 first = ((UInt32)p[0] << 24) | ((UInt32)p[1] << 16) |
                                  ((UInt32)p[2] << 8) | (UInt32)p[3];
             const UInt32 bus = (first >> 8) & 0xFFu;
@@ -454,7 +484,7 @@ void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
         }
         if (reg) reg->release();
 
-        // vendor/device：优先用配置空间，失败则退回属性。
+        // vendor/device: prefer config space; fall back to properties.
         {
             const UInt16 v = pci->configRead16(0x00);
             const UInt16 d = pci->configRead16(0x02);
@@ -478,7 +508,8 @@ void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
             if (did) did->release();
         }
 
-        // MAC：IOPCIDevice 上通常没有，驱动实例上有。下面在子节点里再找。
+        // MAC: usually not on the IOPCIDevice; it is on the driver instance.
+        // Looked for again in the child nodes below.
         OSData *mac = OSDynamicCast(OSData, pci->copyProperty("IOMACAddress"));
         if (mac && mac->getLength() >= 6) {
             const UInt8 *p = (const UInt8 *)mac->getBytesNoCopy();
@@ -490,10 +521,11 @@ void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
         if (mac) mac->release();
     }
 
-    // ---- 驱动实例：MAC + BSD unit ----
+    // ---- Driver instance: MAC + BSD unit ----
     //
-    // 从 IOPCIDevice 往下找驱动子节点（RTL8125）。它带着 IOMACAddress
-    // 和 IOInterfaceUnit，而且它下面挂着 IOEthernetInterface（enN）。
+    // Walk down from the IOPCIDevice to the driver's child node (RTL8125). It
+    // carries IOMACAddress and IOInterfaceUnit, and below it hangs the
+    // IOEthernetInterface (enN).
     {
         OSIterator *it = svc->getChildIterator(gIOServicePlane);
         if (it) {
@@ -515,8 +547,8 @@ void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
                     if (mac) mac->release();
                 }
 
-                // IOInterfaceUnit 可能挂在驱动节点，也可能挂在它的
-                // IOEthernetInterface 子节点上。两处都试。
+                // IOInterfaceUnit may hang on the driver node itself or on its
+                // IOEthernetInterface child. Try both.
                 if (!haveUnit) {
                     OSNumber *u = OSDynamicCast(
                         OSNumber, child->copyProperty("IOInterfaceUnit"));
@@ -527,7 +559,8 @@ void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
                     }
                 }
 
-                // 再往下找 IOEthernetInterface（enN 就在这一层）。
+                // Then look further down for IOEthernetInterface (enN lives
+                // at this level).
                 OSIterator *it2 = child->getChildIterator(gIOServicePlane);
                 if (it2) {
                     OSObject *o2 = nullptr;
@@ -560,7 +593,8 @@ void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
                             }
                             if (mac) mac->release();
                         }
-                        // BSD Name 就是 enN，直接发布出来供人核对。
+                        // BSD Name is the enN; publish it directly for
+                        // human verification.
                         OSString *bsd = OSDynamicCast(
                             OSString, iface->copyProperty("BSD Name"));
                         if (bsd) {
@@ -580,7 +614,7 @@ void org_example_AMDMapperProbe::m2b2CaptureNicIdentity() {
                     }
                     it2->release();
                 }
-                break;   // 第一个驱动子节点就够了
+                break;   // the first driver child node suffices
             }
             it->release();
         }
@@ -702,36 +736,45 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
     IOService *obsSvc = m2b2FindObsService(svc, &src);
     setProperty("m2-b2-obs-source", src);
 
-    // ---- 有界刷新：请求一次新发布，最多等 kObsFetchMaxTries-1 个轮询间隔 --
+    // ---- Bounded refresh: request one new publication, waiting at most
+    //      kObsFetchMaxTries-1 polling intervals --
     //
-    // 【为什么需要】
-    //   驱动的 watchdog 每秒发布一次。窗口结束时，最近一次发布可能已经
-    //   过去将近一秒，而窗口终点就在刚刚。要判定"记录覆盖窗口"，快照的
-    //   tPublished 必须 >= 窗口终点。只等下一次 tick 会多等最多一秒；主动
-    //   请求一次能让驱动在下一个 tick 立刻发布。
+    // [Why needed]
+    //   The driver's watchdog publishes once per second. At window end the
+    //   latest publication may be nearly a second old while the window end is
+    //   just now. To judge "the records cover the window", the snapshot's
+    //   tPublished must be >= the window end. Waiting for the next tick alone
+    //   adds up to a second; actively requesting once makes the driver publish
+    //   on the next tick immediately.
     //
-    // 【为什么不能更强】
-    //   让探针直接调用 obsPublish() 会把一次 ~37 KiB 的 memcpy 放进探针的
-    //   线程上下文，同时输出线程还在写记录；也会在窗口之后插入一段不受控
-    //   的延迟。所以只置一个标志，由驱动自己的 tick 执行。
+    // [Why it cannot be stronger]
+    //   Having the probe call obsPublish() directly would put a ~37 KiB memcpy
+    //   into the probe's thread context while the output thread is still
+    //   writing records; it would also insert an uncontrolled delay after the
+    //   window. So only a flag is set, executed by the driver's own tick.
     //
-    // 【为什么不会无界】
-    //   循环次数与每次睡眠都是编译期常量，总计 200 ms 上限。超时就用现有
-    //   那份并让 obsFreshEnough=false，由分析器降级——绝不无限等。
+    // [Why it cannot be unbounded]
+    //   Loop count and per-iteration sleep are compile-time constants, 200 ms
+    //   total cap. On timeout the existing snapshot is used with
+    //   obsFreshEnough=false and the analyser downgrades -- never wait
+    //   indefinitely.
     OSData *snap = m2b2CopyObsSnapshot(obsSvc, nullptr);
     UInt32 tries = 1;
     if (snap && fM22b2Dma.tWinEnd != 0) {
         UInt32 pub0 = m2b2ObsPubIdOf(snap);
-        // 只有当现有快照**确实早于**窗口终点时才去要新的。
+        // Ask for a new one only if the existing snapshot is **really older
+        // than** the window end.
         const UInt8 *b0 = (const UInt8 *)snap->getBytesNoCopy();
         UInt64 t0 = (b0 && snap->getLength() >= amdobs::OBS_HDR_BYTES)
                         ? amdobs::obsRd64(b0 + 88) : 0;
         if (t0 != 0 && t0 < fM22b2Dma.tWinEnd) {
-            // 请求驱动在下一个 tick 发布。若驱动不认这个方法（旧版本），
-            // 下面只是白等 200 ms 并降级，不会失败。
+            // Ask the driver to publish on the next tick. If the driver does
+            // not recognize the method (older version), the result is just a
+            // wasted 200 ms and a downgrade, not a failure.
             if (obsSvc->metaCast("RTL8125")) {
-                // 没有直接调用接口：通过 IORegistry 无法触发方法。
-                // 这里改为等待下一次 watchdog tick，次数与时长都有界。
+                // No direct call interface: a method cannot be triggered via
+                // the IORegistry. Instead wait for the next watchdog tick,
+                // with bounded count and duration.
             }
             while (tries < kObsFetchMaxTries) {
                 IOSleep(kObsFetchPollMs);
@@ -750,7 +793,7 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
                 } else {
                     n->release();
                 }
-                if (t0 >= fM22b2Dma.tWinEnd) break;   // 够新了，停止轮询
+                if (t0 >= fM22b2Dma.tWinEnd) break;   // fresh enough, stop polling
             }
         }
     }
@@ -770,11 +813,13 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
     const UInt8 *base = (const UInt8 *)snap->getBytesNoCopy();
     setHexProperty(this, "m2-b2-obs-bytes", (UInt64)bytes);
 
-    // ---- 生产入口守卫：格式/尺寸/数量/序列范围 ----
+    // ---- Production entry guards: format / size / count / sequence range ----
     //
-    // 【为什么必须在这里】
-    //   第九轮只在 host 测试里调用守卫，生产路径只比了一个 format 字符串。
-    //   "测试通过"与"生产检查了"是两件事。现在守卫就在读入点。
+    // [Why here]
+    //   Round 9 invoked the guards only in the host test; the production path
+    //   compared only a format string. "The test passed" and "production
+    //   checked" are two different things. Now the guards sit at the read-in
+    //   point.
     const amdobs::ObsHeader h = amdobs::obsHeaderOk(base, bytes);
     if (!h.ok) {
         fM22b2Dma.obsWhy = h.why;
@@ -812,31 +857,37 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
     setProperty("m2-b2-obs-state",
                 (h.lostCount || h.dropped) ? "degraded" : "ok");
 
-    // ---- 设备身份核对（生产入口）----
+    // ---- Device identity check (production entry) ----
     //
-    // 【为什么要核对】
-    //   记录本身不知道是谁写的。若探针读到的是另一个网卡实例（例如机器上
-    //   有两块 RTL8125）或者上一次驱动加载遗留的快照，那么"这些 DMA 属于
-    //   目标设备"就是错的。第九轮完全没有这一层。
+    // [Why check]
+    //   The records themselves do not know who wrote them. If the probe reads
+    //   another NIC instance (e.g. the machine has two RTL8125s) or a snapshot
+    //   left over from a previous driver load, then "this DMA belongs to the
+    //   target device" is simply wrong. Round 9 had none of this layer.
     //
-    // 【为什么身份来自探针自己】
-    //   BDF/vendor/device 取自设备表里这一条 entry，MAC 取自 IOPCIDevice 的
-    //   IOMACAddress 或驱动实例的 IOMACAddress，ifUnit 取自
-    //   IOInterfaceUnit。这些是探针独立观测到的，不是从快照里抄来的。
+    // [Why identity comes from the probe itself]
+    //   BDF/vendor/device come from this entry in the device table; MAC from
+    //   the IOPCIDevice's IOMACAddress or the driver instance's IOMACAddress;
+    //   ifUnit from IOInterfaceUnit. These are independently observed by the
+    //   probe, not copied from the snapshot.
     //
-    // 【第十一轮：epoch 不能再是 0】
-    //   第十轮这里写的是 want.epoch = 0，而 obsIdentityMatches() 把 0 解释
-    //   为"不检查"。于是"驱动重载/reset 后实例变了"这件事**完全没有被
-    //   检测**——同一块卡、同一份 MAC、同一个 unit，旧实例的快照照样通过。
+    // [Round 11: the epoch may no longer be 0]
+    //   Round 10 wrote want.epoch = 0 here, and obsIdentityMatches()
+    //   interprets 0 as "don't check". So "the instance changed after a driver
+    //   reload/reset" was **completely undetected** -- the same card, the same
+    //   MAC, the same unit: the old instance's snapshot passed all the same.
     //
-    //   现在改为绑定到**本次驱动的实例**：
-    //     * 探针先从驱动节点取一个实例标识（驱动的 epoch 属性；
-    //       若驱动不发布，则由探针在窗口前自己采样一个并记住）；
-    //     * 只有这个标识非零时才要求快照的 epoch 与它相等；
-    //     * 标识本身取不到时，发布 epochBinding = "unknown" 并**拒绝**
-    //       进入成功结论——未知不是通过。
+    //   Now the check is bound to **this driver's instance**:
+    //     * the probe first takes an instance identity from the driver node
+    //       (the driver's epoch property; if the driver publishes none, the
+    //       probe samples and remembers one itself before the window);
+    //     * only when that identity is non-zero must the snapshot's epoch
+    //       equal it;
+    //     * if the identity cannot be obtained at all, epochBinding =
+    //       "unknown" is published and entry into a success conclusion is
+    //       **refused** -- unknown is not a pass.
     amdobs::ObsIdentity want;
-    want.busDevFn = fM22b2Dma.devid;     // 设备表里的 devid 就是 BDF
+    want.busDevFn = fM22b2Dma.devid;     // the device table's devid is the BDF
     want.vendorId = fM22b2Dma.vendorId;
     want.deviceId = fM22b2Dma.deviceId;
     want.ifUnit   = fM22b2Dma.nicUnit;
@@ -865,12 +916,15 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
     setHexProperty(this, "m2-b2-obs-epoch-bound", (UInt64)want.epoch);
     setHexProperty(this, "m2-b2-obs-epoch-seen", (UInt64)h.epoch);
 
-    // 【第十二轮】身份未知不是"无需检查"，而是拒绝。
+    // [Round 12] Unknown identity is not "nothing to check" -- it is a refusal.
     //
-    // 第十一轮这里是 `if (want.have && !idOk)`。want.have 为 false 时整段
-    // 跳过：探针没能建立自己对设备的独立视图（例如取不到 MAC 或 unit），
-    // 于是"这份快照属于目标设备"从未被核对，而判定照样继续。未知与不符
-    // 是两件事，但在"能不能下结论"上等价：都不能。
+    // Round 11 had `if (want.have && !idOk)` here. When want.have was false
+    // the whole block was skipped: the probe had failed to establish its own
+    // independent view of the device (e.g. no MAC or unit obtainable), so
+    // "this snapshot belongs to the target device" was never verified, yet the
+    // verdict continued all the same. Unknown and mismatched are two different
+    // things, but they are equivalent with respect to "may a conclusion be
+    // drawn": neither may.
     if (!want.have) {
         fM22b2Dma.obsWhy = "identity-unknown";
         setProperty("m2-b2-obs", "SKIP-identity-unknown");
@@ -901,35 +955,45 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
         return;
     }
 
-    // ---- 第十一轮：把"参与判定的那份字节"钉死并导出 ----
+    // ---- Round 11: pin down and export the exact bytes used for the verdict ----
     //
-    // 【为什么要在解码前后各算一次哈希】
-    //   这份 OSData 是 copyProperty 之后由探针持有的不可变对象，理论上
-    //   不会变。但"理论上"不是证据。解码前算一次、解码后再算一次，
-    //   两次相同才说明判定所依据的字节与导出的字节是同一份；不同就不
-    //   发布 blob，并把原因写出来——宁可这一轮没有可导出的原始输入，
-    //   也不要导出一份无法与判定对应的东西。
+    // [Why hash once before and once after decoding]
+    //   This OSData is an immutable object held by the probe after
+    //   copyProperty and should not change in theory. But "in theory" is not
+    //   evidence. Hash before decoding and again after: equality of the two
+    //   proves the bytes the verdict rests on are the same bytes exported; a
+    //   difference means no blob is published and the reason is written out --
+    //   better for this round to have no exportable raw input than to export
+    //   something that cannot be matched to the verdict.
     char shaBefore[65];
     char shaAfter[65];
     amdobs::sha256::hashHex(base, (amdobs::u64)bytes, shaBefore);
 
-    // ---- 解码与三级判据 ----
+    // ---- Decode and the three-part criteria ----
     //
-    // 【为什么配对结果放成员】
-    //   ObsJoin 现在是几个 KiB。作为局部变量会把本函数帧推过 4 KiB，
-    //   编译器插入 __chkstk，二进制出现对 ____chkstk_darwin 的弱引用，
-    //   kmutil 拒绝加载。成员既省栈，也让"配对只算一次"成为结构事实。
+    // [Why the pairing result is a member]
+    //   ObsJoin is now several KiB. As a local it would push this function's
+    //   frame past 4 KiB, the compiler would insert __chkstk, the binary would
+    //   carry a weak reference to ____chkstk_darwin, and kmutil would refuse to
+    //   load. A member saves stack and also makes "pairing computed exactly
+    //   once" a structural fact.
     //
-    // 【第十一轮：批次声明是一个结构，不是一个数字】
-    //   第十轮只传了 expectedBatch。于是三种装配方式都能让判据通过：
-    //     A. 同一段两条重复完成、另一段零完成（segDone == segCount）；
-    //     B. 窗口内只有无关配对，真正的业务全在窗口之后；
-    //     C. token A 的 req1 与 token B 的 req2 被算成一个完整批次。
-    //   现在把本次 run token 与指定窗口一起传进去，见 ObsBatchSpec。
+    // [Round 11: a batch declaration is a structure, not a number]
+    //   Round 10 passed only expectedBatch. Three assembly patterns could then
+    //   pass the criterion:
+    //     A. two duplicated completions in one segment, zero in another
+    //        (segDone == segCount);
+    //     B. only unrelated pairings inside the window while the real business
+    //        happened after it;
+    //     C. token A's req1 and token B's req2 counted as one complete batch.
+    //   Now this run's token and the specified window are passed together; see
+    //   ObsBatchSpec.
     amdobs::ObsJoin &j = fM22b2ObsJoin;
-    // 【第十二轮】strictToken：生产路径要求本次 token 在**读记录之前**就已
-    // 声明。第十一轮在未声明时会退化为"记录里只有一个 token 就用它"，
-    // 那是用被检查的对象定义检查标准——循环。
+    // [Round 12] strictToken: the production path requires this run's token to
+    // have been declared **before the records are read**. Round 11 degraded to
+    // "if only one token appears in the records, use it" when nothing was
+    // declared -- letting the object under test define the test's standard,
+    // which is circular.
     const amdobs::ObsBatchSpec batchSpec =
         amdobs::obsBatchSpecStrict(fM22b2Dma.expectedBatch,
                                    fM22b2Dma.declaredToken,
@@ -960,7 +1024,7 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
     fM22b2Dma.obsFirstRxAddr = j.firstRxAddr;
     fM22b2Dma.obsLastRxAddr = j.lastRxAddr;
 
-    // 三个判据彼此独立，逐个记录。
+    // The three criteria are independent of each other; each is recorded.
     fM22b2Dma.obsHasCompletePair = j.hasCompletePair;
     fM22b2Dma.obsRecordsCoverWindow = j.recordsCoverWindow;
     fM22b2Dma.obsControlledBatchComplete = j.controlledBatchComplete;
@@ -987,7 +1051,8 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
     fM22b2Dma.obsBatchDmaUnknown = j.batchDmaUnknown;
     fM22b2Dma.obsBatchOrder = j.batchOrder;
 
-    // 窗口内第一条既有提交又有完成的操作：这就是"提交—地址—完成"的三元组。
+    // The first operation inside the window with both a submit and a
+    // completion: this is the "submit -- address -- completion" triple.
     if (j.haveWinOp && j.winOp.submitAddr != 0) {
         fM22b2Dma.obsHaveFirstOp = true;
         fM22b2Dma.obsFirstOpCum = j.winOp.cumulative;
@@ -1000,7 +1065,8 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
         fM22b2Dma.obsFirstOpTCompl = j.winOp.tDone;
     }
 
-    // 受控批次里第一条**完整**的业务操作：TX 全部段 + 全部完成 + RX。
+    // The first **complete** business operation in the controlled batch: all TX
+    // segments + all completions + RX.
     for (UInt32 k = 0; k < j.bizCount; k++) {
         const amdobs::ObsBizOp &b = j.biz[k];
         if (!(b.haveSubmit && b.allSegDone && b.haveRx)) continue;
@@ -1030,18 +1096,21 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
         break;
     }
 
-    // ---- 第十一轮：导出探针实际采用的那份快照 ----
+    // ---- Round 11: export the snapshot the probe actually used ----
     //
-    // 【这一段必须在 snap->release() 之前】
-    //   blob 就是从 snap 的字节里复制的。释放之后再读是 use-after-free，
-    //   而那种错误在内核里表现为随机崩溃，不是编译错误。
+    // [This block must run before snap->release()]
+    //   The blob is copied from snap's bytes. Reading after release is
+    //   use-after-free, and in the kernel that kind of error presents as
+    //   random crashes, not compile errors.
     //
-    // 【导出的是什么】
-    //   与解码用的**同一段字节**，逐字节相同：OSData 的属性值就是
-    //   驱动发布的那份（头部 + 记录）。采集脚本把它写成
-    //   obs-snapshot-used.bin，分析器再用标准库算一次 sha256，与探针
-    //   同时发布的 m2-b2-obs-used-sha256 比对。三者（探针解码、
-    //   导出的 blob、分析器哈希）一旦对不上，这一轮就没有可用的原始输入。
+    // [What is exported]
+    //   The **same byte range** used for decoding, byte for byte: the OSData
+    //   property value is exactly what the driver published (header + records).
+    //   The capture script writes it as obs-snapshot-used.bin, the analyser
+    //   hashes it once more with the standard library, and compares against
+    //   the m2-b2-obs-used-sha256 the probe published alongside. If any of the
+    //   three (probe decode, exported blob, analyser hash) disagree, this
+    //   round has no usable raw input.
     amdobs::sha256::hashHex(base, (amdobs::u64)bytes, shaAfter);
     fM22b2Dma.obsUsedPubId = fM22b2Dma.obsPubId;
     fM22b2Dma.obsUsedTPublished = fM22b2Dma.obsTPublished;
@@ -1091,7 +1160,7 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
     fM22b2Dma.obsPresent = true;
     fM22b2Dma.obsWhy = "ok";
 
-    // ---- 发布 ----
+    // ---- Publish ----
     setProperty("m2-b2-obs", "complete");
     setHexProperty(this, "m2-b2-obs-pub-id", (UInt64)fM22b2Dma.obsPubId);
     setHexProperty(this, "m2-b2-obs-epoch", (UInt64)fM22b2Dma.obsEpoch);
@@ -1120,14 +1189,16 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
                 fM22b2Dma.obsFreshEnough ? "yes" : "no");
     setProperty("m2-b2-obs-identity", idWhy);
 
-    // ---- 第十一轮：导出身份与哈希 ----
+    // ---- Round 11: export identity and hashes ----
     //
-    // 分析器要求这三项同时成立才把这一轮的判定当作证据：
+    // The analyser requires all three of these to hold before treating this
+    // round's verdict as evidence:
     //   m2-b2-obs-used            == "exported"
-    //   m2-b2-obs-used-sha256     == 导出文件的 sha256
-    //   m2-b2-obs-used-pub-id     == 探针判据所依据的 publication
-    // 任何一项缺失或不等，这一轮就只是"运行时看起来通过"，不是可复核的
-    // 有限事务证据。
+    //   m2-b2-obs-used-sha256     == sha256 of the exported file
+    //   m2-b2-obs-used-pub-id     == the publication the probe's criteria
+    //                                were based on
+    // If any is missing or unequal, this round is only "passed at runtime, it
+    // seems" -- not verifiable finite-transaction evidence.
     setProperty("m2-b2-obs-used-why", fM22b2Dma.obsUsedWhy);
     setHexProperty(this, "m2-b2-obs-used-bytes",
                    (UInt64)fM22b2Dma.obsUsedBytes);
@@ -1169,7 +1240,7 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
     setHexProperty(this, "m2-b2-obs-win-uncompleted",
                    (UInt64)fM22b2Dma.obsWinUncompleted);
 
-    // ---- 三个判据 ----
+    // ---- The three criteria ----
     setProperty("m2-b2-obs-has-complete-pair",
                 fM22b2Dma.obsHasCompletePair ? "yes" : "no");
     setProperty("m2-b2-obs-records-cover-window",
@@ -1178,7 +1249,7 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
                 fM22b2Dma.obsControlledBatchComplete ? "yes" : "no");
     setProperty("m2-b2-obs-cover-state", fM22b2Dma.obsCoverName);
 
-    // ---- 业务关联 ----
+    // ---- Business correlation ----
     setHexProperty(this, "m2-b2-obs-biz-ops", (UInt64)fM22b2Dma.obsBizOps);
     setHexProperty(this, "m2-b2-obs-biz-capped",
                    (UInt64)fM22b2Dma.obsBizCapped);
@@ -1200,11 +1271,12 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
                    (UInt64)fM22b2Dma.obsRxParsed);
     setProperty("m2-b2-obs-batch-why", fM22b2Dma.obsBatchWhy);
 
-    // ---- 第十一轮：批次判据的绑定项与阻断计数 ----
+    // ---- Round 11: batch-criterion bindings and blocking counters ----
     //
-    // 这些必须**逐项**发布。把"批次没通过"压缩成一个布尔值，会让分析器
-    // 无法区分"请求缺失""重复完成""跑到了窗口外"——而这几种的处置方式
-    // 完全不同。
+    // These must be published **item by item**. Compressing "the batch failed"
+    // into a single boolean would leave the analyser unable to distinguish
+    // "request missing" from "duplicated completion" from "ran outside the
+    // window" -- and those call for completely different dispositions.
     setHexProperty(this, "m2-b2-obs-declared-token",
                    (UInt64)fM22b2Dma.obsDeclaredToken);
     setHexProperty(this, "m2-b2-obs-join-token",
@@ -1259,8 +1331,9 @@ void org_example_AMDMapperProbe::m2b2ReadDriverObs() {
             setHexProperty(this, key, fM22b2Dma.obsBizSegAddr[s]);
             snprintf(key, sizeof(key), "m2-b2-biz-seg%u-len", (unsigned)s);
             setHexProperty(this, key, (UInt64)fM22b2Dma.obsBizSegLen[s]);
-            // 第十一轮：每一段各自的完成次数。分析器要求它恰好为 1，
-            // 而不是要求"总完成数等于段数"。
+            // Round 11: each segment's own completion count. The analyser
+            // requires it to be exactly 1, not "total completions == segment
+            // count".
             snprintf(key, sizeof(key), "m2-b2-biz-seg%u-done-count",
                      (unsigned)s);
             setHexProperty(this, key, (UInt64)fM22b2Dma.obsBizSegDoneCount[s]);

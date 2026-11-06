@@ -9,17 +9,20 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
-// IOPCIDevice.h 在 SDK 里自身会触发两个 -Werror 级警告：
-//   1. IOPCIDevice 被标 __kpi_deprecated("Use PCIDriverKit")
-//   2. 其内部的 setProperty 重载未标 override（-Winconsistent-missing-override）
+// IOPCIDevice.h itself triggers two -Werror-level warnings from within the SDK:
+//   1. IOPCIDevice is marked __kpi_deprecated("Use PCIDriverKit")
+//   2. Its internal setProperty overload is not marked override (-Winconsistent-missing-override)
 //
-// 这两条都是 **Apple 头文件自身的问题**，不是本项目的代码缺陷：
-//   - PCIDriverKit 是用户态 DriverKit 框架，无法实现 IOMapper 子类，
-//     本项目必须是内核内 IOKit kext，只能用 IOPCIDevice。
-//   - override 警告来自 SDK 声明，我们无法也不应修改 SDK 头。
+// Both are **problems in Apple's own headers**, not defects in this project's code:
+//   - PCIDriverKit is a userspace DriverKit framework and cannot implement an
+//     IOMapper subclass; this project must be an in-kernel IOKit kext and can
+//     only use IOPCIDevice.
+//   - The override warning comes from SDK declarations; we cannot and should
+//     not modify SDK headers.
 //
-// 因此仅在包含该头时抑制这两条，不全局关闭——其他真正的
-// deprecation / override 问题仍会照常报错。
+// Therefore suppress only these two while including that header, without
+// disabling them globally -- other genuine deprecation / override issues
+// will still be reported as errors as usual.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"
@@ -32,13 +35,15 @@
 #include <kern/clock.h>
 #include <libkern/OSByteOrder.h>
 
-// 页表编码/解码的唯一实现。生产代码与 host 回归测试**包含同一个文件**，
-// 测试跑的就是这里的分支，不是另写一份 Python 复述。
-// 见 tests/pte-core-test.cpp 与 docs/m2-2b-2-round5-result.md。
+// The single implementation of page table encoding/decoding. Production code
+// and the host regression tests **include the same file**, so the tests run
+// exactly these branches rather than a separately written Python restatement.
+// See tests/pte-core-test.cpp and docs/m2-2b-2-round5-result.md.
 #include "amd_iommu_pte_core.hpp"
 
-// OSPtr<T> 的定义取决于 IOKIT_ENABLE_SHARED_PTR（SDK libkern/c++/OSPtr.h）：
-//   定义时 = OSSharedPtr<T>；未定义时 = T*。SDK 默认未定义。
+// The definition of OSPtr<T> depends on IOKIT_ENABLE_SHARED_PTR (SDK
+// libkern/c++/OSPtr.h): defined = OSSharedPtr<T>; undefined = T*.
+// The SDK default is undefined.
 #if defined(IOKIT_ENABLE_SHARED_PTR)
     #define M1A_HAS_SHARED_PTR 1
 #else
@@ -48,7 +53,7 @@
 #include "AMDMapperProbeInternal.hpp"
 
 // ===== AMDMapperProbeB1B2.cpp (original lines 217..242) =====
-// ------------------------------------------------------------------ B1 自测
+// ------------------------------------------------------------------ B1 self-test
 
 void org_example_AMDMapperProbe::runB1SelfTest() {
     if (!fTarget) {
@@ -76,15 +81,16 @@ void org_example_AMDMapperProbe::runB1SelfTest() {
 }
 
 // ===== AMDMapperProbeB1B2.cpp (original lines 308..392) =====
-// ---------------------------------------------------------------- B2-0 自测
+// ---------------------------------------------------------------- B2-0 self-test
 
-// 用我们自己的 buffer 与 mapper 构造一次真实的 IODMACommand 流程。
+// Run a real IODMACommand flow using our own buffer and mapper.
 //
-// 复现的正是 RTL812xLucy 对描述符环做的事：
+// This reproduces exactly what RTL812xLucy does to its descriptor ring:
 //     IODMACommand::withSpecification(..., mapper, NULL)
-//     setMemoryDescriptor(md)   ← 内部会调用我们的 iovmMapMemory
+//     setMemoryDescriptor(md)   <- internally calls our iovmMapMemory
 //
-// 全程没有硬件参与：buffer 由我们分配，IOVA 不会被任何设备使用。
+// No hardware is involved at any point: the buffer is ours, and the IOVA is
+// never used by any device.
 void org_example_AMDMapperProbe::runB2SelfTest() {
     const IOByteCount kBufSize = 16 * 4096;
 
@@ -107,7 +113,7 @@ void org_example_AMDMapperProbe::runB2SelfTest() {
     }
     setProperty("m1b2-prepare", "OK");
 
-    // 显式把我们的 mapper 传进去——与 Lucy 驱动的用法一致。
+    // Pass our mapper explicitly -- identical to how the Lucy driver uses it.
     IODMACommand *cmd = IODMACommand::withSpecification(
         kIODMACommandOutputHost64,
         64,             // numAddressBits
@@ -115,7 +121,7 @@ void org_example_AMDMapperProbe::runB2SelfTest() {
         IODMACommand::kMapped,
         0,              // maxTransferSize
         1,              // alignment
-        this,           // mapper ← 关键：我们的 mapper
+        this,           // mapper <- the key point: OUR mapper
         NULL);
     if (!cmd) {
         setProperty("m1b2-cmd", "FAIL-withSpecification");
@@ -125,12 +131,14 @@ void org_example_AMDMapperProbe::runB2SelfTest() {
     }
     setProperty("m1b2-cmd", "OK");
 
-    // 这一行会触发 iovmMapMemory（经 prepare 内部的多段路径）。
-    // 注意：B2-0 刻意保持窗口**关闭**，行为与 0.4.0 完全一致，
-    // 这样两次部署的结果可以直接对比，不会因为实现变化而失去基线。
-    // 成功路径由紧随其后的 B2-a 负责观察。
-    // fProbeCallActive 让 iovmMapMemory 知道这是探针自己发起的，
-    // 从而不会把这次（注定失败的）调用误算成真实设备调用。
+    // This line triggers iovmMapMemory (via the multi-segment path inside
+    // prepare). Note: B2-0 deliberately keeps the window **closed**, behaving
+    // exactly like 0.4.0, so results from two deployments are directly
+    // comparable and do not lose the baseline because the implementation
+    // changed. The success path is observed by B2-a, which follows.
+    // fProbeCallActive tells iovmMapMemory that the probe itself initiated
+    // this call, so this (doomed-to-fail) call is not miscounted as a real
+    // device call.
     fProbeCallActive = true;
     IOReturn ret = cmd->setMemoryDescriptor(bmd);
     fProbeCallActive = false;
@@ -163,13 +171,15 @@ void org_example_AMDMapperProbe::runB2SelfTest() {
 }
 
 // ===== AMDMapperProbeB1B2.cpp (original lines 394..487) =====
-// ---------------------------------------------------------------- B2-a 自测
+// ---------------------------------------------------------------- B2-a self-test
 //
-// 两组对照：
-//   ok   —— 物理连续的 64 KiB，期望 iovmMapMemory 返回成功 + 恒等映射
-//   frag —— 碎片化的 8 MiB，期望返回 kIOReturnUnsupported 并被计数
+// Two comparison cases:
+//   ok   -- physically contiguous 64 KiB; iovmMapMemory should return success
+//           + identity mapping
+//   frag -- fragmented 8 MiB; should return kIOReturnUnsupported and be counted
 //
-// 成败判定不靠 IOLog（会滚出 msgbuf），全部落到 IORegistry 属性。
+// Pass/fail is not judged via IOLog (which scrolls out of msgbuf); everything
+// lands in IORegistry properties.
 
 void org_example_AMDMapperProbe::runB2OneTest(
     const char *tag, bool wantContiguous, IOByteCount size) {
@@ -192,7 +202,8 @@ void org_example_AMDMapperProbe::runB2OneTest(
         return;
     }
 
-    // 先独立探测这块 buffer 的实际物理布局，作为对照基准。
+    // First probe the buffer's actual physical layout independently, as the
+    // comparison baseline.
     ProbeRun run = probeSegmentRun(bmd, 0, size);
     setHexTagged(this, tag, "segs", run.segCount);
     setHexTagged(this, tag, "firstpa", run.firstPA);
@@ -213,7 +224,7 @@ void org_example_AMDMapperProbe::runB2OneTest(
     uint32_t beforeFrag   = fMapRejectFragCalls;
     uint32_t beforeOther  = fMapRejectOtherCalls;
 
-    // 打开窗口，并且只对这个 cmd 有效（双重闸门）。
+    // Open the window, valid only for this cmd (double gate).
     fExpectedCmd = cmd;
     fMapWindowOpen = true;
     fProbeCallActive = true;
@@ -237,7 +248,8 @@ void org_example_AMDMapperProbe::runB2OneTest(
             setHexTagged(this, tag, "iova", seg.fIOVMAddr);
             setHexTagged(this, tag, "seg0len", seg.fLength);
             setHexTagged(this, tag, "nsegs", numSegs);
-            // 恒等映射的判定：IOVA 必须等于 buffer 的物理起点。
+            // Identity-mapping verdict: the IOVA must equal the buffer's
+            // physical start.
             setStrTagged(this, tag, "identity",
                 (seg.fIOVMAddr == run.firstPA && seg.fLength == size)
                     ? "yes" : "NO");
@@ -260,16 +272,17 @@ void org_example_AMDMapperProbe::runB2OneTest(
 
 // ===== AMDMapperProbeB1B2.cpp (original lines 489..521) =====
 void org_example_AMDMapperProbe::runB2aSelfTest() {
-    // B2-0 刚刚跑过一次（窗口关闭 → 计入 rejectOther）。先把 B2-a 自己的
-    // 计数器归零，让下面报出来的数字只反映 B2-a 的两次对照，
-    // 不与 B2-0 的观测调用混在一起。
+    // B2-0 just ran once (window closed -> counted in rejectOther). Zero
+    // B2-a's own counters first so the numbers reported below reflect only
+    // B2-a's two comparison cases, not mixed with B2-0's observation calls.
     fMapOkCalls = fMapRejectFragCalls = fMapRejectOtherCalls = 0;
     fUnmapOkCalls = 0;
 
-    // 对照 1：物理连续，期望成功。
+    // Comparison 1: physically contiguous, expected to succeed.
     runB2OneTest("m1b2a-ok", true, 16 * 4096);
 
-    // 对照 2：碎片化，期望被拒。8 MiB 普通 buffer 几乎不可能物理连续。
+    // Comparison 2: fragmented, expected to be rejected. An 8 MiB general
+    // buffer is almost never physically contiguous.
     runB2OneTest("m1b2a-frag", false, 8 * 1024 * 1024);
 
     setHexProperty(this, "m1b2a-okcalls", fMapOkCalls);
@@ -277,13 +290,15 @@ void org_example_AMDMapperProbe::runB2aSelfTest() {
     setHexProperty(this, "m1b2a-othercalls", fMapRejectOtherCalls);
     setHexProperty(this, "m1b2a-unmapok", fUnmapOkCalls);
 
-    // 最后一次成功映射的摘要（也让 fLast* 四个成员被真正读取）
+    // Summary of the last successful mapping (also makes the fLast* four
+    // members actually read)
     setHexProperty(this, "m1b2a-last-segs", fLastSegCount);
     setHexProperty(this, "m1b2a-last-pa", fLastFirstPA);
     setHexProperty(this, "m1b2a-last-len", fLastLength);
     setHexProperty(this, "m1b2a-last-off", fLastOffset);
 
-    // 总判定：连续成功 + 碎片被拒，两者都成立才算 PASS。
+    // Overall verdict: contiguous success + fragmented rejection -- PASS only
+    // if both hold.
     if (fMapOkCalls > 0 && fMapRejectFragCalls > 0) {
         setProperty("m1b2a-selftest", "PASS-contig-mapped-frag-rejected");
     } else if (fMapOkCalls > 0) {
@@ -294,11 +309,12 @@ void org_example_AMDMapperProbe::runB2aSelfTest() {
 }
 
 // ===== AMDMapperProbeB1B2.cpp (original lines 523..540) =====
-// ------------------------------------------------------ B2-b 映射表操作
+// ------------------------------------------------------ B2-b mapping table operations
 //
-// 恒等映射不需要页表，但必须**记住哪些区间被映射过**，
-// 否则 mapToPhysicalAddress 无法区分「我映射的」与「别人问的」，
-// unmap 也无法校验参数。
+// Identity mappings need no page table, but we must **remember which ranges
+// were mapped**, otherwise mapToPhysicalAddress cannot distinguish "what we
+// mapped" from "what someone asked about", and unmap cannot validate its
+// arguments.
 
 org_example_AMDMapperProbe::MapEntry *
 org_example_AMDMapperProbe::allocMapEntry() {
@@ -310,12 +326,13 @@ org_example_AMDMapperProbe::allocMapEntry() {
             return &fMaps[i];
         }
     }
-    return nullptr;     // 表满
+    return nullptr;     // table full
 }
 
 // ===== AMDMapperProbeB1B2.cpp (original lines 542..554) =====
-// 按 (pa,len) 精确匹配释放。恒等映射下 pa 就是 IOVA，unmap 时内核会把
-// 我们当初返回的值原样传回来（IOMemoryDescriptor::dmaUnmap → iovmUnmapMemory）。
+// Release by exact (pa,len) match. Under identity mapping pa is the IOVA, and
+// on unmap the kernel passes back exactly the value we originally returned
+// (IOMemoryDescriptor::dmaUnmap -> iovmUnmapMemory).
 bool org_example_AMDMapperProbe::freeMapEntry(uint64_t pa, uint64_t len) {
     for (int i = 0; i < kMaxActiveMaps; i++) {
         if (fMaps[i].used && fMaps[i].pa == pa && fMaps[i].len == len) {
@@ -350,9 +367,10 @@ void org_example_AMDMapperProbe::publishB2bStats() {
 }
 
 // ===== AMDMapperProbeB1B2.cpp (original lines 7407..7417) =====
-// ------------------------------------------------------------- 统计属性刷新
+// ------------------------------------------------------------- statistics property refresh
 
-// 只在调用次数变化时刷新，避免每次映射都 setProperty（持续分配内存）。
+// Refresh only when the call count changes, avoiding a setProperty (which
+// keeps allocating memory) on every mapping.
 void org_example_AMDMapperProbe::publishMapStats(bool force) {
     if (!force && fMapCalls == fPublishedMapCalls) return;
     fPublishedMapCalls = fMapCalls;

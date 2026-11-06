@@ -9,17 +9,20 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
-// IOPCIDevice.h 在 SDK 里自身会触发两个 -Werror 级警告：
-//   1. IOPCIDevice 被标 __kpi_deprecated("Use PCIDriverKit")
-//   2. 其内部的 setProperty 重载未标 override（-Winconsistent-missing-override）
+// IOPCIDevice.h itself triggers two -Werror-level warnings from within the SDK:
+//   1. IOPCIDevice is marked __kpi_deprecated("Use PCIDriverKit")
+//   2. Its internal setProperty overload is not marked override (-Winconsistent-missing-override)
 //
-// 这两条都是 **Apple 头文件自身的问题**，不是本项目的代码缺陷：
-//   - PCIDriverKit 是用户态 DriverKit 框架，无法实现 IOMapper 子类，
-//     本项目必须是内核内 IOKit kext，只能用 IOPCIDevice。
-//   - override 警告来自 SDK 声明，我们无法也不应修改 SDK 头。
+// Both are **problems in Apple's own headers**, not defects in this project's code:
+//   - PCIDriverKit is a userspace DriverKit framework and cannot implement an
+//     IOMapper subclass; this project must be an in-kernel IOKit kext and can
+//     only use IOPCIDevice.
+//   - The override warning comes from SDK declarations; we cannot and should
+//     not modify SDK headers.
 //
-// 因此仅在包含该头时抑制这两条，不全局关闭——其他真正的
-// deprecation / override 问题仍会照常报错。
+// Therefore suppress only these two while including that header, without
+// disabling them globally -- other genuine deprecation / override issues
+// will still be reported as errors as usual.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"
@@ -32,13 +35,15 @@
 #include <kern/clock.h>
 #include <libkern/OSByteOrder.h>
 
-// 页表编码/解码的唯一实现。生产代码与 host 回归测试**包含同一个文件**，
-// 测试跑的就是这里的分支，不是另写一份 Python 复述。
-// 见 tests/pte-core-test.cpp 与 docs/m2-2b-2-round5-result.md。
+// The single implementation of page table encoding/decoding. Production code
+// and the host regression tests **include the same file**, so the tests run
+// exactly these branches rather than a separately written Python restatement.
+// See tests/pte-core-test.cpp and docs/m2-2b-2-round5-result.md.
 #include "amd_iommu_pte_core.hpp"
 
-// OSPtr<T> 的定义取决于 IOKIT_ENABLE_SHARED_PTR（SDK libkern/c++/OSPtr.h）：
-//   定义时 = OSSharedPtr<T>；未定义时 = T*。SDK 默认未定义。
+// The definition of OSPtr<T> depends on IOKIT_ENABLE_SHARED_PTR (SDK
+// libkern/c++/OSPtr.h): defined = OSSharedPtr<T>; undefined = T*.
+// The SDK default is undefined.
 #if defined(IOKIT_ENABLE_SHARED_PTR)
     #define M1A_HAS_SHARED_PTR 1
 #else
@@ -48,37 +53,47 @@
 #include "AMDMapperProbeInternal.hpp"
 
 // ===== AMDMapperProbeMmio.cpp (original lines 807..991) =====
-// ------------------------------------------------- M2-0b：PCI 配置空间只读探测
+// ------------------------------------------------- M2-0b: PCI config space read-only probe
 
-// 为什么要有这一步（M2-0 之后）：
+// Why this step exists (after M2-0):
 //
-//   M2-0 的结论是「IVRS 的 0xFD380000 才对，DSDT 的 _CRS 0xFEB80000 是陈旧
-//   声明」。但那个结论的证据全在 Linux 侧：
-//     - Linux 源码用 h->mmio_phys（init.c:1755），不用 _CRS
-//     - Linux dmesg 的 `Using global IVHD EFR:0x0` 反证 EFR 来自 MMIO 读取
-//   这些证明了 0xFD380000 在 **Linux 下**可读，没有证明 macOS 下如何。
+//   M2-0's conclusion was "IVRS's 0xFD380000 is correct; DSDT's _CRS
+//   0xFEB80000 is a stale declaration". But all the evidence for that
+//   conclusion lives on the Linux side:
+//     - Linux source uses h->mmio_phys (init.c:1755), not _CRS
+//     - Linux dmesg's `Using global IVHD EFR:0x0` corroborates that EFR comes
+//       from an MMIO read
+//   These prove 0xFD380000 is readable **under Linux**; they say nothing about
+//   macOS.
 //
-//   IOMMU 的 capability block 里有它自己的 BAR，是硬件当前的权威值。
-//   把它和 IVRS 的 base 一比，就能在 macOS 侧独立判定：
-//     - 若 BAR == 0xFD380000 → 与 IVRS 一致，_CRS 确为陈旧，M2-1 可用该地址
-//     - 若 BAR == 0xFEB80000 → 反过来，_CRS 才对，M2-0 结论要推翻
-//     - 若 BAR 是第三个值   → 两个来源都不可信，M2-1 必须改用 BAR
+//   The IOMMU's capability block carries its own BAR -- the hardware's current
+//   authoritative value. Comparing it with IVRS's base allows an independent
+//   verdict on the macOS side:
+//     - BAR == 0xFD380000 -> agrees with IVRS; _CRS is indeed stale, and M2-1
+//       may use that address
+//     - BAR == 0xFEB80000 -> the reverse; _CRS is right and M2-0's conclusion
+//       must be overturned
+//     - BAR is a third value -> neither source is trustworthy, and M2-1 must
+//       switch to the BAR
 //
-// 全部只读。configRead8/16/32 只读 PCI 配置空间，不碰任何 MMIO，
-// 不写任何寄存器，不改变任何设备状态。
+// Everything here is read-only. configRead8/16/32 only read PCI config space:
+// no MMIO is touched, no register written, no device state changed.
 //
-// 已知限制：
-//   configAccess() 要求 !isInactive() && reserved && parent
-//   且 configProt 不允许读时会被拒（返回 0xFFFFFFFF）。
-//   所以本函数必须能区分「读到全 1」与「读被拒」——两者都返回 0xFFFFFFFF，
-//   靠 device-id / vendor-id 是否能正常读出来判断通道是否通。
+// Known limitations:
+//   configAccess() requires !isInactive() && reserved && parent, and is
+//   rejected (returns 0xFFFFFFFF) if configProt forbids reads.
+//   So this function must distinguish "read all ones" from "read rejected" --
+//   both return 0xFFFFFFFF; whether the channel works is judged by whether
+//   device-id / vendor-id can be read normally.
 //
-// 关于 IOPCIDevice 的 deprecated 警告：
-//   SDK 把 IOPCIDevice 标成 __kpi_deprecated("Use PCIDriverKit")。该建议
-//   对本项目不适用——PCIDriverKit 是用户态 DriverKit 框架，无法实现
-//   IOMapper 子类，本项目必须是内核内 kext。且我们只用**只读**的
-//   configRead8/16/32，这两个符号已确认存在于运行内核的 IOPCIFamily
-//   导出表中。因此只在**本函数内**关掉该警告，不做全局抑制。
+// On IOPCIDevice's deprecation warning:
+//   The SDK marks IOPCIDevice __kpi_deprecated("Use PCIDriverKit"). That advice
+//   does not apply to this project -- PCIDriverKit is a userspace DriverKit
+//   framework and cannot implement an IOMapper subclass; this project must be
+//   an in-kernel kext. We only use the **read-only** configRead8/16/32, whose
+//   symbols are confirmed present in the running kernel's IOPCIFamily export
+//   table. Therefore the warning is disabled only **inside this function**,
+//   not globally.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 void org_example_AMDMapperProbe::runM20ConfigProbe() {
@@ -95,12 +110,12 @@ void org_example_AMDMapperProbe::runM20ConfigProbe() {
         return;
     }
 
-    // ---- 第 1 步：验证配置空间通道本身是否可用 ----
+    // ---- Step 1: verify the config space channel itself works ----
     //
-    // vendor-id 在 0x00，device-id 在 0x02。这两个值我们从 IORegistry
-    // 属性已知（0x1022 / 0x1481），所以它们可以当「通道自检」：
-    // 若读出来不是这两个值，说明 configRead 被拒或返回垃圾，
-    // 后面所有 BAR 读数都不可信。
+    // vendor-id is at 0x00, device-id at 0x02. We already know both values
+    // from IORegistry properties (0x1022 / 0x1481), so they serve as a
+    // "channel self-check": if they do not read back, configRead was rejected
+    // or returned garbage, and every subsequent BAR read is untrustworthy.
     UInt16 vid = pci->configRead16(0x00);
     UInt16 did = pci->configRead16(0x02);
 
@@ -108,7 +123,7 @@ void org_example_AMDMapperProbe::runM20ConfigProbe() {
     setHexProperty(this, "m2-cfg-did", did);
 
     if (vid != 0x1022 || did != 0x1481) {
-        // 通道不通。不能继续，否则 BAR 读数是垃圾。
+        // Channel is dead. Do not continue -- BAR reads would be garbage.
         setProperty("m2-config", "FAIL-channel-not-usable");
         setProperty("m2-config-note",
                     "vid/did mismatch => configRead blocked or inactive");
@@ -116,13 +131,15 @@ void org_example_AMDMapperProbe::runM20ConfigProbe() {
     }
     setProperty("m2-config", "channel-ok");
 
-    // ---- 第 2 步：读 capability 链表，找 AMD IOMMU capability ----
+    // ---- Step 2: walk the capability list to find the AMD IOMMU capability ----
     //
-    // CapID 0x0F = Secure Device (AMD IOMMU capability 用的就是这个 ID)。
-    // 实测 macOS 的 "Capability Offsets" 里 SecureCapability = 64 (0x40)。
+    // CapID 0x0F = Secure Device (the ID the AMD IOMMU capability uses).
+    // On the real machine, macOS's "Capability Offsets" lists
+    // SecureCapability = 64 (0x40).
     //
-    // 我们不盲信那个属性，自己走一遍链表——这样即使属性缺失也能工作，
-    // 且能顺带验证属性里的值与链表一致。
+    // We do not blindly trust that property; we walk the list ourselves -- so
+    // this works even if the property is missing, and it verifies the
+    // property's value against the list along the way.
     UInt16 status = pci->configRead16(0x06);
     bool capListSupported = (status & 0x0010) != 0;   // Status[4] = Capabilities List
     setProperty("m2-cfg-caplist", capListSupported ? "yes" : "no");
@@ -132,12 +149,12 @@ void org_example_AMDMapperProbe::runM20ConfigProbe() {
         return;
     }
 
-    UInt8 capPtr = (UInt8)(pci->configRead8(0x34) & 0xFC);  // 低 2 位保留
+    UInt8 capPtr = (UInt8)(pci->configRead8(0x34) & 0xFC);  // low 2 bits reserved
     setHexProperty(this, "m2-cfg-cap0", capPtr);
 
     UInt8 iommuCap = 0;
     UInt8 walk = capPtr;
-    // 最多走 48 步（PCI 规范上限 48 个 capability），并检测环。
+    // Walk at most 48 steps (PCI spec caps at 48 capabilities) and detect loops.
     for (int i = 0; i < 48 && walk >= 0x40; i++) {
         UInt16 hdr = pci->configRead16(walk);
         UInt8 capId = (UInt8)(hdr & 0xFF);
@@ -147,7 +164,7 @@ void org_example_AMDMapperProbe::runM20ConfigProbe() {
             iommuCap = walk;
             break;
         }
-        if (next == 0 || next == walk) break;   // 链表结束或自环
+        if (next == 0 || next == walk) break;   // list end or self-loop
         walk = next;
     }
 
@@ -159,11 +176,11 @@ void org_example_AMDMapperProbe::runM20ConfigProbe() {
     setHexProperty(this, "m2-cfg-iommu-cap", iommuCap);
     setProperty("m2-config", "capability-found");
 
-    // ---- 第 3 步：读 capability 头部与 BAR ----
+    // ---- Step 3: read the capability header and BAR ----
     //
-    // AMD IOMMU capability 结构（相对 cap 起始）：
+    // AMD IOMMU capability structure (relative to the capability start):
     //   +0x00 u32 : CapID(8) | CapPtr(8) | CapHdr(16)
-    //   +0x04 u64 : Base Address（bit0 = lock，需屏蔽）
+    //   +0x04 u64 : Base Address (bit0 = lock, must be masked)
     //   +0x0C u16 : PCI Segment Group
     //   +0x0E u16 : IOMMU Info
     //   +0x10 u32 : IOMMU Feature Reporting
@@ -179,7 +196,7 @@ void org_example_AMDMapperProbe::runM20ConfigProbe() {
     setHexProperty(this, "m2-cfg-barlo-raw", barLo);
     setHexProperty(this, "m2-cfg-barhi-raw", barHi);
 
-    // bit0 是 lock 位，不是地址位。
+    // bit0 is the lock bit, not an address bit.
     UInt64 bar = ((UInt64)barHi << 32) | (UInt64)(barLo & ~1u);
     setHexProperty(this, "m2-cfg-bar", bar);
 
@@ -194,19 +211,20 @@ void org_example_AMDMapperProbe::runM20ConfigProbe() {
     UInt32 attrs = pci->configRead32((UInt8)(iommuCap + 0x14));
     setHexProperty(this, "m2-cfg-attrs", attrs);
 
-    // EFR Image：这是 IVRS 0x11 块里那个字段的硬件侧副本。
-    // 若它与 IVRS 的 0x058F77EF22294A5A 相等，说明两者是同一份数据。
+    // EFR Image: the hardware-side copy of the field in IVRS's 0x11 block.
+    // If it equals IVRS's 0x058F77EF22294A5A, both derive from the same data.
     UInt32 efrLo = pci->configRead32((UInt8)(iommuCap + 0x18));
     UInt32 efrHi = pci->configRead32((UInt8)(iommuCap + 0x1C));
     UInt64 efr = ((UInt64)efrHi << 32) | (UInt64)efrLo;
     setHexProperty(this, "m2-cfg-efr", efr);
 
-    // ---- 第 4 步：给出判定 ----
+    // ---- Step 4: render the verdict ----
     //
-    // 判据是 BAR 与两个候选地址的比较。这是本函数唯一的目的。
-    const UInt64 kIvrsBase = 0xFD380000ULL;   // IVRS 0x10 与 0x11 块都写这个
-    const UInt64 kCrsBase  = 0xFEB80000ULL;   // DSDT _CRS 的 Memory32Fixed
-    const UInt64 kEfrKnown = 0x058F77EF22294A5AULL;  // IVRS EFR 字段实测值
+    // The criterion is the BAR compared against the two candidate addresses.
+    // That is this function's sole purpose.
+    const UInt64 kIvrsBase = 0xFD380000ULL;   // written in both IVRS 0x10 and 0x11 blocks
+    const UInt64 kCrsBase  = 0xFEB80000ULL;   // DSDT _CRS Memory32Fixed
+    const UInt64 kEfrKnown = 0x058F77EF22294A5AULL;  // IVRS EFR field, measured value
 
     if (bar == kIvrsBase) {
         setProperty("m2-config-verdict", "BAR==IVRS(0xFD380000)");
@@ -222,9 +240,10 @@ void org_example_AMDMapperProbe::runM20ConfigProbe() {
         setProperty("m2-config-meaning", "neither IVRS nor _CRS; trust BAR");
     }
 
-    // EFR 比对：独立的第二重判据。
-    // 若 EFR 与 IVRS 一致，说明这块 capability 结构我们读的位置是对的，
-    // 从而 BAR 读数也可信。若不一致，BAR 读数就要打折扣。
+    // EFR comparison: an independent second criterion.
+    // If EFR matches IVRS, we read the capability structure at the right
+    // place, and the BAR reading is trustworthy too. If not, the BAR reading
+    // is in doubt.
     if (efr == kEfrKnown) {
         setProperty("m2-cfg-efr-match", "yes");
     } else {
@@ -241,7 +260,7 @@ void org_example_AMDMapperProbe::runM20ConfigProbe() {
 void org_example_AMDMapperProbe::runM21MmioProbe() {
     setProperty("m2-m1-stage", "0-start");
 
-    // ---- 门控：默认不执行 ----
+    // ---- Gated: not executed by default ----
     if (!parseMmioBootArg()) {
         setProperty("m2-m1-gate", "closed");
         setProperty("m2-m1-stage", "1-skipped-no-bootarg");
@@ -249,10 +268,11 @@ void org_example_AMDMapperProbe::runM21MmioProbe() {
     }
     setProperty("m2-m1-gate", "open");
 
-    // ---- 建立物理地址描述符 ----
+    // ---- Build the physical address descriptor ----
     //
-    // withPhysicalAddress 描述一段物理地址。这里描述的是 IOMMU 的 MMIO 窗口。
-    // 返回 OSPtr，SDK 默认（未定义 IOKIT_ENABLE_SHARED_PTR）时就是裸指针。
+    // withPhysicalAddress describes a range of physical addresses. Here it
+    // describes the IOMMU's MMIO window. It returns OSPtr, which under the SDK
+    // default (IOKIT_ENABLE_SHARED_PTR undefined) is a bare pointer.
     IOMemoryDescriptor *md =
         IOMemoryDescriptor::withPhysicalAddress(
             (IOPhysicalAddress)M21_MMIO_BASE,
@@ -264,11 +284,12 @@ void org_example_AMDMapperProbe::runM21MmioProbe() {
     }
     setProperty("m2-m1-md", "created");
 
-    // ---- 映射进内核空间 ----
+    // ---- Map into kernel space ----
     //
-    // kIOMapInhibitCache 是必须的：MMIO 寄存器不能被 CPU cache 缓冲，
-    // 否则读到的是旧值、写入也不生效。这不是优化，是正确性要求。
-    // kIOMapReadOnly 再加一道保险：即使代码有 bug 也写不进去。
+    // kIOMapInhibitCache is mandatory: MMIO registers must not be cached by
+    // the CPU, otherwise reads return stale values and writes never land. This
+    // is a correctness requirement, not an optimization. kIOMapReadOnly adds
+    // another safety net: even a code bug cannot write through it.
     IOMemoryMap *map = md->map(kIOMapInhibitCache | kIOMapReadOnly | kIOMapAnywhere);
     if (!map) {
         setProperty("m2-m1-stage", "3-FAIL-map-null");
@@ -290,10 +311,11 @@ void org_example_AMDMapperProbe::runM21MmioProbe() {
 
     volatile UInt8 *base = (volatile UInt8 *)va;
 
-    // ---- 阶段 A：只读 EFR，这是唯一判据 ----
+    // ---- Phase A: read EFR only -- the single criterion ----
     //
-    // 只读这一个寄存器。若地址错了，最坏结果是读到一个无关的 64 位值，
-    // 我们立即停止，不会继续碰别的偏移。
+    // Only this one register is read. If the address is wrong, the worst
+    // outcome is an unrelated 64-bit value; we stop immediately and do not
+    // touch other offsets.
     UInt64 efr = mmioRead64(base, M21_OFF_EXT_FEAT);
     setHexProperty(this, "m2-m1-efr", efr);
     setHexProperty(this, "m2-m1-efr-expected", M21_EFR_EXPECTED);
@@ -301,22 +323,27 @@ void org_example_AMDMapperProbe::runM21MmioProbe() {
     if (efr != M21_EFR_EXPECTED) {
         setProperty("m2-m1-verdict", "FAIL-efr-mismatch");
         setProperty("m2-m1-stage", "6-stopped-efr-mismatch");
-        // 不继续读其他寄存器——地址可能是错的，继续读只会增加风险。
+        // Do not read other registers -- the address may be wrong; reading
+        // more only adds risk.
         map->release();
         md->release();
         return;
     }
 
-    // EFR 匹配 → 地址正确、映射正确、MMIO 可读。
+    // EFR matched -> address right, mapping right, MMIO readable.
     setProperty("m2-m1-verdict", "PASS-efr-match");
     setProperty("m2-m1-stage", "7-efr-verified");
 
-    // ---- 阶段 B：EFR 已验证，读其他只读寄存器作为附加情报 ----
+    // ---- Phase B: EFR verified; read other read-only registers as extra
+    //      intelligence ----
     //
-    // 这些读数不影响判据，只是为 M2-2 提供基线：
-    //   - DEV_TABLE 若非零，说明有人已经配置过设备表（不该发生）
-    //   - CONTROL 的 IOMMU_EN 位若为 1，说明 IOMMU 已在运行（危险信号）
-    //   - STATUS 的 EVT_RUN 等位反映日志是否在跑
+    // These readings do not affect the criterion; they only provide a baseline
+    // for M2-2:
+    //   - DEV_TABLE non-zero means someone already configured a device table
+    //     (should not happen)
+    //   - CONTROL's IOMMU_EN bit set means the IOMMU is already running
+    //     (danger signal)
+    //   - STATUS's EVT_RUN and similar bits reflect whether the log is running
     UInt64 devTable = mmioRead64(base, M21_OFF_DEV_TABLE);
     UInt64 control  = mmioRead64(base, M21_OFF_CONTROL);
     UInt32 status   = mmioRead32(base, M21_OFF_STATUS);
@@ -325,16 +352,17 @@ void org_example_AMDMapperProbe::runM21MmioProbe() {
     setHexProperty(this, "m2-m1-control", control);
     setHexProperty(this, "m2-m1-status", (UInt64)status);
 
-    // 关键安全检查：IOMMU 必须处于关闭状态。
-    // 若 CONTROL 的 bit0（IOMMU_EN）为 1，说明有别人在用它，
-    // 我们的 M2-2 绝不能贸然接管。
+    // Critical safety check: the IOMMU must be off.
+    // If CONTROL's bit0 (IOMMU_EN) is 1, someone else is using it, and M2-2
+    // must never rashly take over.
     if (control & 0x1ULL) {
         setProperty("m2-m1-iommu-enabled", "YES-unexpected");
     } else {
         setProperty("m2-m1-iommu-enabled", "no-as-expected");
     }
 
-    // DEV_TABLE 为 0 意味着从未被编程过——正是我们预期的干净状态。
+    // DEV_TABLE == 0 means it was never programmed -- exactly the clean state
+    // we expect.
     if (devTable == 0) {
         setProperty("m2-m1-devicetable-clean", "yes");
     } else {
@@ -343,61 +371,73 @@ void org_example_AMDMapperProbe::runM21MmioProbe() {
 
     setProperty("m2-m1-stage", "8-complete");
 
-    // ---- 清理 ----
-    // 必须 unmap 并释放。留着映射会让这段 MMIO 一直占着内核虚拟地址。
+    // ---- Cleanup ----
+    // Must unmap and release. Leaving the mapping mapped keeps this MMIO range
+    // pinned in kernel virtual address space.
     map->release();
     md->release();
     setProperty("m2-m1-cleanup", "done");
 }
 
 // ===== AMDMapperProbeMmio.cpp (original lines 1228..1267) =====
-// ------------------------------------------------- M2-2a-1：最小 MMIO 写测试
+// ------------------------------------------------- M2-2a-1: minimal MMIO write test
 
-// 目的：只回答一个问题——**这个 MMIO 窗口能不能写？**
+// Purpose: answer exactly one question -- **can this MMIO window be written?**
 //
-// 不使能 IOMMU、不分配设备表、不发命令。只做一次"写一个值、读回、恢复原值"。
+// No IOMMU enable, no device table allocation, no commands issued. Just one
+// "write a value, read it back, restore the original".
 //
-// 为什么选 MMIO_DEV_TABLE_OFFSET (0x0000) 作为靶子：
-//   - 它是 IOMMU 唯一一个"写了也不会立刻产生副作用"的寄存器：
-//     只有 CONTROL_IOMMU_EN 置位后，硬件才会真正去用它。
-//   - 当前 IOMMU 完全关闭（M2-1 实测 control 所有使能位为 0），
-//     此时写它纯粹是存储，不会被任何硬件逻辑消费。
-//   - 它当前值是 0x0（M2-1 实测），所以"恢复原值"就是写回 0，
-//     即使恢复失败，留下的也是一个"未编程"的干净状态。
+// Why MMIO_DEV_TABLE_OFFSET (0x0000) is the target:
+//   - It is the IOMMU's only register whose write has no immediate side
+//     effect: the hardware only actually uses it once CONTROL_IOMMU_EN is set.
+//   - The IOMMU is currently completely off (M2-1 measured every CONTROL
+//     enable bit as 0), so writing it is pure storage, consumed by no hardware
+//     logic.
+//   - Its current value is 0x0 (measured in M2-1), so "restore the original"
+//     means writing back 0; even a failed restore leaves an "unprogrammed"
+//     clean state.
 //
-// 为什么不用 CONTROL 寄存器做写测试：
-//   写 CONTROL 有真实风险——任何一位写错都可能使能 IOMMU 或清掉固件预设。
-//   DEV_TABLE 没有这个风险。
+// Why not use the CONTROL register for the write test:
+//   Writing CONTROL carries real risk -- any wrong bit could enable the IOMMU
+//   or clear firmware presets. DEV_TABLE has no such risk.
 //
-// 测试值的选择（0.10.0 首次实测后修正）：
-//   初版写 0xDEADBEEF00000000 并直接比较读回值，得到 "FAIL-write-did-not-stick"。
-//   实测读回 0x000DBEEF00000000 —— **只丢了 bit 63:52**，bit 51:0 完全保留。
+// Choice of the test value (corrected after the first 0.10.0 measurement):
+//   The first version wrote 0xDEADBEEF00000000 and compared the read-back
+//   directly, yielding "FAIL-write-did-not-stick". The measurement read back
+//   0x000DBEEF00000000 -- **only bits 63:52 were lost**, bits 51:0 fully
+//   preserved.
 //
-//   这不是写失败，而是硬件按规范屏蔽了保留位：
-//     AMD IOMMU 的 DEV_TABLE 基址寄存器只实现 bit 51:0
-//     （Linux: `#define PM_ADDR_MASK 0x000ffffffffff000ULL`，
-//      且 iommu_set_device_table() 写入的 entry 只有基址 + size 编码）。
-//     bit 63:52 是保留的只读零，写进去读出来就是 0。
+//   That was not a failed write but the hardware masking reserved bits per
+//   spec:
+//     The AMD IOMMU's DEV_TABLE base register implements only bits 51:0
+//     (Linux: `#define PM_ADDR_MASK 0x000ffffffffff000ULL`, and the entry
+//     iommu_set_device_table() writes encodes only base + size).
+//     Bits 63:52 are reserved read-as-zero; anything written there reads back 0.
 //
-//   所以判据必须是「读回值 == 写入值 & 实现掩码」，不能直接比较。
-//   这是我在设计判据时犯的错，不是硬件的问题。
+//   So the criterion must be "read-back == written & implementation mask"; a
+//   direct comparison is wrong. That was my error in designing the criterion,
+//   not a hardware problem.
 //
-// 为什么仍然用这个标记值：
-//   0xDEADBEEF00000000 落在 bit 63:32，其中 bit 51:32 会被保留，
-//   但 bit 51:12 是真实地址位、bit 11:0 是 size 编码位——足以证明写入生效。
-//   改用一个只占 bit 51:12 的模式更干净。
+// Why that marker value is still used:
+//   0xDEADBEEF00000000 sits in bits 63:32; bits 51:32 of it are reserved, but
+//   bits 51:12 are real address bits and bits 11:0 are size-encoding bits --
+//   enough to prove the write landed. A pattern occupying only bits 51:12
+//   would be cleaner.
 #define M22_OFF_DEV_TABLE   0x0000
-// 只使用 bit 51:12（地址位），避开保留位与 size 编码位。
+// Use only bits 51:12 (address bits), avoiding the reserved and size-encoding
+// bits.
 #define M22_WRITE_PATTERN   0x000ABCDEF0000000ULL
-// 硬件实现的位掩码：DEV_TABLE 基址寄存器只有 bit 51:0。
+// The hardware's implemented bit mask: the DEV_TABLE base register has only
+// bits 51:0.
 #define M22_IMPL_MASK       0x000FFFFFFFFFFFFFULL
 
 // ===== AMDMapperProbeMmio.cpp (original lines 1269..1391) =====
 void org_example_AMDMapperProbe::runM22aWriteProbe() {
     setProperty("m2-2a-stage", "0-start");
 
-    // 门控：必须是 amdiommu=write 才执行。
-    // 与 mmio（只读）分开，因为这是第一次写硬件，风险等级不同。
+    // Gated: runs only for amdiommu=write.
+    // Kept separate from mmio (read-only) because this is the first hardware
+    // write -- a different risk level.
     if (!parseWriteBootArg()) {
         setProperty("m2-2a-gate", "closed");
         setProperty("m2-2a-stage", "1-skipped-no-bootarg");
@@ -405,10 +445,11 @@ void org_example_AMDMapperProbe::runM22aWriteProbe() {
     }
     setProperty("m2-2a-gate", "open");
 
-    // ---- 映射，这次要可写 ----
+    // ---- Map, writable this time ----
     //
-    // 与 M2-1 的差别：去掉 kIOMapReadOnly。
-    // 仍保留 kIOMapInhibitCache —— MMIO 不可缓存是正确性要求。
+    // Difference from M2-1: kIOMapReadOnly is dropped.
+    // kIOMapInhibitCache is kept -- MMIO being non-cacheable is a correctness
+    // requirement.
     IOMemoryDescriptor *md =
         IOMemoryDescriptor::withPhysicalAddress(
             (IOPhysicalAddress)M21_MMIO_BASE,
@@ -437,11 +478,12 @@ void org_example_AMDMapperProbe::runM22aWriteProbe() {
 
     volatile UInt8 *base = (volatile UInt8 *)va;
 
-    // ---- 第 1 步：先确认 EFR 仍匹配 ----
+    // ---- Step 1: first confirm EFR still matches ----
     //
-    // 这是"映射对了"的自检。M2-1 已验证过一次，这里再验一次：
-    // 万一这次映射到了别处，后面的写就会落到错误地址上。
-    // 所以写之前必须重新确认身份。
+    // This is the "we mapped the right thing" self-check. M2-1 verified it
+    // once; verify again here: if this mapping landed elsewhere, the writes
+    // below would hit a wrong address. So identity must be reconfirmed before
+    // writing.
     UInt64 efr = mmioRead64(base, M21_OFF_EXT_FEAT);
     setHexProperty(this, "m2-2a-efr", efr);
     if (efr != M21_EFR_EXPECTED) {
@@ -453,13 +495,13 @@ void org_example_AMDMapperProbe::runM22aWriteProbe() {
     }
     setProperty("m2-2a-identity", "confirmed");
 
-    // ---- 第 2 步：记录原值 ----
+    // ---- Step 2: record the original value ----
     UInt64 orig = mmioRead64(base, M22_OFF_DEV_TABLE);
     setHexProperty(this, "m2-2a-devicetable-orig", orig);
 
-    // ---- 第 3 步：写标记值，读回 ----
+    // ---- Step 3: write the marker value, read it back ----
     //
-    // 这是本项目的**第一次硬件写**。
+    // This is the project's **first hardware write**.
     mmioWrite64(base, M22_OFF_DEV_TABLE, M22_WRITE_PATTERN);
     UInt64 readback = mmioRead64(base, M22_OFF_DEV_TABLE);
 
@@ -467,8 +509,9 @@ void org_example_AMDMapperProbe::runM22aWriteProbe() {
     setHexProperty(this, "m2-2a-readback", readback);
     setHexProperty(this, "m2-2a-impl-mask", M22_IMPL_MASK);
 
-    // 判据：只比较硬件实际实现的位（bit 51:0）。
-    // 高位是保留的只读零，写进去读出来必然是 0——那不是失败。
+    // Criterion: compare only the bits the hardware actually implements
+    // (bits 51:0). The high bits are reserved read-as-zero -- written ones
+    // necessarily read back 0. That is not a failure.
     UInt64 expected = M22_WRITE_PATTERN & M22_IMPL_MASK;
     setHexProperty(this, "m2-2a-expected", expected);
 
@@ -478,9 +521,10 @@ void org_example_AMDMapperProbe::runM22aWriteProbe() {
     } else {
         setProperty("m2-2a-writable", "no");
     }
-    // ---- 第 4 步：立即恢复原值 ----
+    // ---- Step 4: restore the original value immediately ----
     //
-    // 无论上一步成功与否都要恢复。这是不可省略的清理动作。
+    // Restore regardless of whether the previous step succeeded. This cleanup
+    // is not optional.
     mmioWrite64(base, M22_OFF_DEV_TABLE, orig);
     UInt64 restored = mmioRead64(base, M22_OFF_DEV_TABLE);
     setHexProperty(this, "m2-2a-restored", restored);
@@ -488,10 +532,10 @@ void org_example_AMDMapperProbe::runM22aWriteProbe() {
     bool restoreOk = (restored == orig);
     setProperty("m2-2a-restore", restoreOk ? "ok" : "MISMATCH");
 
-    // ---- 第 5 步：确认 IOMMU 仍然关闭 ----
+    // ---- Step 5: confirm the IOMMU is still off ----
     //
-    // 写 DEV_TABLE 不应该改变 CONTROL。若变了，说明我们写错了偏移，
-    // 那是一个必须立即知道的事实。
+    // Writing DEV_TABLE must not change CONTROL. If it did, we wrote the wrong
+    // offset -- a fact that must be known immediately.
     UInt64 ctl = mmioRead64(base, M21_OFF_CONTROL);
     setHexProperty(this, "m2-2a-control-after", ctl);
     if (ctl & 0x1ULL) {
@@ -500,7 +544,7 @@ void org_example_AMDMapperProbe::runM22aWriteProbe() {
         setProperty("m2-2a-iommu-enabled", "no-as-expected");
     }
 
-    // ---- 判定 ----
+    // ---- Verdict ----
     if (writeOk && restoreOk) {
         setProperty("m2-2a-verdict", "PASS-mmio-writable");
         setProperty("m2-2a-stage", "6-complete");

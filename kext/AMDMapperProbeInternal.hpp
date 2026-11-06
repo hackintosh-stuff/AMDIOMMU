@@ -60,7 +60,8 @@ static inline IOMapper *probeRawMapper(IOService *device) {
 }
 
 // ---- setHexProperty (original lines 51..56) ----
-// 把数值以十六进制字符串写进 IORegistry，便于 ioreg 阅读。
+// Writes a numeric value into the IORegistry as a hex string for easy reading
+// via ioreg.
 static inline void setHexProperty(IORegistryEntry *e, const char *key, uint64_t v) {
     char buf[32];
     snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)v);
@@ -68,7 +69,7 @@ static inline void setHexProperty(IORegistryEntry *e, const char *key, uint64_t 
 }
 
 // ---- setHexTagged (original lines 58..64) ----
-// 带标签前缀的属性写入：tag="m1b2a-ok"，key="ret" → "m1b2a-ok-ret"。
+// Property write with a tag prefix: tag="m1b2a-ok", key="ret" -> "m1b2a-ok-ret".
 static inline void setHexTagged(IORegistryEntry *e, const char *tag, const char *key,
                          uint64_t v) {
     char k[64];
@@ -85,7 +86,7 @@ static inline void setStrTagged(IORegistryEntry *e, const char *tag, const char 
 }
 
 // ---- iommuNameMatches (original lines 144..154) ----
-// ---------------------------------------------------------------- B1 靶子定位
+// ---------------------------------------------------------------- B1 target location
 
 static inline bool iommuNameMatches(IOService *svc) {
     if (!svc) return false;
@@ -98,21 +99,26 @@ static inline bool iommuNameMatches(IOService *svc) {
 }
 
 // ---- struct ProbeRun (original lines 244..265) ----
-// ------------------------------------------------------- 物理段探测（B2-a 核心）
+// ------------------------------------------------------- Physical segment probing (B2-a core)
 
-// 遍历 [offset, offset+length) 覆盖的物理段，判定是否物理连续。
+// Walk the physical segments covering [offset, offset+length) and decide
+// whether they are physically contiguous.
 //
-// 为什么不用 pageList：
-//   B2-0 实测 pageList 非空且 pageListCount 正确，看似可用。但 SDK 里
-//   upl_page_info_t 是**不透明**的（mach/memory_object_types.h:
-//   struct upl_page_info { unsigned int opaque[2]; }），没有 phys_addr 字段。
-//   AppleVTD 能直接读 pageList[idx].phys_addr，是因为它带着
-//   XNU_KERNEL_PRIVATE 在内核树内编译。第三方 kext 拿不到那个视图。
-//   所以唯一可用的公开手段是 IOMemoryDescriptor::getPhysicalSegment()。
+// Why not pageList:
+//   B2-0 measured pageList as non-empty with a correct pageListCount, which
+//   looks usable. But in the SDK upl_page_info_t is **opaque**
+//   (mach/memory_object_types.h: struct upl_page_info { unsigned int
+//   opaque[2]; }) -- there is no phys_addr field. AppleVTD can read
+//   pageList[idx].phys_addr directly because it compiles inside the kernel
+//   tree with XNU_KERNEL_PRIVATE. A third-party kext cannot get that view. So
+//   the only usable public means is
+//   IOMemoryDescriptor::getPhysicalSegment().
 //
-// 为什么 kIOMemoryMapperNone：
-//   我们尚未发布 gSystem，gIOSystemMapper 为 NULL，此时它本来就返回裸物理地址；
-//   显式传 kIOMemoryMapperNone 是为了在将来 gSystem 被设上后仍不被二次翻译。
+// Why kIOMemoryMapperNone:
+//   We have not yet published gSystem, so gIOSystemMapper is NULL and it would
+//   already return bare physical addresses; passing kIOMemoryMapperNone
+//   explicitly guarantees no second translation even after gSystem gets set in
+//   the future.
 struct ProbeRun {
     uint32_t segCount;
     uint64_t firstPA;
@@ -150,8 +156,10 @@ static inline ProbeRun probeSegmentRun(IOMemoryDescriptor *memory,
         if (r.segCount == 0) {
             r.firstPA = pa;
         } else if (pa != r.firstPA + consumed) {
-            // 段起点跳变 → 碎片。立即停止：碎片化 buffer 可能有上千段，
-            // 没必要为了一次判定把整个 buffer 走完（start() 期间要尽量快）。
+            // Segment start jumped -> fragmentation. Stop immediately: a
+            // fragmented buffer may have thousands of segments, and walking
+            // the whole buffer for one verdict is unnecessary (start() must
+            // stay fast).
             r.contiguous = false;
             return r;
         }
@@ -164,33 +172,42 @@ static inline ProbeRun probeSegmentRun(IOMemoryDescriptor *memory,
 }
 
 // ---- round19: multi-run layout, mirroring AppleVTD::spaceMapMemory ----
-// ------------------------------------------------- 标准路径的多段布局
+// ------------------------------------------------- Multi-run layout on the standard path
 //
-// 参照归档 AppleVTD（IOPCIFamily-726.100.6.cpp:1962..2053）的公开契约：
-//   * 逐 run 走查描述符（getPhysicalSegment，kIOMemoryMapperNone，不二次翻译）；
-//   * run 的窗口槽位按页对齐：align = pa & 4095，
-//     pageBytes = ceil((align + len) / 4096) * 4096，insertOffset 逐 run 累加；
-//   * discontig = 任一后续 run 的 align 非零，或逻辑边界不在页边界上；
-//   * mapAddress  = 窗口基址 + firstOffset（首字节所在 IOVA，不是页基址）；
-//   * mapLength   = discontig ? pages*4096 - firstOffset : length。
-//     后者严格 > length，正是 IODMACommand 建立 fDMAOffset/fMapOffset/fPageOffset
-//     的 partial-mapping 分支（reference/IODMACommand.xnu-…cpp:946..1047）：
-//     该分支不调用 iovmInsert()，gen64IOVMSegments 按 fMapSegments 逐 run 给出
-//     address = allocBase + fMapOffset + (off - fDMAOffset) + fPageOffset。
-// 因此 mapper 记录的每个 run 的 IOVA 必须与 IODMACommand 自己重算的一致，
-// 两边任何不一致都会在驱动/分析器比对时暴露，而不是悄悄发错地址。
+// Following the public contract of the archived AppleVTD
+// (IOPCIFamily-726.100.6.cpp:1962..2053):
+//   * Walk the descriptor run by run (getPhysicalSegment,
+//     kIOMemoryMapperNone, no second translation);
+//   * A run's window slot is page-aligned: align = pa & 4095,
+//     pageBytes = ceil((align + len) / 4096) * 4096, insertOffset accumulates
+//     per run;
+//   * discontig = any later run's align non-zero, or a logical boundary not on
+//     a page boundary;
+//   * mapAddress  = window base + firstOffset (the IOVA of the first byte,
+//     not the page base);
+//   * mapLength   = discontig ? pages*4096 - firstOffset : length.
+//     The former is strictly > length, which is exactly IODMACommand's
+//     partial-mapping branch that establishes
+//     fDMAOffset/fMapOffset/fPageOffset (reference/IODMACommand.xnu-...cpp:
+//     946..1047): that branch does not call iovmInsert(), and gen64IOVMSegments
+//     yields, per fMapSegments run,
+//     address = allocBase + fMapOffset + (off - fDMAOffset) + fPageOffset.
+// Therefore every run's IOVA recorded by the mapper must match what
+// IODMACommand itself recomputes; any mismatch between the two sides surfaces
+// in the driver/analyser comparison instead of silently sending wrong
+// addresses.
 struct LayoutRun {
-    uint64_t pa;        // 首字节物理地址（保留页内偏移，round17 语义）
-    uint64_t bytes;     // run 长度
-    uint64_t slot;      // 在 IOVA 窗口内的页对齐偏移
+    uint64_t pa;        // first byte's physical address (page offset kept, round17 semantics)
+    uint64_t bytes;     // run length
+    uint64_t slot;      // page-aligned offset within the IOVA window
     uint32_t align;     // pa & 4095
-    uint32_t pageBytes; // 该 run 占用的页对齐长度
+    uint32_t pageBytes; // page-aligned length occupied by this run
 };
 
 template<unsigned RunCapacity>
 struct BoundedProbeLayout {
     uint32_t runs;
-    uint32_t pages;      // 整个窗口的页数
+    uint32_t pages;      // page count of the whole window
     uint32_t firstOffset;
     uint64_t totalBytes;
     bool     discontig;
@@ -211,11 +228,13 @@ static inline void probeLayoutInto(BoundedProbeLayout<RunCapacity> &L,
     if (!memory || !length || !maxRuns || maxRuns > RunCapacity) {
         L.error = true; return;
     }
-    // 与 r18 的 probeSegmentRun 一样用公开的 getPhysicalSegment(
-    // kIOMemoryMapperNone) 走查：mapper 到达时描述符必须已 wiring。这要求驱动
-    // 侧的描述符带 kIOMemoryAutoPrepare（withAddress 隐含携带、
-    // withAddressRanges 不携带——第十九轮首次部署的 panic 正是漏了它，
-    // "IOGMD: not wired for the IODMACommand"，见 docs/m2-3d-round19-result.md）。
+    // Like r18's probeSegmentRun, this walks with the public
+    // getPhysicalSegment(kIOMemoryMapperNone): by the time the mapper is
+    // reached the descriptor must be wired. That requires the driver-side
+    // descriptor to carry kIOMemoryAutoPrepare (implied by withAddress, absent
+    // from withAddressRanges -- round 19's first-deployment panic was exactly
+    // this omission, "IOGMD: not wired for the IODMACommand"; see
+    // docs/m2-3d-round19-result.md).
     uint64_t consumed = 0, slot = 0;
     while (consumed < length) {
         if (L.runs == maxRuns) { L.error = true; return; }
@@ -254,27 +273,31 @@ static inline ProbeLayout probeLayout(IOMemoryDescriptor *memory, uint64_t offse
 }
 
 // ---- kNicPaths (original lines 671..696) ----
-// ------------------------------------------------------------- B2-b 靶子定位
+// ------------------------------------------------------------- B2-b target location
 //
-// RTL8127 的 PCI ID 是 10EC:8127（Info.plist 里写作 0x812710ec）。
+// The RTL8127's PCI ID is 10EC:8127 (written 0x812710ec in Info.plist).
 // Legacy B2 experiments keep excluding the onboard 10EC:8168. R53 auto mode
 // selects it explicitly with an adapted ordinary RealtekRTL8111 mapper client;
 // these historical path fallbacks do not participate in auto attachment.
 //
-// 时序教训（0.6.0 首次部署实测）：
-//   探针匹配 IOResources，start() 极早。此时 serviceMatching(IOPCIDevice)
-//   返回空集 —— PCI 枚举还没完成，所以 findNic() 报 ABSENT-no-rtl8127，
-//   而几秒后同一台机器上 pci10ec,8127 明明存在。
-//   B1 之所以一直成功，是因为它走 IODeviceTree/IOACPIPlane 路径，
-//   那些节点在 EFI 阶段就已建立，不依赖 PCI 枚举。
+// Timing lesson (measured at the first 0.6.0 deployment):
+//   The probe matches IOResources and start() runs extremely early. At that
+//   moment serviceMatching(IOPCIDevice) returns an empty set -- PCI
+//   enumeration is not complete yet, so findNic() reported ABSENT-no-rtl8127
+//   while pci10ec,8127 clearly existed on the same machine seconds later.
+//   B1 always succeeded because it goes through the IODeviceTree/IOACPIPlane
+//   paths; those nodes are established during the EFI phase and do not depend
+//   on PCI enumeration.
 //
-// 因此这里改成双策略：
-//   1. 先按 IODeviceTree 路径直取（EFI 阶段就存在，B1 已验证这条路可行）
-//   2. 再按 ACPI 路径（较晚）
-//   3. 最后按 IOName 枚举（最晚，PCI 枚举完成后才可用）
+// Hence the dual strategy here:
+//   1. First direct lookup by IODeviceTree path (exists from the EFI phase;
+//      B1 verified this path works)
+//   2. Then the ACPI path (later)
+//   3. Finally enumeration by IOName (latest, available only after PCI
+//      enumeration completes)
 //
-// 路径格式注意：IODeviceTree 用 BXBR@1,2（设备号,功能号），
-// IOACPIPlane 用 BXBR@10002（十六进制 _ADR）。两者不能混用。
+// Path format caution: IODeviceTree uses BXBR@1,2 (device, function);
+// IOACPIPlane uses BXBR@10002 (hex _ADR). The two must not be mixed.
 static inline const char *kNicPaths[] = {
     "IODeviceTree:/PCI0/BXBR@1,2/BYUP@0/BYD3@3/BYS3@0",
     "IOACPIPlane:/_SB/PCI0@0/BXBR@10002/BYUP@0/BYD3@30000/BYS3@0",
@@ -283,27 +306,32 @@ static inline const char *kNicPaths[] = {
 
 // ---- M2-1 MMIO constants (original lines 992..1021) ----
 
-// ---------------------------------------------------- M2-1：只读 MMIO 探测
+// ---------------------------------------------------- M2-1: read-only MMIO probing
 
-// 这是本项目**第一次**碰 MMIO。设计上把风险压到最低：
+// This is the project's **first** touch of MMIO. The design minimizes risk:
 //
-//   1. 显式 boot-arg 门控（amdiommu=mmio），默认不执行。
-//   2. 只读，不写任何寄存器。
-//   3. 映射用 kIOMapInhibitCache（MMIO 必须不可缓存）+ kIOMapReadOnly。
-//   4. **分阶段读取**：先只读 EFR 一个寄存器，与已知值比对。
-//      只有匹配才继续读其他寄存器。地址若错，第一步就停。
-//   5. 任何一步失败都记录明确状态并返回，不重试、不换地址。
+//   1. Explicit boot-arg gate (amdiommu=mmio); not executed by default.
+//   2. Read-only; no register is written.
+//   3. Mapping uses kIOMapInhibitCache (MMIO must be uncacheable) +
+//      kIOMapReadOnly.
+//   4. **Staged reads**: first read only EFR, one register, and compare with
+//      the known value. Only on a match are other registers read. If the
+//      address is wrong, stop at step one.
+//   5. Any failure records a clear status and returns -- no retry, no address
+//      switching.
 //
-// 为什么 EFR 是唯一可靠的判据（M2-0b 的教训）：
-//   PCI capability 里的 EFR 字段在这块板子上恒为 0（固件没填），
-//   不能用。真正的 EFR 只在 MMIO 的 0x30 处。
-//   而 Linux 已在这台机器上从该处读出 0x058F77EF22294A5A（dmesg 实测），
-//   所以这是一个**有外部验证的期望值**，不是猜测。
+// Why EFR is the only reliable criterion (M2-0b's lesson):
+//   The EFR field in the PCI capability is constantly 0 on this board
+//   (firmware left it unfilled); it cannot be used. The real EFR lives only at
+//   MMIO 0x30.
+//   And Linux has already read 0x058F77EF22294A5A from there on this machine
+//   (dmesg, measured), so this is an **externally verified expected value**,
+//   not a guess.
 //
-// 关于地址：M2-0 与 M2-0b 双重确认 BAR = 0xFD380000。
-//   IVRS 两个块都写这个值；PCI capability 的 BAR 也是这个值；
-//   cap 头 0x190b640f 与 Linux sysfs 逐位相等。
-//   DSDT _CRS 的 0xFEB80000 已被排除。
+// On the address: M2-0 and M2-0b double-confirm BAR = 0xFD380000.
+//   Both IVRS blocks carry this value; the PCI capability's BAR is this value;
+//   the cap header 0x190b640f matches Linux sysfs bit for bit.
+//   DSDT _CRS's 0xFEB80000 has been ruled out.
 #define M21_MMIO_BASE      0xFD380000ULL
 #define M21_MMIO_LEN       0x80000ULL      // MMIO_REG_END_OFFSET
 #define M21_OFF_EXT_FEAT   0x0030          // MMIO_EXT_FEATURES
@@ -313,50 +341,58 @@ static inline const char *kNicPaths[] = {
 #define M21_EFR_EXPECTED   0x058F77EF22294A5AULL
 
 // ---- DTE and device-table constants (original lines 1393..1441) ----
-// ---------------------------------------------- M2-2a-2：建设备表（不使能）
+// ---------------------------------------------- M2-2a-2: build the device table (no enable)
 
-// 目标：把一张合法的设备表建起来并写进 MMIO_DEV_TABLE_OFFSET，
-//       但**不使能 IOMMU**。
+// Goal: build a valid device table and write it into MMIO_DEV_TABLE_OFFSET,
+//       but **without enabling the IOMMU**.
 //
-// 为什么"不使能"是这一步的核心价值：
-//   IOMMU 关闭时，硬件根本不读这张表。所以这一步唯一能验证的是
-//   「内存能拿到」「表能填对」「寄存器能写对」——而系统行为必须完全不变。
-//   把"表对不对"与"使能后稳不稳"两个问题彻底分开，
-//   这样 M2-2a-3 出问题时，可以确定不是建表引入的。
+// Why "no enable" is this step's core value:
+//   With the IOMMU off, the hardware never reads this table. So the only
+//   things this step can verify are "memory can be obtained", "the table can
+//   be filled correctly", "the register can be written correctly" -- while
+//   system behaviour must remain completely unchanged. Separating "is the
+//   table right" from "is it stable after enable" cleanly means that when
+//   M2-2a-3 has a problem, we know it was not introduced by building the
+//   table.
 //
-// ============================ DTE 直通编码的修正 ============================
+// ============================ Correction of the DTE pass-through encoding ============================
 //
-// m2-design.md §1.5 曾写「直通 = V=1, TV=0」。**这个说法是错的**，本轮更正。
+// m2-design.md §1.5 once wrote "pass-through = V=1, TV=0". **That statement is
+// wrong**; corrected this round.
 //
-// Linux 的 set_dte_passthrough()（iommu.c:2164-2173）实际写的是：
+// Linux's set_dte_passthrough() (iommu.c:2164-2173) actually writes:
 //     new->data[0] |= DTE_FLAG_TV | DTE_FLAG_IR | DTE_FLAG_IW;
 //     new->data[1] |= FIELD_PREP(DTE_DOMID_MASK, domain->id);
-// 即 **V=1（make_clear_dte 预置）、TV=1、IR=1、IW=1、DOMID=域号**，
-// 而 MODE 与 HOST_TRP 全为 0。
+// i.e. **V=1 (preset by make_clear_dte), TV=1, IR=1, IW=1, DOMID=domain id**,
+// with MODE and HOST_TRP all 0.
 //
-// 语义：TV=1 表示"本设备使用翻译"，但 MODE=0 表示页表级数为 0，
-// 硬件据此判定为"直通/不翻译"。这与「TV=0」在效果上可能等价，
-// 但**照抄 Linux 的写法更安全**——它是被验证过的编码。
+// Semantics: TV=1 means "this device uses translation", but MODE=0 means page
+// table level 0, from which the hardware decides "pass-through / no
+// translation". This may be equivalent in effect to "TV=0", but **copying
+// Linux's encoding is safer** -- it is the verified one.
 //
-// 这是一个必须在 M2-2a-3 之前定死的问题：如果直通编码写错，
-// 使能后所有未参与实验的设备 DMA 都会失败。本轮先按 Linux 编码填，
-// 并在 M2-2a-3 之前单独复核。
+// This is a question that must be settled before M2-2a-3: if the pass-through
+// encoding is wrong, after enable every non-experiment device's DMA fails.
+// This round fills Linux's encoding first and re-checks it separately before
+// M2-2a-3.
 // ============================================================================
 //
-// 关于设备表大小：
-//   Linux: roundup_pow_of_two((last_bdf+1) * 32)，最小 4 KiB。
-//   本机 IVRS 范围到 0xFFFE → last_bdf ≈ 0xFFFE
-//   → (0xFFFF)*32 = 0x1FFFE0 → roundup_pow2 = 0x200000 = **2 MiB**。
-//   2 MiB 物理连续内存能否在 start() 早期拿到，是本轮要实测的问题。
+// On the device table size:
+//   Linux: roundup_pow_of_two((last_bdf+1) * 32), minimum 4 KiB.
+//   This machine's IVRS range reaches 0xFFFE -> last_bdf ~= 0xFFFE
+//   -> (0xFFFF)*32 = 0x1FFFE0 -> roundup_pow2 = 0x200000 = **2 MiB**.
+//   Whether 2 MiB of physically contiguous memory can be obtained early in
+//   start() is what this round must measure.
 //
-// 保守做法：先尝试 2 MiB；失败则退到 4 KiB 并记录实际大小。
-//   4 KiB 只覆盖 128 个 DTE（devid 0..127），不足以覆盖全总线，
-//   但作为"能不能拿到连续内存"的探针已经够用。
+// Conservative approach: try 2 MiB first; on failure fall back to 4 KiB and
+// record the actual size.
+//   4 KiB covers only 128 DTEs (devid 0..127), not the whole bus, but it is
+//   enough as a probe of "can contiguous memory be obtained".
 #define M22B_DTE_SIZE        32
 #define M22B_TABLE_SIZE_FULL 0x200000ULL   // 2 MiB
 #define M22B_TABLE_SIZE_MIN  0x1000ULL     // 4 KiB
 
-// DTE 位定义（Linux amd_iommu_types.h:346-360）
+// DTE bit definitions (Linux amd_iommu_types.h:346-360)
 #define DTE_V    (1ULL << 0)
 #define DTE_TV   (1ULL << 1)
 #define DTE_IR   (1ULL << 61)
@@ -364,87 +400,104 @@ static inline const char *kNicPaths[] = {
 #define DTE_DOMID_MASK 0xFFFFULL
 
 // ---- M2-2b-2 page-table constants (original lines 2213..2473) ----
-// ------------------------------------- M2-2b-2：4 级恒等页表 + 单设备 DTE 切换
+// ------------------------------------- M2-2b-2: 4-level identity page table + single-device DTE switch
 //
-// 这一步要回答的问题：**IOMMU 真的会按我们写的页表翻译吗？**
+// The question this step answers: **does the IOMMU really translate according
+// to the page table we wrote?**
 //
-// 前面所有步骤里，设备表全是"直通"（TV=1, MODE=0），硬件根本不看页表。
-// 所以哪怕页表全错，也不会有任何现象。M2-2b-2 是第一次让硬件走我们的表。
+// In all previous steps the device table was "pass-through" (TV=1, MODE=0) and
+// the hardware never looked at a page table. So even a completely wrong page
+// table produced no observable effect. M2-2b-2 is the first time the hardware
+// walks our table.
 //
-// ======================== 为什么用 2 MiB 大页 ========================
+// ======================== Why 2 MiB large pages ========================
 //
-// 恒等映射整台机器的物理内存。本机 16 GiB（实测 hw.memsize=0x400000000）。
+// Identity-map the machine's entire physical memory. This machine has 16 GiB
+// (measured hw.memsize=0x400000000).
 //
-//   用 4 KiB 页：16 GiB / 4 KiB = 4194304 个末级 PTE
-//                = 8192 个末级页表页 = 32 MiB，外加 16 个中间级页
-//   用 2 MiB 页：16 GiB / 2 MiB = 8192 个叶子 PTE
-//                = 16 个末级页表页 = 64 KiB，外加 16 个中间级页 + 1 个根页
+//   With 4 KiB pages: 16 GiB / 4 KiB = 4194304 leaf PTEs
+//                     = 8192 leaf table pages = 32 MiB, plus 16 mid-level pages
+//   With 2 MiB pages: 16 GiB / 2 MiB = 8192 leaf PTEs
+//                     = 16 leaf table pages = 64 KiB, plus 16 mid-level pages
+//                     + 1 root page
 //
-// 2 MiB 大页把末级表从 32 MiB 压到 64 KiB，且映射范围**完整覆盖全部 RAM**，
-// 不需要像原计划那样"只映射一小段"。这是真正的全域恒等映射。
+// 2 MiB large pages shrink the leaf tables from 32 MiB to 64 KiB, and the
+// mapping range **fully covers all RAM** -- no need, as originally planned, to
+// "map only a small range". This is a true whole-memory identity mapping.
 //
-// 为什么是"叶子在倒数第二级"而不是更粗的 1 GiB 页：
-//   AMD-Vi 的 PTE 用 NEXT_LEVEL 字段表示"这个 PTE 指向第几级表"。
-//   大页的编码是 NEXT_LEVEL=7 加上 OA 低位填 1（见 amdv1.h PAGE_SIZE_PTE）。
-//   1 GiB 页需要 16 GiB 的每个 1 GiB 区都恰好对齐，虽然本机 RAM 从 0 开始
-//   连续、确实对齐，但 2 MiB 页的中间级少一层、出错面更小，且 64 KiB 的
-//   额外开销可忽略。先用 2 MiB 验证机制，需要时再上 1 GiB。
+// Why "leaves at the second-to-last level" rather than the coarser 1 GiB pages:
+//   AMD-Vi's PTE uses the NEXT_LEVEL field to say "which level of table this
+//   PTE points to". Large-page encoding is NEXT_LEVEL=7 plus ones in the OA
+//   low bits (see amdv1.h PAGE_SIZE_PTE). 1 GiB pages require every 1 GiB
+//   region of the 16 GiB to be exactly aligned -- true here since RAM starts
+//   at 0 and is contiguous -- but the 2 MiB layout has one mid-level fewer, a
+//   smaller error surface, and 64 KiB of overhead is negligible. Validate the
+//   mechanism with 2 MiB first; move to 1 GiB if ever needed.
 //
-// ======================== 页表结构（实测自 Linux v6.6）========================
+// ======================== Page table structure (taken from Linux v6.6) ========================
 //
-// PAGE_MODE_4_LEVEL = 4。domain->iop.mode = 4，则：
-//   level = mode - 1 = 3   ← 根表就是"第 3 级"
-//   root[idx3]  : 非叶子，PM_LEVEL_PDE(3, pa) → NEXT_LEVEL=3
-//   l2[idx2]    : 非叶子，NEXT_LEVEL=2
-//   l1[idx1]    : 叶子，NEXT_LEVEL=7 + 大页编码
+// PAGE_MODE_4_LEVEL = 4. With domain->iop.mode = 4:
+//   level = mode - 1 = 3   <- the root table is "level 3"
+//   root[idx3]  : non-leaf, PM_LEVEL_PDE(3, pa) -> NEXT_LEVEL=3
+//   l2[idx2]    : non-leaf, NEXT_LEVEL=2
+//   l1[idx1]    : leaf, NEXT_LEVEL=7 + large-page encoding
 //
-// 索引（PM_LEVEL_SHIFT(x) = 12 + 9x，PM_LEVEL_INDEX(x,a) = (a >> shift) & 0x1ff）：
-//   idx3 = (addr >> 39) & 0x1ff     每项覆盖 512 GiB
-//   idx2 = (addr >> 30) & 0x1ff     每项覆盖 1 GiB
-//   idx1 = (addr >> 21) & 0x1ff     每项覆盖 2 MiB
+// Indices (PM_LEVEL_SHIFT(x) = 12 + 9x, PM_LEVEL_INDEX(x,a) = (a >> shift) & 0x1ff):
+//   idx3 = (addr >> 39) & 0x1ff     each entry covers 512 GiB
+//   idx2 = (addr >> 30) & 0x1ff     each entry covers 1 GiB
+//   idx1 = (addr >> 21) & 0x1ff     each entry covers 2 MiB
 //
-// 叶子 PTE 的大页编码（amd_iommu_types.h:357-359）：
+// Leaf PTE large-page encoding (amd_iommu_types.h:357-359):
 //   PAGE_SIZE_PTE(address, 2MiB)
 //     = (address | (2MiB-1)) & ~(2MiB>>1) & PM_ADDR_MASK
 //     = (address | 0x1FFFFF) & ~0x100000 & 0x000FFFFFFFFFF000
-//   即：把 address 的 bit20 置 1、bit21..51 保留、bit11..0 清零。
-//   bit20 置 1 正是"大小编码"——bit20 是 2 MiB 页内偏移的最高位，
-//   硬件据此知道这一项映射 2 MiB 而不是 4 KiB。
-//   然后再 OR 上 PM_LEVEL_ENC(7) | PR | IR | IW。
+//   i.e.: set address's bit20, keep bits 21..51, clear bits 11..0.
+//   Setting bit20 is exactly the "size encoding" -- bit20 is the highest bit of
+//   the offset within a 2 MiB page, by which the hardware knows this entry maps
+//   2 MiB rather than 4 KiB.
+//   Then OR in PM_LEVEL_ENC(7) | PR | IR | IW.
 //
-// ======================== 为什么这一步仍然安全 ========================
+// ======================== Why this step is still safe ========================
 //
-// 1. 恒等映射：IOVA == PA。即使页表编码有细微错误，最坏结果是
-//    **DMA 失败**（设备报错），而不是写到错误的内存。
-// 2. 只切**一个**设备（RTL8127，不在默认路由上）。切错只影响它。
-// 3. 有事件日志：任何 fault 都会被记录下来，我们能读到。
-// 4. 全程有恢复：DTE 改回直通、寄存器全部还原、内存全部释放。
+// 1. Identity mapping: IOVA == PA. Even with a subtle encoding error, the
+//    worst outcome is **DMA failure** (device-side error), not writing to
+//    wrong memory.
+// 2. Only **one** device is switched (RTL8127, not on the default route). A
+//    wrong switch affects only it.
+// 3. There is an event log: any fault is recorded and we can read it.
+// 4. Full recovery throughout: DTE back to pass-through, all registers
+//    restored, all memory freed.
 //
-// 关键风险点：如果这个设备的 DMA 在切换后失败，它不会 panic，
-// 但会静默失效。所以判据不能只看"没崩"，必须看**它还在正常工作**
-// （m1bb-realmapok 之类的活动指标）。
+// Key risk: if this device's DMA fails after the switch it will not panic,
+// but fail silently. So the criterion must not be merely "nothing crashed" --
+// it must show **it is still working normally** (activity indicators such as
+// m1bb-realmapok).
 #define M2B2_PAGE_MODE_4_LEVEL  4
 
-// ==================== 3 级页表模式（判别实验）====================
+// ==================== 3-level page table mode (discrimination experiment) ====================
 //
-// 目的：判断本机 IOMMU 期望的页表级数。
+// Purpose: determine how many levels of page table this machine's IOMMU
+// expects.
 //
-// 为什么怀疑 4 级：
-//   本机 RAM 只有 16 GiB，IOVA 只需 34 位（16 GiB = 2^34）。
-//   PAGE_MODE_4_LEVEL 的根表项覆盖 512 GiB，对 16 GiB 来说"过大"。
-//   而 PAGE_MODE_3_LEVEL 的根表项覆盖 1 GiB，正好与 16 GiB 匹配。
+// Why 4 levels is doubted:
+//   This machine has only 16 GiB of RAM, so the IOVA needs only 34 bits
+//   (16 GiB = 2^34). A PAGE_MODE_4_LEVEL root entry covers 512 GiB -- "too
+//   large" for 16 GiB. A PAGE_MODE_3_LEVEL root entry covers 1 GiB, exactly
+//   matching 16 GiB.
 //
-//   两者都是合法编码，但**硬件可能只实现了其中一种**。
-//   4 级表下"页表正确却翻译失败"，而 3 级是唯一未试过的级数。
+//   Both are legal encodings, but **the hardware may implement only one**.
+//   Under a 4-level table, "the page table is correct yet translation fails",
+//   and 3 levels is the only level count never tried.
 //
-// 层级结构（PAGE_MODE_3_LEVEL = 3，则 level = mode-1 = 2 为根）：
+// Hierarchy (PAGE_MODE_3_LEVEL = 3, so level = mode-1 = 2 is the root):
 //   PM_LEVEL_SHIFT(x) = 12 + 9x
-//     x=2 → 30 → 根表每项覆盖 1 GiB
-//     x=1 → 21 → 叶子表每项覆盖 2 MiB
-//   2 MiB 叶子在第 1 级，所以 root(2) → 叶子(1)，**只有两层表**。
+//     x=2 -> 30 -> each root entry covers 1 GiB
+//     x=1 -> 21 -> each leaf-table entry covers 2 MiB
+//   The 2 MiB leaf sits at level 1, so root(2) -> leaf(1): **only two layers
+//   of tables**.
 //
-// 16 GiB 需要：1 张根表 + 16 张叶子表 = 17 页 = 68 KiB
-//   （比 4 级模式还少一页，因为没有中间的 L2 表）
+// 16 GiB needs: 1 root table + 16 leaf tables = 17 pages = 68 KiB
+//   (one page fewer than the 4-level mode, since there is no intermediate L2)
 #define M2B2_PAGE_MODE_3_LEVEL  3
 #define M2B2_3L_ROOT_PAGES      1
 #define M2B2_3L_LEAF_PAGES      (M2B2_IDENTITY_LIMIT / (1ULL << 30))   // 16
@@ -453,85 +506,98 @@ static inline const char *kNicPaths[] = {
 #define M2B2_PTE_COUNT          512
 #define M2B2_PAGE_SIZE          0x1000ULL
 #define M2B2_LARGE_PAGE         0x200000ULL        // 2 MiB
-#define M2B2_IDENTITY_LIMIT     0x400000000ULL     // 16 GiB（本机 RAM）
+#define M2B2_IDENTITY_LIMIT     0x400000000ULL     // 16 GiB (this machine's RAM)
 
-// 各级覆盖范围（PM_LEVEL_SHIFT(x) = 12 + 9x）：
-//   level 1 : 每项 2 MiB  → 一张表覆盖 512 × 2 MiB = 1 GiB
-//   level 2 : 每项 1 GiB  → 一张表覆盖 512 × 1 GiB = 512 GiB
-//   level 3 : 每项 512 GiB
+// Coverage per level (PM_LEVEL_SHIFT(x) = 12 + 9x):
+//   level 1 : 2 MiB per entry  -> one table covers 512 x 2 MiB = 1 GiB
+//   level 2 : 1 GiB per entry  -> one table covers 512 x 1 GiB = 512 GiB
+//   level 3 : 512 GiB per entry
 //
-// 16 GiB 只需要：1 张根表 + 1 张 L2 表 + 16 张叶子表 = 18 页 = 72 KiB。
+// 16 GiB needs only: 1 root + 1 L2 + 16 leaf tables = 18 pages = 72 KiB.
 //
-// 【曾经算错过一次】一开始把"叶子 PTE 总数"当成了"叶子页数"，
-// 得出 8192 张叶子表（32 MiB）。实际 2 MiB 大页下，
-// 叶子表张数 = 16 GiB / 1 GiB = 16。两者差 512 倍。
+// [A past miscalculation] Initially "total leaf PTE count" was mistaken for
+// "leaf table count", yielding 8192 leaf tables (32 MiB). In reality, with
+// 2 MiB large pages, leaf table count = 16 GiB / 1 GiB = 16. A 512x difference.
 #define M2B2_LEAF_PTE_COUNT     (M2B2_IDENTITY_LIMIT / M2B2_LARGE_PAGE)  // 8192
 #define M2B2_LEAF_PAGES         (M2B2_IDENTITY_LIMIT / (1ULL << 30))     // 16
 #define M2B2_L2_PAGES           1                                        // 1
 #define M2B2_ROOT_PAGES         1
 
-// 额外一页：**阴性对照**用的"空根表"。
+// One extra page: the "empty root table" for the **negative control**.
 //
-// 为什么需要阴性对照（这是本步骤最重要的一处方法论修正）：
-//   "切换后 2 秒没有 fault" 这个判据是**有歧义**的：
-//     (a) 页表正确，硬件用了它，翻译成功 → 没有 fault
-//     (b) 硬件根本没去翻译（设备没 DMA / DTE 没生效）→ 也没有 fault
-//   两种情况下我们看到的都是 0，但结论完全相反。
-//   第一次跑这一轮时 `evt-count2 = 0`，如果就此宣布通过，
-//   那和 M2-2a-1 那次"写测试假阴性"是同一类错误——
-//   当时是我把正确行为判成了失败，这次可能是把"没测到"判成了通过。
+// Why a negative control is needed (the most important methodological fix in
+// this step):
+//   The criterion "no fault for 2 seconds after the switch" is **ambiguous**:
+//     (a) the page table is correct, the hardware uses it, translation
+//         succeeds -> no fault
+//     (b) the hardware never translates at all (device not DMAing / DTE not
+//         in effect) -> also no fault
+//   In both cases we see 0, but the conclusions are opposite.
+//   The first time this round ran, evt-count2 = 0; declaring success then
+//   would have been the same class of error as M2-2a-1's "false-negative write
+//   test" -- there I judged correct behaviour a failure; here I might have
+//   judged "nothing measured" a pass.
 //
-// 解法：故意给同一个设备装一张**全零的根表**（PR=0，必然翻译失败）。
-//   若此时真的出现 IO_PAGE_FAULT → 证明硬件确实在按我们的 DTE 翻译，
-//      那么"正确表 → 0 fault"才有意义。
-//   若此时仍然 0 fault → 说明这个设备根本没在 DMA，
-//      正面的 PASS 是**空洞的**，必须换一个有实际 DMA 的设备重做。
+// Solution: deliberately install an **all-zero root table** for the same
+// device (PR=0, translation must fail).
+//   If IO_PAGE_FAULTs really appear then -> the hardware is indeed translating
+//   per our DTE, and only then is "correct table -> 0 faults" meaningful.
+//   If still 0 faults -> this device is not DMAing at all; a positive PASS
+//   would be **hollow**, and the experiment must be redone on a device with
+//   real DMA.
 #define M2B2_BADROOT_PAGES      1
 #define M2B2_TOTAL_PAGES        (M2B2_ROOT_PAGES + M2B2_L2_PAGES + \
                                  M2B2_LEAF_PAGES + M2B2_BADROOT_PAGES)   // 19
 
-// ==================== 4 KiB 页模式（判别实验）====================
+// ==================== 4 KiB page mode (discrimination experiment) ====================
 //
-// 目的：判断本平台的 IOMMU 是否真的支持 **2 MiB 大页编码**。
+// Purpose: determine whether this platform's IOMMU really supports the
+// **2 MiB large-page encoding**.
 //
-// 为什么怀疑大页：
-//   EFR（0x058F77EF22294A5A）里并没有显式声明 2 MiB 页支持。
-//   Linux 的 AMD_IOMMU_PGSIZES 是从 PAGE_SIZE 推出来的，不是从 EFR 读的
-//   （amd_iommu_types.h:285），所以"Linux 支持"不能证明本机支持。
-//   若硬件只认 4 KiB 叶子，那 level-7 的大页编码会被拒绝，
-//   症状正好是"页表里有正确项，硬件却报 fault"。
+// Why large pages are doubted:
+//   EFR (0x058F77EF22294A5A) does not explicitly declare 2 MiB page support.
+//   Linux's AMD_IOMMU_PGSIZES is derived from PAGE_SIZE, not read from EFR
+//   (amd_iommu_types.h:285), so "Linux supports it" does not prove this
+//   machine does. If the hardware only accepts 4 KiB leaves, the level-7
+//   large-page encoding is rejected, with the symptom "the page table has the
+//   correct entry yet the hardware reports faults".
 //
-// 做法：完全相同的表结构，但叶子改成 4 KiB 页（NEXT_LEVEL=0），
-//   映射范围缩小到 64 MiB。
+// Approach: the exact same table structure, but leaves become 4 KiB pages
+// (NEXT_LEVEL=0), with the mapped range shrunk to 64 MiB.
 //
-// 【层级深度必须重算】这是本模式最容易搞错的地方：
+// [The hierarchy depth must be recomputed] This is the easiest thing to get
+// wrong in this mode:
 //   PAGE_SIZE_LEVEL(pagesize) = (ffs(pagesize) - 12) / 9
-//     4 KiB → (12-12)/9 = 0  → 叶子在第 0 级
-//     2 MiB → (21-12)/9 = 1  → 叶子在第 1 级
-//   PAGE_MODE_4_LEVEL = 4，级别是 3,2,1,0。
+//     4 KiB -> (12-12)/9 = 0  -> leaf at level 0
+//     2 MiB -> (21-12)/9 = 1  -> leaf at level 1
+//   PAGE_MODE_4_LEVEL = 4; levels are 3,2,1,0.
 //
-//   2 MiB 模式：root(3) → L2(2) → 叶子(1)              共 3 张表深
-//   4 KiB 模式：root(3) → L2(2) → L1(1) → 叶子(0)      共 4 张表深
+//   2 MiB mode: root(3) -> L2(2) -> leaf(1)              3 tables deep
+//   4 KiB mode: root(3) -> L2(2) -> L1(1) -> leaf(0)      4 tables deep
 //
-//   所以 4 KiB 模式**必须多一层 L1 表**，不能把叶子直接挂在 L2 上
-//   （那是 level skipping，Linux 也明确不支持，见 io_pgtable.c:269）。
+//   So the 4 KiB mode **must add an L1 layer**; leaves cannot hang directly
+//   off L2 (that is level skipping, which Linux explicitly does not support
+//   either; see io_pgtable.c:269).
 //
-// 【映射范围：必须覆盖全部 16 GiB】
-//   第一版只映射 64 MiB，结果 4 个 fault 地址全部 `outofrange`——
-//   en2 的 DMA 缓冲区在 768 MB / 14 GiB 处，根本没被覆盖，
-//   于是"4 KiB 叶子是否被硬件接受"这个问题**完全没被回答**。
-//   要下结论就必须覆盖设备实际会访问的全部地址。
+// [Mapping range: must cover all 16 GiB]
+//   The first version mapped only 64 MiB, and all 4 fault addresses came back
+//   `outofrange` -- en2's DMA buffers at 768 MB / 14 GiB were not covered at
+//   all, so the question "does the hardware accept 4 KiB leaves" was **never
+//   answered**. To conclude anything, every address the device will actually
+//   access must be covered.
 //
-//   16 GiB 用 4 KiB 页的表规模：
-//     叶子表 = 16 GiB / 2 MiB = 8192 张（每张 512 × 4 KiB）
-//     L1 表  = 16 GiB / 1 GiB = 16 张（每张 512 项，每项指向一张叶子表）
-//     L2 表  = 1 张（前 16 项各指向一个 L1 表）
-//     根表   = 1 张
-//     空根   = 1 张
-//     合计 8211 页 = 32.07 MiB
-//   这个大小可以一次分配成功（前面 2 MiB 模式只用了 76 KiB，
-//   32 MiB 是完全不同量级，但 IOBufferMemoryDescriptor 能处理）。
-#define M2B2_4K_MAP_LIMIT       0x400000000ULL    // 16 GiB（全部 RAM）
+//   Table size for 16 GiB with 4 KiB pages:
+//     leaf tables = 16 GiB / 2 MiB = 8192 (512 x 4 KiB each)
+//     L1 tables   = 16 GiB / 1 GiB = 16 (512 entries each, each entry pointing
+//                   to one leaf table)
+//     L2 table    = 1 (its first 16 entries each point to one L1 table)
+//     root table  = 1
+//     empty root  = 1
+//     total 8211 pages = 32.07 MiB
+//   This size can be allocated in one go (the earlier 2 MiB mode used only
+//   76 KiB; 32 MiB is a completely different magnitude, but
+//   IOBufferMemoryDescriptor can handle it).
+#define M2B2_4K_MAP_LIMIT       0x400000000ULL    // 16 GiB (all RAM)
 #define M2B2_4K_LEAF_PTES       (M2B2_4K_MAP_LIMIT / M2B2_PAGE_SIZE)  // 4194304
 #define M2B2_4K_LEAF_PAGES      (M2B2_4K_LEAF_PTES / M2B2_PTE_COUNT)  // 8192
 #define M2B2_4K_L1_PAGES        (M2B2_4K_MAP_LIMIT / (1ULL << 30))    // 16
@@ -544,18 +610,19 @@ static inline const char *kNicPaths[] = {
 // Six IOVA tree pages plus a small RX physical-restore coverage budget.
 #define M2B2_IOVA_RESERVED_PAGES 70u
 
-// PTE 位定义（amd_iommu_types.h:376-380）
+// PTE bit definitions (amd_iommu_types.h:376-380)
 #define M2B2_PTE_PR             (1ULL << 0)
 #define M2B2_PTE_FC             (1ULL << 60)
 #define M2B2_PTE_IR             (1ULL << 61)
 #define M2B2_PTE_IW             (1ULL << 62)
 #define M2B2_PTE_ADDR_MASK      0x000FFFFFFFFFF000ULL
 #define M2B2_LEVEL_ENC(x)       (((UInt64)(x) << 9) & 0xE00ULL)
-// 【v0.20.0】删除了 M2B2_LEVEL_7。它原本是"2 MiB 叶子必须用 NextLevel=7"
-// 这个错误假设的载体。现在页表编码统一由 amd_iommu_pte_core.hpp 提供，
-// 不再需要（也不应该保留）一个可以被误用的裸常量。
+// [v0.20.0] M2B2_LEVEL_7 removed. It was the carrier of the wrong assumption
+// that "a 2 MiB leaf must use NextLevel=7". Page table encoding is now
+// provided uniformly by amd_iommu_pte_core.hpp; a bare constant that can be
+// misused is no longer needed (and should not be kept).
 
-// 命令类型（amd_iommu_types.h:194-199）
+// Command types (amd_iommu_types.h:194-199)
 #define M2B2_CMD_COMPL_WAIT     0x01
 #define M2B2_CMD_INV_DEV_ENTRY  0x02
 #define M2B2_CMD_INV_IOMMU_PAGES 0x03
@@ -563,7 +630,7 @@ static inline const char *kNicPaths[] = {
 #define M2B2_CMD_ALL_PAGES_ADDR 0x7FFFFFFFFFFFFFFFULL
 #define M2B2_CMD_PDE_MASK       0x02
 
-// 事件日志（amd_iommu_types.h:135-156, 241-242）
+// Event log (amd_iommu_types.h:135-156, 241-242)
 #define M2B2_EVT_BUFFER_SIZE    8192ULL
 #define M2B2_EVT_LEN_MASK       (0x9ULL << 56)
 #define M2B2_EVENT_TYPE_SHIFT   28
@@ -577,7 +644,7 @@ static inline const char *kNicPaths[] = {
 #define M2B2_EVENT_CMD_HARD_ERR 0x6
 #define M2B2_EVENT_INV_DEV_REQ  0x8
 
-// MMIO 偏移（amd_iommu_types.h:54-75）
+// MMIO offsets (amd_iommu_types.h:54-75)
 #define M2B2_OFF_DEV_TABLE      0x0000
 #define M2B2_OFF_CMD_BUF        0x0008
 #define M2B2_OFF_EVT_BUF        0x0010
@@ -588,97 +655,109 @@ static inline const char *kNicPaths[] = {
 #define M2B2_OFF_EVT_TAIL       0x2018
 #define M2B2_OFF_STATUS         0x2020
 
-// CONTROL 位（amd_iommu_types.h:159-181）
+// CONTROL bits (amd_iommu_types.h:159-181)
 #define M2B2_CTRL_IOMMU_EN      (1ULL << 0)
 #define M2B2_CTRL_EVT_LOG_EN    (1ULL << 2)
 #define M2B2_CTRL_CMDBUF_EN     (1ULL << 12)
 
-// STATUS 位（amd_iommu_types.h:123-132）
-// 【v0.20.0 新增】此前代码只读 STATUS 并存成属性，从未真正用它判定
-// 窗口有效性。EVT_OVERFLOW 是"事件环回绕、计数不再可信"的唯一标志，
-// EVT_RUN 是"日志确实在运行"的唯一标志，两者都必须参与判定。
+// STATUS bits (amd_iommu_types.h:123-132)
+// [v0.20.0 new] Previously the code only read STATUS and stored it as a
+// property, never actually using it to judge window validity. EVT_OVERFLOW is
+// the only indicator that "the event ring wrapped and counts are no longer
+// trustworthy"; EVT_RUN is the only indicator that "the log really is
+// running". Both must take part in the verdict.
 #define M2B2_STATUS_EVT_OVERFLOW (1U << 0)
 #define M2B2_STATUS_EVT_INT      (1U << 1)
 #define M2B2_STATUS_EVT_RUN      (1U << 3)
-// 【v0.20.0 新增】规范 48882 §3.4.16：STATUS[4] = CmdBufRun。
+// [v0.20.0 new] Spec 48882 §3.4.16: STATUS[4] = CmdBufRun.
 // "1 = the IOMMU may fetch commands from the command buffer."
-// Linux v6.6 **没有**定义这一位（它的 STATUS 宏只到 bit 10 里的
-// 0/1/2/3/5/6/7/8/9/10），所以此前"照抄 Linux"就等于漏掉了
-// 唯一能证明命令缓冲真的停下来的依据。QEMU 定义了它
-// （AMDVI_MMIO_STATUS_CMDBUF_RUN = 1 << 4），与规范一致。
+// Linux v6.6 does **not** define this bit (its STATUS macros only cover
+// 0/1/2/3/5/6/7/8/9/10 within bit 10), so "copying Linux" previously meant
+// missing the only basis for proving the command buffer really stopped. QEMU
+// defines it (AMDVI_MMIO_STATUS_CMDBUF_RUN = 1 << 4), consistent with the
+// spec.
 #define M2B2_STATUS_CMDBUF_RUN   (1U << 4)
 
-// DTE 位（amd_iommu_types.h:213-229）
+// DTE bits (amd_iommu_types.h:213-229)
 #define M2B2_DEV_ENTRY_MODE_MASK  0x07ULL
 #define M2B2_DEV_ENTRY_MODE_SHIFT 0x09
 
-// 目标设备的 PCI devid。
+// The target device's PCI devid.
 //
-// devid = (bus << 8) | (dev << 3) | func。
+// devid = (bus << 8) | (dev << 3) | func.
 //
-// 【2026-10-30 教训】一开始硬编码 0x3700，依据是 ioreg 的
-// pcidebug = "37:0:0"，并把 "37" 当成十六进制。这是**没有验证过的假设**：
-//   - 若 pcidebug 是十进制，bus=37=0x25 → devid = 0x2500
-//   - 若当作十六进制，bus=0x37=55   → devid = 0x3700
-// 两者差很远，而 DTE 下标错就意味着**改了另一个设备的表项**——
-// 那种情况下"没报错"完全不能说明页表正确。
+// [2026-10-30 lesson] It was initially hard-coded as 0x3700, based on ioreg's
+// pcidebug = "37:0:0" with "37" taken as hexadecimal. That was an
+// **unverified assumption**:
+//   - If pcidebug is decimal, bus=37=0x25 -> devid = 0x2500
+//   - If read as hexadecimal, bus=0x37=55   -> devid = 0x3700
+// The two differ greatly, and a wrong DTE index means **another device's table
+// entry was modified** -- in that case "no error" says nothing about the page
+// table being correct.
 //
-// 而 IODeviceTree 的 reg 属性又不能直接按 IEEE 1275 的 phys.hi 解
-// （实测 BXBR 的 reg 解出 dev4/fn1，但 ACPI _ADR 明确是 dev1/fn2）。
+// The IODeviceTree reg property cannot be decoded directly per IEEE 1275's
+// phys.hi either (measured: BXBR's reg decodes to dev4/fn1, while the ACPI
+// _ADR is clearly dev1/fn2).
 //
-// 结论：**不要靠外部字符串猜 devid**。运行时从 IOPCIDevice 直接问
-// getBusNumber()/getDeviceNumber()/getFunctionNumber()，那是驱动栈
-// 自己用的值，也是 IOMMU 用的值。硬编码值只保留作交叉核对。
+// Conclusion: **do not guess the devid from external strings**. At runtime ask
+// IOPCIDevice directly via getBusNumber()/getDeviceNumber()/
+// getFunctionNumber() -- the values the driver stack itself uses, and the ones
+// the IOMMU uses. Hard-coded values are kept only for cross-checking.
 #define M2B2_TARGET_DEVID_HINT  0x3700
 
 // ---- M2-3 command-ring constants (original lines 1702..1705) ----
-#define M23_CMD_BUF_SIZE    8192ULL          // 512 项 × 16 B
+#define M23_CMD_BUF_SIZE    8192ULL          // 512 entries x 16 B
 #define M23_CMD_SIZE_CODE   (0x9ULL << 56)   // MMIO_CMD_SIZE_512
 #define M23_CTRL_IOMMU_EN   (1ULL << 0)
 #define M23_CTRL_CMDBUF_EN  (1ULL << 12)
 
 // ---- M2-1 command macros + writeCmd (original lines 1916..1963) ----
-// ------------------------------------ M2-2b-1：命令通道验证（全新组件）
+// ------------------------------------ M2-2b-1: command channel verification (new component)
 
-// ============================ 这一步做什么 ============================
+// ============================ What this step does ============================
 //
-// M2-2a-3 只"配置"了命令缓冲，从未真正发过命令。
-// 这一步要验证：**命令缓冲能用**——写一条命令，硬件真的执行了，我们能看到完成。
+// M2-2a-3 only "configured" the command buffer, never actually issuing a
+// command. This step verifies: **the command buffer works** -- write one
+// command, the hardware really executes it, and we can see the completion.
 //
-// 用最简单的命令：CMD_COMPL_WAIT（0x01）。
-// 它做一件事：把递增的序列号写到一块我们指定的内存（cmd_sem），
-// 然后我们轮询那块内存，看到值变化就说明命令被硬件执行了。
+// The simplest command: CMD_COMPL_WAIT (0x01).
+// It does one thing: write an incrementing sequence number into a memory block
+// we designate (cmd_sem); we then poll that memory, and seeing the value
+// change proves the hardware executed the command.
 //
-// ============================ 命令格式 ============================
+// ============================ Command format ============================
 //
-// 每条命令 16 字节（4 × u32）。CMD_COMPL_WAIT 的格式（iommu.c:1254-1266）：
+// Each command is 16 bytes (4 x u32). CMD_COMPL_WAIT's format
+// (iommu.c:1254-1266):
 //
 //   data[0] = lower32(cmd_sem_paddr) | CMD_COMPL_WAIT_STORE_MASK(0x01)
-//   data[1] = upper32(cmd_sem_paddr) | (type << 28)      ← type = 0x01
+//   data[1] = upper32(cmd_sem_paddr) | (type << 28)      <- type = 0x01
 //   data[2] = lower32(seq)
 //   data[3] = upper32(seq)
 //
-// **注意 type 在 data[1] 的高 4 位**（bit 28..31），不是 data[0]。
+// **Note the type is in data[1]'s high 4 bits (bit 28..31), not data[0]**.
 // Linux: #define CMD_SET_TYPE(cmd, t) ((cmd)->data[1] |= ((t) << 28))
 //
-// data[0] 的 bit0 是 STORE 位：置位表示"把 seq 写回 cmd_sem"。
+// data[0]'s bit0 is the STORE bit: set means "write seq back to cmd_sem".
 //
-// ============================ 为什么这是新风险点 ============================
+// ============================ Why this is a new risk point ============================
 //
-// 命令通道一旦用错：
-//   - 命令格式错 → 硬件可能报 ILL_CMD 事件，或直接挂起
-//   - cmd_sem 地址错 → 硬件写到错误物理内存（静默数据损坏）
-//   - tail 更新错 → 硬件读到垃圾命令
+// Used wrongly, the command channel:
+//   - wrong command format -> the hardware may report an ILL_CMD event or hang
+//   - wrong cmd_sem address -> the hardware writes to wrong physical memory
+//     (silent data corruption)
+//   - wrong tail update -> the hardware reads garbage commands
 //
-// 所以本步骤仍然是**短窗口**：使能 → 发一条命令 → 轮询 → 立即禁用。
-// 且 cmd_sem 必须是物理连续、4 KiB 对齐、清零过的内存。
+// So this step is still a **short window**: enable -> issue one command ->
+// poll -> immediately disable. And cmd_sem must be physically contiguous,
+// 4 KiB aligned, zeroed memory.
 #define M2B1_CMD_COMPL_WAIT    0x01
 #define M2B1_CMD_STORE_MASK    0x01
 #define M2B1_CMD_TAIL_OFFSET   0x2008
 #define M2B1_CMD_HEAD_OFFSET   0x2000
-#define M2B1_LOOP_TIMEOUT      1000000   // 轮询上限，避免死等
+#define M2B1_LOOP_TIMEOUT      1000000   // polling cap, to avoid waiting forever
 
-// 读/写命令缓冲里的一个 16 字节命令
+// Read/write one 16-byte command in the command buffer
 static inline void writeCmd(volatile UInt32 *buf, UInt32 idx,
                             UInt32 d0, UInt32 d1, UInt32 d2, UInt32 d3) {
     buf[idx * 4 + 0] = d0;
@@ -688,27 +767,32 @@ static inline void writeCmd(volatile UInt32 *buf, UInt32 idx,
 }
 
 // ---- M2-2b-1 command-log bounds (original lines 2939..2956) ----
-// ==================== 命令上下文（v0.20.0）====================
+// ==================== Command context (v0.20.0) ====================
 //
-// 【为什么需要】
-//   旧代码在 DOMID 分支里把 DTE 的 domain 改成 1，却仍用 domain 0
-//   构造 INV_IOMMU_PAGES（写死 `0 | (type << 28)`）。那等于失效了
-//   一个不存在的域，目标域的 TLB 从未被刷过——实验条件本身不成立。
+// [Why needed]
+//   The old code changed the DTE's domain to 1 in the DOMID branch yet still
+//   built INV_IOMMU_PAGES with domain 0 (hard-coded `0 | (type << 28)`). That
+//   invalidated a domain that did not exist; the target domain's TLB was never
+//   flushed -- the experiment's own precondition was broken.
 //
-// 现在 devid / domid / page-mode / 根表地址 / 完成信号地址统一由这个
-// 结构持有，所有失效命令都从它取值，不可能再出现不一致。
+// devid / domid / page-mode / root table address / completion signal address
+// are now held together by this struct and every invalidation command takes
+// its values from it; inconsistency can no longer occur.
 //
-// 另外 failed 一旦置位，后续任何命令都不再提交：任务要求
-// "任何必要步骤失败，立即使该阶段无效并进入恢复流程"。
-// 每条命令的记录（v0.20.0）。
+// Additionally, once `failed` is set, no further command is submitted: the
+// task requires "if any necessary step fails, immediately invalidate that
+// stage and enter the recovery flow".
+// Per-command record (v0.20.0).
 //
-// 任务要求"保存每次关键命令的命令字、预期完成值、观测完成值及阶段"。
-// 第四轮只保留了 submits/completed 两个总数与最后一次的 sem/loops，
-// 于是"哪一条命令、在哪个阶段、预期什么、实际什么"全部丢失。
+// The task requires saving "each critical command's command words, expected
+// completion value, observed completion value, and stage". Round 4 kept only
+// two totals (submits/completed) and the last sem/loops, so "which command, at
+// which stage, expected what, observed what" was all lost.
 #define M2B2_CMD_LOG_MAX 8
 
 // ---- mmioRead64 (original lines 1023..1026) ----
-// 读 64 位 MMIO。用 volatile 保证不被优化掉，且每次真的访问总线。
+// Reads 64-bit MMIO. volatile prevents optimization and forces a real bus
+// access each time.
 static inline UInt64 mmioRead64(volatile UInt8 *base, UInt32 off) {
     return *(volatile UInt64 *)(base + off);
 }
@@ -729,70 +813,76 @@ static inline void mmioWrite32(volatile UInt8 *base, UInt32 off, UInt32 v) {
 }
 
 // ---- m2b2SmallLeaf (original lines 2475..2483) ----
-// 4 KiB 叶子 PTE：NextLevel = 0（= PAGE_MODE_NONE，表示叶子），不含大小编码。
+// 4 KiB leaf PTE: NextLevel = 0 (= PAGE_MODE_NONE, i.e. a leaf), no size
+// encoding.
 //
-// Linux 的 4 KiB 分支（io_pgtable.c:398）：
+// Linux's 4 KiB branch (io_pgtable.c:398):
 //   __pte = paddr | IOMMU_PTE_PR | IOMMU_PTE_FC;
-// 即**只** OR PR 与 FC，不加 PM_LEVEL_ENC —— NEXT_LEVEL 保持 0。
+// i.e. **only** PR and FC are ORed in, without PM_LEVEL_ENC -- NEXT_LEVEL
+// stays 0.
 static inline UInt64 m2b2SmallLeaf(UInt64 pa) {
     return amdpte::makeDefaultLeaf(amdpte::LEVEL_4K, pa,
                                    amdpte::PTE_IR | amdpte::PTE_IW);
 }
 
 // ---- m2b2LargeLeaf (original lines 2485..2521) ----
-// 2 MiB 叶子 PTE。
+// 2 MiB leaf PTE.
 //
-// 【第五轮修正：这是本轮的核心缺陷】
+// [Round 5 fix: this round's core defect]
 //
-// 第四轮这里是：
+// Round 4 had here:
 //     pte = PAGE_SIZE_PTE(pa, 2MiB) | PM_LEVEL_ENC(7) | PR | FC | IR | IW
-// 也就是**无条件**用"扩展页"（NextLevel=7）编码。
+// i.e. **unconditionally** using the "extended page" (NextLevel=7) encoding.
 //
-// 但 Linux 的 iommu_v1_map_pages() 只有 `count > 1` 才走那条分支
-// （io_pgtable.c:394-398）：
+// But Linux's iommu_v1_map_pages() only takes that branch when `count > 1`
+// (io_pgtable.c:394-398):
 //     if (count > 1) {
 //         __pte = PAGE_SIZE_PTE(paddr, pgsize);
 //         __pte |= PM_LEVEL_ENC(7) | IOMMU_PTE_PR | IOMMU_PTE_FC;
 //     } else {
 //         __pte = __sme_set(paddr) | IOMMU_PTE_PR | IOMMU_PTE_FC;
 //     }
-// 而 PAGE_SIZE_PTE_COUNT(2 MiB) = 1ULL << ((21-12)%9) = 1。
-// 所以 2 MiB 走的是 **else** 分支：不带任何 NextLevel 编码。
+// And PAGE_SIZE_PTE_COUNT(2 MiB) = 1ULL << ((21-12)%9) = 1.
+// So 2 MiB goes through the **else** branch: no NextLevel encoding at all.
 //
-// 规范 48882 Rev 3.10 §2.2.3（p.80）明确：
+// Spec 48882 Rev 3.10 §2.2.3 (p.80) is explicit:
 //     "The page size specified by this method must be **larger than** the
 //      default page size and smaller than the default page size for the
 //      next higher level."
-// 2 MiB 恰好等于 level 2 的默认页大小（表 15），既不"更大"也不"更小"，
-// 所以 NextLevel=7 + 2 MiB 大小域是**非法编码**。2 MiB 只有一种合法写法：
-// level 2 表里 NextLevel=0。
+// 2 MiB equals level 2's default page size (table 15) exactly -- neither
+// "larger" nor "smaller" -- so NextLevel=7 with a 2 MiB size field is an
+// **illegal encoding**. There is exactly one legal way to write 2 MiB:
+// NextLevel=0 in a level 2 table.
 //
-// 实机证据（第四轮导出的 leaf = 0x70000003844ffe01，对应 PA 0x384400000）：
-// 正确值应为 0x7000000384400001 —— 只差 bit12..20 那 9 个"大小域"位。
+// On-machine evidence (round 4's exported leaf = 0x70000003844ffe01,
+// corresponding to PA 0x384400000): the correct value would be
+// 0x7000000384400001 -- differing only in the nine "size field" bits 12..20.
 //
-// 注意：**不是**把 DTE 的 Mode=4 改成 Mode=0。改的是叶子 PTE 的 NextLevel。
+// Note: this does **not** mean changing the DTE's Mode=4 to Mode=0. What
+// changes is the leaf PTE's NextLevel.
 static inline UInt64 m2b2LargeLeaf(UInt64 pa) {
-    // 2 MiB 叶子位于 level 2 表（PAGE_MODE_4_LEVEL 下 root(4)->L3(3)->L2(2)），
-    // 用该级的默认页大小编码，NextLevel=0。
+    // The 2 MiB leaf sits in a level 2 table (under PAGE_MODE_4_LEVEL:
+    // root(4)->L3(3)->L2(2)); encoded with that level's default page size,
+    // NextLevel=0.
     return amdpte::makeDefaultLeaf(amdpte::LEVEL_2M, pa,
                                    amdpte::PTE_IR | amdpte::PTE_IW);
 }
 
 // ---- m2b2TablePte (original lines 2523..2533) ----
-// 非叶子 PTE（指向下一级表）：PM_LEVEL_PDE(level, pa)
+// Non-leaf PTE (pointing to the next-level table): PM_LEVEL_PDE(level, pa)
 //
-// Linux 的 PM_LEVEL_PDE（amd_iommu_types.h:323-324）是：
+// Linux's PM_LEVEL_PDE (amd_iommu_types.h:323-324) is:
 //
 //     ((a) | PM_LEVEL_ENC(x) | IOMMU_PTE_PR | IOMMU_PTE_IR | IOMMU_PTE_IW)
 //
-// **不含 FC**。FC 只出现在叶子项（io_pgtable.c:396/398）。
+// **No FC**. FC appears only on leaf entries (io_pgtable.c:396/398).
 static inline UInt64 m2b2TablePte(UInt64 level, UInt64 pa) {
     return amdpte::makeTablePde((unsigned)level, pa,
                                 amdpte::PTE_IR | amdpte::PTE_IW);
 }
 
 // ---- m2b2WriteCmd (original lines 2535..2542) ----
-// 往命令缓冲写一条 16 字节命令
+// Writes one 16-byte command into the command buffer
 static inline void m2b2WriteCmd(volatile UInt32 *buf, UInt32 idx,
                                 UInt32 d0, UInt32 d1, UInt32 d2, UInt32 d3) {
     buf[idx * 4 + 0] = d0;
@@ -802,37 +892,45 @@ static inline void m2b2WriteCmd(volatile UInt32 *buf, UInt32 idx,
 }
 
 // ---- m2b2InvAddress (original lines 2544..2577) ----
-// 【第五轮】原先这里有一个 m2b2PtePageSize()，无条件按
-// PTE_PAGE_SIZE(pte) = 1 << (1 + ffz(pte | 0xfff)) 解释页大小。
+// [Round 5] This originally contained an m2b2PtePageSize() that
+// unconditionally interpreted the page size via
+// PTE_PAGE_SIZE(pte) = 1 << (1 + ffz(pte | 0xfff)).
 //
-// 那个函数**没有层级参数**，因此无法区分"level 2 的默认 2 MiB 叶子
-// （NextLevel=0）"与"扩展编码"；更糟的是它对 NextLevel=0 的项也去数
-// 连续的 1 位，把 4 KiB 叶子算成 4 KiB、把 2 MiB 默认叶子算成 2 MiB，
-// 看起来"都对"，于是永远发现不了 NextLevel=7 被滥用这件事。
+// That function **had no level parameter**, so it could not distinguish "a
+// level 2 default 2 MiB leaf (NextLevel=0)" from "the extended encoding".
+// Worse, for NextLevel=0 entries it also counted consecutive one-bits:
+// computing 4 KiB for a 4 KiB leaf and 2 MiB for a 2 MiB default leaf,
+// everything "looked right", so the misuse of NextLevel=7 could never be
+// detected.
 //
-// 现在统一走 amdpte::decodePte(pte, level)：页大小的解释必须携带当前表级。
-// 删除该函数而不是修补它，是为了让"忘记传层级"在编译期就不可能发生。
+// Everything now goes through amdpte::decodePte(pte, level): page size
+// interpretation must carry the current table level. The function was deleted
+// rather than patched so that "forgetting to pass the level" is impossible at
+// compile time.
 
-// 构造 CMD_INV_IOMMU_PAGES 的失效地址。
+// Build the invalidation address for CMD_INV_IOMMU_PAGES.
 //
-// 【2026-10-30 实测修正】这里曾经直接把 CMD_INV_IOMMU_ALL_PAGES_ADDRESS
-// (0x7FFFFFFFFFFFFFFF) 塞进 data[2]/[3]，结果硬件报 ILL_CMD，
-// 事件地址指向 cmd buffer + 0x30，正是这条命令。
+// [2026-10-30 measured fix] This once stuffed CMD_INV_IOMMU_ALL_PAGES_ADDRESS
+// (0x7FFFFFFFFFFFFFFF) directly into data[2]/[3]; the hardware reported
+// ILL_CMD, and the event address pointed at cmd buffer + 0x30 -- exactly this
+// command.
 //
-// 原因：Linux 的 build_inv_address()（iommu.c:992-1028）在最后一步做了
+// Cause: Linux's build_inv_address() (iommu.c:992-1028) ends with
 //
-//     address &= PAGE_MASK;      // 清 bit11..0
+//     address &= PAGE_MASK;      // clears bits 11..0
 //     return address | CMD_INV_IOMMU_PAGES_SIZE_MASK;
 //
-// 即使走 "invalidate everything" 分支，也会先清低 12 位、再置 bit0。
-// 所以正确的值是 0x7FFFFFFFFFFFF001，而不是 0x7FFFFFFFFFFFFFFF。
-// 我漏掉了那个 PAGE_MASK，多送了 0xFFC（bit2..11）——这些是保留位，
-// 硬件据此判定命令非法。
+// Even on the "invalidate everything" branch it first clears the low 12 bits
+// and then sets bit0. So the correct value is 0x7FFFFFFFFFFFF001, not
+// 0x7FFFFFFFFFFFFFFF. I omitted that PAGE_MASK and sent an extra 0xFFC
+// (bits 2..11) -- reserved bits, by which the hardware judged the command
+// illegal.
 //
-// 教训：照抄 Linux 时要照抄**整个函数**，不能只抄那个常量。
+// Lesson: when copying Linux, copy the **whole function**, not just the
+// constant.
 static inline UInt64 m2b2InvAddress() {
     UInt64 a = M2B2_CMD_ALL_PAGES_ADDR;
-    a &= ~0xFFFULL;          // PAGE_MASK：清 bit11..0
+    a &= ~0xFFFULL;          // PAGE_MASK: clears bits 11..0
     a |= 0x01ULL;            // CMD_INV_IOMMU_PAGES_SIZE_MASK
     return a;
 }
@@ -853,25 +951,28 @@ static inline UInt64 r50InvRangeAddress(UInt64 address, UInt64 bytes) {
 }
 
 // ---- M2B2 measurement window (original lines 2579..2598) ----
-// ==================== 统一测量窗口（v0.20.0）====================
+// ==================== Unified measurement window (v0.20.0) ====================
 //
-// 【本轮审计发现的缺陷，必须先修再谈任何判据】
+// [Defect found by this round's audit; must be fixed before any criterion]
 //
-// 旧代码里基线计数 evtCount2 是在 IOSleep(holdSecs * 1000) 之后读的，
-// 而 holdSecs 在 pgthold 模式下是 **20**；但后面所有用来与它比较的计数
-// （leafprobe / after / domid1 / 阴性对照）全部硬编码 IOSleep(2000)，
-// 也就是 **2 秒**。两者差 10 倍。
+// In the old code the baseline count evtCount2 was read after
+// IOSleep(holdSecs * 1000), with holdSecs = **20** in pgthold mode; but every
+// count later compared against it (leafprobe / after / domid1 / negative
+// control) was hard-coded IOSleep(2000) -- **2 seconds**. A 10x mismatch.
 //
-// 后果：一个真实的 10 倍故障率上升，在这个比较里会显示成"同量级"。
-// 第二轮据此写下的 "domid-not-the-cause"、"leaf level not reached"
-// 以及 A/B/A 的"可逆性"结论，全部建立在这个错配上，不能再用。
+// Consequence: a real 10x increase in fault rate would appear "same
+// magnitude" in that comparison. Round 2's conclusions of
+// "domid-not-the-cause", "leaf level not reached", and the A/B/A
+// "reversibility" all rest on this mismatch and can no longer be used.
 //
-// 它还解释了更早那次困惑：正确页表 56 个 fault（20 秒窗口）与
-// 全零根表 6 个 fault（2 秒窗口）看起来"量级不同"，
-// 归一化后是 2.8/s 与 3.0/s —— **完全相同**。
+// It also explains the earlier confusion: 56 faults under the correct page
+// table (20 s window) versus 6 faults under the all-zero root table (2 s
+// window) "differed in magnitude" -- normalized, 2.8/s versus 3.0/s:
+// **identical**.
 //
-// 修法：所有计数一律走同一个函数、同一个窗口长度，并把窗口长度
-// 作为属性一起发布，使任何比较都能被外部复核。
+// Fix: all counts go through the same function with the same window length,
+// and the window length is published as a property so any comparison can be
+// externally re-checked.
 #define M2B2_MEAS_SECS   3
 
 // Round25: one finite 512-request rolling run, with four reusable slots and
@@ -880,36 +981,43 @@ static inline UInt64 r50InvRangeAddress(UInt64 address, UInt64 bytes) {
 #define M2B2_MAIN_MEAS_SECS 60
 
 // ---- m2b2NowNS (original lines 2602..2611) ----
-// 单调时间与换算。用 mach_absolute_time 而不是 IOSleep 的标称值，
-// 因为 IOSleep 只保证"至少睡这么久"，实测时长可能明显更长。
+// Monotonic time and conversion. mach_absolute_time is used rather than
+// IOSleep's nominal duration, because IOSleep only guarantees "at least this
+// long"; the measured duration may be notably longer.
 //
-// 【为什么用 absolutetime_to_nanoseconds 而不是 mach_timebase_info】
-//   内核 SDK 的 mach/mach_time.h 只声明了 mach_absolute_time()，
-//   没有声明 mach_timebase_info()（那是用户态 API）。内核里做同样换算
-//   的受支持接口是 kern/clock.h 的 absolutetime_to_nanoseconds()。
+// [Why absolutetime_to_nanoseconds instead of mach_timebase_info]
+//   The kernel SDK's mach/mach_time.h declares only mach_absolute_time(), not
+//   mach_timebase_info() (a userspace API). The supported interface for the
+//   same conversion in the kernel is kern/clock.h's
+//   absolutetime_to_nanoseconds().
 static inline UInt64 m2b2NowNS() {
     return mach_absolute_time();
 }
 
 // ---- m2b2ToMS (original lines 2613..2618) ----
 static inline UInt64 m2b2ToMS(UInt64 elapsed) {
-    // 内核版签名是 out 参数：void absolutetime_to_nanoseconds(u64, u64*)
+    // The kernel variant's signature is an out-parameter:
+    // void absolutetime_to_nanoseconds(u64, u64*)
     UInt64 ns = 0;
     absolutetime_to_nanoseconds(elapsed, &ns);
     return ns / 1000000ULL;
 }
 
 // ---- m2b2WallSecs (original lines 2620..2635) ----
-// 【v0.20.0】墙钟时间（日历秒），用于把窗口边界与**外部**观测对齐。
+// [v0.20.0] Wall-clock time (calendar seconds), for aligning the window
+// boundaries with **external** observations.
 //
-// 为什么需要：任务要求"能证明翻译窗口内实际 DMA 完成的证据，例如可关联到
-// 目标接口的受控收发及完成进展"。内核里**读不到** ifnet 统计：
-//   - IONetworkData::readBytes 是 protected，IONetworkInterface 也没有
-//     公开的统计访问器；
-//   - struct ifnet 在 SDK 里是不完整类型（只有前向声明），
-//     `ifp->if_data.ifi_opackets` 无法编译。
-// 所以 DMA 完成证据只能从外部（用户态 netstat / ifconfig 计数器）取得，
-// 而外部只能按**墙钟时间**对齐。发布日历秒就是为此。
+// Why needed: the task requires "evidence that actual DMA completions occurred
+// within the translation window, e.g. controlled sends/receives and completion
+// progress correlatable to the target interface". ifnet statistics **cannot be
+// read** in the kernel:
+//   - IONetworkData::readBytes is protected, and IONetworkInterface has no
+//     public statistics accessor;
+//   - struct ifnet is an incomplete type in the SDK (forward declaration
+//     only), so `ifp->if_data.ifi_opackets` does not compile.
+// So DMA completion evidence can only come from outside (userspace netstat /
+// ifconfig counters), and the outside can align only by **wall-clock time**.
+// Publishing calendar seconds exists for exactly this.
 static inline UInt64 m2b2WallSecs() {
     clock_sec_t secs = 0;
     clock_nsec_t nsecs = 0;
@@ -918,34 +1026,40 @@ static inline UInt64 m2b2WallSecs() {
 }
 
 // ---- struct M2b2PostSample (original lines 2686..2728) ----
-// ==================== 符合规范的事件消费 ====================
+// ==================== Spec-conformant event consumption ====================
 //
-// 严格照抄 Linux iommu_poll_events()（iommu.c:689-702）语义：
+// Strictly follows Linux iommu_poll_events() semantics (iommu.c:689-702):
 //
 //   head = readl(EVT_HEAD); tail = readl(EVT_TAIL);
 //   while (head != tail) { decode(evt_buf + head);
 //                          head = (head + 16) % EVT_BUFFER_SIZE; }
-//   writel(head, EVT_HEAD);      // 只推进到实际消费到的位置
+//   writel(head, EVT_HEAD);      // advances only to the consumed position
 //
-// 关键：**绝不写 TAIL**；HEAD 只前进不回退；不清空缓冲
-// （硬件可能正在写）；溢出/回绕/条目异常 → 整个窗口无效。
-// ---- 第九轮：窗口内后置采样 ----
+// Key points: **never write TAIL**; HEAD only moves forward, never back; no
+// buffer clearing (the hardware may be writing); overflow / wrap / anomalous
+// entry -> the whole window is invalid.
+// ---- Round 9: post-sample inside the window ----
 //
-// 【为什么必须有一个回调，而不能在窗口返回之后再读】
+// [Why a callback is required, rather than reading after the window returns]
 //
-//   第八轮在 m2b2SampleEvents() 返回之后才读关闭指针。那个时刻确实晚于
-//   窗口终点，所以"两次采样夹住窗口"成立——但那是**包含**方向：
-//   [tCloBefore, tCloAfter] ⊇ [tWinStart, tWinEnd]，跨度 3.00785 秒对
-//   窗口 3.00018 秒。它证明不了"这些完成发生在零事件窗口内"，只证明了
-//   "发生在窗口结束之前或之后都算"。
+//   Round 8 read the close pointer only after m2b2SampleEvents() returned.
+//   That moment was indeed after the window end, so "two samples sandwich the
+//   window" held -- but in the **containing** direction:
+//   [tCloBefore, tCloAfter] ⊇ [tWinStart, tWinEnd], a 3.00785 s span over a
+//   3.00018 s window. That proves nothing about "these completions happened
+//   within the zero-event window", only that "before or after the window end,
+//   either counts".
 //
-//   本轮把后置采样放进窗口内部：在 IOSleep 返回之后、tEnd 被记录之前
-//   立刻读两个寄存器。这样得到的是
+//   This round moves the post-sample inside the window: right after IOSleep
+//   returns and before tEnd is recorded, both registers are read immediately.
+//   The result satisfies
 //
 //       tWinStart <= tCloAfter <= tTailAfter <= tWinEnd
 //
-//   即采样本身就在窗口内，而不是包着窗口。窗口关闭后不再读任何设备
-//   寄存器，环扫描也放在窗口之外（它只读内存，不产生时间证据）。
+//   i.e. the sampling itself is inside the window instead of wrapping it. No
+//   device register is read after the window closes, and the ring scan is
+//   placed outside the window (it reads memory only and produces no time
+//   evidence).
 struct M2b2PostSample {
     volatile UInt8 *bar;
     UInt32 reg;
@@ -953,7 +1067,7 @@ struct M2b2PostSample {
     UInt32 mask;
     UInt32 tailReg;
     bool   haveBar;
-    // 输出
+    // Output
     UInt32 cloRaw;
     bool   cloOk;
     UInt32 tailRaw;
@@ -964,11 +1078,11 @@ struct M2b2PostSample {
 
 // ---- struct M2B2CmdRecord (original lines 2957..2964) ----
 struct M2B2CmdRecord {
-    const char *label;      // 阶段标签
-    UInt32      d0, d1, d2, d3;   // 命令字（4 个 dword）
-    UInt64      expected;   // 预期的完成信号值
-    UInt64      observed;   // 实际读到的完成信号值
-    UInt32      loops;      // 等待轮数
+    const char *label;      // stage label
+    UInt32      d0, d1, d2, d3;   // command words (4 dwords)
+    UInt64      expected;   // expected completion-signal value
+    UInt64      observed;   // completion-signal value actually read
+    UInt32      loops;      // polling rounds waited
     bool        ok;
 };
 
@@ -983,48 +1097,52 @@ struct M2B2CmdCtx {
     struct M2B2HeadCache *headCache = nullptr; // opt-in for the shared auto controller
     volatile UInt32 *buf;
     volatile UInt64 *sem;
-    UInt64 semPA;        // 完成信号物理地址（命令里要用）
-    UInt32 idx;          // 下一个命令槽位（始终在原容量内回绕）
-    UInt64 completionSequence = 0; // 独立于环位置及诊断计数的完成序号
+    UInt64 semPA;        // completion signal's physical address (used in commands)
+    UInt32 idx;          // next command slot (always wraps within capacity)
+    UInt64 completionSequence = 0; // completion sequence, independent of ring position and diagnostic counters
     UInt32 wraps = 0;
     UInt32 postWrapCompleted = 0;
-    UInt32 tail;         // 当前 tail（字节偏移）
-    UInt32 domid;        // 当前 DTE 里的 domain id
-    UInt32 devid;        // 当前目标设备
-    UInt32 pageMode;     // DTE 的 MODE 字段
-    UInt64 rootPA;       // 当前根表物理地址
-    bool   failed;       // 一旦 true，禁止继续提交
+    UInt32 tail;         // current tail (byte offset)
+    UInt32 domid;        // domain id currently in the DTE
+    UInt32 devid;        // current target device
+    UInt32 pageMode;     // the DTE's MODE field
+    UInt64 rootPA;       // current root table's physical address
+    bool   failed;       // once true, further submission is forbidden
     const char *failReason;
-    UInt32 submits;      // 已提交批次数
-    UInt32 completed;    // 成功完成批次数
+    UInt32 submits;      // batches submitted
+    UInt32 completed;    // batches completed successfully
     UInt64 lastSem;
     UInt32 lastLoops;
-    // v0.20.0：逐条记录
+    // v0.20.0: per-command records
     UInt32 recordCount;
     M2B2CmdRecord records[M2B2_CMD_LOG_MAX];
 };
 
 // ---- m2b2ResetEventLog (original lines 2637..2684) ----
-// ==================== 符合规范的事件日志重置 ====================
+// ==================== Spec-conformant event log reset ====================
 //
-// 这是**唯一**允许写 EVT_HEAD / EVT_TAIL 的地方，且必须先停日志。
+// This is the **only** place allowed to write EVT_HEAD / EVT_TAIL, and the log
+// must be stopped first.
 //
-// 依据 Linux v6.6（与 AMD IOMMU Spec 48882 一致）：
+// Basis, Linux v6.6 (consistent with AMD IOMMU Spec 48882):
 //   init.c:890-906 iommu_enable_event_buffer()
-//     → 写 EVT_BUF 基址；在使能日志**之前**把 HEAD/TAIL 置 0；
-//       然后才置 CONTROL_EVT_LOG_EN。
+//     -> writes the EVT_BUF base; zeroes HEAD/TAIL **before** enabling the
+//        log; only then sets CONTROL_EVT_LOG_EN.
 //   init.c:763-782 amd_iommu_restart_log()
-//     → 关 EVT_LOG_EN，向 STATUS 写 overflow 位清除，再重新使能。
+//     -> clears EVT_LOG_EN, writes the overflow bit clear to STATUS, then
+//        re-enables.
 //
-// 即：HEAD/TAIL 只能在 EVT_LOG_EN=0 且 EVT_RUN=0 时改写；
-// 日志运行期间 TAIL 属于硬件生产者，软件不得触碰。
+// I.e.: HEAD/TAIL may be rewritten only while EVT_LOG_EN=0 and EVT_RUN=0;
+// while the log runs, TAIL belongs to the hardware producer and software must
+// not touch it.
 static inline bool m2b2ResetEventLog(volatile UInt8 *base) {
-    // 1. 停日志
+    // 1. Stop the log
     UInt64 ctrl = mmioRead64(base, M2B2_OFF_CONTROL);
     ctrl &= ~M2B2_CTRL_EVT_LOG_EN;
     mmioWrite64(base, M2B2_OFF_CONTROL, ctrl);
 
-    // 2. 等 EVT_RUN 清零（有界等待；确认已停才允许动缓冲）
+    // 2. Wait for EVT_RUN to clear (bounded wait; the buffer may be touched
+    // only once stopped is confirmed)
     bool stopped = false;
     for (UInt32 i = 0; i < M2B1_LOOP_TIMEOUT; i++) {
         if ((mmioRead32(base, M2B2_OFF_STATUS) & M2B2_STATUS_EVT_RUN) == 0) {
@@ -1034,14 +1152,14 @@ static inline bool m2b2ResetEventLog(volatile UInt8 *base) {
     }
     if (!stopped) return false;
 
-    // 3. 现在才允许归零两个指针
+    // 3. Only now may both pointers be zeroed
     mmioWrite64(base, M2B2_OFF_EVT_HEAD, 0);
     mmioWrite64(base, M2B2_OFF_EVT_TAIL, 0);
 
-    // 4. 清 overflow 状态位（写 1 清除，init.c:778）
+    // 4. Clear the overflow status bit (write-1-to-clear, init.c:778)
     mmioWrite32(base, M2B2_OFF_STATUS, M2B2_STATUS_EVT_OVERFLOW);
 
-    // 5. 重新使能并确认 EVT_RUN 回到 1
+    // 5. Re-enable and confirm EVT_RUN returns to 1
     ctrl = mmioRead64(base, M2B2_OFF_CONTROL);
     ctrl |= M2B2_CTRL_EVT_LOG_EN;
     mmioWrite64(base, M2B2_OFF_CONTROL, ctrl);
@@ -1062,7 +1180,7 @@ static inline void m2b2DoPostSample(void *ctx) {
     p->tailOk = false;
     if (!p->haveBar || !p->bar) return;
 
-    // 关闭指针：按推导出的宽度读。
+    // Close pointer: read at the derived width.
     p->tClo = m2b2NowNS();
     if (p->width == 2) {
         p->cloRaw = (UInt32)(*(volatile UInt16 *)(p->bar + p->reg));
@@ -1072,7 +1190,7 @@ static inline void m2b2DoPostSample(void *ctx) {
         p->cloOk = amdobs::cloPtrSampleValid(p->cloRaw, 4, p->mask);
     }
 
-    // 尾指针：窗口内提交了多少个描述符。
+    // Tail pointer: how many descriptors were submitted within the window.
     p->tTail = m2b2NowNS();
     p->tailRaw = *(volatile UInt32 *)(p->bar + p->tailReg);
     p->tailOk = true;
@@ -1097,7 +1215,7 @@ static inline bool m2b2BeginEventWindow(
     w->preBacklog = 0;
     for (UInt32 t = 0; t < 16; t++) w->typeCount[t] = 0;
 
-    // ---- 窗口起点 ----
+    // ---- Window start ----
     w->headStart   = (UInt32)mmioRead64(base, M2B2_OFF_EVT_HEAD);
     w->tailStart   = (UInt32)mmioRead64(base, M2B2_OFF_EVT_TAIL);
     w->statusStart = mmioRead32(base, M2B2_OFF_STATUS);
@@ -1117,13 +1235,15 @@ static inline bool m2b2BeginEventWindow(
         return false;
     }
 
-    // 【v0.20.0】记录窗口开始时的**前置积压**：[HEAD, TAIL) 里已经存在、
-    // 但尚未被消费的条目。它们是上一个窗口或 DTE 切换过程产生的，
-    // 不属于本窗口的新事件。
+    // [v0.20.0] Record the **pre-existing backlog** at window start: entries
+    // already in [HEAD, TAIL) but not yet consumed. They come from the
+    // previous window or from the DTE switch, and are not new events of this
+    // window.
     //
-    // 第四轮把整个队列一次性消费完，然后把所有条目都算进主窗口计数——
-    // 于是"切换前积压的 fault"会被误当成"切换后新产生的 fault"。
-    // 现在把它单独记下来，分析器据此区分。
+    // Round 4 consumed the whole queue in one pass and counted all entries
+    // into the main window count -- so "faults backlogged before the switch"
+    // would be misattributed as "new faults after the switch". They are now
+    // recorded separately, letting the analyser distinguish.
     w->preBacklog = ((w->tailStart + M2B2_EVT_BUFFER_SIZE - w->headStart)
                      % M2B2_EVT_BUFFER_SIZE) / 16;
 
@@ -1137,23 +1257,26 @@ static inline void m2b2EndEventWindow(
     volatile UInt8 *base, volatile UInt32 *evtBuf, UInt32 tgtDevid,
     org_example_AMDMapperProbe::M22b2EventWindow *w,
     void (*postSample)(void *) = nullptr, void *postCtx = nullptr) {
-    // 窗口内后置采样：在结束测量时、记录 tEnd 之前完成。
+    // In-window post-sample: done at end-of-window measurement, before tEnd is
+    // recorded.
     //
-    // 放在这里而不是调用方，是因为"窗口内部"这个性质只有在这里才成立。
-    // 调用方拿到返回值时窗口已经关闭，之后读到的任何样本都只能证明
-    // "窗口结束之前或之后"，那正是第八轮被指出的问题。
+    // Placed here rather than in the caller because the "inside the window"
+    // property holds only here. By the time the caller has the return value
+    // the window is closed, and any sample read afterwards can only prove
+    // "before or after the window end" -- exactly what round 8 was criticized
+    // for.
     if (postSample) postSample(postCtx);
 
     w->tEnd = m2b2NowNS();
     w->wallEnd = m2b2WallSecs();
     w->durMS = m2b2ToMS(w->tEnd - w->tStart);
 
-    // ---- 窗口终点 ----
+    // ---- Window end ----
     w->headEnd   = (UInt32)mmioRead64(base, M2B2_OFF_EVT_HEAD);
     w->tailEnd   = (UInt32)mmioRead64(base, M2B2_OFF_EVT_TAIL);
     w->statusEnd = mmioRead32(base, M2B2_OFF_STATUS);
 
-    // ---- 有效性判定：任何一条不成立 → 窗口无效 ----
+    // ---- Validity verdict: any failed condition -> invalid window ----
     if (w->statusEnd & M2B2_STATUS_EVT_OVERFLOW) {
         w->invalidReason = "overflow-during-window";
         return;
@@ -1168,30 +1291,33 @@ static inline void m2b2EndEventWindow(
         w->invalidReason = "head-tail-out-of-range-at-end";
         return;
     }
-    // HEAD 由软件维护，硬件不应改它；变了说明缓冲被人动过
+    // HEAD is maintained by software and the hardware should not change it; a
+    // change means someone touched the buffer
     if (w->headEnd != w->headStart) {
         w->invalidReason = "head-moved-unexpectedly";
         return;
     }
 
-    // ---- 消费 [headStart, tailEnd)，按环形处理回绕 ----
+    // ---- Consume [headStart, tailEnd), handling wraparound as a ring ----
     //
-    // 【v0.20.0 修正】早先的写法从 tailStart 开始遍历，那是**生产者**
-    // 在窗口开始时的位置，不是消费者该读的起点。两者只在"上一窗口刚好
-    // 全部消费完"时才相等；一旦窗口之间有未消费的条目，从 tailStart
-    // 开始就会跳过它们，把真实存在的事件静默丢掉。
-    // Linux iommu_poll_events() 是从 **HEAD** 开始走的（iommu.c:693-698），
-    // 这里照它的语义改。
+    // [v0.20.0 fix] The earlier code started iterating from tailStart -- the
+    // **producer's** position at window start, not where the consumer should
+    // begin reading. The two are equal only when "the previous window was
+    // consumed exactly to the end"; once unconsumed entries exist between
+    // windows, starting at tailStart skips them, silently discarding real
+    // events. Linux's iommu_poll_events() walks from **HEAD**
+    // (iommu.c:693-698); the semantics were changed to match.
     //
-    // 跨度用模运算求，因此合法的回绕（tail 数字变小）是正常情况，
-    // 不再被判为无效。
+    // The span is computed with modulo arithmetic, so a legitimate wraparound
+    // (tail's number decreasing) is a normal case, no longer judged invalid.
     const UInt32 slots = (UInt32)(M2B2_EVT_BUFFER_SIZE / 16);
     const UInt32 span = (w->tailEnd + M2B2_EVT_BUFFER_SIZE - w->headStart)
                         % M2B2_EVT_BUFFER_SIZE;
 
-    // span == 0 表示生产者与消费者重合：可能是"没有新事件"，
-    // 也可能是"刚好写满一整圈"。后者无法与前者区分，而硬件在这种情况下
-    // 会置 EVT_OVERFLOW（上面已检查），所以这里按"无新事件"处理。
+    // span == 0 means producer and consumer coincide: either "no new events"
+    // or "exactly one full ring was written". The latter is indistinguishable
+    // from the former, and the hardware sets EVT_OVERFLOW in that case
+    // (checked above), so it is treated as "no new events".
     if ((span / 16) > slots) {
         w->invalidReason = "span-exceeds-ring-capacity";
         return;
@@ -1209,7 +1335,8 @@ static inline void m2b2EndEventWindow(
         const UInt32 t = (r1 >> M2B2_EVENT_TYPE_SHIFT) &
                          M2B2_EVENT_TYPE_MASK;
 
-        // 类型 0 = 空槽位。已生产区间内出现，说明条目未完成。
+        // Type 0 = empty slot. Appearing within the produced range means an
+        // entry was not completed.
         if (t == 0) {
             w->invalidReason = "incomplete-entry-type-zero";
             mmioWrite64(base, M2B2_OFF_EVT_HEAD, off);
@@ -1230,7 +1357,8 @@ static inline void m2b2EndEventWindow(
             w->raw[w->rawCount][3] = r3;
             w->rawCount++;
         } else {
-            // 达到保留上限：明确标记截断，后续分析不得外推。
+            // Retention cap reached: truncation is explicitly marked; later
+            // analysis must not extrapolate.
             w->rawTruncated = true;
         }
 
@@ -1238,7 +1366,7 @@ static inline void m2b2EndEventWindow(
         remaining -= 16;
     }
 
-    // ---- 只把 HEAD 推进到实际消费到的位置（tailEnd）----
+    // ---- Advance only HEAD to the actually consumed position (tailEnd) ----
     mmioWrite64(base, M2B2_OFF_EVT_HEAD, w->tailEnd);
 
     w->valid = true;
@@ -1256,10 +1384,11 @@ static inline void m2b2SampleEvents(
 }
 
 // ---- m2b2EventTypeName (original lines 2918..2937) ----
-// 事件类型名。严格按 Linux v6.6 amd_iommu_types.h:138-148 的定义，
-// **不**做语义泛化：类型 3 是 DEV_TAB_HARDWARE_ERROR（设备表硬件错误），
-// 不是"任意设备表错误"；类型 4 是 PAGE_TAB_HARDWARE_ERROR；类型 7 是
-// IOTLB_INV_TIMEOUT（失效超时），不是"任意失效失败"。
+// Event type names. Strictly per Linux v6.6 amd_iommu_types.h:138-148,
+// **without** semantic generalization: type 3 is DEV_TAB_HARDWARE_ERROR (a
+// device table hardware error), not "any device table error"; type 4 is
+// PAGE_TAB_HARDWARE_ERROR; type 7 is IOTLB_INV_TIMEOUT (invalidation timeout),
+// not "any invalidation failure".
 static inline const char *m2b2EventTypeName(UInt32 t) {
     switch (t) {
     case 0x1: return "ILLEGAL_DEV_TABLE_ENTRY";
@@ -1280,8 +1409,10 @@ static inline const char *m2b2EventTypeName(UInt32 t) {
 // ---- m2b2Submit (original lines 2987..3046) ----
 // Publish one or more commands followed by one COMPLETION_WAIT.
 //
-// 返回 true 表示硬件确实执行并回写了完成值。
-// 返回 false 时 ctx->failed 已置位，调用方**不得**继续实验。
+// Returning true means the hardware really executed and wrote back the
+// completion value.
+// On false, ctx->failed is set and the caller **must not** continue the
+// experiment.
 struct M2B2CmdWords { UInt32 d0, d1, d2, d3; };
 static_assert(sizeof(M2B2CmdWords) == 16, "AMD command size");
 
@@ -1333,9 +1464,9 @@ static inline bool m2b2SubmitBatch(volatile UInt8 *base, M2B2CmdCtx *c, const ch
         completionIdx = (completionIdx + 1) % slots;
     }
 
-    // 完成等待：data[0] = sem 物理地址 | STORE_MASK(0x01)
-    //           data[1] = sem 高 32 位 | (type << 28)
-    //           data[2..3] = 64 位序号
+    // Completion wait: data[0] = sem physical address | STORE_MASK(0x01)
+    //                   data[1] = sem's high 32 bits | (type << 28)
+    //                   data[2..3] = 64-bit sequence number
     const UInt64 seq = c->completionSequence + 1;
     m2b2WriteCmd(c->buf, completionIdx,
                  (UInt32)(c->semPA & 0xFFFFFFFF) | 0x01,
@@ -1394,38 +1525,46 @@ static inline bool m2b2Submit(volatile UInt8 *base, M2B2CmdCtx *c, const char *l
 }
 
 // ---- m2b2ReadBar64 (original lines 3048..3085) ----
-// ==================== 设备 DMA 观察（v0.21.7）====================
+// ==================== Device DMA observation (v0.21.7) ====================
 //
-// 【为什么必须做这件事，以及为什么第五轮的做法不成立】
+// [Why this must be done, and why round 5's approach does not hold]
 //
-// 第五轮把"fault 地址是否来自设备"寄托在 m1bb-realmapcalls 上。实测它是 0，
-// 于是既不能肯定也不能否定。查了 RTL812xLucy 的源码（commit
-// 639144d1f284a9fee222a518691b01494f5e265d）才明白为什么：
+// Round 5 pinned "are the fault addresses from the device" on
+// m1bb-realmapcalls. Measured, it was 0 -- proving neither direction. Reading
+// RTL812xLucy's source (commit 639144d1f284a9fee222a518691b01494f5e265d)
+// finally explained why:
 //
 //   RTL812xLucy.cpp:322   mapper = IOMapper::copyMapperForDevice(pciDevice);
 //   RTL812xLucy.cpp:333   if (mapper && !useAppleVTD) { useAppleVTD = true; }
-//                         这一句在 #if defined(__arm64__) 里 —— x86_64 不编译。
-//   RTL812xLucySetup.cpp:94-111  version_major >= Tahoe 时找 AppleVTD 服务，
-//                         找到才把 useAppleVTD 置真。本机 AppleVTD 不存在
-//                         （ioreg 里 AppleVTD=0），所以 useAppleVTD 恒假。
+//                         this line is inside #if defined(__arm64__) -- not
+//                         compiled on x86_64.
+//   RTL812xLucySetup.cpp:94-111  when version_major >= Tahoe it looks for an
+//                         AppleVTD service and only then sets useAppleVTD
+//                         true. On this machine AppleVTD does not exist
+//                         (AppleVTD=0 in ioreg), so useAppleVTD stays false.
 //   RTL812xLucy.cpp:699   if (useAppleVTD) txMapPacket(...) else
 //                         txMbufCursor->getPhysicalSegmentsWithCoalesce(...)
-//   RTL812xLucySetup.cpp:421  pa = mbuf_data_to_physical(...)  ← RX 也是裸物理地址
+//   RTL812xLucySetup.cpp:421  pa = mbuf_data_to_physical(...)  <- RX also uses
+//                         bare physical addresses
 //
-// 结论：**这台机器上该网卡的每一个 DMA 地址都不经过我们的 mapper**。
-// 所以 m1bb-* 那一套计数与这条 fault 无关，拿它排除地址来源是无效的。
+// Conclusion: **on this machine, every DMA address of this NIC bypasses our
+// mapper**. So the m1bb-* counters are unrelated to these faults, and using
+// them to exclude address provenance is invalid.
 //
-// 唯一能回答"设备到底在用哪些地址"的办法是去读设备本身：从它的 BAR 里
-// 读出描述符环基址与统计缓冲基址，再把环里的描述符地址收集起来。
+// The only way to answer "which addresses is the device actually using" is to
+// read the device itself: take the descriptor ring base and statistics buffer
+// base from its BARs, then collect the descriptor addresses in the rings.
 //
-// 【只读保证】
-//   - 只用 kIOMapInhibitCache | kIOMapReadOnly 映射 BAR
-//   - 只读寄存器与内存，不写任何一个设备寄存器
-//   - 不改变驱动的 DMA 路径，不替换 mapper，不强制 useAppleVTD
-//   - 每个候选物理区间先过 amdobs::inIdentityRam()，不在已知 RAM 布局里
-//     就不映射（映射错误物理地址会 panic）
+// [Read-only guarantees]
+//   - BARs are mapped only with kIOMapInhibitCache | kIOMapReadOnly
+//   - only registers and memory are read; no device register is written
+//   - the driver's DMA path is not altered: no mapper replacement, no forcing
+//     useAppleVTD
+//   - every candidate physical range first passes amdobs::inIdentityRam(); if
+//     it is not within the known RAM layout it is not mapped (mapping a wrong
+//     physical address panics)
 
-// 从 IOPCIDevice 的 BAR 里读一个 64 位地址寄存器对。
+// Reads a 64-bit address register pair from IOPCIDevice's BAR.
 static inline bool m2b2ReadBar64(volatile UInt8 *bar, UInt32 offLo, UInt32 offHi,
                           UInt64 *out) {
     const UInt32 lo = *(volatile UInt32 *)(bar + offLo);
@@ -1435,77 +1574,95 @@ static inline bool m2b2ReadBar64(volatile UInt8 *bar, UInt32 offLo, UInt32 offHi
 
 // ---- obs fetch bounds (original lines 3887..3950) ----
 // ===========================================================================
-// 第十轮：读驱动侧观测日志（线格式 v2）
+// Round 10: reading the driver-side observation log (wire format v2)
 // ===========================================================================
 //
-// 【第九轮的四个问题，以及这一版怎么解决】
+// [Round 9's four problems, and how this version solves them]
 //
-//   1. 快照可能早于窗口终点。
-//      第九轮依赖"驱动每秒发布一次，所以最多旧一秒"。实测快照发布时间
-//      39963682435 ns，窗口终点 40494639566 ns，差 530957131 ns——
-//      窗口最后半秒从来没进过快照，而报告把它当成完整覆盖。
+//   1. The snapshot may predate the window end.
+//      Round 9 relied on "the driver publishes once per second, so at most one
+//      second stale". Measured: snapshot published at 39963682435 ns, window
+//      end at 40494639566 ns -- 530957131 ns apart. The window's last half
+//      second never entered the snapshot, yet the report treated it as full
+//      coverage.
 //
-//      现在：把 tPublished 与窗口终点**直接比较**，不满足就降级
-//      （recordsCoverWindow = false），并把这个事实发布成属性。
-//      另外提供**有界**刷新请求：写一次 obsPublishNow() 触发驱动侧标志，
-//      然后最多轮询 kObsFetchMaxTries 次、每次 IOSleep(kObsFetchPollMs)，
-//      期间 publication id 变了就用新的；超时就用现有那份并标记不新鲜。
-//      **内核里没有任何无界等待**：轮询次数与总时长都是编译期常量。
+//      Now: tPublished is **directly compared** with the window end; failing
+//      that downgrades (recordsCoverWindow = false) and the fact is published
+//      as a property. A **bounded** refresh is also provided: obsPublishNow()
+//      is written once to trigger the driver-side flag, then polled at most
+//      kObsFetchMaxTries times with IOSleep(kObsFetchPollMs) each; a changed
+//      publication id means use the new one; on timeout keep the existing
+//      snapshot and mark it not fresh.
+//      **No unbounded waits exist in the kernel**: poll count and total
+//      duration are compile-time constants.
 //
-//   2. 头部与记录可能来自不同次发布。
-//      v1 把 head/first/published/wrapped/t-published 分成五个 OSString，
-//      记录是第六个 OSData。六者不是一次原子写，读侧可以把第 N 次的头部
-//      与第 N-1 次的记录拼在一起。第九轮归档里 props.txt（head=0x13c,
-//      t-pub=39963682435）与 driver-obs.txt（head=0x279,
-//      t-pub=126977397680）正是两次不同的发布，相隔 86.5 秒。
+//   2. Header and records may come from different publications.
+//      v1 split head/first/published/wrapped/t-published into five OSStrings
+//      with the records as a sixth OSData. The six are not one atomic write,
+//      so a reader could glue publication N's header to publication N-1's
+//      records. In round 9's archive, props.txt (head=0x13c,
+//      t-pub=39963682435) and driver-obs.txt (head=0x279,
+//      t-pub=126977397680) were exactly two different publications, 86.5
+//      seconds apart.
 //
-//      现在：驱动把**头部+记录**放进同一个 OSData（rtl812x-obs-snapshot），
-//      探针只读这一个属性。没有第二个属性可拼，撕裂在结构上不可能。
+//      Now: the driver puts **header + records** into one OSData
+//      (rtl812x-obs-snapshot) and the probe reads only that property. There is
+//      no second property to glue, making tearing structurally impossible.
 //
-//   3. 生产入口没有真正检查格式、尺寸、数量、序列范围与设备身份。
-//      第九轮只检查了 format 字符串，其余全部信任。
+//   3. The production entry did not really check format, size, count, sequence
+//      range, or device identity.
+//      Round 9 checked only the format string and trusted everything else.
 //
-//      现在：m2b2ReadDriverObs() **自己**调用 amdobs::obsHeaderOk() 与
-//      amdobs::obsIdentityMatches()，任一失败就 SKIP 并写明原因。
-//      这不是"host 测试里调用守卫"，是生产路径本身。
+//      Now: m2b2ReadDriverObs() **itself** calls amdobs::obsHeaderOk() and
+//      amdobs::obsIdentityMatches(); any failure SKIPs with the reason written
+//      out. This is not "guards invoked in the host test" -- it is the
+//      production path itself.
 //
-//   4. 记录里没有业务标识。
-//      第九轮只能靠"时间接近 + 42 字节"把一条 DMA 与一个 TCP ACK 联系起来。
+//   4. Records carried no business identity.
+//      Round 9 could only link a DMA to a TCP ACK by "time proximity + 42
+//      bytes".
 //
-//      现在：驱动在仍持有 mbuf 时解析 IPv4/UDP 载荷前 12 字节
-//      （'IOB1' + runToken + reqId），TX submit / doorbell / RX done 都带
-//      同一组 (token, reqId)。探针据此建立**唯一请求 ↔ 全部 DMA 段 ↔
-//      接收记录**的对应，而不是靠时间。
+//      Now: while still holding the mbuf, the driver parses the first 12 bytes
+//      of the IPv4/UDP payload ('IOB1' + runToken + reqId); TX submit /
+//      doorbell / RX done all carry the same (token, reqId). The probe builds
+//      a **unique request <-> all DMA segments <-> receive records**
+//      correspondence from it, not from time.
 
-// 有界刷新参数。
+// Bounded refresh parameters.
 //
-// 【为什么是 1.2 秒而不是 200 毫秒】
+// [Why 1.2 seconds rather than 200 milliseconds]
 //
-//   驱动的 watchdog 每 1 秒发布一次。探针读完窗口（3 秒）时，最近一次
-//   发布可能刚刚发生在窗口中间——实机第一次运行就是这样：快照
-//   tPublished 比窗口终点早 0.53 秒，于是 records-cover-window = no，
-//   整轮降级。这与第九轮失败的方式**完全相同**，只是数值小一些。
+//   The driver's watchdog publishes once per second. When the probe finishes
+//   reading the window (3 s), the latest publication may have happened mid-
+//   window -- the first real-machine run was exactly that: the snapshot's
+//   tPublished was 0.53 s older than the window end, so
+//   records-cover-window = no and the whole round downgraded. Identical to how
+//   round 9 failed, just with smaller numbers.
 //
-//   要判定"记录覆盖窗口"，必须拿到一份 tPublished >= 窗口终点 的快照。
-//   最坏情况是窗口刚结束、下一次 tick 还没到，需要等将近 1 秒。所以
-//   轮询上限取 1.2 秒：
+//   To judge "the records cover the window", a snapshot with
+//   tPublished >= window end is required. Worst case is a window that just
+//   ended with the next tick not yet arrived -- nearly a second of waiting.
+//   So the polling cap is 1.2 s:
 //
 //       kObsFetchMaxTries * kObsFetchPollMs = 12 * 100 = 1200 ms
 //
-//   这仍然是一个**编译期常量**：次数与每次睡眠都不随运行时状态变化，
-//   内核里没有任何无界等待。超时就退回现有那份并让 freshEnough = false，
-//   由分析器降级——绝不为了一份更漂亮的快照而挂住。
+//   This remains a **compile-time constant**: count and per-iteration sleep do
+//   not vary with runtime state; the kernel has no unbounded waits. On timeout
+//   it falls back to the existing snapshot with freshEnough = false and the
+//   analyser downgrades -- never hanging for a prettier snapshot.
 static const UInt32 kObsFetchMaxTries = 12;
 static const UInt32 kObsFetchPollMs = 100;
 
 // ---- m2b2FindObsService (original lines 3952..3997) ----
-// 找驱动发布 obs 属性的那个节点。
+// Finds the node on which the driver publishes its obs properties.
 //
-// 【为什么是子节点】
-//   findNicServiceOnly() 返回的是 **IOPCIDevice**（设备表里的 devid 就是它的
-//   BDF），取 BAR2、取 device-id 都必须用它。但 rtl812x-obs-* 是驱动在
-//   setProperty() 里写到 **RTL8125** 实例上的，而 RTL8125 是 IOPCIDevice 的
-//   **子**节点。第九轮第一次采集就是这样失败的：记录存在，只是问错了对象。
+// [Why a child node]
+//   findNicServiceOnly() returns the **IOPCIDevice** (the device table's devid
+//   is its BDF); taking BAR2 and the device-id must use it. But rtl812x-obs-*
+//   are written by the driver's setProperty() onto the **RTL8125** instance,
+//   and RTL8125 is a **child** node of the IOPCIDevice. Round 9's first
+//   capture failed exactly this way: the records existed, we just asked the
+//   wrong object.
 static inline IOService *m2b2FindObsService(IOService *svc, const char **source) {
     if (!svc) return nullptr;
     OSIterator *it = svc->getChildIterator(gIOServicePlane);
@@ -1524,7 +1681,7 @@ static inline IOService *m2b2FindObsService(IOService *svc, const char **source)
                 cls->release();
             }
             if (!match) {
-                // 类名可能改，但 bundle id 不会。
+                // The class name may change; the bundle id will not.
                 OSString *bid = OSDynamicCast(
                     OSString, child->copyProperty("CFBundleIdentifier"));
                 if (bid) {
@@ -1547,15 +1704,16 @@ static inline IOService *m2b2FindObsService(IOService *svc, const char **source)
 }
 
 // ---- m2b2CopyObsSnapshot (original lines 3999..4021) ----
-// 取一份快照。
+// Takes one snapshot.
 //
-// 返回一个 retained 的 OSData，调用方负责 release。失败时返回 nullptr 并把
-// 原因写进 why。
+// Returns a retained OSData; the caller releases it. On failure returns
+// nullptr and writes the reason into why.
 //
-// 【为什么复制而不是直接用 OSData 指针】
-//   属性里的 OSData 在 copyProperty 之后由我们持有，但驱动下一次
-//   setProperty 会替换属性对象；我们手上这一份是当时的不可变副本，这正是
-//   想要的：解码期间它不会变。
+// [Why copy instead of using the OSData pointer directly]
+//   The OSData in the property is held by us after copyProperty, but the
+//   driver's next setProperty replaces the property object; the copy in our
+//   hands is the immutable snapshot of that moment -- exactly what is wanted:
+//   it cannot change during decoding.
 static inline OSData *m2b2CopyObsSnapshot(IOService *obsSvc, const char **why) {
     if (why) *why = "ok";
     if (!obsSvc) { if (why) *why = "no-service"; return nullptr; }
@@ -1572,7 +1730,8 @@ static inline OSData *m2b2CopyObsSnapshot(IOService *obsSvc, const char **why) {
 }
 
 // ---- m2b2ObsPubIdOf (original lines 4023..4029) ----
-// 从快照头部读 publication id（不做完整校验，只用来判断"刷新了没有"）。
+// Reads the publication id from a snapshot header (no full validation; used
+// only to tell "did it refresh").
 static inline UInt32 m2b2ObsPubIdOf(const OSData *d) {
     if (!d || d->getLength() < amdobs::OBS_HDR_BYTES) return 0;
     const UInt8 *b = (const UInt8 *)d->getBytesNoCopy();

@@ -10,12 +10,14 @@ class IOPCIDevice;
 
 #include "amd_iommu_mapper_abi.hpp"
 
-// 设备 DMA 观察用的纯逻辑核心（区间集合、fault 分类、描述符解码）。
-// 与 host 回归测试包含同一个文件，见 tests/dma-observe-test.cpp。
+// Pure-logic core for device DMA observation (range sets, fault
+// classification, descriptor decoding). Included by the host regression tests
+// from the same file; see tests/dma-observe-test.cpp.
 #include "amd_iommu_dma_observe.hpp"
 
-// 第十四轮：RX 投递缓冲区集合的构造与解码。同样是"探针与 host 回归编译
-// 同一个文件"，见 tests/rxpost-test.cpp。
+// Round 14: construction and decoding of the RX posted-buffer set. Also
+// "the probe and the host regression compile the same file"; see
+// tests/rxpost-test.cpp.
 #include "amd_iommu_rxset_core.hpp"
 #include "../tools/lucy-obs/RTL812xRxPool.hpp"
 #include "../tools/lucy-obs/RTL812xRxMap.hpp"
@@ -25,30 +27,35 @@ class IOPCIDevice;
 // the archived staging ABI and is no longer included by the probe).
 #include "../tools/lucy-obs/RTL812xTxMapNative.hpp"
 
-class IOTimerEventSource;   // 前置声明，避免头文件相互包含
+class IOTimerEventSource;   // forward declaration, avoids mutual header inclusion
 class R27ProbeTimer;
 struct R47HardwareInfo;
 
-// M1-B 探针（B1 + B2-0 + B2-a）
+// The M1-B probe (B1 + B2-0 + B2-a)
 //
-// B1：给真实但不做 DMA 的设备 IOMA（pci1022,1481）设 iommu-parent，
-//     验证 copyMapperForDevice(realDevice) 返回本 mapper。
+// B1: give the IOMA of a real but non-DMA device (pci1022,1481) an
+//     iommu-parent, verifying copyMapperForDevice(realDevice) returns this
+//     mapper.
 //
-// B2-0：用**自己的** IOBufferMemoryDescriptor + 自己的 mapper 构造一次
-//       真实的 IODMACommand 流程，记录 iovmMapMemory 实际收到的参数。
+// B2-0: use **our own** IOBufferMemoryDescriptor + our own mapper to run a
+//       real IODMACommand flow once, recording the arguments iovmMapMemory
+//       actually receives.
 //
-// B2-a：真正实现「物理连续单段」的恒等映射，并观察成功路径。
-//       关键约束：*mapLength 必须**恰好等于** length。
-//       返回比 length 更大的值会让 IODMACommand 走进多段分支，
-//       而那条分支在 IODMACommand.cpp:946 有
+// B2-a: actually implement the "physically contiguous single segment" identity
+//       mapping and observe the success path.
+//       Key constraint: *mapLength must be **exactly equal to** length.
+//       Returning more than length makes IODMACommand take the multi-segment
+//       branch, and that branch has at IODMACommand.cpp:946
 //           assert(mapArgs.fAllocLength > mapArgs.fLength);
-//       恒等映射给不出更长的区间，一旦走到就会 panic。
-//       返回恰好 length 则 fAllocLength == fLength，多段分支整个跳过。
+//       An identity mapping cannot produce a longer range; taking that branch
+//       panics. Returning exactly length gives fAllocLength == fLength and the
+//       multi-segment branch is skipped entirely.
 //
-// 明确不做：
-//   - 不发布 gSystem（fIsSystem 恒 false）
-//   - 不支持碎片化 buffer（接口表达力不足，见 m1b-b2-0-result.md §6）
-//   - 不改任何第三方驱动
+// Explicitly not done:
+//   - gSystem is not published (fIsSystem stays false)
+//   - fragmented buffers are not supported (the interface cannot express them;
+//     see m1b-b2-0-result.md §6)
+//   - no third-party driver is modified
 class org_example_AMDMapperProbe : public IOMapper {
     OSDeclareDefaultStructors(org_example_AMDMapperProbe);
 
@@ -89,7 +96,7 @@ public:
     uint64_t mapToPhysicalAddress(uint64_t mappedAddress) override;
 
 private:
-    IOService *fTarget;          // B1 靶子（IOMA）
+    IOService *fTarget;          // B1 target (IOMA)
     // Round44: a persistent per-device mapper. Ordinary IODMACommand calls
     // use this backend without the experiment's registered object bindings.
     bool fR44Auto = false;
@@ -218,97 +225,112 @@ private:
     struct R34RxDomain;
     R34RxDomain *fR34Rx = nullptr;
 
-    // ---- B2 观测计数器 ----
-    // iovmMapMemory 可能被高频调用，不能每次都 setProperty（会持续分配内存）。
-    // 策略：只记录第一次、最后一次与累计次数，次数变化时才刷新属性。
+    // ---- B2 observation counters ----
+    // iovmMapMemory may be called at high frequency; setProperty on every call
+    // would keep allocating memory. Policy: record the first call, the last
+    // call and the cumulative count, refreshing properties only when the count
+    // changes.
     uint32_t fMapCalls;
     uint32_t fUnmapCalls;
     uint32_t fInsertCalls;
     uint32_t fPhysAddrCalls;
     uint32_t fPublishedMapCalls;
 
-    // ---- B2-a 判定结果 ----
-    uint32_t fMapOkCalls;          // 物理连续、已成功返回恒等映射
-    uint32_t fMapRejectFragCalls;  // 物理不连续 → kIOReturnUnsupported
-    uint32_t fMapRejectOtherCalls; // 参数不合法 / 窗口关闭
+    // ---- B2-a verdict results ----
+    uint32_t fMapOkCalls;          // physically contiguous, returned identity mapping successfully
+    uint32_t fMapRejectFragCalls;  // not physically contiguous -> kIOReturnUnsupported
+    uint32_t fMapRejectOtherCalls; // invalid arguments / window closed
     uint32_t fUnmapOkCalls;
 
-    // 安全闸门（自测用）：只有探针自测期间才允许真正返回成功。
-    // 除了「窗口打开」之外还要求 dmaCommand 必须是探针自己创建的那个，
-    // 这样即使将来有真实设备拿到本 mapper，也不可能在自测窗口内
-    // 拿到一个「看起来成功」的映射。
+    // Safety gate (for self-test): a real success may be returned only while
+    // the probe's self-test is running. Besides "the window is open", it also
+    // requires dmaCommand to be the very one the probe created -- so even if a
+    // real device obtains this mapper in the future, it can never receive a
+    // "looks-successful" mapping inside the self-test window.
     bool fMapWindowOpen;
     IODMACommand *fExpectedCmd;
 
-    // 「这次调用来自探针自己」的标志，与 fMapWindowOpen 是两回事：
-    //   fProbeCallActive  本次 setMemoryDescriptor 是探针发起的（B2-0 / B2-a）
-    //   fMapWindowOpen    这次允许返回成功（只有 B2-a 的两组对照会打开）
-    // B2-0 是「探针发起但窗口关闭」，若只用窗口判断，它会被误算成
-    // 「真实设备调用」——0.6.0 首次部署就踩了这个坑（m1bb-realmapcalls
-    // 报 1，其实来自 B2-0 的 16 KiB buffer）。
+    // The "this call came from the probe itself" flag, distinct from
+    // fMapWindowOpen:
+    //   fProbeCallActive  this setMemoryDescriptor was initiated by the probe
+    //                     (B2-0 / B2-a)
+    //   fMapWindowOpen    this call may return success (only B2-a's two
+    //                     comparison cases open it)
+    // B2-0 is "probe-initiated but window closed"; judged by the window alone
+    // it would be miscounted as a "real device call" -- exactly the trap of the
+    // first 0.6.0 deployment (m1bb-realmapcalls reported 1, actually B2-0's
+    // 16 KiB buffer).
     bool fProbeCallActive;
 
-    // ---- B2-b：真实设备支持 ----
+    // ---- B2-b: real device support ----
     //
-    // 与 B2-a 的根本差别：B2-a 同一时刻只维护**一个**活跃映射（自测串行），
-    // 而 RTL812xLucy 在 start() 里就要同时建立**三个**映射：
-    //   txBufDesc  (16 KiB)  setupTxResources()   → txDescDmaCmd
-    //   rxBufDesc  (16 KiB)  setupRxResources()   → rxDescDmaCmd
-    //   statBufDesc(~300 B)  setupStatResources() → statDescDmaCmd
-    // 之后若 useAppleVTD 为真还会再映射数据包 buffer。
-    // 所以必须改成映射表，不能再用单变量。
+    // The fundamental difference from B2-a: B2-a maintains **one** active
+    // mapping at a time (self-test is serial), while RTL812xLucy establishes
+    // **three** mappings simultaneously in start():
+    //   txBufDesc  (16 KiB)  setupTxResources()   -> txDescDmaCmd
+    //   rxBufDesc  (16 KiB)  setupRxResources()   -> rxDescDmaCmd
+    //   statBufDesc(~300 B)  setupStatResources() -> statDescDmaCmd
+    // and if useAppleVTD is true it later maps packet buffers as well.
+    // So this must become a mapping table; a single variable no longer works.
     //
-    // 为什么是固定数组而不是动态分配：iovmMapMemory 可能在中断/门控上下文
-    // 被调用，那里不能安全地 IOMalloc。32 项对当前用途绰绰有余，
-    // 满了就返回失败并计数（宁可拒绝，也不要在内核里分配内存）。
+    // Why a fixed array rather than dynamic allocation: iovmMapMemory may be
+    // called in interrupt/gated context, where IOMalloc is not safe. 32 entries
+    // are ample for current use; when full, return failure and count it (better
+    // to reject than to allocate memory inside the kernel).
     enum { kMaxActiveMaps = 32 };
 
     struct MapEntry {
-        uint64_t pa;        // 物理地址（恒等映射下也等于 IOVA）
+        uint64_t pa;        // physical address (under identity mapping also the IOVA)
         uint64_t len;
         bool     used;
     };
     MapEntry fMaps[kMaxActiveMaps];
 
-    // 真实设备闸门：只有 boot-arg `amdiommu=arm` 时才允许真实设备拿到映射。
-    // 这是第二道独立开关——装了卡不等于自动放行，必须显式加启动参数。
+    // Real-device gate: real devices receive mappings only when the boot-arg
+    // `amdiommu=arm` is present. This is a second independent switch -- having
+    // the card installed does not mean automatic admission; the boot argument
+    // must be added explicitly.
     bool      fArmed;
-    IOService *fNicDevice;      // B2-b 靶子（RTL8127 PCI 设备）
+    IOService *fNicDevice;      // B2-b target (the RTL8127 PCI device)
 
-    // 启动时序（0.6.0 实测教训）：
-    //   探针匹配 IOResources，start() 极早。此时 serviceMatching(IOPCIDevice)
-    //   返回空集——PCI 枚举还没完成，findNic() 报 ABSENT-no-rtl8127，
-    //   而几秒后同一台机器上 pci10ec,8127 明明存在。
-    //   B1 一直成功是因为它走 IOACPIPlane 路径，那些节点在 EFI 阶段已建立。
-    //   所以 findNic() 改为优先按 IODeviceTree 路径定位。
+    // Boot sequencing (measured lesson of 0.6.0):
+    //   The probe matches IOResources and start() runs extremely early. At that
+    //   moment serviceMatching(IOPCIDevice) returns an empty set -- PCI
+    //   enumeration is not complete, findNic() reported ABSENT-no-rtl8127,
+    //   while pci10ec,8127 clearly existed on the same machine seconds later.
+    //   B1 always succeeded because it uses the IOACPIPlane path; those nodes
+    //   are established during the EFI phase.
+    //   Hence findNic() now locates the device by IODeviceTree path first.
     //
-    // 竞态（0.6.0 实测：三次重启成功/失败/成功）：
-    //   Lucy 在 start() 里读一次 iommu-parent 且不重试。探针设属性的时刻
-    //   与 Lucy 读它的时刻之间没有顺序保证，于是时灵时不灵。
+    // The race (0.6.0 measured: success/failure/success across three reboots):
+    //   Lucy reads iommu-parent once in start() without retrying. There is no
+    //   ordering guarantee between the moment the probe sets the property and
+    //   the moment Lucy reads it, so it worked only sometimes.
     //
-    // 解法：改用 gIOFirstPublishNotification。
-    //   按 IOKit 文档（IOService.h:279）：
+    // Solution: switch to gIOFirstPublishNotification.
+    //   Per the IOKit documentation (IOService.h:279):
     //     "When an IOService is published with registerService, the matching
     //      and probing process begins ... A list of matching dictionaries from
     //      the catalog **and installed publish notification requests** ...
     //      is constructed ... After probe, the driver is detached ...
     //      For each category, the highest scoring driver ... its start method
     //      called."
-    //   即 publish 通知在 probe/start **之前**投递。设备一注册我们就挂属性，
-    //   Lucy 之后 probe/start 时一定能读到。
+    //   i.e. publish notifications are delivered **before** probe/start. We
+    //   attach the property the instant the device registers; Lucy is certain
+    //   to read it when it later probes/starts.
     IONotifier *fPublishNotifier;
-    uint32_t    fPublishHits;       // 通知回调命中次数
-    bool        fLateAttach;        // 是否走了「通知没赶上」的兜底路径
+    uint32_t    fPublishHits;       // notification callback hit count
+    bool        fLateAttach;        // whether the "notification missed it" fallback path was taken
 
-    // ---- B2-b 观测 ----
-    uint32_t fRealMapCalls;       // 非探针 cmd 的映射请求
-    uint32_t fRealMapOk;          // 其中成功的
-    uint32_t fRealMapRejectFrag;  // 碎片被拒
-    uint32_t fRealMapRejectNoSlot;// 表满
+    // ---- B2-b observation ----
+    uint32_t fRealMapCalls;       // mapping requests with a non-probe cmd
+    uint32_t fRealMapOk;          // of those, the successful ones
+    uint32_t fRealMapRejectFrag;  // rejected for fragmentation
+    uint32_t fRealMapRejectNoSlot;// table full
     uint32_t fRealUnmapCalls;
-    uint32_t fTablePeak;          // 峰值占用
+    uint32_t fTablePeak;          // peak table occupancy
 
-    // 最后一次成功映射的摘要
+    // Summary of the last successful mapping
     uint32_t fLastSegCount;
     uint64_t fLastFirstPA;
     uint64_t fLastLength;
@@ -331,42 +353,46 @@ private:
     volatile UInt32 fR33TeardownState = 0; // 0 active, 1 queued/running, 2 finished
     UInt32 fR33InstallCount = 0;
 
-    R27ProbeTimer *fM22b2Timer;   // 一次性定时器（stop() 里释放）
-    uint32_t            fM22b2DelayMS; // 延迟毫秒数（可被 boot-arg 覆盖）
+    R27ProbeTimer *fM22b2Timer;   // one-shot timer (released in stop())
+    uint32_t            fM22b2DelayMS; // delay in milliseconds (overridable by boot-arg)
 
-    // 每个窗口最多保留多少条原始事件（16 字节/条）供离线解码。
+    // How many raw events (16 bytes each) are kept per window for offline
+    // decoding.
     //
-    // 【v0.20.0】从 8 提高到 16。第四轮只保留 8 条，而窗口里实际有
-    // 14~17 条，于是任何"地址分布 / 标志位构成"的结论都只覆盖了不到
-    // 一半的事件。16 条覆盖迄今观察到的最大窗口（17 条）并留有余量。
+    // [v0.20.0] Raised from 8 to 16. Round 4 kept only 8 while the window
+    // actually held 14-17 events, so any "address distribution / flag
+    // composition" conclusion covered less than half the events. 16 covers the
+    // largest window observed so far (17) with margin.
     //
-    // 【v0.21.0】窗口结构已移到成员（见下面的 fM22b2WinPre / fM22b2WinMain），
-    // 不再占 runM22b2PageTableProbe() 的栈，所以这个上限不再受
-    // __chkstk 阈值约束。
+    // [v0.21.0] The window structs moved to members (see fM22b2WinPre /
+    // fM22b2WinMain below) and no longer occupy runM22b2PageTableProbe()'s
+    // stack, so this cap is no longer constrained by the __chkstk threshold.
 public:
     static const unsigned kM22b2RawKeep = 16;
 
 private:
 
-    // 事件窗口记录。
+    // Event window records.
     //
-    // 【为什么必须有这个结构】
-    //   旧实现 m2b2MeasureEvents() 只返回一个 UInt32，且把 0 同时用于
-    //     (a) 窗口内真的没有事件
-    //     (b) 日志溢出 / 条目未完成 / 采样失败
-    //   两者含义完全相反，混在一起使此前所有"0 fault"结论都不可解释。
+    // [Why this struct must exist]
+    //   The old m2b2MeasureEvents() returned a single UInt32 and used 0 both
+    //   for (a) genuinely no events in the window and (b) log overflow /
+    //   incomplete entries / sampling failure. Opposite meanings merged into
+    //   one value made every prior "0 faults" conclusion uninterpretable.
     //
-    // 现在每个窗口完整记录：单调起止时间、实测时长、HEAD/TAIL 两端值、
-    // STATUS 两端值、逐类型计数、devid 不匹配数、原始事件字节。
-    // valid=false 时 invalidReason 指出具体原因，该窗口**不得**当作 0 事件。
+    // Each window now records in full: monotonic start/end, measured duration,
+    // HEAD/TAIL at both ends, STATUS at both ends, per-type counts, the devid
+    // mismatch count, and raw event bytes. When valid=false, invalidReason
+    // states the concrete reason, and that window **must not** be treated as
+    // 0 events.
 public:
     struct M22b2EventWindow {
         bool        valid;
         const char *invalidReason;
         uint64_t    tStart;
         uint64_t    tEnd;
-        uint64_t    durMS;           // 实测时长（不是标称值）
-        uint64_t    wallStart;       // 墙钟秒，供外部 netstat 采样对齐
+        uint64_t    durMS;           // measured duration (not the nominal value)
+        uint64_t    wallStart;       // wall-clock seconds, for aligning external netstat samples
         uint64_t    wallEnd;
         uint32_t    headStart;
         uint32_t    tailStart;
@@ -378,11 +404,13 @@ public:
         uint32_t    typeCount[16];
         uint32_t    devidMismatch;
         uint32_t    rawCount;
-        // 保留数量是否被上限截断。true 表示 entries > rawCount，
-        // 此时 raw 只是抽样，不能代表全部事件。
+        // Whether retention was truncated by the cap. true means
+        // entries > rawCount; raw is then a sample and cannot represent all
+        // events.
         bool        rawTruncated;
-        // 前置积压：窗口开始时 [HEAD, TAIL) 里已存在、尚未被消费的条目。
-        // 这些是**上一个窗口或切换过程**产生的事件，不属于本窗口的新事件。
+        // Pre-existing backlog: entries already in [HEAD, TAIL) and unconsumed
+        // at window start. These are events from **the previous window or the
+        // switch process**, not new events of this window.
         uint32_t    preBacklog;
         uint32_t    raw[kM22b2RawKeep][4];
     };
@@ -391,70 +419,85 @@ private:
 
 public:
 
-    // 观察结果（由 observeDeviceDma() 填充，第 17 步用它分类 fault）
+    // Observation results (filled by observeDeviceDma(); step 17 classifies
+    // faults with it)
     //
-    // 【第七轮重写】第六轮这个结构的语义有两处错误，都在此修正：
+    // [Round 7 rewrite] Round 6's version of this struct had two semantic
+    // errors, both fixed here:
     //
-    //  (1) 收集描述符地址前先调用 inIdentityRam()（RAM_TOP = 16 GiB），
-    //      于是**本轮要调查的那类地址在进入集合前就被丢掉了**。集合随后
-    //      "证明" fault 不在设备集合内——它从来就不可能在里面。
-    //      现在：记录与解引用彻底分开。所有描述符地址一律记录；
-    //      readVerdict 只决定"能不能读那块内存"，结果作为元数据保存。
+    //  (1) It called inIdentityRam() (RAM_TOP = 16 GiB) before collecting
+    //      descriptor addresses, so **the very class of addresses this round
+    //      investigates was discarded before entering the set**. The set then
+    //      "proved" faults were not in the device set -- they never could have
+    //      been. Now: recording and dereferencing are completely separated. All
+    //      descriptor addresses are recorded; readVerdict only decides "may
+    //      that memory be read", kept as metadata.
     //
-    //  (2) 关闭指针按 1024 取模算差值。硬件计数器是 31 位累计量
-    //      （MaxTxDescPtrMask = 0x7FFFFFFF），1000 -> 2024 的正确答案是
-    //      1024，按环取模却得到 0——把"设备完成了 1024 个描述符"读成
-    //      "设备什么也没做"，恰好是最不能弄错的方向。
+    //  (2) The close-pointer delta was computed with ring modulo 1024. The
+    //      hardware counter is a 31-bit cumulative value
+    //      (MaxTxDescPtrMask = 0x7FFFFFFF); the correct answer to 1000 -> 2024
+    //      is 1024, but ring modulo gives 0 -- reading "the device completed
+    //      1024 descriptors" as "the device did nothing", precisely the
+    //      direction that must never be confused.
     struct M22b2DmaObs {
         bool     ran;
         bool     barMapped;
-        uint64_t barBase;      // BAR2 物理基址
+        uint64_t barBase;      // BAR2's physical base
         uint64_t barLen;
 
-        // ---- 第十轮：目标设备的独立身份 ----
+        // ---- Round 10: the target device's independent identity ----
         //
-        // 【为什么要有这一组】
-        //   第九轮完全没有核对"这些驱动记录属于哪块设备"。记录里没有
-        //   vendor/device/BDF，探针也没有拿自己的观测去比对，于是"记录
-        //   属于目标设备"是一个假设。
+        // [Why this group exists]
+        //   Round 9 never checked "which device these driver records belong
+        //   to". The records carry no vendor/device/BDF, and the probe never
+        //   compared its own observations, so "the records belong to the target
+        //   device" was an assumption.
         //
-        //   这一组由**探针自己**从设备表与 IORegistry 取得，独立于驱动
-        //   发布的任何东西。分析器拿它与快照头部逐项比对，不一致就拒收。
+        //   This group is obtained by **the probe itself** from the device
+        //   table and the IORegistry, independent of anything the driver
+        //   publishes. The analyser compares it item by item with the snapshot
+        //   header and rejects on any mismatch.
         //
-        // 【为什么 MAC 与 ifUnit 也要】
-        //   同一台机器可能有两块同型号网卡（BDF 不同但 vendor/device 相同），
-        //   也可能驱动重载后接口编号变化。MAC + ifUnit 是"这个网络接口就是
-        //   那个 PCI 功能"的可核对证据，而不是"编号看起来像"。
+        // [Why MAC and ifUnit too]
+        //   The same machine may have two NICs of the same model (different
+        //   BDFs, same vendor/device), and interface numbers may change after a
+        //   driver reload. MAC + ifUnit are the checkable evidence that "this
+        //   network interface is that PCI function", not "the number looks
+        //   similar".
         bool     nicIdentityKnown;
-        uint32_t devid;            // 设备表里的 devid，就是 BDF
+        uint32_t devid;            // the device table's devid, which is the BDF
         uint32_t vendorId;
         uint32_t deviceId;
         uint32_t nicUnit;          // BSD unit（en2 -> 2）
-        uint64_t nicMac;           // 48 位 MAC
+        uint64_t nicMac;           // 48-bit MAC
         const char *nicBsdName;    // "en2"
-        // 第十轮受控批次声明的请求数；0 表示本轮没有声明批次。
+        // The request count declared for round 10's controlled batch;
+        // 0 means this round declared no batch.
         uint32_t expectedBatch;
 
-        // ---- 第十一轮：本次运行的 run token 声明 ----
+        // ---- Round 11: this run's run-token declaration ----
         //
-        // 【为什么必须声明，不能从记录里推】
-        //   第十轮的批次判据只按 reqId 归并，没有 token 概念。于是
-        //   "token A 的 req1 + token B 的 req2" 会被算成一个完整的 2 请求
-        //   批次——两次不同的运行被拼成一次。
+        // [Why it must be declared, not inferred from records]
+        //   Round 10's batch criterion merged by reqId alone, with no token
+        //   concept. So "token A's req1 + token B's req2" counted as one
+        //   complete 2-request batch -- two different runs stitched into one.
         //
-        //   这里在**读证据之前**把本轮 token 定下来（负载脚本与 boot-arg
-        //   用同一个值），记录里 token 不符的一律计入 batchForeignToken。
-        //   未声明（0）时退化为"记录里只有一个 token 才采用"，两个以上
-        //   就报 tokenAmbiguous 并拒绝通过。
+        //   This round's token is fixed here **before the evidence is read**
+        //   (the load script and the boot-arg use the same value); records with
+        //   a non-matching token are all counted in batchForeignToken.
+        //   When undeclared (0), it degrades to "adopt only if the records
+        //   contain exactly one token"; two or more yields tokenAmbiguous and a
+        //   refusal to pass.
         uint32_t declaredToken;
 
-        // ---- 第十一轮：本次驱动实例绑定 ----
+        // ---- Round 11: this driver instance's binding ----
         //
-        // 窗口打开之前由 m2b2BindDriverInstance() 设定，之后只读。
-        // 0 表示没能绑定，此时批次判据拒绝通过（未知不是通过）。
+        // Set by m2b2BindDriverInstance() before the window opens, read-only
+        // afterwards. 0 means binding failed, in which case the batch criterion
+        // refuses to pass (unknown is not a pass).
         uint32_t epochBound;
 
-        // 从寄存器读出的设备地址
+        // Device addresses read from registers
         bool     haveTxRing;
         uint64_t txRingBase;
         bool     haveRxRing;
@@ -464,7 +507,7 @@ public:
         bool     haveCounter;
         uint64_t counterAddr;
 
-        // 描述符扫描结果
+        // Descriptor scan results
         uint32_t txSlots;
         uint32_t txOwned;
         uint32_t txDone;
@@ -477,14 +520,16 @@ public:
         uint64_t txFirstAddr;
         uint64_t rxFirstAddr;
 
-        // 收集到的地址区间与**五类互不混用的计数**（第七轮）
+        // Collected address ranges and **five counters that never mix** (round 7)
         //
-        //   rawOffered   描述符/寄存器里取到的原始地址数
-        //   mergedTotal  合并后的区间数 == savedCount + droppedCount
-        //   savedCount   真正存进集合的
-        //   droppedCount 因容量上限没存下的（包络仍然覆盖它们）
-        //   unscanned    完全没能检查的槽（环映射失败等）
-        uint32_t ranges;          // == savedCount，保留旧属性名
+        //   rawOffered   raw addresses taken from descriptors/registers
+        //   mergedTotal  merged range count == savedCount + droppedCount
+        //   savedCount   actually stored into the set
+        //   droppedCount not stored due to the capacity cap (the envelope still
+        //                covers them)
+        //   unscanned    slots that could not be examined at all (ring mapping
+        //                failure etc.)
+        uint32_t ranges;          // == savedCount; keeps the old property name
         uint32_t dropped;         // == droppedCount
         uint32_t rawOffered;
         uint32_t mergedTotal;
@@ -492,38 +537,42 @@ public:
         uint32_t txBufRanges;
         uint32_t rxBufRanges;
 
-        // 所有观察到的区间的包络（含因容量上限被丢弃的）。
+        // The envelope of all observed ranges (including those dropped at the
+        // capacity cap).
         bool     envValid;
         uint64_t envLo;
         uint64_t envHi;
 
-        // 【第七轮】物理布局与读取许可
+        // [Round 7] Physical layout and read permission
         //
-        // 恒等映射上限**不是** RAM 上限；本轮不再用它做记录过滤，
-        // 只用它回答"能不能读"。没有权威布局时 layoutKnown = false，
-        // 任何地址都不解引用，但一律记录。
+        // The identity-mapping ceiling is **not** a RAM ceiling; this round no
+        // longer filters records with it and uses it only to answer "may this
+        // be read". Without an authoritative layout, layoutKnown = false: no
+        // address is dereferenced, but all are recorded.
         bool     layoutKnown;
         const char *layoutSource;   // "probe" / "none"
         uint32_t readOkCount;
         uint32_t readOutOfMapCount;
         uint32_t readNotRamCount;
 
-        // 【第七轮】覆盖范围
+        // [Round 7] Coverage
         //
-        // COV_NONE / COV_SNAPSHOT / COV_WINDOW。快照只能支撑**肯定**
-        // 归属；"设备没用过这个地址"需要整窗覆盖。
+        // COV_NONE / COV_SNAPSHOT / COV_WINDOW. A snapshot supports only
+        // **positive** attribution; "the device never used this address"
+        // requires whole-window coverage.
         uint32_t coverage;
 
-        // 设备完成证据。
+        // Device completion evidence.
         uint32_t txDoneWithAddrBefore;
         uint32_t txDoneWithAddrAfter;
         bool     haveDoneDelta;
 
-        // 【第七轮】关闭指针：身份由芯片推导，不再"取第一个非零候选"。
+        // [Round 7] Close pointer: identity is derived from the chip, no longer
+        // "take the first non-zero candidate".
         bool     haveCloPtr;
         uint32_t cloPtrBefore;
         uint32_t cloPtrAfter;
-        uint32_t cloPtrReg;      // 由 ChipId 推导，不是选举
+        uint32_t cloPtrReg;      // derived from ChipId, not elected
         uint32_t cloPtrWidth;
         uint32_t cloPtrMask;     // MaxTxDescPtrMask
         uint32_t txConfigRaw;
@@ -531,165 +580,191 @@ public:
         uint32_t noCloseVer;
         bool     chipKnown;
         bool     haveCloDelta;
-        uint32_t cloDelta;       // 掩码差值，不是环取模
-        bool     cloDeltaValid;  // 样本合法且差值可解释
+        uint32_t cloDelta;       // masked delta, not ring modulo
+        bool     cloDeltaValid;  // sample valid and the delta explainable
 
-        // 环尾指针（累计提交计数），用于判断窗口覆盖
+        // Ring tail pointer (cumulative submit count), used to judge window
+        // coverage
         bool     haveTailPtr;
         uint32_t tailPtrBefore;
         uint32_t tailPtrAfter;
         bool     txWindowCovered;
 
-        // ---- 第八轮：窗口扫描与代次 ----
+        // ---- Round 8: window scan and generations ----
         //
-        // 第七轮的采集器没有调用 txSlotLifecycle()：它忽略了自己的
-        // tailCum/cloCum 参数，只要能读到关闭指针就把所有非零 TX 地址
-        // 标成 in-flight。第七轮采集里 tail = clo = 0x6a（队列已排空），
-        // 却仍把每条历史地址报成 in-flight。
+        // Round 7's collector never called txSlotLifecycle(): it ignored its
+        // own tailCum/cloCum arguments and, as long as a close pointer was
+        // readable, labelled every non-zero TX address in-flight. In round 7's
+        // capture tail = clo = 0x6a (the queue was already drained), yet every
+        // historical address was still reported in-flight.
         //
-        // 现在由 scanTxWindow() 按 [tailBefore, tailAfter) 逐个累计索引
-        // 走表，每条都带自己的槽位、代次、地址、长度与完成状态。
-        uint32_t winSubmits;         // 窗口内提交的描述符数
-        uint32_t winCompletes;       // 窗口内交还的描述符数
-        uint32_t winVisited;         // 实际访问的累计索引数
-        uint32_t winDecoded;         // 成功解码的
-        uint32_t winOverwritten;     // 槽位已被复用的（描述符已不在环里）
+        // Now scanTxWindow() walks by cumulative index over
+        // [tailBefore, tailAfter), each entry carrying its own slot, generation,
+        // address, length and completion state.
+        uint32_t winSubmits;         // descriptors submitted within the window
+        uint32_t winCompletes;       // descriptors handed back within the window
+        uint32_t winVisited;         // cumulative indices actually visited
+        uint32_t winDecoded;         // successfully decoded
+        uint32_t winOverwritten;     // slots already reused (descriptor no longer in the ring)
         uint32_t winInflight;
         uint32_t winCompleted;
         uint32_t winCompletedInWindow;
-        uint32_t winLenUnknown;      // 长度无法解码的（TSO / 零长）
+        uint32_t winLenUnknown;      // length undecodable (TSO / zero length)
         uint32_t winTsoSlots;
-        uint32_t winGenBefore;       // 窗口起点的代次
-        uint32_t winGenAfter;        // 窗口终点的代次
+        uint32_t winGenBefore;       // generation at window start
+        uint32_t winGenAfter;        // generation at window end
         uint32_t winCovReason;       // TxCoverageReason
-        // 第一个"窗口内完成"的描述符：把正的完成增量落到具体操作上。
+        // The first descriptor "completed within the window": lands the positive
+        // completion delta on a concrete operation.
         bool     haveFirstCompleted;
         uint64_t winFirstCompletedAddr;
         uint32_t winFirstCompletedLen;
         uint32_t winFirstCompletedSlot;
         uint32_t winFirstCompletedGen;
 
-        // ---- 第八轮：逐路径覆盖 ----
+        // ---- Round 8: per-path coverage ----
         //
-        // 第七轮只有一个 coverage 值，却被用于所有路径。TX 是整窗覆盖，
-        // RX / 环 / 统计缓冲只是快照。把 TX 的结论推广到全设备，是同一
-        // 种过度概括换了个位置。
+        // Round 7 had a single coverage value used for all paths. TX has
+        // whole-window coverage; RX / rings / the statistics buffer have only a
+        // snapshot. Generalizing TX's verdict to the whole device is the same
+        // over-generalization in a new place.
         amdobs::PathCoverage pathCov;
 
-        // ---- 第八轮：读环内存的依据 ----
+        // ---- Round 8: grounds for reading ring memory ----
         //
-        // 设备寄存器只能证明"设备被编程使用这个地址"，不能证明这块内存
-        // 仍是驱动的环对象、仍存活、且这个 PA 映射到它。指纹必须真的
-        // 可能失败，才算一个检查。
+        // Device registers prove only "the device was programmed to use this
+        // address"; they cannot prove this memory is still the driver's ring
+        // object, still alive, and that this PA maps to it. A fingerprint must
+        // genuinely be able to fail to count as a check.
         uint32_t txRingBasis;        // RingBasis
         uint32_t rxRingBasis;
-        uint32_t txRingDecoded;      // 指纹里解码出的描述符数
+        uint32_t txRingDecoded;      // descriptors decoded in the fingerprint
         uint32_t rxRingRingEndAtLast;
         bool     txRingFpOk;
         bool     rxRingFpOk;
 
-        // 【第七轮】时间边界：全部单调纳秒，可逐项核对
-        uint64_t tObsBefore;      // 窗口前观察
+        // [Round 7] Time boundaries: all monotonic nanoseconds, checkable item
+        // by item
+        uint64_t tObsBefore;      // observation before the window
         uint64_t tWinStart;
         uint64_t tWinEnd;
-        uint64_t tObsAfter;       // 窗口后观察
+        uint64_t tObsAfter;       // observation after the window
         uint64_t tCloBefore;
         uint64_t tCloAfter;
         uint64_t tRecoveryStart;
         uint64_t tRecoveryEnd;
 
-        // ---- 第八轮：边界时刻（全部同一单调时钟）----
-        uint64_t tTranslateOn;    // DTE 切到翻译生效
-        uint64_t tTranslateOff;   // DTE 切回直通（恢复开始前）
-        uint64_t tTailBefore;     // 窗口前读尾指针的时刻
-        uint64_t tTailAfter;      // 窗口后读尾指针的时刻
-        uint64_t tWinScanStart;   // 窗口后环扫描开始
-        uint64_t tWinScanEnd;     // 窗口后环扫描结束
+        // ---- Round 8: boundary moments (all on the same monotonic clock) ----
+        uint64_t tTranslateOn;    // the DTE switching to translation takes effect
+        uint64_t tTranslateOff;   // the DTE switched back to pass-through (before recovery starts)
+        uint64_t tTailBefore;     // moment the tail pointer was read before the window
+        uint64_t tTailAfter;      // moment the tail pointer was read after the window
+        uint64_t tWinScanStart;   // post-window ring scan start
+        uint64_t tWinScanEnd;     // post-window ring scan end
 
-        // ---- 第九轮：时间边界重排 ----
+        // ---- Round 9: time-boundary reordering ----
         //
-        // 第八轮把 tTranslateOn 记在"写 DTE"的那一刻。DTE 写下去不等于
-        // 翻译已经生效：失效命令还没提交、TLB 里可能还是旧表项。现在
-        // 两个时刻分开发布，tTranslateOn 取**失效命令全部完成之后**。
+        // Round 8 recorded tTranslateOn at "the DTE was written". Writing the
+        // DTE does not mean translation is effective: the invalidation commands
+        // were not yet submitted and the TLB may still hold old entries. The
+        // two moments are now published separately, with tTranslateOn taken
+        // **after all invalidation commands complete**.
         //
-        // 同理，第八轮的两次 CloPtr 采样夹在窗口外面（跨度 3.00785 秒 >
-        // 窗口 3.00018 秒），所以"完成发生在零事件窗口内"这句话其实
-        // 没有被证明。现在后置采样发生在窗口**内部**的最后一刻，窗口
-        // 关闭之后不再读寄存器。
-        uint64_t tDteWritten;     // DTE 写入完成
-        uint64_t tInvComplete;    // 两条失效命令都收到完成
-        // 主窗口的单调边界 tWinStart / tWinEnd 在第七轮就已声明（见上），
-        // 本轮直接用它们给驱动日志的配对做窗口过滤。
-        uint64_t tCloAfterInWin;  // 窗口内后置采样的起点（= tCloAfter）
-        bool     boundaryInWindow; // 后置采样确实发生在窗口内
+        // Likewise, round 8's two CloPtr samples sandwiched the window from the
+        // outside (span 3.00785 s > window 3.00018 s), so "completions happened
+        // within the zero-event window" was never actually proven. The
+        // post-sample now happens at the last moment **inside** the window, and
+        // no register is read after the window closes.
+        uint64_t tDteWritten;     // the DTE write completed
+        uint64_t tInvComplete;    // both invalidation commands received completions
+        // The main window's monotonic boundaries tWinStart / tWinEnd were
+        // declared back in round 7 (above); this round uses them directly to
+        // window-filter the driver log's pairings.
+        uint64_t tCloAfterInWin;  // the in-window post-sample's start (= tCloAfter)
+        bool     boundaryInWindow; // the post-sample really happened inside the window
 
-        // ---- 第十一轮：探针实际采用的那份快照 ----
+        // ---- Round 11: the snapshot the probe actually used ----
         //
-        // 【第十轮在这里出了什么错】
-        //   探针确实读到了一份新鲜快照（publication 27，tPublished
-        //   41,305,180,913 ns，窗口终点 40,843,902,421 ns，覆盖成立）。
-        //   但归档时是从 props.raw.txt 里另取一份，而那是全 IOService
-        //   plane 的 dump，里面的驱动节点已经是 43 秒后的 publication 71。
-        //   于是"运行时结论"与"归档输入"是两件事，分析器验的是后者。
+        // [What went wrong here in round 10]
+        //   The probe did read a fresh snapshot (publication 27, tPublished
+        //   41,305,180,913 ns, window end 40,843,902,421 ns -- coverage held).
+        //   But the archive took a different copy from props.raw.txt, a dump of
+        //   the whole IOService plane, whose driver node was already
+        //   publication 71 from 43 seconds later. So "the runtime verdict" and
+        //   "the archived input" were two different things, and the analyser
+        //   verified the latter.
         //
-        //   修法不是让采集脚本更小心，而是让**探针自己**把参与判定的
-        //   那份字节原样交出来：一份 OSData 属性
-        //   m2-b2-obs-snapshot-used，内容就是当时解码用的那些字节，
-        //   逐字节相同。采集脚本把它落盘，分析器校验它的哈希等于
-        //   探针在属性里同时发布的 m2-b2-obs-used-sha256。
+        //   The fix is not to make the capture script more careful but to have
+        //   **the probe itself** hand over, verbatim, the bytes that took part
+        //   in the verdict: an OSData property m2-b2-obs-snapshot-used whose
+        //   contents are exactly the bytes used for decoding, byte for byte.
+        //   The capture script writes it to disk and the analyser verifies its
+        //   hash equals the m2-b2-obs-used-sha256 the probe published alongside.
         //
-        // 【为什么还要单独记一个哈希】
-        //   属性是文本，blob 是二进制。若只导出 blob，谁也不能证明它与
-        //   当时判定用的是同一份。探针在解码前后各算一次哈希，两次不同
-        //   就说明 OSData 在手里被改过（不该发生，但可检测），此时不发布
-        //   blob 并把原因写出来。
-        bool     obsUsedExported;      // blob 已发布
-        uint32_t obsUsedBytes;         // 发布的字节数
-        bool     obsUsedHashStable;    // 解码前后的哈希一致
-        char     obsUsedSha[65];       // 十六进制 sha256（64 + NUL）
-        const char *obsUsedWhy;        // 未发布的原因
-        // 这份快照是不是"为了覆盖窗口而主动刷新拿到的那一份"。
-        // 与 obsFetchTries 配合，使"有界刷新生效"可被独立核对。
+        // [Why a separate hash is recorded too]
+        //   The property is text; the blob is binary. Exporting only the blob
+        //   proves nothing about its identity with the bytes used at verdict
+        //   time. The probe hashes once before and once after decoding; a
+        //   mismatch means the OSData changed in our hands (should not happen,
+        //   but is detectable) -- the blob is then not published and the reason
+        //   written out.
+        bool     obsUsedExported;      // the blob was published
+        uint32_t obsUsedBytes;         // published byte count
+        bool     obsUsedHashStable;    // hashes before/after decoding agree
+        char     obsUsedSha[65];       // hexadecimal sha256 (64 + NUL)
+        const char *obsUsedWhy;        // why it was not published
+        // Whether this snapshot is the one actively fetched to cover the
+        // window. Combined with obsFetchTries it makes "the bounded refresh
+        // worked" independently checkable.
         uint32_t obsUsedPubId;
         uint64_t obsUsedTPublished;
         bool     obsUsedIsFresh;       // tPublished >= tWinEnd
 
-        // ---- 第十一轮：驱动实例绑定 ----
+        // ---- Round 11: driver instance binding ----
         //
-        // 【为什么必须绑，而不能"只要求内部一致"】
-        //   第十轮的 want.epoch = 0，而 obsIdentityMatches() 把 0 解释为
-        //   "不检查"。同一块卡、同一份 MAC、同一个 BSD unit，驱动重载或
-        //   控制器 reset 之后产生的新实例，其快照会被当作本次实例的证据。
+        // [Why binding is required and "merely requiring internal consistency"
+        // is not enough]
+        //   Round 10 had want.epoch = 0, and obsIdentityMatches() interprets 0
+        //   as "don't check". The same card, the same MAC, the same BSD unit --
+        //   a new instance created after a driver reload or controller reset
+        //   would have its snapshot accepted as this instance's evidence.
         //
-        //   现在在**窗口打开之前**把实例 epoch 定下来（从驱动节点读，或由
-        //   探针采样并记住），之后要求快照头部的 epoch 与它相等。取不到
-        //   就发布 epochBinding = "unknown" 并拒绝通过——未知不是通过。
-        uint32_t obsEpochBound;        // 本轮的实例标识（0 = 未绑定）
-        uint32_t obsEpochSeen;         // 快照头部带来的 epoch
+        //   The instance epoch is now fixed **before the window opens** (read
+        //   from the driver node, or sampled and remembered by the probe), and
+        //   the snapshot header's epoch must equal it afterwards. If it cannot
+        //   be obtained, epochBinding = "unknown" is published and passing is
+        //   refused -- unknown is not a pass.
+        uint32_t obsEpochBound;        // this round's instance identity (0 = not bound)
+        uint32_t obsEpochSeen;         // the epoch carried in the snapshot header
         const char *obsEpochBinding;   // "matched" / "mismatch" / "unknown"
 
-        // ---- 第十轮：驱动侧观测日志（线格式 v2）----
+        // ---- Round 10: the driver-side observation log (wire format v2) ----
         //
-        // 读环只能看到"窗口之后的字节"，无法证明那些字节属于同一代次，
-        // 也无法恢复 TSO 段的真实长度。驱动现在在自己的提交/完成点记录
-        // 元数据，并把**头部+记录**作为**一份** OSData 发布。
+        // Ring reading sees only "bytes after the window": it cannot prove
+        // those bytes belong to one generation, nor recover TSO segments' true
+        // lengths. The driver now records metadata at its own submit/complete
+        // points and publishes **header + records** as **one** OSData.
         //
-        // 【第九轮为什么不够】
-        //   1. v1 的 seq 只在末尾写一次，读侧"读 seq、读 body、再读 seq"
-        //      在写入过程中会看到**上一次**的 seq 两次，于是把半写状态判为
-        //      一致。这不是 seqlock。
-        //   2. v1 把 head/first/published/wrapped/t-published 分成五个
-        //      OSString，记录是第六个 OSData，六者不构成一个原子发布。
-        //   3. 快照发布时间 39963682435 ns 早于窗口终点 40494639566 ns
-        //      530957131 ns，"覆盖完整窗口"不成立。
-        //   4. 记录里没有任何业务标识，无法与客户端请求对应。
+        // [Why round 9's v1 was not enough]
+        //   1. v1's seq is written only once at the end; a reader doing "read
+        //      seq, read body, read seq again" sees **the previous** seq twice
+        //      mid-write and judges a half-written state consistent. That is
+        //      not a seqlock.
+        //   2. v1 split head/first/published/wrapped/t-published into five
+        //      OSStrings with the records as a sixth OSData; the six do not
+        //      form one atomic publication.
+        //   3. The snapshot's publication time 39963682435 ns preceded the
+        //      window end 40494639566 ns by 530957131 ns; "covers the full
+        //      window" did not hold.
+        //   4. The records carried no business identity and could not be matched
+        //      to client requests.
         bool     obsPresent;
-        const char *obsWhy;        // 不可用原因，或 "ok"
-        const char *obsIdentityWhy; // 身份核对失败原因，或 "ok"
-        uint32_t obsPubId;         // 本次采用的 publication ID
-        uint32_t obsEpoch;         // 驱动实例 epoch
+        const char *obsWhy;        // why unavailable, or "ok"
+        const char *obsIdentityWhy; // why the identity check failed, or "ok"
+        uint32_t obsPubId;         // the publication ID adopted this round
+        uint32_t obsEpoch;         // the driver instance's epoch
         uint32_t obsHead;
-        uint32_t obsPublished;     // == 快照里的记录数
+        uint32_t obsPublished;     // == the record count in the snapshot
         uint32_t obsFirst;         // firstTicket
         uint32_t obsWrapped;
         uint32_t obsDropped;
@@ -700,13 +775,13 @@ public:
         uint32_t obsVendorId;
         uint32_t obsDeviceId;
         uint32_t obsIfUnit;
-        uint64_t obsMac;           // 48 位 MAC
+        uint64_t obsMac;           // 48-bit MAC
         uint64_t obsTStart;
         uint64_t obsTPublished;
-        // 刷新次数与最终采用的那一份是不是"新鲜"的
-        uint32_t obsFetchTries;    // 有界轮询了几次
-        bool     obsFreshEnough;   // tPublished >= 窗口终点
-        // 提交→完成的配对结果
+        // Refresh attempts and whether the finally adopted one is "fresh"
+        uint32_t obsFetchTries;    // how many bounded polls were made
+        bool     obsFreshEnough;   // tPublished >= the window end
+        // The submit -> completion pairing result
         uint32_t obsOps;
         uint32_t obsSubmits;
         uint32_t obsDones;
@@ -718,23 +793,24 @@ public:
         uint32_t obsUncompleted;
         uint32_t obsOverflow;
         bool     obsAllCompleted;
-        // ---- 窗口内的配对 ----
+        // ---- Pairings within the window ----
         uint32_t obsWinSubmits;
         uint32_t obsWinDones;
         uint32_t obsWinPaired;
         uint32_t obsWinOrphanDone;
         uint32_t obsWinPreWindowInFlight;
         uint32_t obsWinUncompleted;
-        // ---- 第十轮：三个独立判据 ----
+        // ---- Round 10: three independent criteria ----
         //
-        // 这三个必须分开。"已有一对成功"不能顶替"记录覆盖窗口"，两者也都
-        // 不能顶替"本次受控批次完成"。
+        // These three must stay separate. "One successful pair exists" cannot
+        // substitute for "the records cover the window", and neither can
+        // substitute for "this controlled batch completed".
         bool     obsHasCompletePair;
         bool     obsRecordsCoverWindow;
         bool     obsControlledBatchComplete;
         uint32_t obsCoverState;
         const char *obsCoverName;
-        // ---- 第十轮：业务关联 ----
+        // ---- Round 10: business correlation ----
         uint32_t obsBizOps;
         uint32_t obsBizCapped;
         uint32_t obsExpectedBatch;
@@ -745,23 +821,24 @@ public:
         uint32_t obsBatchUnparsed;
         uint32_t obsTxParsed;
         uint32_t obsRxParsed;
-        // ---- 第十一轮：批次判据的绑定项与阻断计数 ----
-        uint32_t obsDeclaredToken;      // 声明的 run token（0 = 未声明）
-        uint32_t obsJoinToken;          // 实际用于归并的 token
-        bool     obsTokenResolved;      // token 来自声明或唯一推断
-        bool     obsTokenAmbiguous;     // 记录里出现多个 token
-        // 【第十二轮】token 是**推断**出来的（不是读记录之前声明的）。
-        // 推断出的 token 不能支撑批次判据：它让"这些记录属于本次运行"
-        // 按构造成立。
+        // ---- Round 11: batch-criterion bindings and blocking counters ----
+        uint32_t obsDeclaredToken;      // the declared run token (0 = not declared)
+        uint32_t obsJoinToken;          // the token actually used for joining
+        bool     obsTokenResolved;      // the token came from the declaration or a unique inference
+        bool     obsTokenAmbiguous;     // multiple tokens appear in the records
+        // [Round 12] The token was **inferred** (not declared before reading the
+        // records). An inferred token cannot support the batch criterion: it
+        // makes "these records belong to this run" true by construction.
         bool     obsTokenInferred;
-        uint32_t obsBatchForeignToken;  // 属于其它 run 的记录数
-        uint32_t obsBatchOutsideWindow; // 各阶段未全部落在窗口内的请求数
-        uint32_t obsBatchDupDone;       // 重复完成的请求数
-        uint32_t obsBatchBadFrag;       // 段结构不完整的请求数
-        uint32_t obsBatchDmaUnknown;    // DMA 区间无法确定的请求数
-        uint32_t obsBatchOrder;         // 完成早于提交的请求数
+        uint32_t obsBatchForeignToken;  // records belonging to other runs
+        uint32_t obsBatchOutsideWindow; // requests whose stages did not all fall within the window
+        uint32_t obsBatchDupDone;       // requests with duplicated completions
+        uint32_t obsBatchBadFrag;       // requests with incomplete segment structure
+        uint32_t obsBatchDmaUnknown;    // requests whose DMA ranges could not be determined
+        uint32_t obsBatchOrder;         // requests whose completion preceded submission
         const char *obsBatchWhy;
-        // 受控批次里第一条完整（TX 全段 + 完成 + RX）的业务操作
+        // The first complete business operation (all TX segments + completion +
+        // RX) in the controlled batch
         bool     obsHaveBizOp;
         uint32_t obsBizToken;
         uint32_t obsBizReqId;
@@ -775,7 +852,7 @@ public:
         uint64_t obsBizRxAddr;
         uint32_t obsBizRxLen;
         uint64_t obsBizTRx;
-        // 该操作的全部 DMA 段（地址/长度/累计索引）
+        // All DMA segments of that operation (address/length/cumulative index)
         uint32_t obsBizSegCum[amdobs::OBS_MAX_SEGS];
         uint64_t obsBizSegAddr[amdobs::OBS_MAX_SEGS];
         uint32_t obsBizSegLen[amdobs::OBS_MAX_SEGS];
@@ -788,7 +865,8 @@ public:
         uint64_t obsLastDoneT;
         uint64_t obsFirstRxAddr;
         uint64_t obsLastRxAddr;
-        // 第一条完整配对的受控操作：提交—地址—完成三要素都在这里。
+        // The first completely paired controlled operation: submit -- address --
+        // completion, all three here.
         bool     obsHaveFirstOp;
         uint32_t obsFirstOpCum;
         uint32_t obsFirstOpSlot;
@@ -799,60 +877,71 @@ public:
         uint64_t obsFirstOpTSubmit;
         uint64_t obsFirstOpTCompl;
 
-        // ---- 第十一轮：业务地址的原始页表证据 ----
+        // ---- Round 11: raw page table evidence for business addresses ----
         //
-        // 【第十轮为什么不算证据】
-        //   报告写的是"L4→L3→L2 恒等叶子，根表来自实际 DTE"，但发布的
-        //   样本是 win0（窗口内第一条既有提交又有完成的操作，与业务无关）
-        //   和 dma0..dma5（环基址、统计缓冲等设备在用地址的抽样）。
-        //   业务 request 1 的 TX 地址 0x3790a57b6 与 RX 地址 0x1f421f000
-        //   一个都不在其中。把背景操作的路径接到业务链上，是把"邻近"当
-        //   成了"同一"。
+        // [Why round 10's evidence was not evidence]
+        //   The report said "L4->L3->L2 identity leaves, the root table from
+        //   the actual DTE", but the published samples were win0 (the first
+        //   in-window operation with both submit and completion -- unrelated to
+        //   business) and dma0..dma5 (a sample of in-use addresses such as the
+        //   ring base and the statistics buffer). Not one of business request
+        //   1's TX address 0x3790a57b6 or RX address 0x1f421f000 was among
+        //   them. Attaching background operations' paths to the business chain
+        //   mistakes "nearby" for "the same".
         //
-        //   现在：对**每一个受控请求的每一个 TX/RX 段**，用该段的
-        //   [addr, addr+len) 走表，逐级导出真实的表物理地址、索引、级别、
-        //   原始 PTE，并检查区间内每个字节都被合法叶子覆盖。数据来源是
-        //   本次实验自己建的表，起点是本步读到的**实际 DTE**。
+        //   Now: for **every TX/RX segment of every controlled request**, the
+        //   segment's [addr, addr+len) is walked, with the real table physical
+        //   address, index, level and raw PTE exported level by level, and every
+        //   byte of the range checked to be covered by legal leaves. The data
+        //   source is the table this experiment built; the start point is the
+        //   **actual DTE** read in this step.
         //
-        // 【为什么单独开一块而不是复用 dumpPath】
-        //   dumpPath 一次只走一个地址、只判"翻译回自身"。业务区间要判的
-        //   是覆盖与权限，而且要能逐段核对，所以字段结构不同。
-        uint32_t bizWalkCount;      // 实际走表的 (请求, 方向, 段) 数
-        uint32_t bizWalkOk;         // 其中区间被合法叶子完整覆盖的
-        uint32_t bizWalkFail;       // 不成立的
-        // ---- 第十二轮：区间集合的两个"账" ----
+        // [Why a separate block rather than reusing dumpPath]
+        //   dumpPath walks one address at a time and judges only "translates
+        //   back to itself". Business ranges must judge coverage and
+        //   permissions, per segment, so the field structure differs.
+        uint32_t bizWalkCount;      // the (request, direction, segment) pairs actually walked
+        uint32_t bizWalkOk;         // of those, ranges fully covered by legal leaves
+        uint32_t bizWalkFail;       // the ones that did not hold
+        // ---- Round 12: the range set's two "ledgers" ----
         //
-        // 【bizWalkExpected】
-        //   由**原始业务记录**（本次 token 下的每个 req 的每个 TX 段 +
-        //   RX 段）推出的应走表区间数。它必须与 bizWalkCount 相等，否则
-        //   说明有的区间根本没走表——第十一轮只判"走到的那些是否通过"，
-        //   少走几条也能全绿。
+        // [bizWalkExpected]
+        //   The number of ranges that should have been walked, derived from the
+        //   **raw business records** (each req's TX segments + RX segments under
+        //   this run's token). It must equal bizWalkCount; otherwise some ranges
+        //   were never walked at all -- round 11 judged only "whether the ones
+        //   reached passed", and walking a few fewer could still be all green.
         //
-        // 【bizWalkCapped】
-        //   超出取证容量或预算而被明确降级的区间数。第十一轮在
-        //   `count >= kBizWalkMaxSegs` 时直接 return，既不计数也不降级，
-        //   于是"只导出了一部分"会被读成"全部合格"。
+        // [bizWalkCapped]
+        //   The number of ranges explicitly downgraded for exceeding forensic
+        //   capacity or budget. Round 11 returned directly on
+        //   `count >= kBizWalkMaxSegs` -- no counting, no downgrade -- so "only
+        //   a part was exported" would be read as "everything qualified".
         uint32_t bizWalkExpected;
         uint32_t bizWalkCapped;
-        // 每段最多导出几个不同的叶子。一条 74 字节的报文正常只落在一个
-        // 2 MiB 叶子里；跨叶时要把**每个**叶子的完整路径都导出来，否则
-        // 分析器只能核对第一叶却看到 covered=yes。
+        // How many distinct leaves are exported per segment at most. A 74-byte
+        // packet normally lands in a single 2 MiB leaf; when it crosses leaves,
+        // **every** leaf's complete path must be exported, otherwise the
+        // analyser can check only the first leaf while seeing covered=yes.
         static const uint32_t kBizWalkMaxLeaves = 4;
-        // 每个段最多导出几级；AMD-Vi 最多 6 级，取 6 足够且固定。
+        // Levels exported per path at most; AMD-Vi has at most 6 levels, so 6
+        // is sufficient and fixed.
         static const uint32_t kBizWalkMaxLevels = 6;
         static const uint32_t kBizWalkMaxSegs = amdobs::OBS_MAX_SEGS * 8;
-        // 一条路径：从根到叶的每一级。
+        // One path: every level from root to leaf.
         struct BizPath {
             uint8_t  depth;
             uint8_t  reserved[3];
-            uint64_t leafPA;        // 命中的叶子基址
+            uint64_t leafPA;        // the hit leaf's base address
             uint64_t leafSize;
             uint32_t leafLevel;
-            // 这个叶子覆盖了区间里的哪一段：起点 + 字节数。
+            // Which part of the range this leaf covers: start + byte count.
             //
-            // 【为什么两个都要】
-            //   只记字节数，无法核对"两叶加起来正好是整段"——重叠或漏掉的
-            //   一段都会让总和看起来正确。起点使每一叶的覆盖可以逐段相加。
+            // [Why both are needed]
+            //   With byte counts alone, "the two leaves add up to exactly the
+            //   whole range" cannot be checked -- an overlap or a gap still
+            //   makes the total look right. The start makes each leaf's
+            //   coverage addable segment by segment.
             uint64_t coversFrom;
             uint64_t coversBytes;
             uint64_t tablePA[kBizWalkMaxLevels];
@@ -862,50 +951,55 @@ public:
         };
         struct BizWalk {
             uint32_t reqId;
-            uint8_t  isRx;          // 0 = TX（设备读），1 = RX（设备写）
+            uint8_t  isRx;          // 0 = TX (device reads), 1 = RX (device writes)
             uint8_t  segIndex;
-            uint8_t  depth;         // 第一叶的级数（保持旧属性含义）
-            uint8_t  covered;       // 区间被完整覆盖
-            uint8_t  permOk;        // 该方向的权限位足够
-            uint8_t  overflow;      // addr+len 溢出
-            uint8_t  capped;        // 叶子数超出 kBizWalkMaxLeaves
-            uint8_t  leafCount;     // 实际导出的叶子数
+            uint8_t  depth;         // the first leaf's level count (keeps the old property's meaning)
+            uint8_t  covered;       // the range is fully covered
+            uint8_t  permOk;        // this direction's permission bits suffice
+            uint8_t  overflow;      // addr+len overflowed
+            uint8_t  capped;        // leaf count exceeded kBizWalkMaxLeaves
+            uint8_t  leafCount;     // the number of leaves actually exported
             uint64_t addr;
             uint32_t len;
-            uint64_t leafPA;        // 第一叶基址（旧属性）
+            uint64_t leafPA;        // the first leaf's base (old property)
             uint64_t leafSize;
             uint32_t leafLevel;
-            uint64_t rootPA;        // 走表起点（来自实际 DTE）
+            uint64_t rootPA;        // the walk's start point (from the actual DTE)
             uint32_t rootLevel;
-            uint64_t dteRaw;        // 走表所依据的 DTE
-            uint32_t pagesChecked;  // 区间内检查的叶数
-            uint32_t pagesBad;      // 未被合法叶子覆盖的叶数
+            uint64_t dteRaw;        // the DTE the walk was based on
+            uint32_t pagesChecked;  // leaves checked within the range
+            uint32_t pagesBad;      // leaves not covered by a legal leaf
             const char *why;
             BizPath  path[kBizWalkMaxLeaves];
         };
         BizWalk bizWalk[kBizWalkMaxSegs];
 
-        // ---- 第十四轮：RX 投递缓冲区集合 ----
+        // ---- Round 14: the RX posted-buffer set ----
         //
-        // 【第十三轮缺的是什么】
-        //   已走表的 8 条区间是"恰好承载了 4 个回声"的那 8 个缓冲区。整环
-        //   有 1024 个 4 KiB 缓冲区，窗口内还会被反复重新投递。所以当时
-        //   证明的是"抽样被映射"，不是"设备能写的每个缓冲区都被映射"。
+        // [What round 13 lacked]
+        //   The 8 ranges walked were the 8 buffers that "happened to carry the
+        //   4 echoes". The full ring holds 1024 4 KiB buffers, re-posted
+        //   repeatedly within the window. So what was proven was "the sample
+        //   was mapped", not "every buffer the device can write is mapped".
         //
-        // 【本轮的集合】
-        //     S = { 基线槽表里的 (addr, capacity) }
-        //       ∪ { 序号大于基线水位的每条重新投递记录的 (addr, capacity) }
+        // [This round's set]
+        //     S = { (addr, capacity) from the baseline slot table }
+        //       ∪ { (addr, capacity) of every re-post record with sequence
+        //           number greater than the baseline watermark }
         //
-        //   基线由驱动在自己的执行路径上采集并每秒刷新一次；探针在**窗口
-        //   之前**读一次，记下当时的中投递计数（水位），窗口之后读第二次，
-        //   要求"水位之后"的每条记录都在场。于是任何在窗口开始时仍然有
-        //   效、之后被替换掉的缓冲区，要么还在最终基线里，要么在重投递
-        //   记录里——不会两头都漏。
+        //   The baseline is collected by the driver on its own execution path
+        //   and refreshed once per second; the probe reads it once **before the
+        //   window**, recording the then-current post count (the watermark), and
+        //   reads it a second time after the window, requiring every record
+        //   "after the watermark" to be present. So any buffer still valid at
+        //   window start and replaced later is either still in the final
+        //   baseline or in the re-post records -- never missing from both.
         //
-        // 【为什么集合要放进成员】
-        //   3072 个区间 × 24 字节 = 72 KiB。放在 runM22b2PageTableProbe()
-        //   的栈上会把栈帧推过 4 KiB 阈值，二进制里出现 ____chkstk_darwin
-        //   弱引用，kmutil 直接拒绝整个 bundle（本项目踩过三次）。
+        // [Why the set lives in a member]
+        //   3072 ranges x 24 bytes = 72 KiB. On runM22b2PageTableProbe()'s
+        //   stack it would push the frame past the 4 KiB threshold, producing a
+        //   ____chkstk_darwin weak reference and an outright kmutil rejection of
+        //   the whole bundle (this project hit that three times).
         static const uint32_t kRxSetMaxRanges = 3072;
         static const uint32_t kRxSetDetailMax = 64;
         static const uint32_t kRxSetSampleMax = 8;
@@ -923,12 +1017,13 @@ public:
         };
 
         bool     rxsetPresent;
-        const char *rxsetWhy;         // 不可用原因，或 "ok"
-        const char *rxsetSetWhy;      // 集合构造的结论 token（nullptr = 完整）
+        const char *rxsetWhy;         // why unavailable, or "ok"
+        const char *rxsetSetWhy;      // the set construction's verdict token (nullptr = complete)
 
-        // 两次读取的身份与代数。三者相等才允许把两半拼起来。
-        uint32_t rxsetWatermark;      // 窗口**之前**读到的 head
-        uint32_t rxsetHead;           // 窗口之后读到的 head
+        // The two reads' identity and generation. All three must agree before
+        // the two halves may be joined.
+        uint32_t rxsetWatermark;      // the head read **before** the window
+        uint32_t rxsetHead;           // the head read after the window
         uint32_t rxsetRingGen;
         uint32_t rxsetPreRingGen;
         uint32_t rxsetEpoch;
@@ -936,7 +1031,8 @@ public:
         uint32_t rxsetIfUnit;
         uint32_t rxsetVtdPath;
 
-        // 驱动自报的基线统计，逐项与探针独立重算的结果比对。
+        // The driver's self-reported baseline statistics, compared item by item
+        // against the probe's independent recomputation.
         uint32_t rxsetBaselineSlots;
         uint32_t rxsetBaselineValid;
         uint32_t rxsetBaselineCapDesc;
@@ -946,7 +1042,7 @@ public:
         uint32_t rxsetBaselineCount;
         uint32_t rxsetBaselineGenMoved;
 
-        // 集合本身的账。
+        // The set's own accounting.
         uint32_t rxsetRanges;
         uint32_t rxsetFromBaseline;
         uint32_t rxsetFromRearm;
@@ -959,7 +1055,7 @@ public:
         uint32_t rxsetRearmSeen;
         bool     rxsetComplete;
 
-        // 走表结果。
+        // Walk results.
         uint32_t rxsetWalked;
         uint32_t rxsetOk;
         uint32_t rxsetFail;
@@ -967,13 +1063,16 @@ public:
         uint64_t rxsetMinAddr;
         uint64_t rxsetMaxEnd;
         uint64_t rxsetBytesTotal;
-        // 未映射/无权限的那些区间，逐条导出（有上限，超出的计数）。
+        // The unmapped / unauthorized ranges, exported one by one (bounded;
+        // overflow only counted).
         uint32_t rxsetFailCount;
         RxSetDetail rxsetFailDetail[kRxSetDetailMax];
-        // 通过的那部分只抽样导出完整路径，避免逐槽堆积页表文本。
+        // For the passing part, only a sample is exported with full paths, to
+        // avoid piling up page-table text per slot.
         uint32_t rxsetSampleCount;
         RxSetDetail rxsetSample[kRxSetSampleMax];
-        // 抽样区间的完整路径，与业务区间同一种导出形式。
+        // Sampled ranges' complete paths, in the same export form as the
+        // business ranges.
         struct RxSamplePath {
             uint8_t  leafCount;
             uint8_t  depth;
@@ -988,59 +1087,72 @@ public:
         };
         RxSamplePath rxsetSamplePath[kRxSetSampleMax];
 
-        // 驱动发布的那份原始字节（供分析器独立重算集合）。
+        // The raw bytes the driver published (so the analyser can rebuild the
+        // set independently).
         bool     rxsetRawExported;
         uint32_t rxsetRawBytes;
         char     rxsetRawSha[65];
         const char *rxsetRawWhy;
 
-        // 区间数组。成员，不是局部变量（见上面的栈帧说明）。
+        // The range array. A member, not a local (see the stack frame note
+        // above).
         amdrx::Range rxsetList[kRxSetMaxRanges];
 
-        // ---- 第九轮：窗口扫描质量 ----
+        // ---- Round 9: window scan quality ----
         //
-        // 第八轮把计数器都发出来了，但 covered 只看指针算术。扫描提前停止、
-        // 记录丢失、长度不可解码，全都不影响 `tx-window-covered = yes`。
-        // 现在这些都会撤回资格，而不只是显示在旁边。
+        // Round 8 published all the counters, but covered looked only at
+        // pointer arithmetic: an early scan stop, lost records, undecodable
+        // lengths -- none affected `tx-window-covered = yes`. Now all of them
+        // withdraw eligibility instead of merely being displayed alongside.
         uint32_t winRecordsLost;
         bool     winExact;
         const char *winQualityName;
 
-        // ---- 第十二轮：证据资格的实际结论 ----
+        // ---- Round 12: the evidence gate's actual verdict ----
         //
-        // evidenceOk / evidenceWhy 是 amdobs::obsEvidenceGate() 对**同一份**
-        // 证据给出的结论。探针发布它，分析器再独立重算一遍；两者不一致
-        // 就说明有一方读错了证据。注意它不是判定字符串的副本：判定还会
-        // 叠加窗口边界与读环归因，而那些不属于"证据资格"。
+        // evidenceOk / evidenceWhy are amdobs::obsEvidenceGate()'s verdict over
+        // **the same** evidence. The probe publishes it and the analyser
+        // independently recomputes it; a mismatch means one side read the
+        // evidence wrong. Note it is not a copy of the verdict string: the
+        // verdict additionally layers window boundaries and ring-read
+        // attribution, which are not part of "evidence eligibility".
         bool     evidenceOk;
         const char *evidenceWhy;
 
         const char *skipReason;
     };
 
-    // 把描述符里的地址+长度收进集合。
+    // Collect the addresses + lengths from descriptors into the set.
     //
-    // 与第六轮的关键差别：**不按任何上限过滤**。所有非零地址都进集合，
-    // 能不能读那块内存由 readVerdict() 单独判定并作为元数据记录。
+    // The key difference from round 6: **no filtering by any ceiling**. All
+    // non-zero addresses enter the set; whether that memory may be read is
+    // decided separately by readVerdict() and recorded as metadata.
     //
-    // 【第八轮】这个函数现在真的使用 tailCum/cloCum：它调用
-    // scanTxWindow()，按 [tailCum, 窗口后尾指针) 逐个累计索引取描述符，
-    // 每条带自己的槽位、代次、生命周期。第七轮版本忽略了这两个参数，
-    // 把所有非零地址一律标成 in-flight。
+    // [Round 8] This function now really uses tailCum/cloCum: it calls
+    // scanTxWindow(), taking descriptors by cumulative index over
+    // [tailCum, the post-window tail pointer), each with its own slot,
+    // generation and lifecycle. Round 7's version ignored both arguments and
+    // labelled every non-zero address in-flight.
     void m2b2CollectTxSegments(const UInt8 *ring, UInt32 count,
                                UInt32 tailCum, UInt32 cloCum);
 
-    // 【第十轮】读取驱动侧观测日志（线格式 v2）。
+    // [Round 10] Read the driver-side observation log (wire format v2).
     //
-    // 与读环的根本区别：这里读的是驱动**仍然持有的**内存对象的副本。
-    // 驱动在提交/完成点写入记录，并把**头部+记录**作为**一份** OSData
-    // 发布。探针拿到的字节带着驱动自己算出的累计索引，所以"提交—完成"
-    // 的配对是按同一个数字对上的，不涉及对槽位复用的推断。
+    // The fundamental difference from ring reading: what is read here is a copy
+    // of memory the driver **still holds**. The driver writes records at its
+    // submit/complete points and publishes **header + records** as **one**
+    // OSData. The bytes the probe receives carry the driver's own cumulative
+    // indices, so the "submit -- completion" pairing matches on the same number,
+    // with no inference about slot reuse involved.
     //
-    // 第九轮的 v1 有三个结构性缺陷，v2 逐个修掉（见实现处注释）：
-    //   1. seq 只在末尾写一次，读侧无法识别半写状态；
-    //   2. 头部与记录分属六个属性，可以来自不同次发布；
-    //   3. 记录里没有业务标识，无法与客户端请求对应。
+    // Round 9's v1 had three structural defects, each fixed in v2 (see the
+    // implementation's comments):
+    //   1. seq written only once at the end; a reader cannot detect a
+    //      half-written state;
+    //   2. header and records in six properties, possibly from different
+    //      publications;
+    //   3. no business identity in the records, so they cannot be matched to
+    //      client requests.
     void m2b2ReadDriverObs();
 
     // ---- Debug-only declarations: used only by kext/*Debug.cpp ----
@@ -1182,12 +1294,13 @@ public:
         uint64_t *, uint64_t *);
     IOReturn r34RxUnmap(IOMemoryDescriptor *, IODMACommand *, uint64_t, uint64_t);
 
-    // 只读查找网卡服务，**不**设置 fNicDevice、不依赖 fArmed。
+    // Read-only lookup of the NIC service: **does not** set fNicDevice and does
+    // not depend on fArmed.
     //
-    // 为什么单独一个函数：M2-2b-2 需要在 amdiommu=pgt 下拿到目标设备的
-    // BDF，但此时 fArmed=false、fNicDevice 为 NULL。直接复用 findNic()
-    // 会修改状态并与 arm 流程耦合；复用 fNicDevice 则得到 NULL。
-    // 调用方负责 release 返回值。
+    // Why a separate function: M2-2b-2 needs the target device's BDF under
+    // amdiommu=pgt, but then fArmed=false and fNicDevice is NULL. Reusing
+    // findNic() directly would mutate state and couple to the arm flow; reusing
+    // fNicDevice would yield NULL. The caller releases the returned value.
     IOService *findNicServiceOnly();
     void runB2SelfTest();
     void runB2aSelfTest();
@@ -1195,111 +1308,134 @@ public:
     void publishMapStats(bool force);
     void publishB2bStats();
 
-    // ---- M2-0b：PCI 配置空间只读探测 ----
+    // ---- M2-0b: PCI config space read-only probe ----
     //
-    // 目的：M2-0 的结论是 IVRS 的 0xFD380000 才对，DSDT 的 _CRS（0xFEB80000）
-    // 是陈旧声明。但那个结论依赖 Linux 侧证据，macOS 侧还没有独立验证。
+    // Purpose: M2-0's conclusion was that IVRS's 0xFD380000 is correct and DSDT's
+    // _CRS (0xFEB80000) is a stale declaration. But that conclusion rests on
+    // Linux-side evidence and had no independent verification on macOS.
     //
-    // IOMMU 的 capability block（实测 cap_ptr = 0x40）里有它自己的 MMIO BAR：
+    // The IOMMU's capability block (measured cap_ptr = 0x40) carries its own
+    // MMIO BAR:
     //   cap_ptr + 0x00 : CapID(8) | CapPtr(8) | CapHdr(16)
-    //   cap_ptr + 0x04 : BAR low  (bit0 是 lock 位，需屏蔽)
+    //   cap_ptr + 0x04 : BAR low  (bit0 is the lock bit; must be masked)
     //   cap_ptr + 0x08 : BAR high
-    // 这是硬件当前的、权威的 BAR 值，比 DSDT 的静态声明可信。
+    // This is the hardware's current, authoritative BAR value -- more
+    // trustworthy than DSDT's static declaration.
     //
-    // 全部只读：configRead8/16/32 只做 PCI 配置读，不写任何寄存器。
+    // Everything is read-only: configRead8/16/32 only do PCI config reads; no
+    // register is written.
     void runM20ConfigProbe();
 
-    // ---- M2-1：只读 MMIO 探测 ----
+    // ---- M2-1: read-only MMIO probing ----
     //
-    // 本项目第一次碰 MMIO。三重保护：
-    //   1. boot-arg `amdiommu=mmio` 门控，默认完全不执行
-    //   2. 只读，且映射用 kIOMapReadOnly
-    //   3. 分阶段：先只读 EFR 一个寄存器，与 Linux 实测值比对，
-    //      不匹配立即停止，不继续碰其他偏移
+    // The project's first touch of MMIO. Triple protection:
+    //   1. Gated by boot-arg `amdiommu=mmio`; not executed at all by default
+    //   2. Read-only, mapped with kIOMapReadOnly
+    //   3. Staged: first read only EFR, one register, compared against Linux's
+    //      measured value; on mismatch stop immediately, touching no other
+    //      offsets
     void runM21MmioProbe();
 
-    // ---- M2-2a-1：最小 MMIO 写测试 ----
+    // ---- M2-2a-1: minimal MMIO write test ----
     //
-    // 只回答一个问题：这个 MMIO 窗口能不能写。
-    // 不使能 IOMMU、不分配设备表、不发命令。
+    // Answers exactly one question: can this MMIO window be written.
+    // No IOMMU enable, no device table allocation, no commands.
     //
-    // 做法：写标记值到 DEV_TABLE 寄存器 → 读回 → 恢复原值 → 确认 CONTROL 未变。
-    // 门控：boot-arg `amdiommu=write`。
+    // Approach: write a marker to the DEV_TABLE register -> read back ->
+    // restore the original -> confirm CONTROL unchanged.
+    // Gate: boot-arg `amdiommu=write`.
     //
-    // 为什么选 DEV_TABLE 做靶子：它是唯一"写了也不会立刻产生副作用"的寄存器
-    // ——只有 CONTROL_IOMMU_EN 置位后硬件才会用它，而当前 IOMMU 完全关闭。
-    // 且它当前值为 0，即使恢复失败留下的也是"未编程"的干净状态。
+    // Why DEV_TABLE is the target: it is the only register whose write has no
+    // immediate side effect -- the hardware uses it only once
+    // CONTROL_IOMMU_EN is set, and the IOMMU is currently completely off.
+    // Its current value is 0, so even a failed restore leaves an "unprogrammed"
+    // clean state.
     void runM22aWriteProbe();
 
-    // ---- M2-2a-2：建设备表（不使能）----
+    // ---- M2-2a-2: build the device table (no enable) ----
     //
-    // 分配物理连续内存 → 全填直通 DTE → 写 DEV_TABLE 基址寄存器 →
-    // 确认 CONTROL 未被改变 → 恢复原值。
+    // Allocate physically contiguous memory -> fill all pass-through DTEs ->
+    // write the DEV_TABLE base register -> confirm CONTROL unchanged ->
+    // restore the original value.
     //
-    // **不使能 IOMMU**。这是本步骤的核心价值：IOMMU 关闭时硬件不读这张表，
-    // 所以系统行为必须完全不变，从而把"表对不对"与"使能后稳不稳"彻底分开。
+    // **The IOMMU is not enabled.** That is this step's core value: with the
+    // IOMMU off the hardware never reads the table, so system behaviour must be
+    // completely unchanged, separating "is the table right" from "is it stable
+    // after enable" cleanly.
     //
-    // 门控：boot-arg `amdiommu=table`。
+    // Gate: boot-arg `amdiommu=table`.
     void runM22bTableProbe();
 
-    // ---- M2-2a-3：短窗口使能测试（最高风险）----
+    // ---- M2-2a-3: short-window enable test (highest risk) ----
     //
-    // 完整走 Linux early_enable_iommu() 的使能序列，但**极短窗口后立即禁用**：
-    //   建设备表 → 写 DEV_TABLE → 分配命令缓冲 → 写 CMD_BUF →
-    //   复位 head/tail → CMDBUF_EN → **IOMMU_EN** → 读 STATUS →
-    //   立即清 IOMMU_EN → 确认已关闭 → 恢复所有寄存器
+    // Walk the full Linux early_enable_iommu() enable sequence, but **disable
+    // immediately after an extremely short window**:
+    //   build device table -> write DEV_TABLE -> allocate command buffer ->
+    //   write CMD_BUF -> reset head/tail -> CMDBUF_EN -> **IOMMU_EN** ->
+    //   read STATUS -> immediately clear IOMMU_EN -> confirm off -> restore all
+    //   registers
     //
-    // 门控：boot-arg `amdiommu=enable`。
+    // Gate: boot-arg `amdiommu=enable`.
     //
-    // 为什么短窗口：使能动作本身可能立即崩溃（地址错、编码错、命令缓冲未就绪）。
-    // 短窗口若崩，说明配置有根本问题，不必冒险长期运行。
+    // Why a short window: the enable action itself may crash immediately (wrong
+    // address, wrong encoding, command buffer not ready). If it crashes in a
+    // short window, the configuration is fundamentally broken and a long run
+    // need not be risked.
     void runM23EnableProbe();
 
-    // ---- M2-2b-1：命令通道验证 ----
+    // ---- M2-2b-1: command channel verification ----
     //
-    // M2-2a-3 只"配置"了命令缓冲，从未发过命令。
-    // 这一步发一条 CMD_COMPL_WAIT，验证三件事：
-    //   命令格式正确  → 硬件能解析（type 在 data[1] 的 bit28..31）
-    //   tail 推进正确 → 硬件能看到新命令
-    //   cmd_sem 地址正确 → 硬件能写回完成信号
+    // M2-2a-3 only "configured" the command buffer, never issuing a command.
+    // This step issues one CMD_COMPL_WAIT and verifies three things:
+    //   command format correct   -> the hardware can parse it (type in
+    //                               data[1]'s bit28..31)
+    //   tail advance correct     -> the hardware sees the new command
+    //   cmd_sem address correct  -> the hardware can write back the completion
     //
-    // 门控：boot-arg `amdiommu=cmd`。
+    // Gate: boot-arg `amdiommu=cmd`.
     //
-    // 这是全新组件：三块内存（设备表 / 命令缓冲 / 完成信号）同时在场，
-    // 且第一次真正驱动硬件执行动作。仍是短窗口。
+    // This is an entirely new component: three memory blocks (device table /
+    // command buffer / completion signal) present simultaneously, and the first
+    // time the hardware is truly driven to act. Still a short window.
     void runM2b1CmdProbe();
 
-    // ---- M2-2b-2：4 级恒等页表 + 单设备 DTE 切换 ----
+    // ---- M2-2b-2: 4-level identity page table + single-device DTE switch ----
     //
-    // M2-2b-1 证明了命令通道可用。这一步证明**页表机制**：
-    //   建 4 级页表 → 填恒等映射 → 使能 → CMD_INV_ALL →
-    //   把目标设备的 DTE 从直通改成翻译 → INV_DEV_ENTRY + INV_IOMMU_PAGES →
-    //   确认硬件接受（无 fault 事件）→ 全部恢复原状。
+    // M2-2b-1 proved the command channel works. This step proves the **page
+    // table mechanism**:
+    //   build the 4-level page table -> fill identity mappings -> enable ->
+    //   CMD_INV_ALL -> switch the target device's DTE from pass-through to
+    //   translation -> INV_DEV_ENTRY + INV_IOMMU_PAGES -> confirm the hardware
+    //   accepts it (no fault events) -> restore everything.
     //
-    // 门控：boot-arg `amdiommu=pgt`。
+    // Gate: boot-arg `amdiommu=pgt`.
     //
-    // 新增观测手段：**事件日志**。开启 EVT_LOG_EN 后 IOMMU 会把自己的
-    // IO_PAGE_FAULT / DEV_TAB_ERR 写进我们指定的内存，这是前面所有步骤
-    // 都没有的能力——之前只能靠"系统有没有崩"来间接判断。
+    // New observation means: **the event log**. With EVT_LOG_EN on, the IOMMU
+    // writes its own IO_PAGE_FAULT / DEV_TAB_ERR into memory we designate -- a
+    // capability none of the earlier steps had; before, the only indirect
+    // measure was "did the system crash".
     //
-    // 【2026-10-31 关键修正】本函数**不能**在 start() 里直接跑。
+    // [2026-10-31 key fix] This function **cannot** run directly in start().
     //
-    // 实测：把 RTL8127 用 SFP+ 光缆接上局域网、手动 `ifconfig en2 up`
-    // 之后它确实有 DMA（Ipkts 从 0 涨到 157）。但只要重启，en2 又回到
-    // `media: <unknown type>`、零包——因为探针的 start() 比 Lucy 配置网卡
-    // **更早**。所以"切换后 0 fault"仍然测不到东西。
+    // Measured: with the RTL8127 connected via an SFP+ fibre link and a manual
+    // `ifconfig en2 up`, it did DMA (Ipkts rose from 0 to 157). But after any
+    // reboot, en2 returned to `media: <unknown type>` with zero packets --
+    // because the probe's start() runs **earlier** than Lucy configures the
+    // NIC. So "0 faults after switching" still measures nothing.
     //
-    // 解法：用 IOTimerEventSource 把整个探测推迟到 start() 返回之后
-    // （默认 20 秒），那时 PCI 枚举、网卡驱动、链路协商都已完成。
-    // 这样既不阻塞启动，又能在有真实 DMA 的窗口里做实验。
+    // Solution: an IOTimerEventSource defers the whole probe until after start()
+    // returns (default 20 s), by which time PCI enumeration, the NIC driver and
+    // link negotiation are all complete. That neither blocks boot nor performs
+    // the experiment in a window with real DMA.
     void runM22b2PageTableProbe();
     void finishM22b2PageTableProbe(R33DeviceDomain *, bool finishWindow);
 
-    // 延迟调度：在 start() 末尾挂一个一次性定时器，到点后调用
-    // runM22b2PageTableProbe()。返回 false 表示调度失败（记录属性后放弃）。
+    // Deferred scheduling: attach a one-shot timer at the end of start(); when
+    // it fires, it calls runM22b2PageTableProbe(). Returning false means
+    // scheduling failed (record the property and give up).
     bool scheduleM22b2();
 
-    // 定时器回调（静态，符合 IOTimerEventSource::Action 签名）
+    // Timer callback (static, matching IOTimerEventSource::Action's signature)
     static void m22b2TimerFired(OSObject *owner, IOTimerEventSource *sender);
 
     // Round33: setup transfers its hardware resources to the service and
@@ -1311,133 +1447,165 @@ public:
     bool r33DomainStopPending() const;
     void r31RequestStop();
 
-    // 叶子页大小模式：
-    //   false = 2 MiB 大页（覆盖全部 16 GiB）
-    //   true  = 4 KiB 小页（覆盖全部 16 GiB，用于判别大页编码是否被硬件接受）
-    // 由 boot-arg `amdiommu=pgt4k` 选择。
+    // Leaf page size mode:
+    //   false = 2 MiB large pages (covering all 16 GiB)
+    //   true  = 4 KiB small pages (covering all 16 GiB, to test whether the
+    //           large-page encoding is accepted by the hardware)
+    // Chosen by boot-arg `amdiommu=pgt4k`.
     bool                fM22b2Use4K;
 
-    // 保持翻译生效的长时间观察模式（`amdiommu=pgthold`）。
-    // 观察窗口从 2 秒延长到 M2B2_HOLD_SECS 秒，期间 DTE 一直指向翻译表，
-    // 便于从外部用 netstat 观察设备是否仍在正常收发。
+    // Long observation mode keeping translation active (`amdiommu=pgthold`).
+    // The observation window extends from 2 s to M2B2_HOLD_SECS seconds with
+    // the DTE pointing at the translation table throughout, easing external
+    // netstat observation of whether the device still transmits normally.
     bool                fM22b2Hold;
 
-    // 纯睡眠对照（`amdiommu=pgtsleep`）：保持 DTE 直通，只做同样的 20 秒
-    // IOSleep，用来判断"计数冻结"是翻译造成的，还是长睡眠阻塞 workloop 造成的。
+    // Pure-sleep control (`amdiommu=pgtsleep`): keeps the DTE pass-through and
+    // only performs the same 20 s IOSleep, to decide whether "the counters
+    // froze" was caused by translation or by a long sleep blocking the
+    // workloop.
     bool                fM22b2SleepOnly;
 
-    // 页表级数模式（`amdiommu=pgt3l`）：
-    //   false = PAGE_MODE_4_LEVEL（根表项覆盖 512 GiB）
-    //   true  = PAGE_MODE_3_LEVEL（根表项覆盖 1 GiB，与 16 GiB RAM 匹配）
+    // Page table level mode (`amdiommu=pgt3l`):
+    //   false = PAGE_MODE_4_LEVEL (each root entry covers 512 GiB)
+    //   true  = PAGE_MODE_3_LEVEL (each root entry covers 1 GiB, matching the
+    //           16 GiB RAM)
     bool                fM22b2Use3L;
 
-    // 设备 DMA 观察（v0.21.0）。
+    // Device DMA observation (v0.21.0).
     //
-    // 第五轮唯一没答上的问题就是"那条范围外 fault 的地址，是不是设备真的
-    // 在用"。当时的判据是 m1bb-realmapcalls，而它是 0——因为 RTL812xLucy
-    // 在 useAppleVTD 为假时根本不走 mapper，直接用裸物理地址。所以那个
-    // 计数器无法排除任何东西。
+    // The only question round 5 failed to answer was "was that out-of-range
+    // fault's address really in use by the device". The criterion then was
+    // m1bb-realmapcalls, and it was 0 -- because RTL812xLucy bypasses the
+    // mapper entirely when useAppleVTD is false, using bare physical addresses.
+    // That counter could therefore exclude nothing.
     //
-    // 现在的做法是直接读设备：从 BAR2 读出 TX/RX 描述符环基址、统计缓冲
-    // 基址、以及 CounterAddr 寄存器，再把环里的描述符地址收集成一个
-    // 区间集合。这些是设备真正会去访问的地址，与驱动走不走 mapper 无关。
+    // The approach now is to read the device directly: from BAR2 read the TX/RX
+    // descriptor ring bases, the statistics buffer base and the CounterAddr
+    // register, then collect the descriptors' addresses in the rings into a
+    // range set. These are addresses the device will truly access, independent
+    // of whether the driver goes through a mapper.
     //
-    // 只读：不写任何设备寄存器，不改变驱动的 DMA 路径。
+    // Read-only: no device register is written; the driver's DMA path is not
+    // altered.
     void observeDeviceDma();
 
-    // 只读 TX 环，返回 DescOwn 已清的槽数；-1 = 读不到。
-    // 窗口前后各调一次，差值即窗口内完成记录数。
+    // Reads the TX ring read-only and returns the count of slots with DescOwn
+    // cleared; -1 = unreadable. Called once before and once after the window;
+    // the difference is the in-window completion record count.
     int m2b2ScanTxDone();
-    // 两个窗口实例。放在成员里而不是栈上：每个 424 字节，两个 848 字节，
-    // 正好是把 runM22b2PageTableProbe() 帧推过 __chkstk 阈值的那部分。
+    // Two window instances. Placed in members rather than on the stack: 424
+    // bytes each, 848 total -- exactly the part that pushed
+    // runM22b2PageTableProbe()'s frame past the __chkstk threshold.
     M22b2EventWindow fM22b2WinPre;
     M22b2EventWindow fM22b2WinMain;
     M22b2DmaObs fM22b2Dma;
 
-    // 观察到的设备 DMA 区间集合。
+    // The observed device DMA range set.
     //
-    // 【为什么放在成员里而不是栈上】
-    //   AddrSet 现在是 64 个区间，每项 32 字节 = 2048 字节。放进
-    //   runM22b2PageTableProbe() 的栈帧会把总帧推过编译器插入 __chkstk
-    //   的阈值（4 KiB），于是二进制里出现对 ____chkstk_darwin 的**弱**
-    //   引用，kmutil 直接拒绝："Has weak references but does not test for
-    //   them." 第六轮就是踩在这个坑上（M2B2_RAW_KEEP 从 8 提到 32 时）。
-    //   放到成员里既不占栈，也让第 15b 步与第 17 步共用同一份快照。
+    // [Why a member and not the stack]
+    //   AddrSet is now 64 ranges at 32 bytes each = 2048 bytes. Placing it in
+    //   runM22b2PageTableProbe()'s frame would push the total frame past the
+    //   compiler's __chkstk threshold (4 KiB), producing a **weak** reference to
+    //   ____chkstk_darwin in the binary and an outright kmutil refusal:
+    //   "Has weak references but does not test for them."
+    //   Round 6 hit exactly this trap (when M2B2_RAW_KEEP rose from 8 to 32).
+    //   As a member it occupies no stack and lets step 15b and step 17 share
+    //   the same snapshot.
     amdobs::AddrSet fM22b2AddrSet;
 
-    // 【第九轮】窗口记录的**独立**容量。
+    // [Round 9] The window records' **dedicated** capacity.
     //
-    // 第八轮把窗口内那几条描述符塞进与几千条历史 RX/TX 快照共用的
-    // AddrSet（容量 64）。历史快照先填满，窗口记录就被丢进 dropped，
-    // 于是"窗口内 3 条提交"可能在集合里一条都没有。小规模受控操作的
-    // 记录必须独立，否则它永远排在最后。
+    // Round 8 pushed the handful of window descriptors into the AddrSet
+    // (capacity 64) shared with thousands of historical RX/TX snapshots. The
+    // snapshots filled it first and the window records landed in dropped, so
+    // "3 submissions within the window" could have zero entries in the set.
+    // Records of small controlled operations must be independent, otherwise
+    // they are always queued last.
     amdobs::AddrSet fM22b2WinSet;
 
-    // 【第九轮】提交/完成配对的暂存。
+    // [Round 9] Staging for submit/completion pairing.
     //
-    // 为什么是成员而不是局部变量：ObsJoin 含 64 个 ObsTxOp，每个约 56 字节，
-    // 合计约 3.6 KiB。作为 m2b2ReadDriverObs() 的局部变量会把该函数的栈帧
-    // 推过 4 KiB，于是编译器插入 __chkstk，二进制里出现对
-    // ____chkstk_darwin 的**弱**引用，kmutil 直接拒绝：
+    // Why a member rather than a local: ObsJoin holds 64 ObsTxOps at ~56 bytes
+    // each, about 3.6 KiB total. As a local of m2b2ReadDriverObs() it would push
+    // that function's frame past 4 KiB, the compiler would insert __chkstk, the
+    // binary would carry a **weak** reference to ____chkstk_darwin, and kmutil
+    // would refuse outright:
     //   "Has weak references but does not test for them."
-    // 第六轮在 M2B2_RAW_KEEP 从 8 提到 32 时踩过同一个坑。
+    // Round 6 hit the same trap when M2B2_RAW_KEEP rose from 8 to 32.
     amdobs::ObsJoin fM22b2ObsJoin;
 
-    // 物理布局策略（恒等映射上限 + RAM 空洞 + 布局是否已知）
+    // Physical layout policy (identity-mapping ceiling + RAM holes + whether
+    // the layout is known)
     amdobs::MapPolicy fM22b2Policy;
 
-    // 【第八轮】窗口结束后的描述符生命周期扫描。
+    // [Round 8] Post-window descriptor lifecycle scan.
     //
-    // 与 m2b2CollectTxSegments 的区别：后者在窗口**之前**取快照（不知道
-    // 窗口里发生了什么），这个在窗口**之后**按窗口两端的累计指针逐条
-    // 归因。结果写进 fM22b2Dma 的 win* 字段。
+    // Difference from m2b2CollectTxSegments: the latter snapshots **before** the
+    // window (knowing nothing of what happened inside), while this one, **after**
+    // the window, attributes each cumulative index between the window edges.
+    // Results go into fM22b2Dma's win* fields.
     void m2b2ScanTxWindowAfter(const UInt8 *ring, UInt32 count);
 
     void m2b2CollectRxSegments(const UInt8 *ring, UInt32 count);
 
-    // 【第十轮】采集目标网卡的身份（BDF / vendor / device / BSD unit / MAC）。
+    // [Round 10] Collect the target NIC's identity (BDF / vendor / device / BSD
+    // unit / MAC).
     //
-    // 【为什么要独立采集】
-    //   驱动记录本身不知道"我是哪块卡"。若探针不自己观测身份，那么
-    //   "这些 DMA 属于目标设备"就只是假设。第九轮正是这样。
+    // [Why collected independently]
+    //   The driver records themselves do not know "which card I am". If the
+    //   probe does not observe identity itself, "this DMA belongs to the target
+    //   device" is merely an assumption. Round 9 was exactly that.
     //
-    // 【为什么不写死 en2】
-    //   接口编号会随驱动加载顺序变化。这里从 IORegistry 现取：
-    //   IOInterfaceUnit 给编号，IOMACAddress 给 MAC，父节点给 BDF。
-    //   三者一起才能把"网络接口"与"PCI 功能"绑成同一件事。
+    // [Why en2 is not hard-coded]
+    //   Interface numbers change with driver load order. Fetched fresh from the
+    //   IORegistry: IOInterfaceUnit gives the number, IOMACAddress gives the
+    //   MAC, the parent node gives the BDF. Only the three together bind "the
+    //   network interface" and "the PCI function" into one thing.
     void m2b2CaptureNicIdentity();
 
-    // 【第十一轮】为每个受控请求的每个 TX/RX 段采集原始页表证据。
+    // [Round 11] Collect raw page table evidence for every TX/RX segment of
+    // every controlled request.
     //
-    // 【为什么必须在恢复之前调用】
-    //   走表用的是本次实验建的那块页表内存。恢复流程会（在确认硬件停止
-    //   后）释放它，之后指针就无效了。所以采集点必须在第 17b 步，
-    //   与 DTE 切换仍然生效的时间区间重叠。
+    // [Why it must be called before recovery]
+    //   The walk uses the page table memory built for this experiment. The
+    //   recovery flow frees it (after confirming the hardware stopped), after
+    //   which the pointer is invalid. So the collection point must be step 17b,
+    //   overlapping the interval where the DTE switch is still in effect.
     //
-    // 【为什么起点必须是实际 DTE】
-    //   第十轮的分析器有一项"根表来自 DTE"，但它在 m2-b2-dte-root 不存在
-    //   时直接判通过，而该属性从来不存在。这里改为：从 dte[] 里**读回**
-    //   目标设备那一条，解码出 mode 与根表地址，把它作为走表起点；同时把
-    //   那条 DTE 的原始值一起导出，使"起点来自 DTE"可被独立核对。
+    // [Why the start point must be the actual DTE]
+    //   Round 10's analyser had a criterion "the root table comes from the DTE",
+    //   but it judged a pass outright when m2-b2-dte-root did not exist -- and
+    //   that property never existed. Here instead: the target device's entry is
+    //   **read back** from dte[], its mode and root table address decoded, and
+    //   that used as the walk's start; the raw DTE value is exported alongside,
+    //   making "the start came from the DTE" independently checkable.
     //
-    // 页表由 R33DeviceDomain 持有；诊断只在域仍有效时借用这些指针。
-    // 恢复硬件并完成诊断后，域统一释放页表，走表函数不保存借用指针。
+    // The page tables are owned by R33DeviceDomain; the diagnostics borrow these
+    // pointers only while the domain is valid. After hardware recovery and the
+    // diagnostics, the domain releases the page tables uniformly; the walk
+    // function keeps no borrowed pointers.
     void m2b2WalkBusinessRanges(const volatile UInt64 *dte, UInt32 tgt,
                                 const volatile UInt64 *ptMem,
                                 UInt64 ptBasePA, UInt64 ptBytes);
 
-    // ---- 第十四轮：RX 投递缓冲区集合 ----
+    // ---- Round 14: the RX posted-buffer set ----
     //
-    // m2b2RxSetRead()：读一次驱动发布的 rtl812x-rxpost，解出基线槽表、
-    //   重投递记录与水位，并当场构造集合 S。`beforeWindow` 决定它扮演哪个
-    //   角色：窗口之前那次只记下水位（之后序号大于它的重投递都属于本
-    //   窗口），窗口之后那次才是构造集合与导出原始字节的那一次。
-    //   返回 false 时 rxsetWhy 说明原因，绝不返回一个"空集合"冒充结果。
+    // m2b2RxSetRead(): reads the driver's published rtl812x-rxpost once,
+    //   decoding the baseline slot table, re-post records and watermark, and
+    //   constructs set S on the spot. `beforeWindow` decides its role: the
+    //   pre-window read only records the watermark (re-posts with later
+    //   sequence numbers then belong to this window), while the post-window
+    //   read is the one that constructs the set and exports the raw bytes.
+    //   On false, rxsetWhy says why; it never returns an "empty set" pretending
+    //   to be a result.
     //
-    // m2b2WalkRxSet()：对 S 的每个区间走真实页表，复用 amdbw::walkRange()。
-    //   与业务区间走表是**同一份**核心代码。
+    // m2b2WalkRxSet(): walks every range of S against the real page table,
+    //   reusing amdbw::walkRange() -- **the same** core code as the business
+    //   range walks.
     //
-    // m2b2PublishRxSet()：发布计数、逐条失败区间与抽样路径。
+    // m2b2PublishRxSet(): publishes the counters, each failing range and the
+    //   sampled paths.
     bool m2b2RxSetRead(bool beforeWindow);
     void m2b2WalkRxSet(const volatile UInt64 *dte, UInt32 tgt,
                        const volatile UInt64 *ptMem,
@@ -1464,38 +1632,43 @@ public:
         ~R15Scope() { if (!transferred) self->m2b2R15Release(); }
     };
 
-    // 第十轮：本轮声明的受控批次请求数；0 = 未声明。
+    // Round 10: the controlled batch's declared request count this round;
+    // 0 = not declared.
     UInt32 m2b2ReadDeclaredBatch();
 
-    // 第十一轮：本轮声明的 run token；0 = 未声明。
+    // Round 11: this round's declared run token; 0 = not declared.
     //
-    // 批次判据必须绑定到"这一次运行"。只按 reqId 归并会把两次不同运行的
-    // 记录拼成一个完整批次——见 amd_iommu_dma_observe.hpp 里
-    // ObsBatchSpec 的反例 C。
+    // The batch criterion must bind to "this one run". Merging by reqId alone
+    // stitches two different runs' records into one complete batch -- see
+    // counterexample C of ObsBatchSpec in amd_iommu_dma_observe.hpp.
     UInt32 m2b2ReadDeclaredToken();
 
-    // 第十一轮：在窗口打开之前绑定本次驱动实例的 epoch。
+    // Round 11: bind this driver instance's epoch before the window opens.
     //
-    // 【为什么必须在窗口之前】
-    //   若在 m2b2ReadDriverObs()（窗口之后）里取 epoch，就等于用被检验的
-    //   对象去定义检验标准。绑定点必须先于证据。
+    // [Why it must precede the window]
+    //   Taking the epoch inside m2b2ReadDriverObs() (after the window) would
+    //   let the object under test define the test's standard. The binding point
+    //   must precede the evidence.
     //
-    // 取不到时 epochBound 保持 0，读侧拒绝通过——未知不是通过。
+    // If it cannot be obtained, epochBound stays 0 and the reader refuses to
+    // pass -- unknown is not a pass.
     void m2b2BindDriverInstance();
 
-    // 读关闭指针（按 ChipId 推导的寄存器与宽度）。返回 false = 读不到。
+    // Reads the close pointer (register and width derived from ChipId).
+    // Returning false = unreadable.
     bool m2b2ReadCloPtr(volatile UInt8 *bar, UInt32 *out);
     bool m2b2ReadTailPtr(volatile UInt8 *bar, UInt32 *out);
 
-    // 把第七轮新增的观察字段写成默认值。
+    // Writes round 7's new observation fields as defaults.
     //
-    // 为什么需要：observeDeviceDma() 有多条提前返回路径。若它们只写一个
-    // m2-b2-dma-obs 就返回，独立分析器看到的是"字段缺失"，只能报
-    // CANNOT ANALYSE——那等于说"我没有数据"，而事实是"观察跑了但无法继续"。
-    // 两者含义不同，只有一句诚实。
+    // Why needed: observeDeviceDma() has several early-return paths. If they
+    // return after writing only m2-b2-dma-obs, the independent analyser sees
+    // "fields missing" and can only report CANNOT ANALYSE -- equivalent to "I
+    // have no data", when the fact is "the observation ran but could not
+    // continue". The two mean different things, and only one of them is honest.
     void m2b2PublishDmaDefaults();
 
-    // 映射表操作
+    // Mapping table operations
     MapEntry *allocMapEntry();
     bool      freeMapEntry(uint64_t pa, uint64_t len);
     uint32_t  usedMapEntries();

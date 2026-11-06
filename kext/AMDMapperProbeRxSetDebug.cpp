@@ -66,8 +66,9 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
-// IOPCIDevice.h 在 SDK 里自身会触发两个 -Werror 级警告（见 AMDMapperProbeObs.cpp
-// 的同一段说明）。仅抑制这两条，不全局关闭。
+// IOPCIDevice.h itself triggers two -Werror-level warnings from within the SDK
+// (see the same note in AMDMapperProbeObs.cpp). Suppress only these two, not
+// globally.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"

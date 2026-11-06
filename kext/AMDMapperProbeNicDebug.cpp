@@ -10,17 +10,20 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
-// IOPCIDevice.h 在 SDK 里自身会触发两个 -Werror 级警告：
-//   1. IOPCIDevice 被标 __kpi_deprecated("Use PCIDriverKit")
-//   2. 其内部的 setProperty 重载未标 override（-Winconsistent-missing-override）
+// IOPCIDevice.h itself triggers two -Werror-level warnings from within the SDK:
+//   1. IOPCIDevice is marked __kpi_deprecated("Use PCIDriverKit")
+//   2. Its internal setProperty overload is not marked override (-Winconsistent-missing-override)
 //
-// 这两条都是 **Apple 头文件自身的问题**，不是本项目的代码缺陷：
-//   - PCIDriverKit 是用户态 DriverKit 框架，无法实现 IOMapper 子类，
-//     本项目必须是内核内 IOKit kext，只能用 IOPCIDevice。
-//   - override 警告来自 SDK 声明，我们无法也不应修改 SDK 头。
+// Both are **problems in Apple's own headers**, not defects in this project's code:
+//   - PCIDriverKit is a userspace DriverKit framework and cannot implement an
+//     IOMapper subclass; this project must be an in-kernel IOKit kext and can
+//     only use IOPCIDevice.
+//   - The override warning comes from SDK declarations; we cannot and should
+//     not modify SDK headers.
 //
-// 因此仅在包含该头时抑制这两条，不全局关闭——其他真正的
-// deprecation / override 问题仍会照常报错。
+// Therefore suppress only these two while including that header, without
+// disabling them globally -- other genuine deprecation / override issues
+// will still be reported as errors as usual.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"
@@ -33,13 +36,15 @@
 #include <kern/clock.h>
 #include <libkern/OSByteOrder.h>
 
-// 页表编码/解码的唯一实现。生产代码与 host 回归测试**包含同一个文件**，
-// 测试跑的就是这里的分支，不是另写一份 Python 复述。
-// 见 tests/pte-core-test.cpp 与 docs/m2-2b-2-round5-result.md。
+// The single implementation of page table encoding/decoding. Production code
+// and the host regression tests **include the same file**, so the tests run
+// exactly these branches rather than a separately written Python restatement.
+// See tests/pte-core-test.cpp and docs/m2-2b-2-round5-result.md.
 #include "amd_iommu_pte_core.hpp"
 
-// OSPtr<T> 的定义取决于 IOKIT_ENABLE_SHARED_PTR（SDK libkern/c++/OSPtr.h）：
-//   定义时 = OSSharedPtr<T>；未定义时 = T*。SDK 默认未定义。
+// The definition of OSPtr<T> depends on IOKIT_ENABLE_SHARED_PTR (SDK
+// libkern/c++/OSPtr.h): defined = OSSharedPtr<T>; undefined = T*.
+// The SDK default is undefined.
 #if defined(IOKIT_ENABLE_SHARED_PTR)
     #define M1A_HAS_SHARED_PTR 1
 #else
@@ -51,7 +56,8 @@
 #if AMD_MAPPER_PROBE_DEBUG
 
 bool org_example_AMDMapperProbe::findTarget() {
-    // 策略 1：按路径直取（实机 acpi-path = IOACPIPlane:/_SB/PCI0@0/IOMA@2）
+    // Strategy 1: direct lookup by path (on the real machine acpi-path =
+    // IOACPIPlane:/_SB/PCI0@0/IOMA@2)
     const char *paths[] = {
         "IODeviceTree:/PCI0/IOMA",
         "IOACPIPlane:/_SB/PCI0@0/IOMA@2",
@@ -71,9 +77,10 @@ bool org_example_AMDMapperProbe::findTarget() {
         e->release();
     }
 
-    // 策略 2：枚举后逐个核对 IOName。
-    // serviceMatching + setObject 追加属性键并不可靠（0.2.0 实测拿到过
-    // D002/pci1022,1480），所以必须自己核对。
+    // Strategy 2: enumerate and verify IOName one by one.
+    // serviceMatching + setObject to append a property key is not reliable
+    // (0.2.0 testing once returned D002/pci1022,1480), so we must verify
+    // ourselves.
     OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
     if (!matching) {
         setProperty("m1b-find", "FAIL-no-matching-dict");
@@ -127,9 +134,11 @@ bool org_example_AMDMapperProbe::armNic(IOService *nic) {
     setProperty("m1bb-parent", "set");
     setProperty("m1bb-nic-name", nic->getName());
 
-    // 记录「挂属性时它是否已经被驱动占用」。
-    // 走通知路径时它刚 publish，必然还没有驱动 → no-good-timing。
-    // 若走 start() 里的兜底路径且已被占用 → yes-too-late，说明通知没赶上。
+    // Record "whether it was already claimed by a driver when the property
+    // was attached". Via the notification path it has just published, so no
+    // driver can hold it yet -> no-good-timing. If the fallback path inside
+    // start() finds it already claimed -> yes-too-late, meaning the
+    // notification missed the window.
     bool busy = (nic->getProperty("IOClass") != nullptr)
              && (OSDynamicCast(OSString, nic->getProperty("IOClass")) != nullptr);
     setProperty("m1bb-nic-busy", busy ? "yes-too-late" : "no-good-timing");
@@ -137,18 +146,19 @@ bool org_example_AMDMapperProbe::armNic(IOService *nic) {
 }
 
 bool org_example_AMDMapperProbe::findNic() {
-    // ---- 策略 1/2：按路径直取 ----
+    // ---- Strategies 1/2: direct lookup by path ----
     for (int i = 0; kNicPaths[i]; i++) {
         IORegistryEntry *e = IORegistryEntry::fromPath(kNicPaths[i]);
         if (!e) continue;
         IOService *svc = OSDynamicCast(IOService, e);
         if (svc) {
-            // 核对 device-id，防止路径写错挂到别的设备上
+            // Verify device-id to prevent a wrong path from attaching to
+            // another device
             OSData *did = OSDynamicCast(OSData, svc->copyProperty("device-id"));
             bool ok = false;
             if (did && did->getLength() >= 2) {
                 const UInt8 *p = (const UInt8 *)did->getBytesNoCopy();
-                // device-id 是小端：0x8127 → 27 81
+                // device-id is little-endian: 0x8127 -> 27 81
                 ok = (p[0] == 0x27 && p[1] == 0x81);
             }
             if (did) did->release();
@@ -166,7 +176,8 @@ bool org_example_AMDMapperProbe::findNic() {
         e->release();
     }
 
-    // ---- 策略 3：枚举（依赖 PCI 枚举完成，通常太晚）----
+    // ---- Strategy 3: enumeration (depends on PCI enumeration being done,
+    // usually too late) ----
     OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
     if (!matching) {
         setProperty("m1bb-find", "FAIL-no-matching");
@@ -197,8 +208,9 @@ bool org_example_AMDMapperProbe::findNic() {
         nm->release();
         if (!hit) continue;
 
-        // 命中。注意：这条兜底路径依赖 PCI 枚举完成，通常已经太晚
-        // （Lucy 可能早已 start 过）。真正的时序保障靠 publish 通知。
+        // Hit. Note: this fallback path depends on PCI enumeration being
+        // complete and is usually too late already (Lucy may have started long
+        // ago). The real timing guarantee is the publish notification.
         svc->retain();
         fNicDevice = svc;
         setProperty("m1bb-find", "OK-by-enumerate");
@@ -211,15 +223,18 @@ bool org_example_AMDMapperProbe::findNic() {
     if (!found) setProperty("m1bb-find", "ABSENT-no-rtl8127");
     return found;
 }
-// 只读查找 RTL8127 的 IOService，供 M2-2b-2 取 BDF 用。
+// Read-only lookup of the RTL8127 IOService, used by M2-2b-2 to obtain the BDF.
 //
-// 与 findNic() 的区别：
-//   findNic()            会 retain 并写 fNicDevice、写 m1bb-* 属性，
-//                        且调用方只在 fArmed 时才用，属"arm 流程"的一部分。
-//   findNicServiceOnly() 只查找并 retain 返回，调用方 release。
-//                        不碰任何成员状态，因此可以在 pgt 模式下安全使用。
+// Difference from findNic():
+//   findNic()            retains, writes fNicDevice and the m1bb-* properties,
+//                        and callers only use it while fArmed, making it part
+//                        of the "arm flow".
+//   findNicServiceOnly() only looks up and retains the return; the caller
+//                        releases it. It touches no member state, so it is
+//                        safe to use in pgt mode as well.
 //
-// 复用同一组路径常量，保证两条路找的是同一个设备。
+// Both paths reuse the same set of path constants, guaranteeing they find the
+// same device.
 IOService *org_example_AMDMapperProbe::findNicServiceOnly() {
     for (int i = 0; kNicPaths[i]; i++) {
         IORegistryEntry *e = IORegistryEntry::fromPath(kNicPaths[i]);

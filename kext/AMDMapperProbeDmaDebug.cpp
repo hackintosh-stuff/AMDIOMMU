@@ -9,17 +9,20 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
-// IOPCIDevice.h 在 SDK 里自身会触发两个 -Werror 级警告：
-//   1. IOPCIDevice 被标 __kpi_deprecated("Use PCIDriverKit")
-//   2. 其内部的 setProperty 重载未标 override（-Winconsistent-missing-override）
+// IOPCIDevice.h itself triggers two -Werror-level warnings from within the SDK:
+//   1. IOPCIDevice is marked __kpi_deprecated("Use PCIDriverKit")
+//   2. Its internal setProperty overload is not marked override (-Winconsistent-missing-override)
 //
-// 这两条都是 **Apple 头文件自身的问题**，不是本项目的代码缺陷：
-//   - PCIDriverKit 是用户态 DriverKit 框架，无法实现 IOMapper 子类，
-//     本项目必须是内核内 IOKit kext，只能用 IOPCIDevice。
-//   - override 警告来自 SDK 声明，我们无法也不应修改 SDK 头。
+// Both are **problems in Apple's own headers**, not defects in this project's code:
+//   - PCIDriverKit is a userspace DriverKit framework and cannot implement an
+//     IOMapper subclass; this project must be an in-kernel IOKit kext and can
+//     only use IOPCIDevice.
+//   - The override warning comes from SDK declarations; we cannot and should
+//     not modify SDK headers.
 //
-// 因此仅在包含该头时抑制这两条，不全局关闭——其他真正的
-// deprecation / override 问题仍会照常报错。
+// Therefore suppress only these two while including that header, without
+// disabling them globally -- other genuine deprecation / override issues
+// will still be reported as errors as usual.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"
@@ -32,13 +35,15 @@
 #include <kern/clock.h>
 #include <libkern/OSByteOrder.h>
 
-// 页表编码/解码的唯一实现。生产代码与 host 回归测试**包含同一个文件**，
-// 测试跑的就是这里的分支，不是另写一份 Python 复述。
-// 见 tests/pte-core-test.cpp 与 docs/m2-2b-2-round5-result.md。
+// The single implementation of page table encoding/decoding. Production code
+// and the host regression tests **include the same file**, so the tests run
+// exactly these branches rather than a separately written Python restatement.
+// See tests/pte-core-test.cpp and docs/m2-2b-2-round5-result.md.
 #include "amd_iommu_pte_core.hpp"
 
-// OSPtr<T> 的定义取决于 IOKIT_ENABLE_SHARED_PTR（SDK libkern/c++/OSPtr.h）：
-//   定义时 = OSSharedPtr<T>；未定义时 = T*。SDK 默认未定义。
+// The definition of OSPtr<T> depends on IOKIT_ENABLE_SHARED_PTR (SDK
+// libkern/c++/OSPtr.h): defined = OSSharedPtr<T>; undefined = T*.
+// The SDK default is undefined.
 #if defined(IOKIT_ENABLE_SHARED_PTR)
     #define M1A_HAS_SHARED_PTR 1
 #else
@@ -48,22 +53,24 @@
 #include "AMDMapperProbeInternal.hpp"
 
 // ===== AMDMapperProbeDma.cpp (original lines 3087..3116) =====
-// ---- 第七轮：按芯片身份读关闭指针 / 尾指针 ----
+// ---- Round 7: read the close pointer / tail pointer by chip identity ----
 //
-// 第六轮的做法是"探测三个候选寄存器，取第一个非零且 < 1024 的"。
-// 那不是身份判据，是猜测：一个陈旧或无关的寄存器只要恰好读出一个
-// 小数字就会赢得选举。寄存器其实是芯片配置方式的确定性函数，而配置
-// 方式可以从 TxConfig(0x40) 读出来并完全复现驱动的分支：
+// Round 6 "probed three candidate registers and took the first one that was
+// non-zero and < 1024". That is not an identity criterion, it is a guess: any
+// stale or unrelated register that happens to read a small number wins the
+// election. The registers are in fact a deterministic function of how the chip
+// is configured, and that configuration can be read from TxConfig(0x40) to
+// reproduce the driver's branches exactly:
 //
 //   rtl812xIdentifyChip()      RTL812xLucyHardware.cpp:167
 //     reg = TxConfig & 0x7c800000 ; ICVerID = TxConfig & 0x00700000
 //     0x6C800000 + ICVerID 0 -> CFG_METHOD_41 ; 0x100000 -> 42
-//   rtl812xx.cpp:17494-17507   HwSuppTxNoCloseVer（41/42 -> 6）
-//   rtl812xx.cpp:17511-17525   MaxTxDescPtrMask（ver 6 -> 0x7FFFFFFF）
+//   rtl812xx.cpp:17494-17507   HwSuppTxNoCloseVer (41/42 -> 6)
+//   rtl812xx.cpp:17511-17525   MaxTxDescPtrMask (ver 6 -> 0x7FFFFFFF)
 //   rtl812xx.cpp:17214-17232   rtl8125_setup_mqs_reg()
 //     ver 6 -> HW_CLO_PTR0_8125BP = 0x0D34 / SW_TAIL_PTR0_8125BP = 0x0D30
 //   RTL812xLucyHardware.cpp:1178 rtl812xGetHwCloPtr()
-//     ver 3 -> RTL_R16，其余 RTL_R32
+//     ver 3 -> RTL_R16, otherwise RTL_R32
 bool org_example_AMDMapperProbe::m2b2ReadCloPtr(volatile UInt8 *bar,
                                                 UInt32 *out) {
     if (!bar || !out) return false;
@@ -73,7 +80,8 @@ bool org_example_AMDMapperProbe::m2b2ReadCloPtr(volatile UInt8 *bar,
     const UInt32 v = (spec.width == 2)
         ? (UInt32)(*(volatile UInt16 *)(bar + spec.reg))
         : *(volatile UInt32 *)(bar + spec.reg);
-    // 宽度与掩码都必须成立，否则这个样本不可解释。
+    // Both the width and the mask must hold, otherwise this sample is not
+    // interpretable.
     if (!amdobs::cloPtrSampleValid(v, spec.width, spec.mask)) return false;
     *out = v;
     return true;
@@ -91,32 +99,39 @@ bool org_example_AMDMapperProbe::m2b2ReadTailPtr(volatile UInt8 *bar,
 }
 
 // ===== AMDMapperProbeDma.cpp (original lines 3128..3233) =====
-// ---- 第七轮：把描述符里的 (地址, 长度) 收进集合 ----
+// ---- Round 7: collect the (address, length) pairs from descriptors ----
 //
-// 【与第六轮的根本差别】
-//   第六轮在插入前调用 inIdentityRam()，其 RAM_TOP 固定 16 GiB。于是
-//   "16 GiB 及以上的描述符地址"——恰恰是本轮要调查的那一类——在进入
-//   集合之前就被丢掉了。集合随后"证明"fault 不在设备集合内，而它从来
-//   就不可能在里面。
+// [Fundamental difference from round 6]
+//   Round 6 called inIdentityRam() before inserting, with RAM_TOP fixed at
+//   16 GiB. Descriptor addresses "at or above 16 GiB" -- exactly the class
+//   this round investigates -- were therefore discarded before ever entering
+//   the set. The set then "proved" faults were not in the device set, when
+//   they could never have been in it.
 //
-//   有效描述符中的所有非零地址一律记录，无论它在哪里。已注册 fixed TX
-//   环重建留下的空槽除外。能不能读内存由 readVerdict() 独立判定。
+//   Every non-zero address in a valid descriptor is recorded, wherever it
+//   lies. The only exception is empty slots left by a registered fixed-TX
+//   ring rebuild. Whether the memory may be read is decided independently by
+//   readVerdict().
 //
-// 【第八轮：生命周期真的接进来了】
-//   第七轮的版本收下了 tailCum / cloCum 两个参数，然后 `(void)` 掉，
-//   只要能读到关闭指针就把每一条非零地址标成 LIFE_INFLIGHT。第七轮
-//   采集里 tail = clo = 0x6a，也就是队列**已经排空**，而每一条历史
-//   地址仍被报成 in-flight。
+// [Round 8: the lifecycle is really wired in]
+//   Round 7's version accepted the tailCum / cloCum arguments and then
+//   `(void)`-ed them: as long as a close pointer was readable, every non-zero
+//   address was labelled LIFE_INFLIGHT. In round 7's capture tail = clo =
+//   0x6a, i.e. the queue was **already drained**, yet every historical address
+//   was still reported in-flight.
 //
-//   现在逐条按累计索引判定：txSlotCumulative() 给出该槽当前对应的累计
-//   位置，再与关闭指针比较。同一个槽里可能已经是后一代的描述符，所以
-//   生命周期必须按"这个槽现在的描述符"算，不能按"这个槽曾经有过描述符"。
+//   Now each slot is judged by its cumulative index: txSlotCumulative() gives
+//   the cumulative position the slot currently corresponds to, which is then
+//   compared with the close pointer. A slot may already hold a later
+//   generation's descriptor, so the lifecycle must be computed as "the
+//   descriptor this slot holds now", not "the descriptor this slot once held".
 void org_example_AMDMapperProbe::m2b2CollectTxSegments(const UInt8 *ring,
                                                        UInt32 count,
                                                        UInt32 tailCum,
                                                        UInt32 cloCum) {
     if (!ring) return;
-    // 每个描述符最多一段，段数不会超过槽数。分批处理，避免一次申请过大。
+    // One segment per descriptor at most; segment count never exceeds slot
+    // count. Process in batches to avoid one oversized allocation.
     const UInt32 kBatch = 256;
     amdobs::Seg *segs = (amdobs::Seg *)IOMalloc(kBatch * sizeof(amdobs::Seg));
     if (!segs) {
@@ -135,7 +150,7 @@ void org_example_AMDMapperProbe::m2b2CollectTxSegments(const UInt8 *ring,
             const UInt32 slot = done + k;
             const UInt8 *d = ring + (UInt64)slot * amdobs::TX_DESC_STRIDE;
             const UInt64 addr = amdobs::rd64(d + 8);
-            if (addr == 0) continue;          // 从未编程：不是 DMA 目标
+            if (addr == 0) continue;          // never programmed: not a DMA target
             const UInt32 opts1 = amdobs::rd32(d);
             // The fixed-object entry rebuild clears opts1 but retains the
             // old address. Such an empty slot is not a current DMA span.
@@ -146,9 +161,11 @@ void org_example_AMDMapperProbe::m2b2CollectTxSegments(const UInt8 *ring,
             const bool tso =
                 (opts1 & (amdobs::TX_DESC_LARGESEND | amdobs::TX_DESC_GSO4 |
                           amdobs::TX_DESC_GSO6)) != 0;
-            // 【第八轮】TSO 的 16 位字段是 MSS 不是长度；零长度也无法
-            // 表达。两者都只能给一个**界**，必须打上 LEN_UNKNOWN，使
-            // 它不能参与精确覆盖的论证。第七轮直接把 0x1000 当成真长度。
+            // [Round 8] TSO's 16-bit field is the MSS, not a length; a zero
+            // length cannot be expressed either. Both can only yield a
+            // **bound**, which must be marked LEN_UNKNOWN so it cannot take
+            // part in exact-coverage arguments. Round 7 simply treated 0x1000
+            // as the true length.
             UInt32 flags = 0;
             if (tso) {
                 flags |= amdobs::RANGE_LEN_UNKNOWN | amdobs::RANGE_FROM_TSO;
@@ -162,13 +179,16 @@ void org_example_AMDMapperProbe::m2b2CollectTxSegments(const UInt8 *ring,
             segs[used].flags = flags;
             segs[used].pad = 0;
             used++;
-            // 【第八轮】逐槽生命周期，而不是"有关闭指针就全标 in-flight"。
+            // [Round 8] Per-slot lifecycle, not "close pointer present ->
+            // label everything in-flight".
             const UInt32 life = amdobs::txSlotLifecycle(
                 slot, tailCum, cloCum, 1024, mask, fM22b2Dma.haveCloPtr);
             if (life < 4) lifeCounts[life]++;
         }
-        // insertSegments 每批只能给一个 lifecycle。取**最保守**的那个：
-        // 只要有一条不确定，整批就不说成在途。逐条计数另行发布。
+        // insertSegments accepts a single lifecycle per batch. Take the
+        // **most conservative** one: if any record is uncertain, the whole
+        // batch is not claimed in-flight. Per-record counts are published
+        // separately.
         UInt32 life;
         if (!fM22b2Dma.haveCloPtr) {
             life = amdobs::LIFE_SNAPSHOT;
@@ -182,8 +202,9 @@ void org_example_AMDMapperProbe::m2b2CollectTxSegments(const UInt8 *ring,
                    !lifeCounts[amdobs::LIFE_INFLIGHT]) {
             life = amdobs::LIFE_COMPLETED;
         } else {
-            // 混合：既有在途又有已交还。用 snapshot 表示"这一批不能
-            // 用一个词概括"，而不是挑一个好看的。
+            // Mixed: both in-flight and returned records. Use snapshot to
+            // mean "this batch cannot be summarized in one word" instead of
+            // picking the flattering label.
             life = amdobs::LIFE_SNAPSHOT;
         }
         amdobs::insertSegments(fM22b2AddrSet, segs, used, amdobs::PURP_TX_BUF,
@@ -192,7 +213,8 @@ void org_example_AMDMapperProbe::m2b2CollectTxSegments(const UInt8 *ring,
     }
     IOFree(segs, kBatch * sizeof(amdobs::Seg));
 
-    // 逐类计数单独发布，使"混合"这个结论可被外部核对。
+    // Per-class counts are published separately, making the "mixed" conclusion
+    // externally checkable.
     setHexProperty(this, "m2-b2-dma-tx-life-inflight",
                    (UInt64)lifeCounts[amdobs::LIFE_INFLIGHT]);
     setHexProperty(this, "m2-b2-dma-tx-life-completed",
@@ -223,13 +245,16 @@ void org_example_AMDMapperProbe::m2b2CollectRxSegments(const UInt8 *ring,
             const UInt8 *d = ring + (UInt64)slot * amdobs::RX_DESC_STRIDE;
             const UInt64 addr = amdobs::rd64(d + 8);
             if (addr == 0) continue;
-            // RX 描述符的 blen 低 16 位是缓冲长度；驱动恒填 kRxBufferSize。
+            // For RX descriptors the low 16 bits of blen are the buffer
+            // length; the driver always fills kRxBufferSize.
             const UInt32 blen = amdobs::rd32(d);
             UInt32 len = blen & 0xFFFF;
             UInt32 flags = 0;
             if (len == 0) {
-                // 驱动恒填 kRxBufferSize，读到 0 说明这条不是有效描述符。
-                // 仍然记录地址（可能是设备正在用的），但长度只能给界。
+                // The driver always fills kRxBufferSize; reading 0 means this
+                // is not a valid descriptor. The address is still recorded (it
+                // may be in use by the device), but the length can only be a
+                // bound.
                 len = 0x1000;
                 flags |= amdobs::RANGE_LEN_UNKNOWN;
             }
@@ -247,29 +272,39 @@ void org_example_AMDMapperProbe::m2b2CollectRxSegments(const UInt8 *ring,
 }
 
 // ===== AMDMapperProbeDma.cpp (original lines 3277..3495) =====
-// ---- 第八轮：窗口结束后的描述符生命周期扫描 ----
+// ---- Round 8: post-window descriptor lifecycle scan ----
 //
-// 【为什么必须单独一个函数，而不能复用窗口前那次采集】
+// [Why a separate function is required, rather than reusing the pre-window
+// capture]
 //
-//   窗口前那次采集只知道"窗口开始时环里有什么"。它无法回答本轮的核心
-//   问题：**窗口内提交的那几个描述符，各自的地址、长度、代次、完成状态
-//   是什么**。
+//   The pre-window capture only knows "what was in the ring when the window
+//   opened". It cannot answer this round's core question: **for the
+//   descriptors submitted during the window, what are their addresses,
+//   lengths, generations and completion states**.
 //
-//   窗口两端的两个累计指针正好给出这个集合：[tailBefore, tailAfter) 就是
-//   窗口内提交的全部累计索引。逐条走一遍，每条都能落到具体槽位与代次。
+//   The two cumulative pointers at the window edges give exactly this set:
+//   [tailBefore, tailAfter) is every cumulative index submitted within the
+//   window. Walking it one by one resolves each entry to a concrete slot and
+//   generation.
 //
-// 【为什么必须在窗口之后读】
-//   完成状态由窗口结束时的关闭指针决定。窗口中间读只能得到中间态。
+// [Why it must be read after the window]
+//   Completion state is determined by the close pointer at window end. A read
+//   mid-window yields only an intermediate state.
 //
-// 【并发条件与局限】（诚实列出，不藏在实现里）
-//   - 读环时设备可能仍在写。但 [tailBefore, tailAfter) 之外的描述符不在
-//     我们的遍历范围内，而范围内的描述符不会被改写：驱动只有提交新描述符
-//     时才会改写槽位，那会把尾指针推过它。
-//   - 驱动从不清除已完成描述符的地址字段，所以已完成的窗口描述符的字节
-//     会一直保留到该槽被复用。这正是 txWindowCoverageOf() 里
-//     `submits < ringSize` 这个条件的作用。
-//   - 若窗口提交量达到环大小，最早的那几条已被覆盖。它们被计入
-//     winOverwritten，不会被悄悄丢掉。
+// [Concurrency conditions and limitations] (listed honestly, not hidden in the
+// implementation)
+//   - The device may still be writing while we read the ring. But descriptors
+//     outside [tailBefore, tailAfter) are not in our traversal range, and
+//     descriptors inside it are not rewritten: the driver only rewrites a slot
+//     when submitting a new descriptor, which would push the tail pointer past
+//     it.
+//   - The driver never clears the address field of completed descriptors, so
+//     the bytes of completed window descriptors persist until that slot is
+//     reused. That is what the `submits < ringSize` condition in
+//     txWindowCoverageOf() is for.
+//   - If window submissions reach the ring size, the earliest entries have
+//     already been overwritten. They are counted in winOverwritten rather
+//     than silently dropped.
 void org_example_AMDMapperProbe::m2b2ScanTxWindowAfter(const UInt8 *ring,
                                                        UInt32 count) {
     fM22b2Dma.winSubmits = fM22b2Dma.winCompletes = 0;
@@ -308,15 +343,19 @@ void org_example_AMDMapperProbe::m2b2ScanTxWindowAfter(const UInt8 *ring,
 
     fM22b2Dma.tWinScanStart = m2b2NowNS();
 
-    // 【第九轮】窗口记录用**独立的**保存容量。
+    // [Round 9] Window records use **dedicated** storage capacity.
     //
-    //   第八轮把窗口内那几条描述符塞进与几千条历史 RX/TX 快照共用的
-    //   AddrSet（容量 64）。历史快照先填满，窗口记录就被丢进 dropped——
-    //   于是"窗口内 3 条提交"可能在集合里一条都没有，而 dropped 只是
-    //   变大。小规模受控操作的记录必须独立，否则它永远排在最后。
+    //   Round 8 pushed the handful of window descriptors into the same
+    //   AddrSet (capacity 64) shared with thousands of historical RX/TX
+    //   snapshots. The snapshots filled it first and the window records landed
+    //   in dropped -- so "3 submissions within the window" could have zero
+    //   entries in the set while dropped merely grew. Records of small
+    //   controlled operations must be independent, otherwise they are always
+    //   queued last.
     //
-    //   现在窗口记录写进 fM22b2WinSet，容量与快照集合分开，分析器可以
-    //   分别核对两者的记账不变式。
+    //   Window records now go to fM22b2WinSet with capacity separate from the
+    //   snapshot set, letting the analyser check both accounting invariants
+    //   independently.
     const UInt32 kBatch = 256;
     amdobs::Seg *segs = (amdobs::Seg *)IOMalloc(kBatch * sizeof(amdobs::Seg));
     UInt32 used = 0;
@@ -337,16 +376,18 @@ void org_example_AMDMapperProbe::m2b2ScanTxWindowAfter(const UInt8 *ring,
                     segs[used].pad = 0;
                     used++;
                 } else {
-                    // 保存容量用尽：这条描述符**存在且可解码**，但没能留下
-                    // 记录。它必须计入 recordsLost，使覆盖资格被撤回，
-                    // 而不是静默消失。
+                    // Storage exhausted: this descriptor **exists and is
+                    // decodable**, but no record could be kept. It must be
+                    // counted in recordsLost so coverage eligibility is
+                    // withdrawn instead of silently vanishing.
                     recordsLost++;
                 }
             }
             if (d.lifecycle < 4) lifeCounts[d.lifecycle]++;
         });
 
-    // 窗口内的描述符按"窗口内提交"记录。lifecycle 取最保守值。
+    // Window descriptors are recorded as "submitted within the window".
+    // lifecycle takes the most conservative value.
     if (segs && used) {
         UInt32 life;
         if (lifeCounts[amdobs::LIFE_SNAPSHOT] ||
@@ -388,18 +429,21 @@ void org_example_AMDMapperProbe::m2b2ScanTxWindowAfter(const UInt8 *ring,
         fM22b2Dma.winFirstCompletedGen = sc.firstCompletedGen;
     }
 
-    // 【第九轮】扫描质量决定覆盖资格。
+    // [Round 9] Scan quality decides coverage eligibility.
     //
-    //   第八轮把计数器都发出来了，但 covered 只看指针算术：扫描提前停止、
-    //   记录丢失、长度不可解码，全都不影响 tx-window-covered = yes。
-    //   现在这些都会撤回资格——"发出来了"与"算进去了"是两件事。
+    //   Round 8 published the counters, but covered only looked at pointer
+    //   arithmetic: an early scan stop, lost records, undecodable lengths --
+    //   none affected tx-window-covered = yes. Now all of them withdraw
+    //   eligibility -- "it was published" and "it was accounted" are two
+    //   different things.
     const amdobs::TxWindowQuality q =
         amdobs::txWindowQualityOf(sc, recordsLost);
     fM22b2Dma.winExact = q.exact;
     fM22b2Dma.winQualityName = amdobs::txWindowQualityName(q);
     const bool eligible = sc.coverage.covered && q.exact;
 
-    // TX 缓冲路径的覆盖只在这里成立，而且只在这一个路径上。
+    // Coverage of the TX buffer path holds only here, and only on this one
+    // path.
     fM22b2Dma.pathCov.set(amdobs::PATH_TX_BUF,
                           eligible ? amdobs::COV_WINDOW
                                    : amdobs::COV_SNAPSHOT);
@@ -443,7 +487,8 @@ void org_example_AMDMapperProbe::m2b2ScanTxWindowAfter(const UInt8 *ring,
     setProperty("m2-b2-dma-tx-window-covered",
                 eligible ? "yes" : "no");
 
-    // 窗口集合的记账（与快照集合分开核对）。
+    // Accounting for the window set (checked separately from the snapshot
+    // set).
     setHexProperty(this, "m2-b2-winset-ranges",
                    (UInt64)fM22b2WinSet.n);
     setHexProperty(this, "m2-b2-winset-raw-offered",
@@ -506,8 +551,10 @@ void org_example_AMDMapperProbe::m2b2PublishDmaDefaults() {
     setHexProperty(this, "m2-b2-dma-t-obs-after", fM22b2Dma.tObsAfter);
     setHexProperty(this, "m2-b2-dma-t-clo-before", fM22b2Dma.tCloBefore);
 
-    // 【第八轮】SKIP 路径同样发布逐路径覆盖与窗口扫描字段，且明确标注
-    // 为未观察。否则分析器只能报"字段缺失"，而事实是"观察跑了但没走完"。
+    // [Round 8] The SKIP path also publishes per-path coverage and window scan
+    // fields, explicitly marked as not observed. Otherwise the analyser can
+    // only report "field missing" when the fact is "the observation ran but did
+    // not complete".
     setProperty("m2-b2-dma-cov-txring", "none");
     setProperty("m2-b2-dma-cov-rxring", "none");
     setProperty("m2-b2-dma-cov-txbuf", "none");
@@ -539,11 +586,13 @@ void org_example_AMDMapperProbe::m2b2PublishDmaDefaults() {
     setHexProperty(this, "m2-b2-dma-tx-life-snapshot", 0);
     setHexProperty(this, "m2-b2-dma-tx-life-unknown", 0);
 
-    // 【第九轮】SKIP 路径也必须发布窗口质量、边界位置与驱动日志字段。
+    // [Round 9] The SKIP path must also publish window quality, boundary
+    // positions and driver-log fields.
     //
-    // 理由同上一段：分析器需要能区分"这一项不适用"与"这一项缺失"。
-    // 缺失只能报 CANNOT ANALYSE，而那等于说"我没有数据"——事实是
-    // "观察没走完，原因如下"。
+    // Same reasoning as above: the analyser needs to distinguish "not
+    // applicable" from "missing". Missing can only be reported as CANNOT
+    // ANALYSE, which amounts to "I have no data" -- when the fact is "the
+    // observation did not complete, and here is why".
     setProperty("m2-b2-dma-win-quality", "not-run");
     setProperty("m2-b2-dma-win-exact", "no");
     setHexProperty(this, "m2-b2-dma-win-records-lost", 0);
@@ -646,20 +695,24 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
     fM22b2Dma.haveDoneDelta = false;
     fM22b2Dma.skipReason = nullptr;
 
-    // 时间边界：单调纳秒，便于与窗口起止逐项核对。
+    // Time boundaries: monotonic nanoseconds, easy to check item by item
+    // against the window start/end.
     fM22b2Dma.tObsBefore = m2b2NowNS();
 
     setProperty("m2-b2-dma-obs", "started");
 
-    // ---- 0. 物理布局策略 ----
+    // ---- 0. Physical layout policy ----
     //
-    // 【第七轮】这里只建立"能不能读"的判据，**不**参与记录。
-    // 恒等映射上限是 16 GiB（M2-2b-2 的覆盖范围），它不是 RAM 上限；
-    // 第六轮把它当成 RAM 上限去做记录过滤，正是本轮要修的错误之一。
+    // [Round 7] Only the "may this be read" criterion is established here;
+    // it does **not** participate in recording. The identity-mapping ceiling is
+    // 16 GiB (M2-2b-2's coverage), not a RAM ceiling. Round 6 treated it as a
+    // RAM ceiling and filtered records with it -- one of the errors this round
+    // fixes.
     //
-    // layoutKnown 保持 false：本轮没有取得与**本次启动**对应的权威
-    // 物理布局，所以任何地址都不解引用，但一律记录。这是诚实的做法：
-    // 宁可少读一块内存，也不要把一个猜出来的布局当成事实。
+    // layoutKnown stays false: this round obtained no authoritative physical
+    // layout matching **this boot**, so no address is dereferenced, but all are
+    // recorded. That is the honest choice: rather read less memory than treat
+    // a guessed layout as fact.
     fM22b2Policy = amdobs::defaultMapPolicy();
     fM22b2Policy.limit = M2B2_IDENTITY_LIMIT;
     fM22b2Policy.layoutKnown = false;
@@ -669,10 +722,11 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
     setProperty("m2-b2-dma-layout-source",
                 "no authoritative per-boot physical layout was captured");
 
-    // ---- 1. 找网卡的 IOPCIDevice ----
+    // ---- 1. Find the NIC's IOPCIDevice ----
     //
-    // IOPCIDevice 在 SDK 里被标了 __kpi_deprecated("Use PCIDriverKit")，
-    // 而本工程用 -Werror 编译，所以必须局部压掉这条诊断。
+    // IOPCIDevice is marked __kpi_deprecated("Use PCIDriverKit") in the SDK,
+    // and this project builds with -Werror, so the diagnostic must be
+    // suppressed locally.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     IOPCIDevice *nic = nullptr;
@@ -692,12 +746,13 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
         return;
     }
 
-    // ---- 2. 取 BAR2 的物理区间并只读映射 ----
+    // ---- 2. Get BAR2's physical range and map it read-only ----
     //
-    // 【v0.21.7 修正：必须按配置寄存器取，不能按数组索引取】
-    // getDeviceMemoryWithIndex(2) 是设备内存数组的第 3 个元素，不是 BAR2；
-    // 实测返回 {0xfc860000,0x4000} 而真正的 BAR2 是 {0xfc800000,0x40000}。
-    // 正确接口是 getDeviceMemoryWithRegister()。
+    // [v0.21.7 fix: must be fetched by config register, not by array index]
+    // getDeviceMemoryWithIndex(2) is the 3rd element of the device memory
+    // array, not BAR2; in testing it returned {0xfc860000,0x4000} while the
+    // real BAR2 is {0xfc800000,0x40000}. The correct interface is
+    // getDeviceMemoryWithRegister().
     IODeviceMemory *dm =
         nic->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);
     if (!dm) {
@@ -741,11 +796,14 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
     fM22b2Dma.barLen = (UInt64)barSize;
     setProperty("m2-b2-dma-obs", "bar-mapped-readonly");
 
-    // ---- 3. 芯片身份：关闭指针的寄存器由它推导，不靠选举 ----
+    // ---- 3. Chip identity: the close-pointer registers are derived from it,
+    //      not elected ----
     //
-    // 第六轮"取第一个非零且 < 1024 的候选寄存器"不是身份判据。寄存器是
-    // 芯片配置方式的确定性函数，而配置方式可以从 TxConfig(0x40) 读出
-    // 并完全复现驱动的分支（见 amd_iommu_dma_observe.hpp 的推导注释）。
+    // Round 6's "take the first candidate register that is non-zero and
+    // < 1024" is not an identity criterion. The registers are a deterministic
+    // function of how the chip is configured, and that configuration can be
+    // read from TxConfig(0x40) to reproduce the driver's branches exactly (see
+    // the derivation comment in amd_iommu_dma_observe.hpp).
     {
         const UInt32 txConfig = *(volatile UInt32 *)(bar + amdobs::REG_TX_CONFIG);
         const amdobs::ChipId chip = amdobs::identifyChip(txConfig);
@@ -771,10 +829,11 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
                                : "unknown-chip-no-register");
     }
 
-    // ---- 4. 读设备自己的 DMA 基址寄存器 ----
+    // ---- 4. Read the device's own DMA base registers ----
     //
-    // 这些是驱动写进去、硬件照着访问的地址。读它们等于问设备
-    // "你现在在访问哪些内存"，与驱动走不走 mapper 无关。
+    // These are addresses the driver wrote and the hardware accesses by. To
+    // read them is to ask the device "which memory are you accessing now",
+    // regardless of whether the driver goes through the mapper.
     m2b2ReadBar64(bar, amdobs::REG_TX_DESC_LOW, amdobs::REG_TX_DESC_HIGH,
                   &fM22b2Dma.txRingBase);
     fM22b2Dma.haveTxRing = (fM22b2Dma.txRingBase != 0);
@@ -785,7 +844,8 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
                   &fM22b2Dma.counterAddr);
     fM22b2Dma.haveCounter = (fM22b2Dma.counterAddr != 0);
 
-    // 关闭指针与尾指针：按推导出的寄存器读，并记录时刻。
+    // Close and tail pointers: read from the derived registers, with the
+    // reading time recorded.
     {
         UInt32 v = 0;
         if (m2b2ReadCloPtr(bar, &v)) {
@@ -815,13 +875,15 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
     setProperty("m2-b2-dma-rx-ring-src",
                 fM22b2Dma.haveRxRing ? "register" : "zero-not-programmed");
 
-    // ---- 5. 建立地址集合 ----
+    // ---- 5. Build the address sets ----
     //
-    // 【第七轮】所有地址一律记录。能不能读由 readVerdict 单独判定。
+    // [Round 7] All addresses are recorded unconditionally. Whether they may
+    // be read is decided separately by readVerdict.
     //
-    // 【第九轮】窗口记录用独立的集合，这里清空的是快照集合，窗口集合在
-    // 窗口扫描时清空。两者容量分开，小规模受控操作不会排在几千条历史
-    // 快照之后被丢掉。
+    // [Round 9] Window records use a dedicated set; what is cleared here is
+    // the snapshot set, and the window set is cleared at window scan time.
+    // Their capacities are separate, so records of small controlled operations
+    // are no longer dropped behind thousands of historical snapshots.
     amdobs::AddrSet &set = fM22b2AddrSet;
     set.clear();
     fM22b2WinSet.clear();
@@ -848,7 +910,8 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
     setHexProperty(this, "m2-b2-dma-tx-ring-read-pa", txBacking ? txReadPA : 0);
     setHexProperty(this, "m2-b2-dma-rx-ring-read-pa", rxBacking ? rxReadPA : 0);
 
-    // 环与统计缓冲的地址**无条件登记**。它们是设备确定会访问的内存。
+    // Ring and statistics-buffer addresses are registered **unconditionally**.
+    // They are memory the device is certain to access.
     if (fM22b2Dma.haveTxRing) {
         set.insert(fM22b2Dma.txRingBase, kTxDescBytes, amdobs::PURP_TX_RING,
                    amdobs::LIFE_INFLIGHT, txReadVerdict);
@@ -867,8 +930,9 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
         setHexProperty(this, "m2-b2-dma-stat-base", fM22b2Dma.statBase);
     }
 
-    // 映射环内存的**独立**判据：这里才用 readVerdict，且只用于决定是否
-    // 去读描述符。记录已经完成，读失败不影响归属集合。
+    // **Separate** criterion for mapping ring memory: readVerdict is used only
+    // here, and only to decide whether to read the descriptors. Recording is
+    // already complete; a failed read does not affect set membership.
     {
         const char *whyTx = nullptr;
         const bool txOk =
@@ -887,7 +951,8 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
         if (!txOk && fM22b2Dma.haveTxRing) {
             setProperty("m2-b2-dma-tx-ring-why",
                         whyTx ? whyTx : "not readable under current policy");
-            // 环地址已记录，但内容读不到 -> 无法枚举描述符 -> 这些槽未扫描。
+            // Ring address recorded, but its contents unreadable -> cannot
+            // enumerate descriptors -> these slots are unscanned.
             fM22b2Dma.unscanned += 1024;
         }
         if (!rxOk && fM22b2Dma.haveRxRing) {
@@ -902,21 +967,28 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
         if (!rxOk) fM22b2Dma.haveRxRing = false;
     }
 
-    // ---- 5b. 读环内存的依据：指纹必须真的能失败 ----
+    // ---- 5b. Grounds for reading ring memory: the fingerprint must be able
+    //      to fail for real ----
     //
-    // 【第八轮】第七轮的放行条件是"设备寄存器说它用这个地址"。那只能
-    // 证明**设备被编程**使用它，不能证明：这块内存仍是驱动的环对象、
-    // 仍存活、以及这个 PA 映射到它。读错 PA 会 panic，所以那个理由少
-    // 了一步。
+    // [Round 8] Round 7's admission condition was "the device register says it
+    // uses this address". That proves only that the **device was programmed**
+    // to use it -- not that this memory is still the driver's ring object, is
+    // still alive, or that this PA maps to it. Reading a wrong PA panics, so
+    // that reasoning was one step short.
     //
-    // 没有注册对象的普通路径只能根据内容与驱动构造的环是否一致判断：
-    //   - RX 环的最后一个描述符带 RingEnd（驱动在 setup 时写死，
-    //     之后从不清除），这是结构指纹；
-    //   - TX 环的地址非零、长度字段在 16 位内或带 TSO 位。
-    // 一页随机内存不会满足"RingEnd 恰好在最后一槽"。这是真能失败的检查。
+    // The unregistered general path can only judge by whether the contents
+    // match a ring the driver would have constructed:
+    //   - The RX ring's last descriptor carries RingEnd (written once at setup
+    //     and never cleared) -- a structural fingerprint;
+    //   - TX ring addresses are non-zero with length fields within 16 bits or
+    //     carrying the TSO bit.
+    // A page of random memory will not satisfy "RingEnd exactly in the last
+    // slot". This is a check that can genuinely fail.
     //
-    // 普通路径的指纹不通过时，保留地址但停止扫描。Native fixed TX 已由
-    // 注册对象、原 PA 和活映射确认身份，重建后的空环不依赖历史内容指纹。
+    // When the general path's fingerprint fails, the address is kept but the
+    // scan stops. Native fixed TX identity is already confirmed by the
+    // registered object, its original PA and a live mapping; a rebuilt empty
+    // ring does not depend on historical content fingerprints.
     {
         fM22b2Dma.txRingBasis = amdobs::RB_NONE;
         fM22b2Dma.rxRingBasis = amdobs::RB_NONE;
@@ -928,10 +1000,12 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
         setProperty("m2-b2-dma-rx-ring-basis", "none");
     }
 
-    // ---- 6. 读描述符环，按实际格式收集 (地址, 长度) ----
+    // ---- 6. Read the descriptor rings, collecting (address, length) in the
+    //      actual formats ----
     //
-    // 这一步是核心：描述符里的 addr 字段就是设备下一次 DMA 的目标，
-    // 长度字段给出这段 DMA 的真实大小（不再一律按一页近似）。
+    // This is the core step: a descriptor's addr field is the target of the
+    // device's next DMA, and the length field gives the real size of that DMA
+    // (no longer approximated as one page across the board).
     if (fM22b2Dma.haveTxRing) {
         IOMemoryDescriptor *ringMd =
             IOMemoryDescriptor::withPhysicalAddress(txReadPA,
@@ -943,7 +1017,8 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
                 const UInt8 *rb =
                     (const UInt8 *)(uintptr_t)rm->getVirtualAddress();
 
-                // 指纹：内容是否真的像驱动构出来的 TX 环。
+                // Fingerprint: whether the contents really look like a
+                // driver-constructed TX ring.
                 const amdobs::TxRingFingerprint fp =
                     amdobs::txRingFingerprint(rb, 1024);
                 const bool registeredTx = fR31Session && txBacking;
@@ -977,7 +1052,8 @@ void org_example_AMDMapperProbe::observeDeviceDma() {
                 fM22b2Dma.txFirstAddr = ts.firstAddr;
                 fM22b2Dma.txDoneWithAddrBefore = ts.doneWithAddr;
 
-                // 原始三字段导出：判断 stride / 环基址 / 长度字段是否对。
+                // Raw three-field export: to judge whether stride / ring base /
+                // length field are right.
                 for (UInt32 di = 0; di < 8; di++) {
                     const UInt8 *dd =
                         rb + (UInt64)di * amdobs::TX_DESC_STRIDE;
@@ -1018,9 +1094,10 @@ afterTxRing:
                 const UInt8 *rb =
                     (const UInt8 *)(uintptr_t)rm->getVirtualAddress();
 
-                // 指纹：驱动在 setup 时把 RingEnd 写进最后一个描述符，
-                // 之后从不清除。它出现在那个位置，是"这块 PA 就是 RX 环"
-                // 目前能取得的最强证据。
+                // Fingerprint: the driver writes RingEnd into the last
+                // descriptor at setup and never clears it afterwards. Its
+                // presence at that position is the strongest currently
+                // obtainable evidence that "this PA is the RX ring".
                 const amdobs::RxRingFingerprint fp =
                     amdobs::rxRingFingerprint(rb, 1024);
                 fM22b2Dma.rxRingRingEndAtLast = fp.ringEndAtLast;
@@ -1072,7 +1149,7 @@ afterRxRing:
     fM22b2Dma.envLo = set.envLo;
     fM22b2Dma.envHi = set.envHi;
 
-    // 读取许可统计：记录每条区间为什么可读 / 不可读。
+    // Read-permission statistics: record why each range is / is not readable.
     for (UInt32 i = 0; i < set.n; i++) {
         if (set.r[i].readable == amdobs::RD_OK) fM22b2Dma.readOkCount++;
         else if (set.r[i].readable == amdobs::RD_OUT_OF_MAP)
@@ -1081,11 +1158,14 @@ afterRxRing:
             fM22b2Dma.readNotRamCount++;
     }
 
-    // 覆盖范围：一次快照。窗口覆盖要等窗口结束后由尾指针推进量判定。
+    // Coverage: one snapshot. Window coverage awaits the tail-pointer delta
+    // after the window ends.
     //
-    // 【第八轮】逐路径初始化。此刻所有路径都只有快照；TX 缓冲路径的
-    // 整窗覆盖要等窗口结束后的 m2b2ScanTxWindowAfter() 才能成立。
-    // 环与统计缓冲**不会**获得整窗覆盖：我们没有对它们做窗口论证。
+    // [Round 8] Per-path initialization. At this moment every path has only a
+    // snapshot; whole-window coverage of the TX buffer path only becomes
+    // claimable after m2b2ScanTxWindowAfter() runs post-window. Rings and the
+    // statistics buffer **do not** gain whole-window coverage: we make no
+    // window argument for them.
     fM22b2Dma.pathCov.clear();
     fM22b2Dma.pathCov.set(amdobs::PATH_TX_RING, amdobs::COV_SNAPSHOT);
     fM22b2Dma.pathCov.set(amdobs::PATH_RX_RING, amdobs::COV_SNAPSHOT);
@@ -1096,7 +1176,7 @@ afterRxRing:
 
     fM22b2Dma.tObsAfter = m2b2NowNS();
 
-    // ---- 7. 发布结果 ----
+    // ---- 7. Publish the results ----
     setHexProperty(this, "m2-b2-dma-tx-slots", fM22b2Dma.txSlots);
     setHexProperty(this, "m2-b2-dma-tx-owned", fM22b2Dma.txOwned);
     setHexProperty(this, "m2-b2-dma-tx-done", fM22b2Dma.txDone);
@@ -1111,7 +1191,7 @@ afterRxRing:
     setHexProperty(this, "m2-b2-dma-rx-zeroaddr", fM22b2Dma.rxAddrZero);
     setHexProperty(this, "m2-b2-dma-rx-firstaddr", fM22b2Dma.rxFirstAddr);
 
-    // 五类计数分开发布，互不混用。
+    // The five counter classes are published separately and never mixed.
     setHexProperty(this, "m2-b2-dma-ranges", fM22b2Dma.ranges);
     setHexProperty(this, "m2-b2-dma-dropped", fM22b2Dma.dropped);
     setHexProperty(this, "m2-b2-dma-raw-offered", fM22b2Dma.rawOffered);
@@ -1133,9 +1213,10 @@ afterRxRing:
     setHexProperty(this, "m2-b2-dma-t-obs-after", fM22b2Dma.tObsAfter);
     setHexProperty(this, "m2-b2-dma-t-clo-before", fM22b2Dma.tCloBefore);
 
-    // 【第八轮】逐路径覆盖状态单独发布。
-    // 一个总的 coverage 值不足以表达"TX 完整、RX 只是快照"，
-    // 而把后者当前者用，正是第七轮过度概括的位置。
+    // [Round 8] Per-path coverage state is published separately.
+    // A single coverage value cannot express "TX complete, RX snapshot only",
+    // and using the latter as the former is exactly where round 7
+    // over-generalized.
     setProperty("m2-b2-dma-cov-txring",
                 amdobs::coverageName(fM22b2Dma.pathCov.txRing));
     setProperty("m2-b2-dma-cov-rxring",
@@ -1151,7 +1232,7 @@ afterRxRing:
     setProperty("m2-b2-dma-cov-all-window",
                 fM22b2Dma.pathCov.allWindow() ? "yes" : "no");
 
-    // 【第八轮】读环内存的依据逐项发布。
+    // [Round 8] The grounds for reading ring memory are published item by item.
     setProperty("m2-b2-dma-tx-ring-basis",
                 amdobs::ringBasisName(fM22b2Dma.txRingBasis));
     setProperty("m2-b2-dma-rx-ring-basis",
@@ -1160,11 +1241,12 @@ afterRxRing:
                    (UInt64)fM22b2Dma.txRingDecoded);
     setHexProperty(this, "m2-b2-dma-rx-ring-ringend-at-last",
                    (UInt64)fM22b2Dma.rxRingRingEndAtLast);
-    // 长度无法解码的区间数：非零时不得作精确覆盖的否定。
+    // Number of ranges whose length could not be decoded: when non-zero, exact
+    // coverage must not be claimed negatively.
     setHexProperty(this, "m2-b2-dma-len-unknown",
                    (UInt64)set.savedLenUnknown);
 
-    // 区间明细（有限条数，避免属性爆炸）
+    // Range details (bounded count, to avoid a property explosion)
     for (UInt32 i = 0; i < set.n && i < 16; i++) {
         char k[56];
         snprintf(k, sizeof(k), "m2-b2-dma-range%u-base", i);

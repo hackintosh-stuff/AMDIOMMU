@@ -13,17 +13,20 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
-// IOPCIDevice.h 在 SDK 里自身会触发两个 -Werror 级警告：
-//   1. IOPCIDevice 被标 __kpi_deprecated("Use PCIDriverKit")
-//   2. 其内部的 setProperty 重载未标 override（-Winconsistent-missing-override）
+// IOPCIDevice.h itself triggers two -Werror-level warnings from within the SDK:
+//   1. IOPCIDevice is marked __kpi_deprecated("Use PCIDriverKit")
+//   2. Its internal setProperty overload is not marked override (-Winconsistent-missing-override)
 //
-// 这两条都是 **Apple 头文件自身的问题**，不是本项目的代码缺陷：
-//   - PCIDriverKit 是用户态 DriverKit 框架，无法实现 IOMapper 子类，
-//     本项目必须是内核内 IOKit kext，只能用 IOPCIDevice。
-//   - override 警告来自 SDK 声明，我们无法也不应修改 SDK 头。
+// Both are **problems in Apple's own headers**, not defects in this project's code:
+//   - PCIDriverKit is a userspace DriverKit framework and cannot implement an
+//     IOMapper subclass; this project must be an in-kernel IOKit kext and can
+//     only use IOPCIDevice.
+//   - The override warning comes from SDK declarations; we cannot and should
+//     not modify SDK headers.
 //
-// 因此仅在包含该头时抑制这两条，不全局关闭——其他真正的
-// deprecation / override 问题仍会照常报错。
+// Therefore suppress only these two while including that header, without
+// disabling them globally -- other genuine deprecation / override issues
+// will still be reported as errors as usual.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"
@@ -36,16 +39,20 @@
 #include <kern/clock.h>
 #include <libkern/OSByteOrder.h>
 
-// 页表编码/解码的唯一实现。生产代码与 host 回归测试**包含同一个文件**，
-// 测试跑的就是这里的分支，不是另写一份 Python 复述。
-// 见 tests/pte-core-test.cpp 与 docs/m2-2b-2-round5-result.md。
+// The single implementation of page table encoding/decoding. Production code
+// and the host regression tests **include the same file**, so the tests run
+// exactly these branches rather than a separately written Python restatement.
+// See tests/pte-core-test.cpp and docs/m2-2b-2-round5-result.md.
 #include "amd_iommu_pte_core.hpp"
-// 【第十二轮】整段业务区间走表的核心。与 host 回归编译**同一份**文件，
-// 所以"生产走表"与"测试走表"不是两份互相印证的实现。
+// [Round 12] The core of walking whole business ranges with the page table.
+// Compiled with the host regression from **the same file**, so "production
+// walking" and "test walking" are not two implementations corroborating each
+// other.
 #include "amd_iommu_bizwalk_core.hpp"
 
-// OSPtr<T> 的定义取决于 IOKIT_ENABLE_SHARED_PTR（SDK libkern/c++/OSPtr.h）：
-//   定义时 = OSSharedPtr<T>；未定义时 = T*。SDK 默认未定义。
+// The definition of OSPtr<T> depends on IOKIT_ENABLE_SHARED_PTR (SDK
+// libkern/c++/OSPtr.h): defined = OSSharedPtr<T>; undefined = T*.
+// The SDK default is undefined.
 #if defined(IOKIT_ENABLE_SHARED_PTR)
     #define M1A_HAS_SHARED_PTR 1
 #else
@@ -133,14 +140,17 @@ bool org_example_AMDMapperProbe::scheduleM22b2() {
     }
     setProperty("m2-b2-gate", "open");
 
-    // 叶子页大小模式：amdiommu=pgt4k 选 4 KiB，amdiommu=pgt 选 2 MiB 大页。
-    // 用同一个 boot-arg 的两个取值，避免依赖第二个参数
-    // （实测 m2b2delay 那类附加参数没有被 PE_parse_boot_argn 取到）。
+    // Leaf page size mode: amdiommu=pgt4k selects 4 KiB, amdiommu=pgt selects
+    // 2 MiB large pages. Two values of the same boot-arg, avoiding a second
+    // parameter (measured: extra parameters like m2b2delay were not picked up
+    // by PE_parse_boot_argn).
     fM22b2Use4K = parsePgt4kBootArg();
-    // 【v0.20.0】pgthold / pgtsleep 已不再改变测量窗口长度。
-    // 旧代码用它们把基线窗口从 2 秒拉到 20 秒，而对照仍固定 2 秒，
-    // 造成 10 倍错配（见 m2b2MeasureEvents 注释）。现在窗口恒为
-    // M2B2_MEAS_SECS，这两个模式只保留历史语义标记，不再影响计数。
+    // [v0.20.0] pgthold / pgtsleep no longer change the measurement window
+    // length. The old code used them to stretch the baseline window from 2 s
+    // to 20 s while controls stayed at 2 s, creating a 10x mismatch (see the
+    // m2b2MeasureEvents comment). The window is now constant
+    // M2B2_MEAS_SECS; these two modes keep only their historical semantic
+    // markers and no longer affect counting.
     fM22b2Hold  = parsePgtHoldBootArg();
     fM22b2SleepOnly = parsePgtSleepBootArg();
     fM22b2Use3L = parsePgt3lBootArg();
@@ -161,7 +171,8 @@ bool org_example_AMDMapperProbe::scheduleM22b2() {
     setProperty("m2-b2-level-mode", fM22b2Use3L ? "3-level" : "4-level");
     setHexProperty(this, "m2-b2-meas-secs", M2B2_MEAS_SECS);
 
-    // 延迟值：默认 20000 ms，可用 m2b2delay=<秒> 覆盖（上限 300 秒）
+    // Delay value: default 20000 ms, overridable with m2b2delay=<seconds>
+    // (capped at 300 s)
     uint32_t delayMS = 20000;
     uint32_t overrideMS = 0;
     if (parseM22b2Delay(&overrideMS)) {
@@ -216,7 +227,7 @@ void org_example_AMDMapperProbe::m22b2TimerFired(
         OSDynamicCast(org_example_AMDMapperProbe, owner);
     if (!self) return;
 
-    // 定时器是一次性的：触发后不再重排。
+    // The timer is one-shot: it does not reschedule after firing.
     self->setProperty("m2-b2-schedule", "fired");
 
     if (self->fR31Session) {
@@ -350,27 +361,33 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         ~ContextScope() { if (owned) IOFree(owned, sizeof(*owned)); }
     } contextScope = {domain};
 
-    // 门控已在 scheduleM22b2() 里检查过（只有 amdiommu=pgt 才会走到这里）。
-    // 这里不再重复 parsePgtBootArg()，避免两处逻辑漂移。
+    // The gate was already checked in scheduleM22b2() (only amdiommu=pgt
+    // reaches here). parsePgtBootArg() is deliberately not repeated here to
+    // avoid the two sites drifting apart.
 
-    // ---- 阶段状态（v0.20.0）----
+    // ---- Stage state (v0.20.0) ----
     //
-    // 【为什么必须在函数最开头就初始化】
-    //   第四轮的两个窗口结构 winPre / winMain 是**未初始化的栈变量**，
-    //   只有在对应阶段真的执行到 m2b2SampleEvents() 时才被写。
-    //   而判定阶段无条件读 winMain.valid / winMain.entries。
-    //   于是"采样前就失败"的路径会读到栈垃圾——恰好非 0 时，
-    //   就会把一个根本没跑过的窗口当成"有效窗口且无事件"，
-    //   进而给出 INDETERMINATE 这种看起来像"测过但没结论"的判定。
+    // [Why initialization must happen at the very top of the function]
+    //   Round 4's two window structs winPre / winMain were **uninitialized
+    //   stack variables**, written only if the corresponding stage actually
+    //   reached m2b2SampleEvents(). The verdict stage unconditionally reads
+    //   winMain.valid / winMain.entries. So a "failed before sampling" path
+    //   would read stack garbage -- if it happened to be non-zero, a window
+    //   that never ran would be treated as "valid window with no events",
+    //   yielding an INDETERMINATE that looks like "tested but no conclusion".
     //
-    //   这里显式初始化，并额外用两个布尔量记录"这个阶段到底有没有执行"，
-    //   让判定阶段能区分"执行了且无事件"与"根本没执行"。
-    // 【v0.21.7】窗口结构改放成员，不再占栈。
+    //   Explicit initialization here, plus two booleans recording "did this
+    //   stage actually run", lets the verdict stage distinguish "ran and had
+    //   no events" from "never ran at all".
+    // [v0.21.7] The window structs moved to members, no longer on the stack.
     //
-    // 每个 org_example_AMDMapperProbe::M22b2EventWindow 是 0x1A8 = 424 字节（含 16*4 个 UInt32 原始事件）。
-    // 两个加起来 848 字节，正是把本函数帧从 4096 以下推过 __chkstk 阈值的
-    // 最后一根稻草（实测 0x1040 = 4160）。第五轮把 org_example_AMDMapperProbe::kM22b2RawKeep 从 32
-    // 降到 16 只是绕过症状；把结构移到成员才是消除弱引用的正解。
+    // Each org_example_AMDMapperProbe::M22b2EventWindow is 0x1A8 = 424 bytes
+    // (including 16*4 raw UInt32 events). Two of them total 848 bytes -- the
+    // last straw that pushed this function's frame past the __chkstk threshold
+    // (measured 0x1040 = 4160). Round 5's reduction of
+    // org_example_AMDMapperProbe::kM22b2RawKeep from 32 to 16 only papered over
+    // the symptom; moving the structs to members is the real fix for the weak
+    // reference.
     org_example_AMDMapperProbe::M22b2EventWindow &winPre = fM22b2WinPre;
     org_example_AMDMapperProbe::M22b2EventWindow &winMain = fM22b2WinMain;
     for (UInt32 t = 0; t < 16; t++) {
@@ -384,28 +401,30 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     winPre.durMS = 0;      winMain.durMS = 0;
     winPre.devidMismatch = 0; winMain.devidMismatch = 0;
 
-    // 记录"该阶段是否真的执行过"。0 = 没执行，1 = 执行了。
+    // Records "did this stage actually run". 0 = not run, 1 = ran.
     bool preWindowRan = false;
     bool mainWindowRan = false;
 
-    // 首个失败阶段。一旦置位就不再被后续的通用状态覆盖——
-    // 这是任务要求的"保留首个失败阶段，避免后来的通用状态掩盖原因"。
+    // The first failing stage. Once set it is not overwritten by later generic
+    // status -- the task's requirement to "keep the first failing stage so
+    // later generic status does not mask the cause".
     const char *firstFailStage = nullptr;
     const char *firstFailReason = nullptr;
 
     setProperty("m2-b2-pre-window-ran", "no");
     setProperty("m2-b2-main-window-ran", "no");
 
-    // ---- 第 1 步：分配全部内存 ----
+    // ---- Step 1: allocate all memory ----
     //
-    // 页表用一块连续内存装下所有页。
-    // 为什么一块而不是每页单独分配：
-    //   单独分配会得到不连续的物理页，需要用 getPhysicalSegment 逐个取，
-    //   代码复杂且容易在某个下标上取错。一块连续内存里各页的物理地址
-    //   就是 base + n*4096，不可能算错。
+    // One contiguous block holds all page table pages.
+    // Why one block rather than allocating each page separately:
+    //   Separate allocations yield non-contiguous physical pages requiring
+    //   getPhysicalSegment per page -- complex code that can easily grab a
+    //   wrong index. In one contiguous block every page's physical address is
+    //   base + n*4096, which cannot be miscalculated.
     //
-    // 2 MiB 模式：1 根 + 1 L2 + 16 叶子 + 1 空根 = 19 页 = 76 KiB
-    // 4 KiB 模式：1 根 + 1 L2 + 32 叶子 + 1 空根 = 35 页 = 140 KiB
+    // 2 MiB mode: 1 root + 1 L2 + 16 leaves + 1 empty root = 19 pages = 76 KiB
+    // 4 KiB mode: 1 root + 1 L2 + 32 leaves + 1 empty root = 35 pages = 140 KiB
     const bool nativeSparse = fR31Session && !fM22b2SleepOnly;
     const UInt32 legacyBasePtPageCount =
         fM22b2Use4K ? M2B2_4K_TOTAL_PAGES
@@ -473,7 +492,8 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         return;
     }
 
-    // 全部必须 4 KiB 对齐（页表页本身要求；其余是寄存器写入要求）
+    // Everything must be 4 KiB aligned (page table pages require it; the rest
+    // is a register-write requirement)
     if ((ptPA & 0xFFF) || (tblPA & 0xFFF) || (cmdPA & 0xFFF) ||
         (semPA & 0xFFF) || (evtPA & 0xFFF)) {
         setProperty("m2-b2-verdict", "FAIL-not-aligned");
@@ -491,7 +511,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     setHexProperty(this, "m2-b2-sem-pa", (UInt64)semPA);
     setHexProperty(this, "m2-b2-evt-pa", (UInt64)evtPA);
 
-    // ---- 第 2 步：建设备表（全直通）----
+    // ---- Step 2: build the device table (all pass-through) ----
     volatile UInt64 *dte = (volatile UInt64 *)tbl->getBytesNoCopy();
     const UInt32 dteCount = (UInt32)(M22B_TABLE_SIZE_FULL / M22B_DTE_SIZE);
     const UInt64 pt0 = DTE_V | DTE_TV | DTE_IR | DTE_IW;
@@ -503,16 +523,17 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     }
     setProperty("m2-b2-dt", "built-passthrough");
 
-    // ---- 第 3 步：建 4 级恒等页表 ----
+    // ---- Step 3: build the 4-level identity page table ----
     //
-    // 页表页在 ptMem 里的布局（页号从 0 开始）：
-    //   page 0            : 根表（level 3）
-    //   page 1 .. 16      : L2 表（level 2），每个覆盖 1 GiB
-    //   page 17 .. 8208   : 叶子表（level 1），每个覆盖 1 GiB 里的 512 个 2 MiB
+    // Page table page layout within ptMem (page numbers from 0):
+    //   page 0            : root table (level 3)
+    //   page 1 .. 16      : L2 tables (level 2), each covering 1 GiB
+    //   page 17 .. 8208   : leaf tables (level 1), each covering the 512
+    //                       2 MiB pages of one GiB
     volatile UInt64 *pt = (volatile UInt64 *)ptMem->getBytesNoCopy();
 
-    // 先整体清零：未使用的项必须是 0（PR=0 表示不存在），
-    // 否则硬件会去解引用垃圾地址。
+    // Zero everything first: unused entries must be 0 (PR=0 means absent),
+    // otherwise the hardware dereferences garbage addresses.
     const UInt64 ptQwords = ptBytes / 8;
     for (UInt64 i = 0; i < ptQwords; i++) pt[i] = 0;
 
@@ -520,19 +541,21 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     const UInt64 l2PageBase   = rootPageIdx + M2B2_ROOT_PAGES;    // 1
     const UInt64 leafPageBase = l2PageBase + M2B2_L2_PAGES;       // 2
 
-    // 物理地址换算：页号 → 物理地址
-    // ptPA 是这块连续内存的物理基址，第 n 页的物理地址 = ptPA + n*4096
+    // Physical address conversion: page number -> physical address.
+    // ptPA is the physical base of this contiguous block; page n's physical
+    // address = ptPA + n*4096
     const UInt64 rootPA = (UInt64)ptPA + rootPageIdx * M2B2_PAGE_SIZE;
     UInt64 l2PA = (UInt64)ptPA + l2PageBase * M2B2_PAGE_SIZE;
 
     volatile UInt64 *root = pt + rootPageIdx * M2B2_PTE_COUNT;
     volatile UInt64 *l2   = pt + l2PageBase  * M2B2_PTE_COUNT;
 
-    // 根表项：指向唯一的 L2 表。
-    // 2 MiB 模式：16 GiB 全部落在 IOVA 0..0x3FFFFFFFF，即 idx3 = 0。
-    // 4 KiB 模式：只映射 64 MiB，同样 idx3 = 0。
-    // 【3 级模式】根表本身就是"第 2 级"，**没有 L2 这一层**：
-    //   根表项直接指向叶子表，所以这里不能写 root[0] = TablePte(3,...)。
+    // Root entries: point to the single L2 table.
+    // 2 MiB mode: all 16 GiB falls in IOVA 0..0x3FFFFFFFF, i.e. idx3 = 0.
+    // 4 KiB mode: only 64 MiB is mapped, likewise idx3 = 0.
+    // [3-level mode] The root table itself is "level 2"; **there is no L2
+    // layer**: root entries point directly at leaf tables, so
+    // root[0] = TablePte(3,...) must not be written here.
     if (!nativeSparse && !fM22b2Use3L) {
         root[0] = m2b2TablePte(3, l2PA);
     }
@@ -541,18 +564,19 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         // The native root stays empty until standard IOVA maps are requested.
         // r34RxPrepareMap validates the unchanged physical ring manifest.
     } else if (fM22b2Use3L) {
-        // ---- 3 级 + 2 MiB 大页：root(2) → 叶子(1)，覆盖 16 GiB ----
+        // ---- 3-level + 2 MiB large pages: root(2) -> leaf(1), covering 16 GiB ----
         //
-        // PAGE_MODE_3_LEVEL = 3 → 根表是第 2 级，每项覆盖 1 GiB。
-        // 16 GiB 用根表的 16 项（root[0..15]），每项直接指向一张叶子表。
-        // 叶子表每项 2 MiB，512 项覆盖 1 GiB。
+        // PAGE_MODE_3_LEVEL = 3 -> the root is level 2, each entry covering
+        // 1 GiB. 16 GiB uses root entries 0..15, each pointing directly at one
+        // leaf table. Each leaf entry covers 2 MiB; 512 entries cover 1 GiB.
         //
-        // 注意叶子表从 l2PageBase 开始放（这一页原本给 L2 用，3 级模式下没有 L2）。
+        // Leaf tables start at l2PageBase (that page was reserved for L2; the
+        // 3-level mode has no L2).
         for (UInt32 gb = 0; gb < M2B2_3L_LEAF_PAGES; gb++) {
             const UInt64 leafPageIdx = leafPageBase + gb;
             const UInt64 leafPA = (UInt64)ptPA + leafPageIdx * M2B2_PAGE_SIZE;
 
-            // 根表项（第 2 级）直接指向叶子表（第 1 级）
+            // Root entry (level 2) points directly at a leaf table (level 1)
             root[gb] = m2b2TablePte(2, leafPA);
 
             volatile UInt64 *leaf = pt + leafPageIdx * M2B2_PTE_COUNT;
@@ -563,15 +587,15 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
             }
         }
     } else if (!fM22b2Use4K) {
-        // ---- 2 MiB 大页：16 张叶子表，每张覆盖 1 GiB ----
+        // ---- 2 MiB large pages: 16 leaf tables, each covering 1 GiB ----
         for (UInt32 gb = 0; gb < M2B2_LEAF_PAGES; gb++) {
             const UInt64 leafPageIdx = leafPageBase + gb;
             const UInt64 leafPA = (UInt64)ptPA + leafPageIdx * M2B2_PAGE_SIZE;
 
-            // idx2 = (addr >> 30) & 0x1ff，1 GiB 步长下就是 gb
+            // idx2 = (addr >> 30) & 0x1ff, which at 1 GiB stride is simply gb
             l2[gb] = m2b2TablePte(2, leafPA);
 
-            // 叶子表：512 个 2 MiB 项，覆盖 [gb*1GiB, (gb+1)*1GiB)
+            // Leaf table: 512 2 MiB entries covering [gb*1GiB, (gb+1)*1GiB)
             volatile UInt64 *leaf = pt + leafPageIdx * M2B2_PTE_COUNT;
             const UInt64 base1G = (UInt64)gb << 30;
             for (UInt32 i = 0; i < M2B2_PTE_COUNT; i++) {
@@ -580,15 +604,17 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
             }
         }
     } else {
-        // ---- 4 KiB 小页：root(3) → L2(2) → L1(1) → 叶子(0)，覆盖 16 GiB ----
+        // ---- 4 KiB small pages: root(3) -> L2(2) -> L1(1) -> leaf(0), covering 16 GiB ----
         //
-        // 层级覆盖范围：
-        //   L2 的一项覆盖 1 GiB；16 GiB 需要 16 项 → l2[0..15] 各指向一个 L1 表
-        //   L1 的一项覆盖 2 MiB；一个 L1 表 512 项 = 1 GiB
-        //   叶子的每一项覆盖 4 KiB；一张叶子表 512 项 = 2 MiB
+        // Coverage per level:
+        //   One L2 entry covers 1 GiB; 16 GiB needs 16 entries -> l2[0..15]
+        //   each point to one L1 table
+        //   One L1 entry covers 2 MiB; one L1 table's 512 entries = 1 GiB
+        //   Each leaf entry covers 4 KiB; one leaf table's 512 entries = 2 MiB
         //
-        // 所以：16 个 L1 表 × 512 项 = 8192 张叶子表，正好覆盖 16 GiB。
-        const UInt64 l1PageBase = leafPageBase;                 // 紧跟 L2
+        // So: 16 L1 tables x 512 entries = 8192 leaf tables, exactly covering
+        // 16 GiB.
+        const UInt64 l1PageBase = leafPageBase;                 // right after L2
         const UInt64 leaf0PageBase = l1PageBase + M2B2_4K_L1_PAGES;
 
         for (UInt32 gb = 0; gb < M2B2_4K_L1_PAGES; gb++) {
@@ -596,17 +622,17 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
             const UInt64 l1PA = (UInt64)ptPA + l1PageIdx * M2B2_PAGE_SIZE;
             volatile UInt64 *l1 = pt + l1PageIdx * M2B2_PTE_COUNT;
 
-            // L2[gb] 指向第 gb 个 L1 表（level 2 项指向第 1 级表）
+            // L2[gb] points at the gb-th L1 table (a level 2 entry points at a level 1 table)
             l2[gb] = m2b2TablePte(2, l1PA);
 
-            // 这个 L1 表覆盖 [gb*1GiB, (gb+1)*1GiB)，共 512 张叶子表
+            // This L1 table covers [gb*1GiB, (gb+1)*1GiB), 512 leaf tables in total
             for (UInt32 li = 0; li < M2B2_PTE_COUNT; li++) {
                 const UInt64 leafGlobal = (UInt64)gb * M2B2_PTE_COUNT + li;
                 const UInt64 leafPageIdx = leaf0PageBase + leafGlobal;
                 const UInt64 leafPA =
                     (UInt64)ptPA + leafPageIdx * M2B2_PAGE_SIZE;
 
-                // L1 的第 li 项指向一张叶子表（level 1 项指向第 0 级表）
+                // L1's li-th entry points at one leaf table (a level 1 entry points at a level 0 table)
                 l1[li] = m2b2TablePte(1, leafPA);
 
                 volatile UInt64 *leaf = pt + leafPageIdx * M2B2_PTE_COUNT;
@@ -657,18 +683,23 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
                        fM22b2Use4K ? M2B2_4K_L1_PAGES : 0);
     }
 
-    // ---- 第 4 步：页表自检（软件走表，不碰硬件）----
+    // ---- Step 4: page table self-check (software walk, no hardware touched) ----
     //
-    // 在把这张表交给硬件之前，先用**与解码器同一份实现**走一遍。
+    // Before handing this table to the hardware, walk it once using **the same
+    // implementation as the decoder**.
     //
-    // 【第五轮重写】第四轮这段是手写的逐级 if/else，它对叶子的判据是
+    // [Round 5 rewrite] Round 4's version here was hand-written per-level
+    // if/else whose leaf criterion was
     //     lvl == M2B2_LEVEL_7 && m2b2PtePageSize(pte1) == 2MiB
-    // 也就是"叶子必须 NextLevel=7"。这与构表函数用了同一个错误假设，
-    // 所以**自检通过只能证明两者一致，不能证明编码正确**。
+    // i.e. "the leaf must have NextLevel=7". That shared the builder's wrong
+    // assumption, so **a passing self-check proved only that the two agreed --
+    // not that the encoding was correct**.
     //
-    // 现在改成调用 amdpte::walkPageTable()，它要求逐级携带表级，
-    // 并把"扩展页大小必须严格大于本级默认值"这条规范规则编进解码器。
-    // 于是"构表错 + 自检错"这种共同错误会在自检阶段就被抓住。
+    // Now it calls amdpte::walkPageTable(), which requires the level to be
+    // carried at every step and encodes the spec rule "an extended page size
+    // must be strictly larger than this level's default" into the decoder. A
+    // shared error of "builder wrong + checker wrong" is thus caught at the
+    // self-check stage.
     if (!nativeSparse) {
         bool walkOk = true;
         UInt32 walkBad = 0;
@@ -676,13 +707,14 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         UInt32 walkChecked = 0;
         const char *walkFirstReason = nullptr;
 
-        // 抽样覆盖：页内偏移、页边界、2 MiB 边界、1/4/8/15/16 GiB 边界。
+        // Sample coverage: intra-page offsets, page boundaries, 2 MiB
+        // boundaries, and the 1/4/8/15/16 GiB boundaries.
         const UInt64 samples[] = {
             0x0ULL, 0x1ULL, 0xFFFULL, 0x1000ULL,
             0x1FFFFFULL, 0x200000ULL, 0x3FFFFFULL,
-            0x40000000ULL,                  // 1 GiB 边界
-            0x100000000ULL,                 // 4 GiB 边界
-            0x200000000ULL,                 // 8 GiB 边界
+            0x40000000ULL,                  // 1 GiB boundary
+            0x100000000ULL,                 // 4 GiB boundary
+            0x200000000ULL,                 // 8 GiB boundary
             0x3C0000000ULL,                 // 15 GiB
             0x3FFE00000ULL,                 // 16 GiB - 2 MiB
             0x3FFFFFFF0ULL,                 // 16 GiB - 16
@@ -692,8 +724,9 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         const UInt64 mapLimit = fM22b2Use4K ? M2B2_4K_MAP_LIMIT
                                             : M2B2_IDENTITY_LIMIT;
 
-        // 走表读取器：把 PTE 的物理地址换算成 pt 里的偏移。
-        // 越界读返回 0（PR=0 → 解码为 absent），绝不越界访问。
+        // Walking reader: converts a PTE's physical address into an offset in
+        // pt. Out-of-range reads return 0 (PR=0 -> decoded as absent); no
+        // out-of-bounds access ever happens.
         volatile UInt64 *ptv = pt;
         const UInt64 ptBase = (UInt64)ptPA;
         const UInt64 ptEnd  = ptBase + ptBytes;
@@ -705,7 +738,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
             return (amdpte::u64)ptv[byteOff / 8 + idx];
         };
 
-        // 根表级：4 级模式 = 4，3 级模式 = 3（规范 1-based 编号）
+        // Root level: 4-level mode = 4, 3-level mode = 3 (spec numbering is 1-based)
         const unsigned rootLevel =
             fM22b2Use3L ? amdpte::LEVEL_1G : amdpte::LEVEL_512G;
 
@@ -742,20 +775,23 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         }
     }
 
-    // ---- 第 4b 步：验证页表物理地址与虚拟地址确实指向同一块内存 ----
+    // ---- Step 4b: verify the page table's physical and virtual addresses
+    //      really name the same memory ----
     //
-    // 为什么必须有这一步：
-    //   软件走表（第 4 步）用的是**虚拟指针** pt；
-    //   硬件走表用的是 DTE 里的 **物理基址** rootPA。
-    //   如果这两者不是同一块内存，那么"软件走表通过"对硬件毫无意义——
-    //   我们验证的是另一块内存。
+    // Why this step must exist:
+    //   The software walk (step 4) uses the **virtual pointer** pt;
+    //   the hardware walk uses the **physical base** rootPA from the DTE.
+    //   If the two are not the same memory, "the software walk passed" means
+    //   nothing to the hardware -- we validated different memory.
     //
-    // 本项目已经犯过一次 PA/VA 混淆（flush_dcache64 传物理地址 → 两次 panic），
-    // 所以这个假设不能靠"应该没问题"过关，必须实测。
+    // This project has already confused PA/VA once (flush_dcache64 given a
+    // physical address -> two panics), so this assumption cannot pass on "it
+    // should be fine"; it must be measured.
     //
-    // 做法：把 ptPA 按物理地址映射进来，与 pt 逐字节比较。
-    //   全部相同 → 软件走表的结论对硬件有效
-    //   有差异   → 之前所有"页表正确"的结论都不成立
+    // Approach: map ptPA in as a physical address and compare byte for byte
+    // with pt.
+    //   All identical -> the software walk's verdict is valid for the hardware
+    //   Any difference -> every prior "the page table is correct" verdict is void
     {
         IOMemoryDescriptor *ptChk = IOMemoryDescriptor::withPhysicalAddress(
             (IOPhysicalAddress)ptPA, (IOByteCount)ptBytes, kIODirectionNone);
@@ -800,11 +836,12 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     volatile UInt32 *evtBuf = (volatile UInt32 *)evtMd->getBytesNoCopy();
     for (UInt32 i = 0; i < (M2B2_EVT_BUFFER_SIZE / 4); i++) evtBuf[i] = 0;
 
-    // ---- 第 6 步：映射 MMIO，验证身份 ----
+    // ---- Step 6: map the MMIO and verify identity ----
     //
-    // MMIO 窗口既读又写，方向保持 kIODirectionNone（与 M2-1/M2-2b-1 一致）。
-    // 上面把 buffer 改成 kIODirectionOut 是针对**页表/设备表/命令缓冲**
-    // 那些"由 CPU 写、由设备读"的内存，不适用于 MMIO 映射。
+    // The MMIO window is both read and written; the direction stays
+    // kIODirectionNone (consistent with M2-1 / M2-2b-1). Setting the buffer to
+    // kIODirectionOut above targets the **page table / device table / command
+    // buffer** memory ("written by CPU, read by device"), not the MMIO mapping.
     IOMemoryDescriptor *md =
         IOMemoryDescriptor::withPhysicalAddress(
             (IOPhysicalAddress)M21_MMIO_BASE,
@@ -837,7 +874,7 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     }
     setProperty("m2-b2-identity", "confirmed");
 
-    // ---- 第 7 步：记录原状态 ----
+    // ---- Step 7: record the original state ----
     const UInt64 origDT   = mmioRead64(base, M2B2_OFF_DEV_TABLE);
     const UInt64 origCmd  = mmioRead64(base, M2B2_OFF_CMD_BUF);
     const UInt64 origEvt  = mmioRead64(base, M2B2_OFF_EVT_BUF);
@@ -853,30 +890,35 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         return;
     }
 
-    // ---- 第 8 步：确定目标设备的 devid（必须在使能之前！）----
+    // ---- Step 8: determine the target device's devid (must precede enable!) ----
     //
-    // 【2026-10-30 严重事故】这一步原先放在使能之后，且从 fNicDevice 取设备。
-    // 但 fNicDevice 只在 amdiommu=arm 时才被设置；本轮用的是 amdiommu=pgt，
-    // 所以 fNicDevice 为 NULL → tgtOk=false → 函数在**IOMMU 已使能**的状态下
-    // 直接 return，并 release 了设备表内存。
+    // [2026-10-30 serious incident] This step was originally placed after the
+    // enable and took the device from fNicDevice. But fNicDevice is set only
+    // under amdiommu=arm; this round runs amdiommu=pgt, so fNicDevice was NULL
+    // -> tgtOk=false -> the function returned directly **with the IOMMU
+    // already enabled**, releasing the device table memory.
     //
-    // 后果：IOMMU 仍在运行，DEV_TABLE 指向已被释放的 2 MiB 内存，
-    // 命令缓冲也已被释放。硬件继续按那张"野指针表"翻译全系统 DMA，
-    // 启动在 0.42 秒处死锁，连续两次复现。
+    // Consequence: the IOMMU kept running, DEV_TABLE pointed at freed 2 MiB
+    // memory, the command buffer was freed too. The hardware went on
+    // translating all system DMA through that "wild pointer table"; boot
+    // deadlocked at 0.42 s, reproduced twice in a row.
     //
-    // 两条教训：
-    //   1. 所有"可能失败"的前置条件都必须在**碰硬件之前**检查完。
-    //      一旦使能了 IOMMU，后面不允许有任何裸 return。
-    //   2. 不要复用带副作用的成员变量（fNicDevice 受 fArmed 控制），
-    //      这里需要的是一个**只读查找**，与是否放行无关。
+    // Two lessons:
+    //   1. Every "can fail" precondition must be checked **before touching the
+    //      hardware**. Once the IOMMU is enabled, no bare return is allowed
+    //      afterwards.
+    //   2. Do not reuse stateful member variables (fNicDevice is governed by
+    //      fArmed); what is needed here is a **read-only lookup**, independent
+    //      of whether devices are let through.
     UInt32 tgt = 0;
     bool tgtOk = false;
     {
         IOService *nicSvc = findNicServiceOnly();
         if (nicSvc) {
-            // IOPCIDevice 被标 deprecated，但本 kext 必须是内核内 IOMapper 子类，
-            // PCIDriverKit（用户态）无法替代。与 runM20ConfigProbe 同样处理：
-            // 只在这个小范围内抑制，不做全局抑制。
+            // IOPCIDevice is marked deprecated, but this kext must be an
+            // in-kernel IOMapper subclass; PCIDriverKit (userspace) cannot
+            // replace it. Handled like runM20ConfigProbe: suppress only in this
+            // small scope, not globally.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
             IOPCIDevice *nicPci = OSDynamicCast(IOPCIDevice, nicSvc);
@@ -900,7 +942,8 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         tgtOk ? "IOPCIDevice-accessors" : "FAIL-no-nic-device");
 
     if (!tgtOk) {
-        // 此时**还没碰过任何硬件寄存器**，可以安全返回。
+        // At this point **no hardware register has been touched**; returning is
+        // safe.
         setProperty("m2-b2-verdict", "FAIL-no-target-devid");
         setProperty("m2-b2-stage", "8-FAIL-no-devid");
         map->release(); md->release();
@@ -915,32 +958,34 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         setProperty("m2-b2-tgt-mismatch", "none");
     }
 
-    // ---- 第 9 步：配置并使能（含事件日志）----
+    // ---- Step 9: configure and enable (including the event log) ----
     //
-    // 顺序严格照抄 early_enable_iommu()（init.c:2798-2811）：
-    //   设备表 → 命令缓冲 → 事件缓冲 → 使能
+    // The order strictly follows early_enable_iommu() (init.c:2798-2811):
+    //   device table -> command buffer -> event buffer -> enable
     const UInt64 dtEntry = ((UInt64)tblPA & ~0xFFFULL) |
                            ((M22B_TABLE_SIZE_FULL >> 12) - 1);
     const UInt64 cmdEntry = ((UInt64)cmdPA & ~0xFFFULL) | M23_CMD_SIZE_CODE;
     const UInt64 evtEntry = ((UInt64)evtPA & ~0xFFFULL) | M2B2_EVT_LEN_MASK;
 
-    // ---- 确保页表与设备表对设备可见 ----
+    // ---- Ensure the page table and device table are visible to the device ----
     //
-    // 【2026-10-31 修正】这里原先调用了 flush_dcache64((addr64_t)ptPA, ...)，
-    // 把**物理地址**当成**虚拟地址**传给了内核 API。
-    // 即使该 API 在 x86 上是空实现，传错地址族也是明确的错误，
-    // 而且实测随后出现了启动异常。已改为安全做法：
+    // [2026-10-31 fix] This originally called flush_dcache64((addr64_t)ptPA,
+    // ...), passing a **physical address** where the kernel API expects a
+    // **virtual address**. Even though that API is a no-op on x86, passing the
+    // wrong address family is a clear error, and boot anomalies followed in
+    // testing. Replaced with the safe approach:
     //
-    //   1. IOBufferMemoryDescriptor 已用 kIODirectionOut 分配
-    //      （见上面第 1 步），IOKit 会保证这块内存对设备可见；
-    //   2. 再加 OSSynchronizeIO() 强制写顺序，防止编译器/CPU 重排
-    //      导致 MMIO 寄存器先于内存写入生效。
+    //   1. IOBufferMemoryDescriptor was allocated with kIODirectionOut (see
+    //      step 1 above); IOKit guarantees the memory is visible to the device;
+    //   2. OSSynchronizeIO() additionally forces write ordering, preventing
+    //      compiler/CPU reordering from letting MMIO register writes land
+    //      before the memory writes.
     //
-    // 为什么不需要显式 flush：
-    //   x86 的缓存是**硬件一致**的（IOMMU 走表时会 snoop CPU 缓存），
-    //   且 AMD-Vi 的 CONTROL_COHERENT_EN 已置位（实测 control-on
-    //   含 bit10）。Linux 在 x86 上也不对页表做 dcache flush，
-    //   它依赖的正是同一套硬件一致性。
+    // Why no explicit flush is needed:
+    //   x86 caches are **hardware-coherent** (the IOMMU snoops CPU caches when
+    //   walking tables), and AMD-Vi's CONTROL_COHERENT_EN is set (measured:
+    //   control-on includes bit10). Linux does not dcache-flush page tables on
+    //   x86 either -- it relies on the same hardware coherence.
     OSSynchronizeIO();
     setProperty("m2-b2-cache-flush", "io-sync-only");
 
@@ -971,12 +1016,13 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         (ctrlOn & M2B2_CTRL_EVT_LOG_EN) ? "enabled" : "no");
     setHexProperty(this, "m2-b2-control-on", ctrlOn);
 
-    // ---- 第 10 步：命令上下文 ----
+    // ---- Step 10: command context ----
     //
-    // 所有 devid / domid / page-mode / 根表地址 / 完成信号地址都由 ctx
-    // 持有，失效命令一律从它取值。旧代码在 DOMID 分支里改了 DTE 的
-    // domain 却仍用 domain 0 发 INV_IOMMU_PAGES，那等于刷了一个不存在的
-    // 域；现在这种不一致在结构上不可能发生。
+    // All devid / domid / page-mode / root table address / completion signal
+    // address are held by ctx, and invalidation commands always take their
+    // values from it. The old code changed the DTE's domain in the DOMID branch
+    // yet still issued INV_IOMMU_PAGES with domain 0 -- flushing a domain that
+    // did not exist. That inconsistency is now structurally impossible.
     M2B2CmdCtx ctx;
     ctx.buf = cmdBuf;
     ctx.sem = sem;
@@ -995,44 +1041,48 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     ctx.lastLoops = 0;
     ctx.recordCount = 0;
 
-    // 恢复状态：只有这里全部为 true 才允许释放内存
+    // Restore state: memory may be freed only if everything here is true
     bool hwStopped      = false;
     bool cmdBufStopped  = false;
     bool evtLogStopped  = false;
     bool regsRestored   = false;
     bool safeToFree     = false;
 
-    // ---- 第七轮：阶段完成状态 ----
+    // ---- Round 7: stage completion state ----
     //
-    // 判定必须能区分"某阶段执行了并成功"与"某阶段根本没走到"。
-    // 第六轮的 CONTROL 分支只看 fM22b2SleepOnly 这个**选择**，不看
-    // 控制阶段是否真的跑完：前置的事件日志重置失败、命令失败、恢复失败
-    // 都会被 CONTROL 覆盖掉，于是"我选了控制模式"变成了万能结论。
+    // The verdict must distinguish "the stage ran and succeeded" from "the
+    // stage was never reached". Round 6's CONTROL branch looked only at the
+    // fM22b2SleepOnly **choice**, not at whether the control stage actually
+    // completed: a failed event-log reset, a failed command, or a failed
+    // recovery would all be overwritten by CONTROL, turning "I chose control
+    // mode" into a universal verdict.
     //
-    // 现在每一道前置门都有自己的布尔量，CONTROL 只有在它们全部成立、
-    // 且控制阶段本身确实完成时才允许输出。
-    bool evtResetOk     = false;   // 第 11 步：事件日志重置成功
-    bool invAllOk       = false;   // 第 12 步：CMD_INV_ALL 完成
-    bool invDevOk       = false;   // 第 15 步(a)：INV_DEV_ENTRY 完成
-    bool invPagesOk     = false;   // 第 15 步(b)：INV_IOMMU_PAGES 完成
-    bool controlDone    = false;   // 控制阶段（pgtsleep）确实跑完
+    // Every precondition gate now has its own boolean, and CONTROL is emitted
+    // only when all of them hold and the control stage itself really finished.
+    bool evtResetOk     = false;   // step 11: event log reset succeeded
+    bool invAllOk       = false;   // step 12: CMD_INV_ALL completed
+    bool invDevOk       = false;   // step 15(a): INV_DEV_ENTRY completed
+    bool invPagesOk     = false;   // step 15(b): INV_IOMMU_PAGES completed
+    bool controlDone    = false;   // the control stage (pgtsleep) really finished
 
-    // 【第八轮】窗口结束时的边界采样结果。
+    // [Round 8] Boundary sampling results at window end.
     //
-    // 必须声明在这里而不是第 16b 步里：本函数有多处 `goto recover`
-    // 从第 11~15 步跳过来，C++ 不允许跳过带初始化的声明。把它们放在
-    // 所有 goto 之前，既满足语言规则，也让"恢复路径也能看到这些值"
-    // 成为结构上的事实而不是约定。
+    // Declared here rather than in step 16b: this function has several
+    // `goto recover` jumping in from steps 11-15, and C++ forbids jumping over
+    // declarations with initializers. Placing them before all gotos satisfies
+    // the language rule and makes "the recovery path can also see these values"
+    // a structural fact rather than a convention.
     UInt32 tailAfterRaw = 0;
     bool   tailAfterOk  = false;
     UInt32 cloAfterRaw  = 0;
     bool   cloAfterOk   = false;
 
-    // 【第九轮】窗口内后置采样。
+    // [Round 9] In-window post-sampling.
     //
-    // 采样状态与映射都必须在所有 goto 之前声明（同上：C++ 不允许 goto
-    // 跳过带初始化的声明）。postMap 由第 16 步创建、窗口一关闭就释放，
-    // 所以"窗口内读过寄存器"只发生在窗口内部。
+    // The sampling state and mapping must also be declared before all gotos
+    // (same reason: C++ forbids goto over initialized declarations). postMap is
+    // created in step 16 and released as soon as the window closes, so
+    // "registers read inside the window" happens only inside the window.
     M2b2PostSample postSample;
     postSample.bar = nullptr;
     postSample.reg = 0;
@@ -1104,17 +1154,20 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         domain->postSample = postSample;
     };
 
-    // 窗口记录（winPre / winMain）已在函数开头初始化，见那里的说明。
+    // The window records (winPre / winMain) were initialized at the top of the
+    // function; see the explanation there.
 
-    // ---- 第 11 步：按规范重置事件日志 ----
+    // ---- Step 11: reset the event log per the spec ----
     //
-    // 这是唯一允许写 HEAD/TAIL 的入口：先停 EVT_LOG_EN、等 EVT_RUN=0，
-    // 再归零、清 overflow 位、重新使能。日志运行期间绝不触碰 TAIL。
+    // This is the only entry allowed to write HEAD/TAIL: first stop
+    // EVT_LOG_EN, wait for EVT_RUN=0, then zero, clear the overflow bit, and
+    // re-enable. TAIL is never touched while the log runs.
     {
         const bool ok = m2b2ResetEventLog(base);
         setProperty("m2-b2-evt-reset", ok ? "done" : "FAIL-cannot-stop-log");
         if (!ok) {
-            // 无法确认日志已停 → 不碰缓冲、不做实验，直接进入恢复
+            // Cannot confirm the log stopped -> do not touch the buffer, do
+            // not run the experiment, go straight to recovery
             setProperty("m2-b2-verdict", "INVALID-evt-log-will-not-stop");
             setProperty("m2-b2-stage", "11-abort-evt-log");
             if (!firstFailStage) {
@@ -1126,9 +1179,10 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         evtResetOk = true;
     }
 
-    // ---- 第 12 步：使能后先清一次缓存（此时仍全直通）----
+    // ---- Step 12: flush caches once after enable (still all pass-through now) ----
     //
-    // CMD_INV_ALL (type 0x08) 在 FEATURE_IA=1 时合法（第三轮已解码确认）。
+    // CMD_INV_ALL (type 0x08) is legal when FEATURE_IA=1 (decoded and confirmed
+    // in round 3).
     if (!m2b2Submit(base, &ctx, "inv-all",
                     0, ((UInt32)M2B2_CMD_INV_ALL << 28), 0, 0)) {
         setProperty("m2-b2-inv-all", "FAIL-no-completion");
@@ -1143,19 +1197,22 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     setProperty("m2-b2-inv-all", "done");
     invAllOk = true;
 
-    // ---- 第 13 步：纯睡眠对照（pgtsleep）----
+    // ---- Step 13: pure-sleep control (pgtsleep) ----
     //
-    // 该分支**不切换 DTE**，只做与 pgthold 相同的长睡眠，用来区分
-    // "翻译导致设备冻结" 与 "长 IOSleep 阻塞 workloop 导致测量假象"。
+    // This branch **does not switch the DTE**; it only performs the same long
+    // sleep as pgthold, distinguishing "translation freezes the device" from
+    // "a long IOSleep blocking the workloop creates a measurement artifact".
     //
-    // 【明确时长】本分支固定 20 秒，**不是** M2B2_MEAS_SECS。它的用途
-    // 是从外部用 netstat 观察设备是否仍在收发，需要足够长的时间窗；
-    // 而它不产生任何用于比较的事件计数，所以不存在与其他窗口错配的问题。
+    // [Explicit duration] This branch is fixed at 20 s, **not** M2B2_MEAS_SECS.
+    // Its purpose is to observe from outside via netstat whether the device is
+    // still transmitting, which needs a sufficiently long window; it produces
+    // no event counts used for comparison, so no window mismatch arises.
     if (fM22b2SleepOnly) {
         setProperty("m2-b2-sleep-only", "yes");
         setProperty("m2-b2-dte", "NOT-switched-control");
         setHexProperty(this, "m2-b2-window-secs", 20);
-        // 控制阶段的时间边界也必须是可核对的单调时间。
+        // The control stage's time boundaries must also be checkable monotonic
+        // time.
         const UInt64 tCtl0 = m2b2NowNS();
         const UInt64 wCtl0 = m2b2WallSecs();
         setHexProperty(this, "m2-b2-ctl-t-start", tCtl0);
@@ -1167,11 +1224,12 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         setHexProperty(this, "m2-b2-ctl-dur-ms", m2b2ToMS(tCtl1 - tCtl0));
         setProperty("m2-b2-sleep-only", "done");
 
-        // 【第七轮】控制阶段确实完成了。
+        // [Round 7] The control stage really completed.
         //
-        // 这个布尔量是 CONTROL 判定的**必要条件**：只有前置重置、命令、
-        // 以及控制阶段本身都成立，才允许输出 CONTROL。第六轮只看
-        // fM22b2SleepOnly 这个"选择"，于是任何真实失败都会被覆盖。
+        // This boolean is a **necessary condition** of the CONTROL verdict:
+        // only when the preceding reset, the commands, and the control stage
+        // itself all hold may CONTROL be emitted. Round 6 looked only at the
+        // fM22b2SleepOnly "choice", so any real failure was masked.
         controlDone = true;
 
         setProperty("m2-b2-evt-window", "none-in-sleep-only-branch");
@@ -1180,9 +1238,9 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         goto recover;
     }
 
-    // ---- 第 14 步：建设备表项并切换目标设备到翻译 ----
+    // ---- Step 14: build the device table entry and switch the target device to translation ----
     //
-    // set_dte_entry()（iommu.c:1580-1602）：
+    // set_dte_entry() (iommu.c:1580-1602):
     //   pte_root = root_pa | (mode << 9) | IR | IW | V | TV
     {
         const UInt64 pageMode = fM22b2Use3L ? M2B2_PAGE_MODE_3_LEVEL
@@ -1203,7 +1261,8 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         ctx.pageMode = (UInt32)pageMode;
         ctx.rootPA = rootPA;
 
-        // 切换前先采一个窗口：此时 DTE 仍是直通，任何事件都不是翻译造成的。
+        // Sample one window before the switch: the DTE is still pass-through,
+        // so any event is not caused by translation.
         m2b2SampleEvents(base, evtBuf, M2B2_MEAS_SECS, tgt, &winPre);
         preWindowRan = true;
         setProperty("m2-b2-pre-window-ran", "yes");
@@ -1213,11 +1272,13 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
             setProperty("m2-b2-pre-invalid", winPre.invalidReason);
         }
 
-        // 【v0.20.0】winPre 无效时**不允许**继续做翻译实验。
-        // 理由：winPre 的作用是给出"同一台设备、同一段时间、未切换 DTE"
-        // 的对照。若它本身无效（溢出 / 日志停了 / 条目撕裂），后面的主窗口
-        // 即使有效也无法归因——我们失去了基线。继续做下去只会得到
-        // 一个无法解释的数字，正是第三、四轮反复出问题的那种结果。
+        // [v0.20.0] A winPre that is invalid **forbids** continuing the
+        // translation experiment. Reason: winPre exists to provide the
+        // "same device, same time span, DTE not switched" comparison. If it is
+        // itself invalid (overflow / log stopped / torn entries), the main
+        // window cannot be attributed even if valid -- the baseline is lost.
+        // Continuing only yields an unexplainable number, exactly the failure
+        // shape of rounds 3 and 4.
         if (!winPre.valid) {
             firstFailStage = "14-pre-window-invalid";
             firstFailReason = winPre.invalidReason;
@@ -1225,27 +1286,33 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
             setProperty("m2-b2-first-fail-reason", firstFailReason);
             setProperty("m2-b2-verdict", "INVALID-pre-window");
             setProperty("m2-b2-stage", "14-abort-pre-window");
-            // DTE 尚未改动，无需改回；直接进入恢复。
+            // The DTE was not yet modified, so nothing to revert; go straight
+            // to recovery.
             goto recover;
         }
 
-        // ---- 第 14b 步：进入窗口的前半段（round22 顺序修正）----
+        // ---- Step 14b: the first half of entering the window (round22 ordering fix) ----
         //
-        // 【为什么必须在这里，而不是在写 DTE 之后】
-        //   第 21 轮的顺序是"写 DTE → 两条失效 → Install → 排空 → 开闸"。
-        //   排空发生在 DTE 已经切换之后，于是"旧映射下已交给硬件的 TX"
-        //   实际上已经被新表翻译过了；更糟的是，一个已经通过旧路径、还没
-        //   写 OWN 的输出线程既不在闸门计数里，也不在环占用里，排空对它
-        //   视而不见。
+        // [Why here and not after writing the DTE]
+        //   Round 21's order was "write DTE -> two invalidations -> Install ->
+        //   drain -> open the gate". The drain happened after the DTE had
+        //   already switched, so TX already handed to the hardware under the
+        //   old mapping had in fact been translated by the new table; worse,
+        //   an output thread that had passed the old path but not yet written
+        //   OWN was in neither the gate count nor the ring occupancy -- the
+        //   drain was blind to it.
         //
-        //   现在的顺序：Install（关闭接纳，发布状态）→ 等提交者退出并排空
-        //   旧映射的环 → 再写 DTE → 失效 → 才打开接纳。DTE 切换不会与任何
-        //   未完成的提交并发，因为接纳字节的引用计数把它们都算进来了。
+        //   The order now: Install (close admission, publish state) -> wait for
+        //   submitters to exit and drain the old-mapping ring -> write the DTE
+        //   -> invalidate -> only then open admission. The DTE switch never
+        //   races any outstanding submission, because the admission bytes'
+        //   reference count includes them all.
         //
-        // 【为什么 Install 放在 pre-window 之后】
-        //   pre-window 是"DTE 仍是直通"的对照采样，要跑 3 秒。Install 会
-        //   关闭接纳，把对照窗口里的普通流量全部丢掉。所以先采完对照，再
-        //   Install。
+        // [Why Install comes after the pre-window]
+        //   The pre-window is the "DTE still pass-through" control sample and
+        //   runs 3 s. Install closes admission and would discard all ordinary
+        //   traffic inside the control window. So the control sample completes
+        //   first, then Install.
         if (!r17Activate(base, &ctx)) {
             setProperty("m2-3b-authorize", "FAIL-install");
             firstFailStage = "14b-abort-install";
@@ -1269,30 +1336,33 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         setProperty("m2-3e-enter", "stopped-before-dte");
 
         dte[tgt * 4 + 0] = dteRoot;
-        dte[tgt * 4 + 1] = ctx.domid;   // data[1] 低 16 位 = domain id
+        dte[tgt * 4 + 1] = ctx.domid;   // data[1]'s low 16 bits = domain id
         dte[tgt * 4 + 2] = 0;
         dte[tgt * 4 + 3] = 0;
         setHexProperty(this, "m2-b2-dte-after", dte[tgt * 4 + 0]);
         setHexProperty(this, "m2-b2-dte-domid", dte[tgt * 4 + 1]);
         setProperty("m2-b2-dte", "switched-to-translation");
         OSSynchronizeIO();
-        // 【第九轮】DTE 写入完成的时刻。这只是"写下去了"，不等于翻译已生效：
-        // 失效命令还没提交，TLB 里可能仍是旧表项。真正的生效起点在
-        // 第 15 步两条失效命令都收到完成之后记为 tInvComplete。
+        // [Round 9] The moment the DTE write completed. This is only "it was
+        // written down", not "translation is in effect": the invalidation
+        // commands have not been submitted, and the TLB may still hold old
+        // entries. The real activation point is recorded as tInvComplete after
+        // both invalidation commands in step 15 receive their completions.
         fM22b2Dma.tDteWritten = m2b2NowNS();
         setHexProperty(this, "m2-b2-dma-t-dte-written",
                        fM22b2Dma.tDteWritten);
     }
 
-    // ---- 第 15 步：失效命令（全部从 ctx 取参数）----
+    // ---- Step 15: invalidation commands (all parameters from ctx) ----
     //
-    // 顺序照抄 Linux attach_device：先 INV_DEV_ENTRY，再刷 TLB。
-    // INV_IOMMU_PAGES 的 domain 取 ctx.domid —— 这正是旧代码的缺陷所在。
+    // Order follows Linux's attach_device: INV_DEV_ENTRY first, then the TLB
+    // flush. INV_IOMMU_PAGES takes its domain from ctx.domid -- exactly where
+    // the old code was defective.
     {
         const UInt64 invAddr = m2b2InvAddress();
         setHexProperty(this, "m2-b2-inv-addr", invAddr);
 
-        // (a) INV_DEV_ENTRY：data[0] = devid，type 在 data[1] bit28
+        // (a) INV_DEV_ENTRY: data[0] = devid, type in data[1] bit28
         if (!m2b2Submit(base, &ctx, "inv-dev-entry",
                         ctx.devid,
                         ((UInt32)M2B2_CMD_INV_DEV_ENTRY << 28), 0, 0)) {
@@ -1306,8 +1376,8 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
             goto recover;
         }
 
-        // (b) INV_IOMMU_PAGES：整个地址空间，domain 来自 ctx
-        //     data[1] 低 16 位 = domid；PDE 位表示连 PDE 一起失效
+        // (b) INV_IOMMU_PAGES: the whole address space, domain from ctx
+        //     data[1]'s low 16 bits = domid; the PDE bit invalidates PDEs too
         if (!m2b2Submit(base, &ctx, "inv-iommu-pages",
                         0,
                         ctx.domid | ((UInt32)M2B2_CMD_INV_IOMMU_PAGES << 28),
@@ -1332,14 +1402,18 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
         setHexProperty(this, "m2-b2-inv-sem", ctx.lastSem);
         setHexProperty(this, "m2-b2-inv-loops", ctx.lastLoops);
 
-        // 【第九轮】翻译**生效**的时刻是这里，不是写 DTE 的那一刻。
+        // [Round 9] Translation becomes **effective** here, not at the DTE
+        // write.
         //
-        //   第八轮把 tTranslateOn 记在 dte[] 写完之后。可是那时失效命令
-        //   还没提交，IOMMU 的 TLB 里可能仍是直通表项；"DTE 已写"与
-        //   "翻译已生效"是两件事，把它们合成一个时刻会让"窗口在翻译
-        //   生效区间内"这句话缺少它需要的前提。
+        //   Round 8 recorded tTranslateOn right after the dte[] writes. But the
+        //   invalidation commands had not been submitted yet, and the IOMMU's
+        //   TLB might still hold pass-through entries; "the DTE was written"
+        //   and "translation is effective" are two different things, and
+        //   merging them into one moment leaves "the window lies within the
+        //   translation-active interval" without its needed premise.
         //
-        //   两条命令都收到了完成信号之后，才把这一刻记为生效起点。
+        //   Only after both commands have received their completions is this
+        //   moment recorded as the activation point.
         fR15InvTicks = mach_absolute_time();
         fM22b2Dma.tInvComplete = m2b2NowNS();
         fM22b2Dma.tTranslateOn = fM22b2Dma.tInvComplete;
@@ -1349,35 +1423,42 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
                        fM22b2Dma.tTranslateOn);
     }
 
-    // ---- 第 15b 步：设备 DMA 观察（v0.21.7）----
+    // ---- Step 15b: device DMA observation (v0.21.7) ----
     //
-    // 【为什么放在这里，而不是更早或更晚】
+    // [Why here, neither earlier nor later]
     //
-    //   更早不行：此刻 DTE 刚切到翻译、失效命令刚完成，设备可能还在
-    //   重新取描述符，读到的环状态不是稳态。
+    //   Earlier does not work: the DTE has just switched to translation and the
+    //   invalidations just completed; the device may still be re-fetching
+    //   descriptors, so ring state is not steady.
     //
-    //   更晚不行：必须在主窗口**之前**读一次 TX 完成计数，才能在窗口
-    //   之后再读一次，用两次之差证明"设备在这段时间里真的完成了传输"。
-    //   这正是第五轮缺失的那类证据：当时的 netstat 差值是秒级的，
-    //   无法把某个包归到窗口内，也无法排除统计发布延迟。
+    //   Later does not work: the TX completion count must be read once
+    //   **before** the main window and once after, and their difference proves
+    //   "the device really completed transfers during this span". That is
+    //   exactly the evidence round 5 lacked: its netstat deltas were
+    //   second-grained, unable to place a packet inside the window or exclude
+    //   statistics publication delay.
     //
-    //   本步只读：不写设备寄存器，不改变 DMA 路径。
+    //   This step is read-only: no device register is written, the DMA path is
+    //   not altered.
     if (!fR31Session) {
         observeDeviceDma();
         setProperty("m2-b2-dma-obs-before-window",
                     fM22b2Dma.ran ? "yes" : "no");
     }
 
-    // ---- 第 15c 步：绑定本次驱动实例（必须在窗口之前）----
+    // ---- Step 15c: bind this driver instance (must precede the window) ----
     //
-    // 【为什么放在这里】
-    //   驱动观测日志的 epoch 是"驱动实例"的标识。要让"这份快照属于本次
-    //   实例"成为可核验的事实，绑定值必须在读到证据**之前**定下来。
-    //   第 16c 步（窗口之后）才读快照，所以绑定点选在这里。
+    // [Why here]
+    //   The driver observation log's epoch identifies the "driver instance".
+    //   For "this snapshot belongs to this instance" to be a verifiable fact,
+    //   the binding value must be fixed **before** the evidence is read. Step
+    //   16c (after the window) is where snapshots are read, so the binding
+    //   point is here.
     //
-    // 【第十轮为什么没有这一步】
-    //   读侧把 want.epoch 写成 0，而 0 表示"不检查"。整条保护因此从未
-    //   生效：驱动重载后同一块卡的新实例会被当成旧的。
+    // [Why round 10 lacked this step]
+    //   The reader wrote want.epoch = 0, and 0 means "don't check". The whole
+    //   protection never took effect: after a driver reload, a new instance of
+    //   the same card was accepted as the old one.
     if (!fR31Session) {
         m2b2BindDriverInstance();
         setHexProperty(this, "m2-b2-epoch-bound-at-window",
@@ -1386,21 +1467,26 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
                        fM22b2Dma.tWinStart);
     }
 
-    // ---- 第 15d 步：RX 投递缓冲区集合的**水位**（必须在窗口之前）----
+    // ---- Step 15d: the RX posted-buffer set's **watermark** (must precede the window) ----
     //
-    // 【为什么只在这里读一次，而且只记水位】
-    //   本轮要证明的是"窗口内设备可能写入的每一个 RX 缓冲区都被映射"。
-    //   集合由两半组成：窗口前的基线槽表，以及基线之后、窗口结束之前的
-    //   每一条重新投递记录。要判断"哪些重新投递属于本窗口"，就必须在
-    //   窗口打开**之前**把驱动的重投递计数记下来——之后序号大于它的，
-    //   都是窗口（及其紧邻的采集区间）产生的。
+    // [Why read once here, and only the watermark]
+    //   This round must prove "every RX buffer the device may write within the
+    //   window is mapped". The set has two halves: the baseline slot table from
+    //   before the window, and every re-post record between the baseline and
+    //   window end. Deciding "which re-posts belong to this window" requires
+    //   recording the driver's re-post counter **before the window opens** --
+    //   anything with a later sequence number was produced by the window (and
+    //   its immediately adjacent capture interval).
     //
-    // 【为什么不能等窗口之后再一起读】
-    //   那样"窗口之前已经发生的重投递"和"窗口内发生的"就无法区分：基线
-    //   槽表只反映最后一次采集，被它替换掉的缓冲区会两头都不在，集合
-    //   悄悄变小，而"全部覆盖"仍然成立。这正是本轮要消除的失效形态。
+    // [Why both cannot be read together after the window]
+    //   Then "re-posts that happened before the window" and "within the window"
+    //   become indistinguishable: the baseline slot table reflects only the
+    //   last capture, buffers it replaced appear in neither half, the set
+    //   silently shrinks -- and "everything covered" still holds. Exactly the
+    //   failure shape this round eliminates.
     //
-    // 本步只读属性，不写设备寄存器，也不改变 DMA 路径。
+    //   This step reads properties only: no device register writes, no DMA path
+    //   changes.
     if (!fR31Session) m2b2RxSetRead(true);
     // Replacements are impossible until both mapping and invalidation have
     // completed. Authorization accepts no new DMA addresses from the probe.
@@ -1408,22 +1494,28 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
                    fM22b2Dma.declaredToken ^ 0x80000000u);
     setHexProperty(this, "m2-b2-r15-flood-req-first", 10001);
     setHexProperty(this, "m2-b2-r15-flood-req-last", 11200);
-    // ---- 第 15e 步：打开接纳（round22 顺序修正）----
+    // ---- Step 15e: open admission (round22 ordering fix) ----
     //
-    // 【顺序】第 14b 步已经停掉接纳、等提交者退出、排空旧映射；第 14 步
-    // 切换了 DTE；第 15 步两条失效命令都收到了完成。只有到这一刻，"设备
-    // 通过本表翻译"才是成立的事实，因此也只有到这一刻才允许重新接纳：
+    // [Order] Step 14b already closed admission, waited for submitters to exit,
+    // and drained the old mapping; step 14 switched the DTE; step 15 saw both
+    // invalidation commands complete. Only at this moment is "the device
+    // translates through this table" an established fact, and only now may
+    // admission reopen:
     //
-    //   * 普通包 PA 会改用新表解析（新表只保证 [0,16GiB) 恒等，
-    //     r17TxCover 负责在写 OWN 之前补上窗口外的块）；
-    //   * 受控包的 64GiB IOVA 只有在新表生效后才有意义。
+    //   * Ordinary packet PAs will be resolved via the new table (it only
+    //     guarantees identity on [0,16GiB); r17TxCover tops up out-of-window
+    //     blocks before OWN is written);
+    //   * The controlled packets' 64 GiB IOVAs are meaningful only once the new
+    //     table is in effect.
     //
-    // 【为什么不在第 14 步之前"只加一个 gate 检查"】
-    //   第 21 轮就是这么做的：Install 之后关一个 flag，再读环占用。可是
-    //   一个已经通过 flag 检查、还没写 OWN 的输出线程不在任何计数里，
-    //   排空会把它当成"已经结束"，于是 DTE 切换与它的 OWN 写并发。现在
-    //   接纳是一个原子字（关闭位 + 引用计数），线程在"获准"的同一刻被
-    //   计数，在写完 OWN 之后才离开，排空等的是这个计数。
+    // [Why not "just add a gate check" before step 14]
+    //   Round 21 did exactly that: Install closed a flag, then ring occupancy
+    //   was read. But an output thread that had passed the flag check and not
+    //   yet written OWN was in no counter; the drain treated it as finished, so
+    //   the DTE switch raced its OWN write. Admission is now one atomic word
+    //   (closed bit + reference count): a thread is counted at the same instant
+    //   it is admitted, leaves only after writing OWN, and the drain waits on
+    //   that count.
     // Round22: hand the domain the CURRENT command-ring cursors. Install copied
     // them before the two invalidations above were submitted, so without this
     // the first controlled map would append at a consumed slot and its
@@ -1471,15 +1563,19 @@ void org_example_AMDMapperProbe::runM22b2PageTableProbe() {
     }
     r27RxReady();
 
-    // ---- 第 16 步：稳态观察窗口（唯一的功能判据窗口）----
+    // ---- Step 16: steady-state observation window (the only functional
+    //      criterion window) ----
     //
-    // 严格按规范消费事件环：只推进 HEAD，绝不写 TAIL，不清空缓冲。
-    // 窗口有效性由 Begin/End 判定；无效即"无法判定"，不是 0 事件。
+    // Consume the event ring strictly per the spec: advance only HEAD, never
+    // write TAIL, never clear the buffer. Window validity is decided by
+    // Begin/End; invalid means "cannot judge", not 0 events.
     //
-    // 【第九轮】窗口前先把后置采样需要的 BAR2 映射准备好，并把采样函数
-    // 交给 m2b2EndEventWindow()。这样采样发生在窗口**内部**，而不是窗口
-    // 返回之后。映射失败时 postSampleDone 保持 false，后面的边界判定
-    // 会如实报"没有后置采样"，而不是用一个更宽的区间充数。
+    // [Round 9] Before the window, the BAR2 mapping needed by the post-sample
+    // is prepared and the sampling function handed to m2b2EndEventWindow(), so
+    // sampling happens **inside** the window rather than after it returns. If
+    // the mapping fails, postSampleDone stays false and the boundary verdict
+    // later reports "no post-sample" honestly, not padded with a wider
+    // interval.
     {
         postSample.reg = fM22b2Dma.cloPtrReg;
         postSample.width = fM22b2Dma.cloPtrWidth;
@@ -1627,29 +1723,34 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
         postSample.haveBar = false;
     }
 
-    // ---- 第 16b 步：窗口内后置采样已经完成，这里只做结果处理 ----
+    // ---- Step 16b: the in-window post-sample has already run; only results
+    //      are handled here ----
     //
-    // 【第九轮重排：采样移进窗口内部】
+    // [Round 9 reordering: sampling moved inside the window]
     //
-    //   第八轮的做法：窗口返回之后再读两个寄存器。结果是
-    //   [tCloBefore, tCloAfter] ⊇ [tWinStart, tWinEnd]，
-    //   跨度 3.00785 秒包住窗口 3.00018 秒。这个方向只能证明"完成发生在
-    //   窗口结束之前或之后"，不能证明"完成发生在零事件窗口内"。
+    //   Round 8's approach read the two registers after the window returned:
+    //   [tCloBefore, tCloAfter] ⊇ [tWinStart, tWinEnd], a 3.00785 s span
+    //   wrapping the 3.00018 s window. That direction proves only "completions
+    //   happened before or after the window end", not "within the zero-event
+    //   window".
     //
-    //   后置采样由 m2b2EndEventWindow() 在记录 tEnd 之前调用
-    //   m2b2DoPostSample() 完成，所以
+    //   The post-sample is performed by m2b2EndEventWindow() calling
+    //   m2b2DoPostSample() before recording tEnd, so
     //
     //       tWinStart <= tCloAfter <= tTailAfter <= tWinEnd
     //
-    //   采样本身落在窗口内。窗口关闭后不再读任何设备寄存器。
+    //   The sampling itself falls inside the window. No device register is read
+    //   after the window closes.
     //
-    //   剩余测量误差仍然存在，但它的**方向**变了：关闭指针与尾指针之间
-    //   只隔几十纳秒，而两者都远早于 tWinEnd，所以窗口末尾那一点点时间
-    //   里的完成没有被计入——这是漏计，不是多计。方向上是保守的：
-    //   不会把"设备还在工作"读成"设备停下来了"。
+    //   Residual measurement error remains, but its **direction** changed: the
+    //   close and tail pointers are tens of nanoseconds apart, both far earlier
+    //   than tWinEnd, so completions in the last sliver of the window are not
+    //   counted -- an undercount, not an overcount. Conservative in direction:
+    //   it cannot read "the device is still working" as "the device stopped".
     //
-    //   不声称"误差最多一个描述符"：没有吞吐上界依据。两个采样时刻都
-    //   发布，任何人可以据此判断量级。
+    //   No claim of "error at most one descriptor": there is no throughput
+    //   upper bound to justify it. Both sampling moments are published; anyone
+    //   can judge the magnitude from them.
     {
         fM22b2Dma.boundaryInWindow = false;
         if (postSampleDone) {
@@ -1685,12 +1786,12 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
         setProperty("m2-b2-dma-tx-window-covered", "no");
     }
 
-    // --- 段 1 的结果处理（纯计算，不碰硬件、不扫描）---
+    // --- Segment 1's result handling (pure computation; no hardware, no scan) ---
     if (cloAfterOk) {
         fM22b2Dma.cloPtrAfter = cloAfterRaw;
         fM22b2Dma.haveCloDelta = true;
 
-        // 掩码差值，不是环取模。
+        // Masked delta, not ring modulo.
         const UInt32 delta = amdobs::cloPtrDelta(
             fM22b2Dma.cloPtrBefore, cloAfterRaw, fM22b2Dma.cloPtrMask);
         const bool plausible = amdobs::cloPtrDeltaPlausible(
@@ -1698,13 +1799,15 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
 
         setHexProperty(this, "m2-b2-dma-cloptr-after", (UInt64)cloAfterRaw);
         setHexProperty(this, "m2-b2-dma-cloptr-delta", (UInt64)delta);
-        // 同时给出"按环取模"的结果，让两种解释的差别可见。
+        // The "ring modulo" result is also given, making the difference between
+        // the two interpretations visible.
         setHexProperty(this, "m2-b2-dma-cloptr-delta-ringmod",
                        (UInt64)amdobs::cloPtrRingIndex(delta, 1024));
 
         if (!plausible) {
-            // 差值大到无法解释：更像计数器重置或设备更换，而不是
-            // "设备完成了半个计数器空间的描述符"。
+            // Delta too large to explain: more like a counter reset or a device
+            // swap than "the device completed half a counter space of
+            // descriptors".
             fM22b2Dma.cloDelta = 0;
             fM22b2Dma.cloDeltaValid = false;
             setProperty("m2-b2-dma-cloptr-delta-valid",
@@ -1725,12 +1828,15 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
                        (UInt64)tailAfterRaw);
     }
 
-    // --- 段 2：窗口扫描（边界已固定，此后不再影响边界值）---
+    // --- Segment 2: window scan (boundaries are now fixed and no longer
+    //      affect boundary values) ---
     //
-    // 【为什么必须在这里，而不是在两次采样之间】
-    //   扫描 1024 个描述符、发布几十个属性都要时间。放在两次边界采样
-    //   之间，就会把"完成进展"的区间撑得比主窗口还宽——第七轮正是
-    //   这样：两次采样相距 3.00694 秒，中间还夹着整个扫描。
+    // [Why here and not between the two boundary samples]
+    //   Scanning 1024 descriptors and publishing dozens of properties takes
+    //   time. Placing it between the two boundary samples would stretch the
+    //   "completion progress" interval wider than the main window -- round 7
+    //   did exactly that: the samples were 3.00694 s apart with the entire scan
+    //   sandwiched between.
     if (fM22b2Dma.ran && fM22b2Dma.haveTxRing && tailAfterOk) {
         const UInt64 bytes = 1024ULL * amdobs::TX_DESC_STRIDE;
         const char *why = nullptr;
@@ -1765,37 +1871,43 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
                     tailAfterOk ? "SKIP-no-tx-ring" : "SKIP-no-tail-pointer");
     }
 
-    // ---- 第 16c 步：读驱动侧观测日志（第九轮新增）----
+    // ---- Step 16c: read the driver-side observation log (added in round 9) ----
     //
-    // 【为什么在窗口之后读】
-    //   日志记录的是提交与完成的**实际发生**，窗口内的记录才是本窗口的
-    //   证据。驱动每秒把一段后缀复制进属性，所以这里读到的是最新一次
-    //   发布，覆盖窗口内那几秒。
+    // [Why read after the window]
+    //   The log records submits and completions as they **actually happen**;
+    //   records inside the window are this window's evidence. The driver copies
+    //   a suffix into the property every second, so what is read here is the
+    //   latest publication, covering the seconds inside the window.
     //
-    // 【为什么这一条能替代读环作为主证据】
-    //   读环只能看到"窗口之后的字节"：证明不了代次，也恢复不了 TSO 的
-    //   真实长度。日志里每条记录都带着驱动自己算的累计索引，提交与完成
-    //   按同一个数字配对，不涉及对槽位复用的推断。
+    // [Why this replaces ring reading as the primary evidence]
+    //   Ring reading sees only "bytes after the window": it cannot prove the
+    //   generation nor recover TSO's true length. Each log record carries the
+    //   driver's own cumulative index; submit and completion pair on the same
+    //   number, with no inference about slot reuse involved.
     //
-    //   读环仍然保留：它是唯一不依赖驱动配合的观测，且它的包络是
-    //   fault 分类的输入。两者不互相替代，报告里分开说。
+    //   Ring reading is still kept: it is the only observation independent of
+    //   driver cooperation, and its envelope feeds fault classification. The
+    //   two do not replace each other; the report keeps them separate.
     //
-    // 【第十轮】先取目标网卡身份，再读快照。
-    //   顺序不能反：m2b2ReadDriverObs() 要用这一组去核对快照头部的
-    //   vendor/device/BDF/MAC/ifUnit。第九轮没有这一步，于是"记录属于
-    //   目标设备"从未被检验过——而那一轮的负载其实走的是另一块网卡。
+    // [Round 10] Take the target NIC's identity first, then read the snapshot.
+    //   The order cannot be reversed: m2b2ReadDriverObs() uses this set to
+    //   verify the snapshot header's vendor/device/BDF/MAC/ifUnit. Round 9 had
+    //   no such step, so "the records belong to the target device" was never
+    //   tested -- and that round's traffic in fact flowed through another NIC.
     //
-    // 【第十一轮】实例 epoch 的绑定发生在第 15b 步（窗口之前），不在这里。
-    //   这一点是刻意的：在窗口之后取 epoch 等于用被检验的对象去定义检验
-    //   标准。这里的读侧只使用那个已经定下来的值。
+    // [Round 11] The instance epoch's binding happened in step 15b (before the
+    //   window), not here. That is deliberate: taking the epoch after the
+    //   window lets the object under test define the test's standard. This
+    //   reader only uses the already-fixed value.
     m2b2CaptureNicIdentity();
     m2b2ReadDriverObs();
 
-    // ---- 第 16d 步：窗口结束后的 DescOwn 计数（只作旁证）----
+    // ---- Step 16d: post-window DescOwn count (circumstantial only) ----
     //
-    // DescOwn 在本芯片上不被硬件清除，所以这个差值恒为 0（已连续三轮
-    // 观察到 done == zeroaddr）。它保留在这里是为了让"DescOwn 不是完成
-    // 信号"这件事每次都可见，而不是被删掉后变成一段传闻。
+    // DescOwn is not cleared by the hardware on this chip, so this delta is
+    // constantly 0 (done == zeroaddr observed three rounds running). It is
+    // kept here to make "DescOwn is not a completion signal" visible every
+    // time, rather than becoming hearsay once deleted.
     if (fM22b2Dma.ran) {
         const int after = m2b2ScanTxDone();
         fM22b2Dma.txDoneWithAddrAfter = (after >= 0) ? (UInt32)after : 0;
@@ -1821,22 +1933,25 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
         setProperty("m2-b2-dma-tx-completions-valid", "no-observation-skipped");
     }
 
-    // 覆盖范围最终值。
+    // Final coverage value.
     //
-    // 【第七轮】一次快照只能支撑**肯定**归属："fault 地址落在设备正在用
-    // 的区间里" 是可靠的。反过来，"fault 地址不在集合里" 并不能推出
-    // "设备没用过它"——设备可能在一秒前用过。
+    // [Round 7] A single snapshot supports only **positive** attribution:
+    // "the fault address falls within the range the device is using" is
+    // reliable. The converse -- "the fault address is not in the set" -- does
+    // not imply "the device never used it"; it may have used it a second ago.
     //
-    // 【第八轮】不再用**一个** coverage 值代表所有路径。
+    // [Round 8] One **single** coverage value no longer stands for all paths.
     //
-    //   第七轮把 txWindowCovered 的结果直接赋给 fM22b2Dma.coverage，
-    //   然后第 17 步用这一个值去分类每一条 fault。但 TX 的整窗覆盖
-    //   只对 TX 缓冲成立：RX 缓冲走 mbuf_data_to_physical()，环与统计
-    //   缓冲走 IODMACommand，这三条路径一次窗口扫描都看不到。
+    //   Round 7 assigned txWindowCovered's result straight into
+    //   fM22b2Dma.coverage, and step 17 classified every fault with that one
+    //   value. But TX whole-window coverage holds only for TX buffers: RX
+    //   buffers go through mbuf_data_to_physical(), and the rings and
+    //   statistics buffer go through IODMACommand -- one window scan sees
+    //   none of those three paths.
     //
-    //   现在 fM22b2Dma.coverage 是**逐路径记录里最弱的那一个**，
-    //   而 classifyFault 另有 allPathsCovered 参数来决定它能否说成
-    //   全设备的结论。
+    //   fM22b2Dma.coverage is now **the weakest of the per-path records**, and
+    //   classifyFault takes a separate allPathsCovered argument to decide
+    //   whether a whole-device claim is permitted.
     fM22b2Dma.coverage = fM22b2Dma.pathCov.weakest();
     setProperty("m2-b2-dma-coverage",
                 amdobs::coverageName(fM22b2Dma.coverage));
@@ -1855,12 +1970,14 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
     setProperty("m2-b2-dma-cov-all-window",
                 fM22b2Dma.pathCov.allWindow() ? "yes" : "no");
 
-    // 【第八轮】边界时刻全部发布，使"完成进展"能与明确的窗口逐项核对。
+    // [Round 8] All boundary moments are published, so completion progress can
+    // be checked item by item against an explicit window.
     setHexProperty(this, "m2-b2-dma-t-translate-on",
                    fM22b2Dma.tTranslateOn);
     setHexProperty(this, "m2-b2-dma-t-translate-off",
                    fM22b2Dma.tTranslateOff);
-    // 【第九轮】DTE 写入与失效完成分开：只有后者才是翻译生效的起点。
+    // [Round 9] The DTE write and the invalidation completion are separated:
+    // only the latter is the point where translation takes effect.
     setHexProperty(this, "m2-b2-dma-t-dte-written",
                    fM22b2Dma.tDteWritten);
     setHexProperty(this, "m2-b2-dma-t-inv-complete",
@@ -1896,7 +2013,8 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
     setHexProperty(this, "m2-b2-win-entries", winMain.entries);
     setHexProperty(this, "m2-b2-win-devid-mismatch", winMain.devidMismatch);
     setHexProperty(this, "m2-b2-status", (UInt64)winMain.statusEnd);
-    // v0.20.0：截断标记与前置积压（必须与分析一起发布）
+    // v0.20.0: truncation marker and pre-existing backlog (must be published
+    // together with the analysis)
     setProperty("m2-b2-win-raw-truncated",
                 winMain.rawTruncated ? "yes" : "no");
     setHexProperty(this, "m2-b2-win-pre-backlog", winMain.preBacklog);
@@ -1908,7 +2026,7 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
                 winPre.rawTruncated ? "yes" : "no");
     setHexProperty(this, "m2-b2-pre-entries-count", winPre.entries);
 
-    // 逐类型计数 + 原始事件（供离线解码，不再只留总数）
+    // Per-type counts + raw events (for offline decoding; no longer totals only)
     for (UInt32 t = 1; t < 16; t++) {
         if (winMain.typeCount[t] == 0) continue;
         char k[48];
@@ -1928,7 +2046,7 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
         setProperty(k, v);
     }
 
-    // 主类型（只报最多的那一种，附规范名称）
+    // Dominant type (only the most frequent is reported, with its spec name)
     {
         UInt32 bestT = 0, bestN = 0;
         for (UInt32 t = 1; t < 16; t++) {
@@ -1942,24 +2060,30 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
         setHexProperty(this, "m2-b2-win-dominant-count", bestN);
     }
 
-    // ---- 第 17 步：把窗口内的 IO_PAGE_FAULT 地址逐个对照页表 ----
+    // ---- Step 17: check each IO_PAGE_FAULT address inside the window against
+    //      the page table ----
     //
-    // 【第五轮重写】第四轮这里也是手写逐级 if/else，并且判据是
-    // "叶子 PR=1 就算 present"——它**没有检查叶子的编码是否合法**。
-    // 所以一张用非法 NextLevel=7 写成的表，在这里会被报成
-    // "walk-present = 8"，也就是"地址都被映射了"，而实际上硬件
-    // 正是因为那个非法编码才报的 fault。这正是第四轮把
-    // "页表看起来完全正确"与"硬件报 fault"并列成矛盾的原因：
-    // 那个"看起来正确"是同一个错误假设的产物。
+    // [Round 5 rewrite] Round 4's version here was also hand-written per-level
+    // if/else, with the criterion "a leaf with PR=1 counts as present" -- it
+    // **never checked whether the leaf's encoding was legal**. So a table
+    // written with the illegal NextLevel=7 was reported here as
+    // "walk-present = 8", i.e. "every address is mapped", while the hardware
+    // faulted precisely because of that illegal encoding. That is exactly why
+    // round 4 presented "the page table looks completely correct" and "the
+    // hardware faults" as a contradiction: that "looks correct" was a product
+    // of the same wrong assumption.
     //
-    // 现在用 amdpte::walkPageTable()，它区分 present / absent / illegal。
-    // 对本案（第四轮的 8 条样本，RZ=0 且 PR=1），正确结果是 illegal。
+    // Now amdpte::walkPageTable() is used, which distinguishes present /
+    // absent / illegal. For this case (round 4's 8 samples, RZ=0 and PR=1),
+    // the correct result is illegal.
     //
-    // 【第六轮补充】范围外地址也要走表，不能因为"超出覆盖范围"就跳过。
-    //   第五轮的 m2-b2-dump-count = 0 正是这样来的：唯一那条 fault 在
-    //   16 GiB 之外，于是取证被整段跳过，低层表项一次都没被读过。
-    //   走表本身是安全的（只读我们自己分配的表内存），结论会明确写成
-    //   "absent at level N"，这就是"当前表没有覆盖它"的直接证据。
+    // [Round 6 addition] Out-of-range addresses are walked too; they must not
+    // be skipped for being "beyond coverage". Round 5's m2-b2-dump-count = 0
+    // arose exactly that way: the only fault was above 16 GiB, so forensics
+    // was skipped entirely and no low-level entry was ever read. The walk
+    // itself is safe (it only reads our own allocated table memory), and the
+    // verdict is written plainly as "absent at level N" -- the direct evidence
+    // that "the current table does not cover it".
     {
         UInt32 evtInRange = 0, evtOutOfRange = 0;
         UInt32 evtWalkPresent = 0, evtWalkAbsent = 0, evtWalkIllegal = 0;
@@ -1967,23 +2091,26 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
         UInt32 evtWrite = 0, evtRead = 0, evtInterrupt = 0;
         UInt64 evtMinAddr = 0, evtMaxAddr = 0, evtFirstAbsent = 0;
         UInt64 evtFirstIllegal = 0;
-        // v0.21.7：把每条 fault 的地址对照**设备实际在用的地址集合**
+        // v0.21.7: check each fault's address against **the set of addresses
+        // the device is actually using**
         UInt32 evtInLiveSet = 0, evtInDeadSet = 0;
         UInt32 evtInsideMapUnobserved = 0, evtUnknownOwnership = 0;
-        // 第七轮：快照覆盖下"本次没观察到"是单独一类，不与"确定不在集合内"
-        // 混为一谈。
+        // Round 7: "not observed this run" under snapshot coverage is its own
+        // class, not conflated with "definitely not in the set".
         UInt32 evtObservedAbsent = 0;
         UInt64 evtFirstInLive = 0;
         setProperty("m2-b2-fault-map-basis", "actual-page-table-not-bootstrap-limit");
 
-        // 直接引用第 15b 步观察到的集合（成员，不是栈）。
+        // References directly the set observed in step 15b (a member, not the
+        // stack).
         //
-        // 【为什么不在这里复制一份】
-        //   AddrSet 是 48*24+8 = 1160 字节。在栈上复制一份会把
-        //   runM22b2PageTableProbe() 的帧推过 __chkstk 阈值（实测
-        //   0x14D0 = 5328 字节就已经触发），于是二进制里出现对
-        //   ____chkstk_darwin 的弱引用，kmutil 直接拒绝这个 kext。
-        //   用 const 引用既省栈，也保证分类用的是同一份快照。
+        // [Why not copy it here]
+        //   AddrSet is 48*24+8 = 1160 bytes. Copying one onto the stack would
+        //   push runM22b2PageTableProbe()'s frame past the __chkstk threshold
+        //   (measured: 0x14D0 = 5328 bytes already triggers it), producing a
+        //   weak reference to ____chkstk_darwin in the binary and an outright
+        //   kmutil refusal of this kext. A const reference saves stack and
+        //   guarantees classification uses the same snapshot.
         const amdobs::AddrSet &obsSet = fM22b2AddrSet;
         setHexProperty(this, "m2-b2-fault-obs-set-ranges", (UInt64)obsSet.n);
 
@@ -2009,9 +2136,10 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
                              M2B2_EVENT_TYPE_MASK;
             if (t != M2B2_EVENT_IO_FAULT) continue;
 
-            // 标志域是 dword1 的 bit24:16（规范表 57），**不是**低 16 位。
-            // 低 16 位是 DomainID/PASID。第四轮把它当标志读，于是
-            // domain=0 的条目全部显示成 "flags=0x000"，把 PR/RW 一起藏掉了。
+            // The flags field is dword1's bit24:16 (spec table 57), **not** the
+            // low 16 bits. The low 16 bits are DomainID/PASID. Round 4 read
+            // them as flags, so every domain=0 entry displayed "flags=0x000",
+            // hiding PR/RW along with them.
             const UInt32 fl = (r1 >> 16) & 0x1FF;
             const UInt32 fPr = (fl >> 4) & 1;
             const UInt32 fRw = (fl >> 5) & 1;
@@ -2032,14 +2160,17 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
             const amdpte::WalkResult actualWalk = amdpte::walkPageTable(
                 readPte17, rootLevel17, rootPA, addr);
 
-            // ---- 地址归属（第七轮）----
+            // ---- Address attribution (round 7) ----
             //
-            // 判据是"设备是否在用这个地址"，**不是**"它是否在 16 GiB 之上"。
-            // 第五轮把后者当成前者，于是把范围外 fault 直接说成 MMIO。
+            // The criterion is "is the device using this address", **not** "is
+            // it above 16 GiB". Round 5 treated the latter as the former and
+            // labelled out-of-range faults as MMIO outright.
             //
-            // 第七轮加入覆盖维度：一次快照只能支撑**肯定**归属。
-            // "地址不在观察到的集合里" 不等于 "设备没用过它"——设备可能
-            // 在一秒前用过。只有整窗覆盖（COV_WINDOW）才允许更强的否定。
+            // Round 7 adds the coverage dimension: a single snapshot supports
+            // only **positive** attribution. "The address is not in the
+            // observed set" does not mean "the device never used it" -- it may
+            // have used it a second ago. Only whole-window coverage (COV_WINDOW)
+            // permits a stronger negative.
             {
                 const amdobs::FaultClass fc = amdobs::classifyFault(
                     addr, obsSet, fM22b2Policy, fM22b2Dma.coverage,
@@ -2095,25 +2226,26 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
         setHexProperty(this, "m2-b2-fault-walk-illegal", evtWalkIllegal);
         setHexProperty(this, "m2-b2-fault-addr-min", evtMinAddr);
         setHexProperty(this, "m2-b2-fault-addr-max", evtMaxAddr);
-        // v0.21.7 归属统计
+        // v0.21.7 attribution statistics
         setHexProperty(this, "m2-b2-fault-in-live-set", evtInLiveSet);
         setHexProperty(this, "m2-b2-fault-in-dead-set", evtInDeadSet);
         setHexProperty(this, "m2-b2-fault-inside-map-unobserved",
                        evtInsideMapUnobserved);
         setHexProperty(this, "m2-b2-fault-ownership-unknown",
                        evtUnknownOwnership);
-        // 第七轮：单列"本次未观察到"。
+        // Round 7: "not observed this run" listed separately.
         setHexProperty(this, "m2-b2-fault-observed-absent",
                        evtObservedAbsent);
         setProperty("m2-b2-fault-coverage",
                     amdobs::coverageName(fM22b2Dma.coverage));
-        // 【第八轮】否定结论的适用范围必须与覆盖一致。
+        // [Round 8] A negative conclusion's scope must match the coverage.
         //
-        //   第七轮这里只判断 coverage == COV_WINDOW。但 coverage 当时是
-        //   由 TX 的整窗覆盖算出来的，却被当成全设备的。现在：
-        //     - fault-negative-sound = 所有路径都整窗覆盖（唯一能支持
-        //       全设备否定的条件）
-        //     - fault-negative-scope  = 实际能说到哪一步
+        //   Round 7 tested only coverage == COV_WINDOW here. But coverage was
+        //   then computed from TX's whole-window coverage yet applied to the
+        //   whole device. Now:
+        //     - fault-negative-sound = every path has whole-window coverage
+        //       (the only condition supporting a whole-device negative)
+        //     - fault-negative-scope  = how far the negative actually extends
         const bool allCov = fM22b2Dma.pathCov.allWindow();
         setProperty("m2-b2-fault-negative-sound", allCov ? "yes" : "NO");
         setProperty("m2-b2-fault-negative-scope",
@@ -2131,7 +2263,8 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
                            evtFirstIllegal);
         }
 
-        // 故障标志统计（按规范表 57 解码，而不是只数 type==2 的个数）
+        // Fault flag statistics (decoded per spec table 57, not just a count of
+        // type==2)
         setHexProperty(this, "m2-b2-flags-pr", evtFlagPr);
         setHexProperty(this, "m2-b2-flags-pe", evtFlagPe);
         setHexProperty(this, "m2-b2-flags-rz", evtFlagRz);
@@ -2140,29 +2273,34 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
         setHexProperty(this, "m2-b2-flags-interrupt", evtInterrupt);
     }
 
-    // ---- 第 17b 步：导出**实际**页表路径（第七轮重写）----
+    // ---- Step 17b: export the **actual** page table paths (round 7 rewrite) ----
     //
-    // 【为什么必须逐级真读，而不是推断】
-    //   第六轮导出了 root[0..15]，看到 root[1..15] 全为 0，就写下
-    //   "所以 L3[16] 根本不存在"。那句话听起来像观测，其实是推断：
-    //   它假设了根项与下层表之间的对应关系，而**从未去读那一项**。
-    //   如果根表索引算错、或 root[0] 指向的 L3 页基址不对，结论就完全
-    //   不同，而输出会一模一样。
+    // [Why each level must really be read, not inferred]
+    //   Round 6 exported root[0..15], saw root[1..15] all zero, and wrote
+    //   "therefore L3[16] does not exist at all". That sentence sounds like an
+    //   observation but is an inference: it assumes a correspondence between
+    //   root entries and lower tables and **never reads that entry**. If the
+    //   root index were miscalculated, or root[0]'s L3 page base were wrong,
+    //   the conclusion would be completely different while the output looked
+    //   identical.
     //
-    //   本轮对每个地址真正逐级读取，并把每一级的
-    //     - 表物理地址 tablePA
-    //     - 表级 level（规范 1-based）
-    //     - 索引 index（该级用地址的哪 9 位）
-    //     - 原始 PTE
-    //     - 解码结论
-    //   全部导出。这样"absent at level 3, index 16"是一个**读到的**结果，
-    //   任何人可以用同样的表字节复核。
+    //   This round truly reads level by level for each address and exports, per
+    //   level:
+    //     - the table's physical address tablePA
+    //     - the table level (spec numbering, 1-based)
+    //     - the index (which 9 bits of the address that level uses)
+    //     - the raw PTE
+    //     - the decode verdict
+    //   "absent at level 3, index 16" is then a **read** result that anyone can
+    //   re-verify with the same table bytes.
     //
-    // 【同时导出正常路径】
-    //   只导出失败路径无法证明走表本身是对的：如果 walker 有 bug，它会
-    //   把一切都报成 absent，而输出看起来仍然"合理"。所以同时对若干条
-    //   设备实际在用的 DMA 地址走表，它们必须命中叶子并翻译回自身
-    //   （恒等映射）。一组 present + 一组 absent 才是完整证据。
+    // [Normal paths exported too]
+    //   Exporting only failure paths cannot prove the walker itself is right:
+    //   a buggy walker would report everything absent, and the output would
+    //   still "look reasonable". So several DMA addresses the device actually
+    //   uses are also walked; they must hit leaves and translate back to
+    //   themselves (identity mapping). One set of present + one set of absent
+    //   is the complete evidence.
     {
         setHexProperty(this, "m2-b2-dump-root-pa", rootPA);
         setHexProperty(this, "m2-b2-dump-l2-pa", l2PA);
@@ -2179,15 +2317,16 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
                     (fR31Session || fM22b2Use4K) ? "NextLevel0-4KiB-default"
                                                : "NextLevel0-2MiB-default");
 
-        // 根表内容仍然导出（便于核对 root[0] 的编码），但**不再**用它
-        // 推断下层内容。推断与观测必须分开。
+        // The root table's contents are still exported (making root[0]'s
+        // encoding checkable), but it is **no longer** used to infer lower
+        // content. Inference and observation must stay separate.
         for (UInt32 i = 0; i < 16; i++) {
             char k[48];
             snprintf(k, sizeof(k), "m2-b2-dump-root%u", i);
             setHexProperty(this, k, root[i]);
         }
 
-        // 取证覆盖范围：我们实际读了这块内存的哪一段。
+        // Forensic coverage: which part of this memory we actually read.
         setHexProperty(this, "m2-b2-dump-forensic-base", (UInt64)ptPA);
         setHexProperty(this, "m2-b2-dump-forensic-bytes", ptBytes);
 
@@ -2202,10 +2341,11 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
             return (amdpte::u64)ptv[byteOff / 8 + idx];
         };
 
-        // 对一条地址逐级走表并导出全部中间事实。
+        // Walks one address level by level and exports every intermediate fact.
         //
-        // 返回 true 表示走到叶子且翻译回自身（恒等映射成立）。
-        // `tag` 用来区分 fault 路径与正常 DMA 路径。
+        // Returning true means it reached a leaf and translated back to itself
+        // (identity mapping holds). `tag` distinguishes fault paths from normal
+        // DMA paths.
         struct WalkExport {
             UInt32 walked;
             UInt32 present;
@@ -2259,19 +2399,20 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
             snprintf(k, sizeof(k), "m2-b2-%s%u-depth", tag, idx);
             setHexProperty(this, k, n);
             for (UInt32 j = 0; j < n; j++) {
-                // 表物理地址：证明我们读的是哪一张表
+                // Table physical address: proves which table we read
                 snprintf(k, sizeof(k), "m2-b2-%s%u-pte%u-table",
                          tag, idx, j);
                 setHexProperty(this, k, tbls[j]);
-                // 表级：解码的必要输入，不能由解码器自己猜
+                // Table level: a necessary decode input; the decoder must not
+                // guess it itself
                 snprintf(k, sizeof(k), "m2-b2-%s%u-pte%u-level",
                          tag, idx, j);
                 setHexProperty(this, k, lvls[j]);
-                // 索引：该级用了地址的哪 9 位
+                // Index: which 9 bits of the address this level used
                 snprintf(k, sizeof(k), "m2-b2-%s%u-pte%u-index",
                          tag, idx, j);
                 setHexProperty(this, k, idxs[j]);
-                // 原始表项
+                // Raw table entry
                 snprintf(k, sizeof(k), "m2-b2-%s%u-pte%u",
                          tag, idx, j);
                 setHexProperty(this, k, vals[j]);
@@ -2292,7 +2433,7 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
             if (outOk) *outOk = ok;
         };
 
-        // (a) 每条 IO_PAGE_FAULT 的真实路径
+        // (a) The real path of each IO_PAGE_FAULT
         UInt32 dumped = 0;
         for (UInt32 i = 0; i < winMain.rawCount && dumped < 4; i++) {
             const UInt32 r1 = winMain.raw[i][1];
@@ -2312,17 +2453,21 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
         }
         setHexProperty(this, "m2-b2-dump-count", (UInt64)dumped);
 
-        // (b) 若干条设备实际在用的 DMA 地址：正常路径必须命中叶子
+        // (b) Several DMA addresses the device actually uses: normal paths must
+        //     hit leaves
         //
-        // 这一组是"走表本身是对的"的证据。若 walker 有 bug 而把所有地址
-        // 都报 absent，这一组的 ok 也会是 no，从而暴露问题。
+        // This set is the evidence that "the walker itself is right". If a
+        // walker bug reported every address absent, this set's ok would also be
+        // no, exposing the problem.
         {
             UInt64 dmaAddrs[8];
             const char *dmaTags[8];
             UInt32 nDma = 0;
-            // 【第八轮】优先走**窗口内实际完成**的那条描述符的地址。
-            // 这是本轮要求的那条链：提交 -> 地址 -> 页表 -> 完成。
-            // 只走环基址与"第一条描述符"无法把它接到某一次完成上。
+            // [Round 8] Prefer the address of the descriptor that **actually
+            // completed within the window**. That is the chain this round
+            // demands: submit -> address -> page table -> completion. Walking
+            // only the ring base and "the first descriptor" cannot tie it to a
+            // specific completion.
             if (fM22b2Dma.haveFirstCompleted &&
                 fM22b2Dma.winFirstCompletedAddr != 0) {
                 dmaAddrs[nDma] = fM22b2Dma.winFirstCompletedAddr;
@@ -2367,14 +2512,16 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
             }
             setHexProperty(this, "m2-b2-dma-walk-count", (UInt64)nDma);
             setHexProperty(this, "m2-b2-dma-walk-present", (UInt64)good);
-            // 窗口内完成的那条地址是否也走到了恒等叶子。这是
-            // "提交—地址—页表—完成"这条链的最后一环。
+            // Whether the address that completed within the window also walked
+            // to an identity leaf. This is the last link of the
+            // "submit -- address -- page table -- completion" chain.
             setProperty("m2-b2-dma-win-walk",
                         fM22b2Dma.haveFirstCompleted
                             ? (winGood ? "identity-mapped" : "NOT-MAPPED")
                             : "no-window-completion-observed");
-            // 设备在用地址中能被恒等翻译的比例。这是"表对不对"的直接
-            // 证据，而不仅是"fault 地址有没有被覆盖"。
+            // The fraction of in-use device addresses that identity-translate.
+            // This is the direct evidence of "is the table right", not merely
+            // "was the fault address covered".
             setProperty("m2-b2-dma-walk-verdict",
                         (nDma == 0) ? "no-addresses-observed"
                                     : (good == nDma ? "all-identity-mapped"
@@ -2385,34 +2532,40 @@ void org_example_AMDMapperProbe::finishM22b2PageTableProbe(
         setHexProperty(this, "m2-b2-walk-present", (UInt64)we.present);
     }
 
-    // ---- 第 17c 步：为每个受控请求的每个 TX/RX 段走真实页表 ----
+    // ---- Step 17c: walk the real page table for every TX/RX segment of every
+    //      controlled request ----
     //
-    // 【为什么放在恢复之前】
-    //   走表读的是本次实验建的页表内存。恢复流程在确认硬件停止后会
-    //   释放它；之后再走表就是 use-after-free。这里与第 17b 步一样，
-    //   仍在 DTE 指向翻译表的区间内。
+    // [Why before recovery]
+    //   The walk reads the page table memory built for this experiment. The
+    //   recovery flow frees it once hardware shutdown is confirmed; walking
+    //   afterwards is use-after-free. As in step 17b, we are still within the
+    //   span where the DTE points at the translation table.
     //
-    // 【为什么传 pt / ptPA / ptBytes】
-    //   它们是本函数的局部变量，作用域正好覆盖这块内存的生命周期。
-    //   提升成成员会让它活过 free，那正是要避免的形态。
+    // [Why pt / ptPA / ptBytes are passed]
+    //   They are locals of this function whose scope exactly covers this
+    //   memory's lifetime. Promoting them to members would let them outlive
+    //   the free -- precisely the shape to avoid.
     m2b2WalkBusinessRanges(dte, tgt, pt, (UInt64)ptPA, ptBytes);
 
-    // ---- 第 17d 步：RX 投递缓冲区集合的读入、构造与走表 ----
+    // ---- Step 17d: the RX posted-buffer set's read-in, construction and walk ----
     //
-    // 【顺序】
-    //   1. 读窗口之后的那份 rtl812x-rxpost（基线 + 重投递记录 + 原始字节）；
-    //   2. 用第 15d 步记下的水位把它拼成集合 S；
-    //   3. 对 S 的每个区间走表，判据与业务区间完全相同（RX 需要 IW）。
+    // [Order]
+    //   1. Read the post-window rtl812x-rxpost (baseline + re-post records +
+    //      raw bytes);
+    //   2. Use the watermark recorded in step 15d to assemble the set S;
+    //   3. Walk every range of S, with criteria identical to the business
+    //      ranges (RX requires IW).
     //
-    // 【为什么仍在恢复之前】
-    //   与第 17c 步同一个理由：走表读的是本次实验建的页表内存，恢复流程
-    //   之后会释放它。传 pt / ptPA / ptBytes 而不是把它们提升成成员，
-    //   也是同一个理由——成员会活过 free。
+    // [Why still before recovery]
+    //   Same reason as step 17c: the walk reads this experiment's page table
+    //   memory, which recovery frees afterwards. Passing pt / ptPA / ptBytes
+    //   instead of promoting them to members has the same reason -- members
+    //   would outlive the free.
     //
-    // 【失败不隐藏】
-    //   读不到发布、集合不完整、区间走表失败，三种情况分别有独立的稳定
-    //   token（m2-b2-rxset-why / -set-why / -walk），并且都以"未证明"
-    //   而不是"零失败"的形式记录。
+    // [Failures are not hidden]
+    //   Missing publication, an incomplete set, and a range walk failure each
+    //   have their own stable token (m2-b2-rxset-why / -set-why / -walk), and
+    //   all are recorded as "unproven", never as "zero failures".
     if (m2b2RxSetRead(false)) {
         m2b2WalkRxSet(dte, tgt, pt, (UInt64)ptPA, ptBytes);
     }
@@ -2466,36 +2619,44 @@ recover:
         }
         if (!stopTxAtExit()) return;
     }
-    // ---- 第 18 步：恢复（状态机，任何一步失败都阻止释放）----
+    // ---- Step 18: recovery (a state machine; any failed step blocks freeing) ----
     //
-    // 恢复阶段的时间边界也发布出来，使"停止—确认—还原"能被核对。
+    // The recovery stage's time boundaries are published too, so
+    // "stop -- confirm -- restore" can be checked.
     fM22b2Dma.tRecoveryStart = m2b2NowNS();
     setHexProperty(this, "m2-b2-t-recovery-start", fM22b2Dma.tRecoveryStart);
     //
-    // 【第五轮重写】第四轮这里有两个真问题：
+    // [Round 5 rewrite] Round 4 had two real problems here:
     //
-    //  (a) `cmdBufStopped = true;` 是**直接赋值**，没有任何硬件依据。
-    //      属性里写的是 "yes"，但它并不代表硬件真的停了命令缓冲。
-    //      规范 48882 §3.4.16：STATUS[4] = CmdBufRun，"1 = the IOMMU may
-    //      fetch commands from the command buffer"。必须读它，而不是假设。
+    //  (a) `cmdBufStopped = true;` was a **direct assignment** with no hardware
+    //      basis. The property said "yes", but that does not mean the hardware
+    //      really stopped the command buffer. Spec 48882 §3.4.16: STATUS[4] =
+    //      CmdBufRun, "1 = the IOMMU may fetch commands from the command
+    //      buffer". It must be read, not assumed.
     //
-    //  (b) 停止阶段里 `c |= (origCtrl & M2B2_CTRL_CMDBUF_EN)` 把**原始使能位
-    //      又写回去了**。也就是说"停止"这一步可能反而把命令缓冲重新使能。
-    //      原始状态只能在确认停稳、且要恢复寄存器时一次性还原，不能在
-    //      停止阶段提前恢复。事件日志那一行有同样的问题。
+    //  (b) In the stop stage, `c |= (origCtrl & M2B2_CTRL_CMDBUF_EN)` wrote
+    //      **the original enable bit back**. That is, the "stop" step could
+    //      re-enable the command buffer. The original state may be restored
+    //      only once shutdown is confirmed, and only when restoring registers;
+    //      it must not be restored early in the stop stage. The event log line
+    //      had the same problem.
     //
-    // 现在的顺序（依据规范 §2.4 / §2.5.1 的重启流程，以及 Linux
-    // iommu_disable() init.c:470-495 的实践）：
-    //   1. 清 CMDBUF_EN / EVT_LOG_EN，把两个"停止"位都置 0，**不**还原原值；
-    //   2. 有界等待 STATUS.CmdBufRun == 0 与 STATUS.EventLogRun == 0；
-    //   3. 清 IOMMU_EN 并读回确认；
-    //   4. 三者都确认后才允许还原基址寄存器与原始使能状态；
-    //   5. 寄存器读回全部等于原值，才允许释放内存。
+    // The order now (per the spec's §2.4 / §2.5.1 restart flow and Linux's
+    // iommu_disable() practice, init.c:470-495):
+    //   1. Clear CMDBUF_EN / EVT_LOG_EN -- both "stop" bits to 0, **not**
+    //      restoring the originals;
+    //   2. Bounded wait for STATUS.CmdBufRun == 0 and STATUS.EventLogRun == 0;
+    //   3. Clear IOMMU_EN and read back to confirm;
+    //   4. Only after all three are confirmed may the base registers and the
+    //      original enable state be restored;
+    //   5. Memory may be freed only after every register reads back equal to
+    //      its original value.
     //
-    // 每一步的 CONTROL/STATUS 实际读回值、等待轮数与是否超时都发布成属性，
-    // 使"停没停"可以被外部复核，而不是靠一个硬编码的 yes。
+    // Each step's actual CONTROL/STATUS read-backs, wait rounds and timeouts
+    // are published as properties, so "did it stop" can be externally verified
+    // instead of resting on a hard-coded yes.
 
-    // 18.1 先关两个使能位（不还原原值）
+    // 18.1 First clear both enable bits (without restoring originals)
     {
         UInt64 c = mmioRead64(base, M2B2_OFF_CONTROL);
         c &= ~M2B2_CTRL_CMDBUF_EN;
@@ -2506,7 +2667,7 @@ recover:
                        mmioRead64(base, M2B2_OFF_CONTROL));
     }
 
-    // 18.1b 发布逐条命令记录（命令字 / 预期值 / 观测值 / 阶段）
+    // 18.1b Publish per-command records (command words / expected / observed / stage)
     {
         setHexProperty(this, "m2-b2-cmd-record-count",
                        (UInt64)ctx.recordCount);
@@ -2531,7 +2692,7 @@ recover:
         }
     }
 
-    // 18.2 有界等待 CmdBufRun 清零（规范 STATUS[4]）
+    // 18.2 Bounded wait for CmdBufRun to clear (spec STATUS[4])
     {
         UInt32 loops = 0;
         UInt32 st = mmioRead32(base, M2B2_OFF_STATUS);
@@ -2550,7 +2711,7 @@ recover:
         }
     }
 
-    // 18.3 有界等待 EventLogRun 清零（规范 STATUS[3]）
+    // 18.3 Bounded wait for EventLogRun to clear (spec STATUS[3])
     {
         UInt32 loops = 0;
         UInt32 st = mmioRead32(base, M2B2_OFF_STATUS);
@@ -2566,7 +2727,7 @@ recover:
                     evtLogStopped ? "yes" : "FAIL-still-running");
     }
 
-    // 18.4 最后才停 IOMMU 本体，并读回确认
+    // 18.4 Only last is the IOMMU body stopped, with read-back confirmation
     {
         UInt64 c = mmioRead64(base, M2B2_OFF_CONTROL);
         c &= ~M2B2_CTRL_IOMMU_EN;
@@ -2578,11 +2739,13 @@ recover:
                     hwStopped ? "yes" : "FAIL-still-enabled");
     }
 
-    // 18.5 三项都确认停稳后，才还原基址寄存器与原始使能状态
+    // 18.5 Only after all three are confirmed stopped are the base registers
+    //      and original enable state restored
     if (hwStopped && cmdBufStopped && evtLogStopped) {
-        // 基址寄存器先还原，最后再把 CONTROL 整体写回原值。
-        // 顺序不能反：先把 CONTROL 还原成"已使能"，硬件就会立刻去读
-        // 还指向我们缓冲区的基址寄存器。
+        // Base registers are restored first; CONTROL as a whole is written back
+        // to its original value last. The order cannot be reversed: restoring
+        // CONTROL to "enabled" first would make the hardware immediately read
+        // base registers still pointing into our buffers.
         mmioWrite64(base, M2B2_OFF_DEV_TABLE, origDT);
         mmioWrite64(base, M2B2_OFF_CMD_BUF, origCmd);
         mmioWrite64(base, M2B2_OFF_EVT_BUF, origEvt);
@@ -2610,7 +2773,7 @@ recover:
         setProperty("m2-b2-restore-abort",
             "refusing to rewrite base registers while hardware may still "
             "reference them");
-        // 明确记录是哪一项没停住，而不是只给一个笼统的失败
+        // Record explicitly which item failed to stop, not a blanket failure
         const char *why = !hwStopped      ? "iommu-en-still-set"
                         : !cmdBufStopped  ? "cmdbuf-run-still-set"
                                           : "eventlog-run-still-set";
@@ -2618,18 +2781,24 @@ recover:
         safeToFree = false;
     }
 
-    // ---- 第 18b 步：确认翻译已停止，然后才拆 backend（round22）----
+    // ---- Step 18b: confirm translation has stopped, then tear down the
+    //      backend (round22) ----
     //
-    // 【顺序】第 18 步把设备表基址与控制寄存器写回原值并读回比对。只有四项
-    // 读回全部等于原值，"翻译已停止、原始状态已恢复"才是事实；也只有到这时
-    // 才允许 Detach（释放 callback/context/backend），最后才重新接纳普通输出。
+    // [Order] Step 18 wrote the device table base and control registers back to
+    // their originals and compared read-backs. Only when all four read back
+    // equal are "translation stopped, original state restored" facts; only then
+    // may Detach run (releasing callback/context/backend), and only after that
+    // is ordinary output re-admitted.
     //
-    // 【为什么 Detach 必须在恢复之后】第 21 轮的 Detach 出现在恢复之前，而且
-    // 它顺手把接纳打开了：恢复失败时翻译还指着我们的表，普通包却已经开始在
-    // 没有 cover 的情况下提交。现在 Detach 不再改接纳，接纳只由 kResume 打开，
-    // 而 kResume 只在读完寄存器、确认恢复之后调用。
+    // [Why Detach must come after recovery] Round 21's Detach ran before
+    // recovery, and it also reopened admission: on a recovery failure,
+    // translation still pointed at our table while ordinary packets were
+    // already submitting without covers. Detach no longer touches admission
+    // now; admission is opened only by kResume, which is called only after the
+    // registers are read and recovery confirmed.
     if (regsRestored) {
-        // 这一刻才是"翻译停止"的实际时间，不是恢复阶段的开始。
+        // This moment is translation-stop's actual time, not the recovery
+        // stage's start.
         fM22b2Dma.tTranslateOff = m2b2NowNS();
         setHexProperty(this, "m2-b2-dma-t-translate-off", fM22b2Dma.tTranslateOff);
         setProperty("m2-3e-translate-off", "confirmed-by-register-readback");
@@ -2647,8 +2816,10 @@ recover:
     }
     if (hadWindow) {
         if (!regsRestored) {
-            // 拒绝在硬件仍可能引用我们的表时拆 backend：callback、表、命令
-            // 缓冲全部留下，接纳保持关闭（普通输出停住），并如实报告。
+            // Refuse to tear down the backend while the hardware may still
+            // reference our tables: the callback, the table and the command
+            // buffer all stay, admission stays closed (ordinary output halted),
+            // and the situation is reported honestly.
             setProperty("m2-3b-cleanup", "PINNED-restore-incomplete");
             setProperty("m2-b2-verdict", "INVALID-restore-incomplete-pinned");
             setProperty("m2-b2-stage", "18b-pinned-restore");
@@ -2662,8 +2833,9 @@ recover:
             r17Export(&ctx);
             return;
         }
-        // Detach 成功 = 受控接纳已撤销、callback/context 已清空、翻译已停止。
-        // 只有到这一刻才允许普通输出重新流动。
+        // Detach succeeded = controlled admission revoked, callback/context
+        // cleared, translation stopped. Only now may ordinary output flow
+        // again.
         const bool resumed = r17ResumeOutput();
         r17Export(&ctx);
         r17Release();
@@ -2682,17 +2854,23 @@ recover:
     // their own control after register restoration.
     m2b2R15Finish();
 
-    // ---- 第 19 步：判定 ----
+    // ---- Step 19: verdict ----
     //
-    // 严格区分四类，不把"没测到"写成"通过"，也不把"计数变化"当因果：
-    //   INVALID        采样/命令/恢复任一条件不成立 → 本轮无结论
-    //   CONTROL        控制分支（pgtsleep）的判定，不被翻译判定覆盖
-    //   INDETERMINATE  条件成立但缺少目标设备活动的证据 → 无法判定
-    //   FAIL           有效条件下观察到具体失败
-    //   PASS           仅当全部功能验收条件同时满足（本轮无法给出）
+    // Four classes strictly distinguished: "not measured" is never written as
+    // "pass", and "a counter changed" is never taken as causation:
+    //   INVALID        any sampling/command/recovery condition failed -> no
+    //                  conclusion this round
+    //   CONTROL        the control branch's (pgtsleep) verdict, never
+    //                  overwritten by the translation verdict
+    //   INDETERMINATE  conditions hold but evidence of target-device activity
+    //                  is missing -> cannot judge
+    //   FAIL           a concrete failure observed under valid conditions
+    //   PASS           only when every functional acceptance condition holds
+    //                  simultaneously (not attainable this round)
     //
-    // 【v0.20.0 修正】判定不再无条件读 winMain：先看主窗口是否真的执行过。
-    // 没执行过就是"没测"，既不是 PASS 也不是 FAIL。
+    // [v0.20.0 fix] The verdict no longer unconditionally reads winMain: it
+    // first checks whether the main window actually ran. Not having run is "not
+    // measured" -- neither PASS nor FAIL.
     {
         const bool cmdOk     = !ctx.failed;
         const bool winOk     = (mainWindowRan && winMain.valid);
@@ -2704,23 +2882,29 @@ recover:
         const char *verdict;
         const char *stage;
 
-        // 【第七轮修正：控制分支必须有"完成"证据，不能只看"选择"】
+        // [Round 7 fix: the control branch needs evidence of "completion", not
+        // merely the "choice"]
         //
-        // 第六轮把 `fM22b2SleepOnly` 当作控制分支成立的全部条件。那是把
-        // **选择**当成了**结果**：只要启动参数是 pgtsleep，即使事件日志
-        // 重置失败、CMD_INV_ALL 超时、甚至恢复都没做完，最终判定也会被
-        // 改写成 CONTROL——真实失败被这个选择本身掩盖了。
+        // Round 6 treated `fM22b2SleepOnly` as the whole condition for the
+        // control branch. That mistakes a **choice** for a **result**: with the
+        // boot-arg pgtsleep, even if the event log reset failed, CMD_INV_ALL
+        // timed out, or recovery never finished, the final verdict would be
+        // rewritten to CONTROL -- real failures masked by the choice itself.
         //
-        // 现在的顺序：
-        //   1. 恢复失败 —— 最高优先，硬件状态不明，任何结论都不可信
-        //   2. 命令失败 —— 失效命令没完成，翻译窗口从未正确建立
-        //   3. 前置门未过 —— 事件日志重置 / INV_ALL 未完成
-        //   4. 控制分支 —— 只有 controlDone（控制阶段确实跑完）才输出
-        //   5. 翻译分支的窗口/事件判定
+        // The order now:
+        //   1. Recovery failed -- highest priority; hardware state unknown, no
+        //      conclusion is trustworthy
+        //   2. Command failed -- invalidation commands unfinished, the
+        //      translation window was never properly established
+        //   3. A precondition gate failed -- event log reset / INV_ALL incomplete
+        //   4. Control branch -- emitted only when controlDone (the control
+        //      stage really finished)
+        //   5. The translation branch's window/event verdict
         //
-        // 控制分支不切换 DTE，所以"主窗口没跑"对它是**正常**的，不能被
-        // 判成 INVALID-main-window-not-executed。分支 4 在分支 5 之前，
-        // 正是为了这一点。
+        // The control branch never switches the DTE, so "main window did not
+        // run" is **normal** for it and must not be judged
+        // INVALID-main-window-not-executed. Branch 4 precedes branch 5 for
+        // exactly that reason.
         if (!restoreOk) {
             verdict = "INVALID-restore-incomplete";
             stage   = "19-invalid-restore";
@@ -2728,23 +2912,27 @@ recover:
             verdict = "INVALID-command-did-not-complete";
             stage   = "19-invalid-cmd";
         } else if (!evtResetOk || !invAllOk) {
-            // 前置门没通过：控制分支也不能输出 CONTROL，因为控制阶段
-            // 赖以成立的硬件状态从未建立。
+            // A precondition gate failed: the control branch cannot emit
+            // CONTROL either, because the hardware state the control stage
+            // rests on was never established.
             verdict = "INVALID-precondition-not-established";
             stage   = "19-invalid-precondition";
         } else if (fM22b2SleepOnly) {
             if (!controlDone) {
-                // 选了控制模式，但控制阶段没跑完。这既不是 CONTROL，
-                // 也不是翻译实验——它只是没做完。
+                // Control mode was selected but the control stage never
+                // finished. This is neither CONTROL nor the translation
+                // experiment -- it simply did not complete.
                 verdict = "INVALID-control-stage-did-not-complete";
                 stage   = "19-invalid-control";
             } else {
-                // 控制实验：不切 DTE、不产生翻译窗口，结论就是"控制组完成"。
+                // Control experiment: no DTE switch, no translation window;
+                // the conclusion is "control group completed".
                 verdict = "CONTROL-sleep-only-no-dte-change";
                 stage   = "19-control-preserved";
             }
         } else if (!mainWindowRan) {
-            // 主窗口根本没跑：明确说"没测"，不猜结论。
+            // The main window never ran at all: state plainly "not measured";
+            // do not guess a conclusion.
             verdict = "INVALID-main-window-not-executed";
             stage   = "19-invalid-not-executed";
         } else if (!winOk) {
@@ -2754,79 +2942,102 @@ recover:
             verdict = "INDETERMINATE-events-from-other-devices";
             stage   = "19-indeterminate-devid";
         } else if (anyEvent && winMain.typeCount[M2B2_EVENT_IO_FAULT] > 0) {
-            // 有效窗口里确实观察到 IO_PAGE_FAULT：具体失败，证据已记录
+            // IO_PAGE_FAULTs were indeed observed in a valid window: concrete
+            // failure, evidence recorded
             verdict = "FAIL-io-page-faults-observed";
             stage   = "19-complete-faults";
         } else if (anyEvent) {
-            // 有事件但不是 IO_PAGE_FAULT：类型已逐条记录，按类型定性
+            // Events occurred but none were IO_PAGE_FAULT: types recorded
+            // individually; qualify by type
             verdict = "FAIL-non-fault-events-observed";
             stage   = "19-complete-other-events";
         } else if (fM22b2Dma.cloDeltaValid && fM22b2Dma.cloDelta > 0) {
-            // 【第七轮】窗口内没有事件，**且**硬件关闭指针以可解释的方式
-            // 前进了。
+            // [Round 7] No events inside the window, **and** the hardware close
+            // pointer advanced in an explainable way.
             //
-            // 比第五轮强得多的结论类别：
-            //   - 关闭指针前进 => 设备确实把描述符交还给了驱动，
-            //     即真的完成了 DMA，而不只是"没有报错"；
-            //   - 事件数为 0 => 这些 DMA 全部被翻译表成功翻译。
+            // A far stronger conclusion class than round 5:
+            //   - the close pointer advancing => the device really handed
+            //     descriptors back to the driver, i.e. DMA really completed,
+            //     not merely "no errors reported";
+            //   - zero events => all that DMA was translated successfully by
+            //     the translation table.
             //
-            // 但要求 cloDeltaValid：掩码差值必须可解释（不是重置、不是
-            // 设备更换）。第六轮用环取模，1000 -> 2024 会得到 0，把
-            // "完成了 1024 个描述符"读成"什么都没做"。
+            // But cloDeltaValid is required: the masked delta must be
+            // explainable (not a reset, not a device swap). Round 6 used ring
+            // modulo, where 1000 -> 2024 yields 0, reading "completed 1024
+            // descriptors" as "did nothing".
             //
-            // 【第八轮】还要求窗口扫描真的把这几条完成归因到具体描述符。
+            // [Round 8] Also required: the window scan really attributed these
+            // completions to concrete descriptors.
             //
-            // 【第九轮】再收紧三处，因为第八轮仍然接受了一些不该接受的
-            // 采集：
+            // [Round 9] Three more tightenings, because round 8 still accepted
+            // captures it should not have:
             //
-            //   (a) 后置采样必须落在窗口**内部**。第八轮的采样包住窗口
-            //       （跨度 3.00785 秒对窗口 3.00018 秒），那个方向证明不了
-            //       "完成发生在零事件窗口内"。
-            //   (b) 扫描必须 exact：提前停止、记录丢失、长度不可解码、
-            //       槽位被覆盖，任何一项成立都撤回覆盖资格。
-            //   (c) 必须有一条来自**驱动侧记录**的完整配对——提交与完成
-            //       按同一个累计索引对上，且该地址有页表路径。只有读环的
-            //       聚合计数不够：那只能说明"计数器动了"。
+            //   (a) The post-sample must fall **inside** the window. Round 8's
+            //       samples wrapped the window (3.00785 s span over a 3.00018 s
+            //       window); that direction cannot prove "completions happened
+            //       within the zero-event window".
+            //   (b) The scan must be exact: early stop, lost records,
+            //       undecodable lengths, overwritten slots -- any one withdraws
+            //       coverage eligibility.
+            //   (c) There must be one complete pairing from **driver-side
+            //       records** -- submit and completion matched on the same
+            //       cumulative index, with a page table path for that address.
+            //       Ring-read aggregate counters alone are not enough: they
+            //       show only "the counter moved".
             //
-            // 仍然不是 PASS：这是单次受控实验，不是持续负载与稳定性。
-            // 【第十轮】再收紧一处：第九轮的 PASS-CANDIDATE 只要求
-            // "驱动记录里有一对窗口内的配对"，但那一对可能来自
-            // **另一块网卡**的流量，而且快照本身可能早于窗口终点。
+            // Still not PASS: this is a single controlled experiment, not
+            // sustained load and stability.
+            // [Round 10] One more tightening: round 9's PASS-CANDIDATE required
+            // only "one in-window pairing in the driver records", but that pair
+            // could come from **another NIC's** traffic, and the snapshot
+            // itself could predate the window end.
             //
-            // 现在要求三个**互相独立**的判据同时成立：
+            // Three **mutually independent** criteria must now hold
+            // simultaneously:
             //
-            //   obsHasCompletePair        至少一条可核对的提交/完成
-            //   obsRecordsCoverWindow     原始记录完整覆盖 [winStart, winEnd]
-            //   obsControlledBatchComplete 本次有限批次的预期业务全部完成
+            //   obsHasCompletePair        at least one checkable submit/completion
+            //   obsRecordsCoverWindow     the raw records fully cover
+            //                             [winStart, winEnd]
+            //   obsControlledBatchComplete every expected item of this finite
+            //                             batch completed
             //
-            // 并且仍然要求读环独立把完成归因到具体描述符（读环与驱动记录
-            // 是两条独立路径，互相印证才不是自说自话）。
+            // And ring reading must still independently attribute completions to
+            // concrete descriptors (ring read and driver records are two
+            // independent paths; only their mutual corroboration is not
+            // self-testimony).
             //
-            // 只满足"有一对"而覆盖不成立时，落到
-            // INDETERMINATE-snapshot-does-not-cover-window——这正是第九轮
-            // 的实际状态：它有配对，但快照比窗口终点早 530957131 ns。
+            // When only "there is a pair" holds without coverage, the verdict
+            // falls to INDETERMINATE-snapshot-does-not-cover-window -- exactly
+            // round 9's actual state: it had the pair, but the snapshot was
+            // 530957131 ns older than the window end.
             const bool windowOk2 =
                 fM22b2Dma.boundaryInWindow && fM22b2Dma.winExact;
             const bool ringAttributed =
                 fM22b2Dma.winCompletedInWindow > 0 &&
                 fM22b2Dma.haveFirstCompleted;
 
-            // ---- 第十二轮：把"证据资格"接进最终判定 ----
+            // ---- Round 12: wiring "evidence eligibility" into the final verdict ----
             //
-            // 第十一轮算了七类证据属性并逐个发布，但最终 PASS-CANDIDATE
-            // 只消费了其中三项。于是出现了这样的形态：
+            // Round 11 computed seven classes of evidence properties and
+            // published each, but the final PASS-CANDIDATE consumed only three.
+            // Shapes like these appeared:
             //
-            //   * 业务区间走表全军覆没（bizWalkFail > 0）仍然 PASS；
-            //   * 设备身份未知（nicIdentityKnown = false）被
-            //     `if (want.have && !idOk)` 放行；
-            //   * token 未声明（0）时从被检查的记录里反推一个，判据循环；
-            //   * bizWalkFail 在早退分支里 ++ 过，随后被函数末尾的局部
-            //     fail 覆盖。
+            //   * business-range walks failing across the board
+            //     (bizWalkFail > 0) yet still PASS;
+            //   * unknown device identity (nicIdentityKnown = false) admitted by
+            //     `if (want.have && !idOk)`;
+            //   * with the token undeclared (0), one was derived from the very
+            //     records under test -- a circular criterion;
+            //   * bizWalkFail was ++-ed in an early-exit branch and then
+            //     overwritten by the local fail at the function's end.
             //
-            // 现在判定不再手写合取，而是调用 amdobs::obsEvidenceGate()：
-            // 生产路径与 host 回归跑的是**同一个函数**，每一条反例在
-            // tests/dma-observe-test.cpp 里逐项证伪。发布属性不等于使用
-            // 属性，这个函数就是把"使用"变成结构事实的地方。
+            // The verdict no longer hand-writes the conjunction but calls
+            // amdobs::obsEvidenceGate(): the production path and the host
+            // regression run **the same function**, and every counterexample is
+            // falsified item by item in tests/dma-observe-test.cpp. Publishing
+            // a property is not using it; this function is where "using" becomes
+            // a structural fact.
             amdobs::ObsEvidence ev;
             ev.identityKnown     = fM22b2Dma.nicIdentityKnown;
             ev.declaredToken     = fM22b2Dma.declaredToken;
@@ -2842,8 +3053,9 @@ recover:
             ev.hasCompletePair   = fM22b2Dma.obsHasCompletePair;
             ev.recordsCoverWindow = fM22b2Dma.obsRecordsCoverWindow;
             ev.controlledBatchComplete = fM22b2Dma.obsControlledBatchComplete;
-            // 只有"声明的 token 就是实际用于归并的那个"才算绑定成立。
-            // token 为 0 时 joinToken 可能是从记录里推出来的，那是循环。
+            // Binding holds only when "the declared token is the one actually
+            // used for joining". With token 0, joinToken may have been derived
+            // from the records -- that is circular.
             ev.tokenResolvedOnDeclared =
                 (fM22b2Dma.declaredToken != 0 &&
                  fM22b2Dma.obsJoinToken == fM22b2Dma.declaredToken &&
@@ -2854,19 +3066,25 @@ recover:
             ev.bizWalkOk         = fM22b2Dma.bizWalkOk;
             ev.bizWalkFail       = fM22b2Dma.bizWalkFail;
             ev.bizWalkCapped     = fM22b2Dma.bizWalkCapped;
-            // ---- 第十四轮：RX 投递缓冲区集合 ----
+            // ---- Round 14: the RX posted-buffer set ----
             //
-            // 这些项进入同一个门禁，而不是作为"旁边的补充信息"。理由与
-            // 第十二轮把 bizWalk 接进判据时相同：**发布属性不等于使用属性**。
-            // 如果 RX 集合只被打印出来而不参与判定，那么"RX 整窗覆盖"就会
-            // 再次退化成报告里的一句话，而不是一个会让 PASS 失败的条件。
+            // These items enter the same gate rather than standing as
+            // "supplementary information beside it". Same reason round 12 wired
+            // bizWalk into the criteria: **publishing a property is not using
+            // it**. If the RX set were only printed and never part of the
+            // verdict, "RX whole-window coverage" would again degrade into a
+            // sentence in the report instead of a condition that can fail a
+            // PASS.
             //
-            // 【三个失败原因必须可分辨】
-            //   门禁对"环被套圈"、"记录丢失"、"集合被预算截断"给出不同的
-            //   token，因为它们对应完全不同的补救。若三者都写成
-            //   `!rxSetComplete`，报告就只能说"集合不完整"，而这句话对
-            //   定位问题没有用。所以它们从**核心给出的那一个 token** 派生
-            //   （rxsetSetWhy），而不是各自再判一次——一份定义，三个投影。
+            // [The three failure causes must be distinguishable]
+            //   The gate gives different tokens to "the ring wrapped", "records
+            //   were lost", and "the set was budget-truncated", because their
+            //   remedies are completely different. If all three were collapsed
+            //   into `!rxSetComplete`, the report could only say "the set is
+            //   incomplete", which is useless for locating the problem. They
+            //   are therefore projections of **the single token the core
+            //   provides** (rxsetSetWhy), not three independent judgements --
+            //   one definition, three projections.
             ev.rxSetPresent  = fM22b2Dma.rxsetPresent;
             ev.rxSetComplete = fM22b2Dma.rxsetComplete;
             ev.rxSetRanges   = fM22b2Dma.rxsetRanges;
@@ -2909,35 +3127,42 @@ recover:
                 verdict = "PASS-CANDIDATE-controlled-chain";
                 stage   = "19-controlled-chain-complete";
             } else if (!windowOk2) {
-                // 边界或扫描质量不成立：连"这些完成在窗口内"都不能说。
+                // Boundaries or scan quality failed: not even "these
+                // completions were within the window" may be said.
                 verdict = "INDETERMINATE-boundary-or-scan-not-exact";
                 stage   = "19-indeterminate-boundary";
             } else if (gateWhy != nullptr) {
-                // 证据资格不足。原因由 obsEvidenceGate() 给出，逐项可读，
-                // 不再压缩成一个笼统的"没通过"。
+                // Insufficient evidence eligibility. The reason comes from
+                // obsEvidenceGate(), readable item by item, no longer
+                // compressed into a blanket "did not pass".
                 verdict = "INDETERMINATE-evidence-insufficient";
                 stage   = "19-indeterminate-evidence";
             } else if (!fM22b2Dma.obsHasCompletePair) {
-                // 关闭指针动了，但驱动侧记录里没有任何可核对的配对。
+                // The close pointer moved, but the driver-side records contain
+                // no checkable pairing.
                 verdict = "INDETERMINATE-no-driver-record-pair";
                 stage   = "19-indeterminate-no-obs-pair";
             } else if (!fM22b2Dma.obsRecordsCoverWindow) {
-                // 有配对，但快照没有覆盖整个窗口。这是第九轮的真实状态，
-                // 而第九轮把它判成了通过。
+                // There is a pairing, but the snapshot does not cover the whole
+                // window. This was round 9's real state, which round 9 judged a
+                // pass.
                 verdict = "INDETERMINATE-snapshot-does-not-cover-window";
                 stage   = "19-indeterminate-obs-coverage";
             } else if (!fM22b2Dma.obsControlledBatchComplete) {
-                // 覆盖成立，但本次有限批次没有全部完成。
+                // Coverage holds, but this finite batch did not complete in
+                // full.
                 verdict = "INDETERMINATE-controlled-batch-incomplete";
                 stage   = "19-indeterminate-batch";
             } else {
-                // 证据齐全，但读环没能把完成归因到具体描述符。
+                // Evidence is complete, but ring reading could not attribute the
+                // completions to concrete descriptors.
                 verdict = "INDETERMINATE-completions-not-attributed";
                 stage   = "19-indeterminate-unattributed";
             }
         } else {
-            // 窗口有效、无事件，**且没有完成证据**。这时什么都不能说：
-            // 设备可能根本没工作，也可能工作了但统计没发布。
+            // Valid window, no events, **and no completion evidence**. Nothing
+            // can be said here: the device may not have worked at all, or it
+            // worked but the statistics were not published.
             verdict = "INDETERMINATE-no-events-no-dma-evidence";
             stage   = "19-indeterminate-no-dma";
         }
@@ -2947,7 +3172,8 @@ recover:
         fM22b2Dma.tRecoveryEnd = m2b2NowNS();
         setHexProperty(this, "m2-b2-t-recovery-end", fM22b2Dma.tRecoveryEnd);
 
-        // 每个前置门的实际完成状态，逐项发布，便于独立复核。
+        // Every precondition gate's actual completion state, published item by
+        // item for independent re-checking.
         setProperty("m2-b2-stage-evt-reset", evtResetOk ? "yes" : "no");
         setProperty("m2-b2-stage-inv-all", invAllOk ? "yes" : "no");
         setProperty("m2-b2-stage-inv-dev", invDevOk ? "yes" : "no");
@@ -2956,7 +3182,8 @@ recover:
         setProperty("m2-b2-mode",
                     fM22b2SleepOnly ? "control-sleep-only" : "translation");
 
-        // 首个失败阶段单独保留，不被上面的通用状态覆盖。
+        // The first failing stage is kept separately, never overwritten by the
+        // generic status above.
         if (firstFailStage) {
             setProperty("m2-b2-first-fail-stage", firstFailStage);
             if (firstFailReason) {
@@ -2966,15 +3193,18 @@ recover:
             setProperty("m2-b2-first-fail-stage", "none");
         }
 
-        // 两个窗口"到底有没有执行过"的最终值。属性在采样时已写过一次，
-        // 这里用判定实际所用的布尔量重写，保证记录与判定完全一致。
+        // The final "did these two windows actually run" values. The properties
+        // were written once at sampling; here they are rewritten from the
+        // booleans the verdict actually used, guaranteeing record and verdict
+        // agree exactly.
         setProperty("m2-b2-pre-window-ran", preWindowRan ? "yes" : "no");
         setProperty("m2-b2-main-window-ran", mainWindowRan ? "yes" : "no");
     }
 
-    // ---- 第 20 步：资源处置 ----
+    // ---- Step 20: resource disposition ----
     //
-    // 只有 safeToFree 才释放；否则保持内存有效并记录后续处置要求。
+    // Freed only if safeToFree; otherwise the memory is kept valid and the
+    // required follow-up disposition is recorded.
     if (safeToFree) {
         map->release();
         md->release();
@@ -2991,9 +3221,10 @@ recover:
                 __atomic_load_n(&fR31StopRequested, __ATOMIC_ACQUIRE);
         }
     } else {
-        // 不释放：硬件可能仍引用这些地址。宁可泄漏，也不要让 IOMMU
-        // 继续按已被回收的内存翻译全系统 DMA（2026-10-30 就是这样
-        // 连续两次启动死锁的）。
+        // Do not free: the hardware may still reference these addresses. Better
+        // to leak than to let the IOMMU go on translating all system DMA through
+        // reclaimed memory (this is exactly how boot deadlocked twice in a row
+        // on 2026-10-30).
         setProperty("m2-b2-cleanup", "REFUSED-hardware-not-proven-idle");
         setProperty("m2-b2-cleanup-action",
             "memory intentionally retained; reboot required");
@@ -3005,36 +3236,45 @@ recover:
     }
 }
 // ---------------------------------------------------------------------------
-// 【第十二轮】业务区间的走表：整段 [addr, addr+len)、每一叶、逐级原始 PTE
+// [Round 12] Walking business ranges: the whole [addr, addr+len), every leaf,
+// every level's raw PTEs
 // ---------------------------------------------------------------------------
 //
-// 第十一轮的这条路径有三个假通过形态，全部在本轮修掉：
+// Round 11's path had three false-pass shapes, all fixed this round:
 //
-//   1. 只导出**第一页**的路径，却对整段声称 covered。一条 74 字节的报文
-//      从叶末前 16 字节开始时会跨进下一叶，而下一叶的路径从未导出；
-//      分析器手里只有一叶的原始 PTE，却看到"整段已覆盖"的结论。
-//   2. 覆盖循环在解码失败时退回 4096 字节步长，可能整段跳过缺口。
-//   3. `count >= kBizWalkMaxSegs` 时直接 return，既不计数也不降级，
-//      于是"只走了一部分"与"全部合格"在输出上无法区分。
+//   1. Only the **first page's** path was exported while the whole range was
+//      claimed covered. A 74-byte packet starting 16 bytes before a leaf's end
+//      crosses into the next leaf, whose path was never exported; the analyser
+//      held one leaf's raw PTEs yet saw "the whole range is covered".
+//   2. The coverage loop fell back to a 4096-byte stride on decode failure,
+//      potentially skipping whole gaps.
+//   3. On `count >= kBizWalkMaxSegs` it returned directly -- no counting, no
+//      downgrade -- making "only partly walked" and "all qualified"
+//      indistinguishable in the output.
 //
-// 现在走表逻辑搬到 kext/amd_iommu_bizwalk_core.hpp，探针与 host 回归
-// 编译**同一份**代码。这里只负责：取 DTE、给 readEntry 加边界、把结果
-// 发布出去，以及把 expected/count/ok/fail/capped 四个数分别记账。
+// The walk logic now lives in kext/amd_iommu_bizwalk_core.hpp, compiled by the
+// probe and the host regression from **the same** code. This site only: fetch
+// the DTE, bound readEntry, publish the results, and account separately for
+// expected/count/ok/fail/capped.
 void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
         const volatile UInt64 *dte, UInt32 tgt,
         const volatile UInt64 *ptv, UInt64 ptBase, UInt64 ptBytes) {
-    // 四个账各自独立。第十一轮的 bizWalkFail 在早退分支里被 ++ 过，随后
-    // 又被函数末尾的局部 fail 覆盖——早退造成的失败因此从输出里消失了。
-    // 现在任何一条失败路径都只改这四个成员，末尾不再有局部计数器。
+    // The four ledgers are independent. Round 11's bizWalkFail was ++-ed in an
+    // early-exit branch and then overwritten by the local fail at the function's
+    // end -- failures caused by early exits vanished from the output. Now every
+    // failure path touches only these four members; there are no local counters
+    // at the end any more.
     fM22b2Dma.bizWalkCount = 0;
     fM22b2Dma.bizWalkOk = 0;
     fM22b2Dma.bizWalkFail = 0;
     fM22b2Dma.bizWalkCapped = 0;
 
-    // ---- 期望区间数：由**原始业务记录**推出 ----
+    // ---- Expected range count: derived from the **raw business records** ----
     //
-    // 这是"应走表多少段"的唯一来源，不是"实际走了多少段"。两者不等就说明
-    // 有区间没走表，而第十一轮只判"走到的那些是否通过"。
+    // This is the only source of "how many ranges should have been walked",
+    // not "how many were actually walked". A mismatch means some ranges were
+    // never walked, whereas round 11 only judged "whether the ones reached
+    // passed".
     {
         UInt32 want = 0;
         const amdobs::ObsJoin &j0 = fM22b2ObsJoin;
@@ -3047,16 +3287,20 @@ void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
         fM22b2Dma.bizWalkExpected = want;
     }
 
-    // ---- 起点：本次实验里**实际**写到设备表里的那条 DTE ----
+    // ---- Starting point: the DTE **actually** written into the device table
+    //      during this experiment ----
     //
-    // 第十轮的分析器有一项 "the root table is the one the DTE names"，判据是
+    // Round 10's analyser had a criterion "the root table is the one the DTE
+    // names":
     //
     //     pte_get('m2-b2-win0-pte0-table') == pte_get('m2-b2-dte-root')
     //         or pte_get('m2-b2-dte-root') is None
     //
-    // 而 m2-b2-dte-root 这个属性**从来没有被发布过**，于是右边恒为真，
-    // 这一项从未检查任何东西。现在改为从 dte[] 读回真实值，并把它一起
-    // 导出，使"根表来自实际 DTE"成为可核对的事实而不是一句声明。
+    // But the m2-b2-dte-root property was **never published**, so the right
+    // side was always true and the criterion checked nothing. Now the real
+    // value is read back from dte[] and exported alongside, making "the root
+    // table comes from the actual DTE" a checkable fact rather than a
+    // declaration.
     const UInt64 dteRaw = (UInt64)dte[tgt * 4 + 0];
     const UInt64 dteMode =
         (dteRaw >> M2B2_DEV_ENTRY_MODE_SHIFT) & M2B2_DEV_ENTRY_MODE_MASK;
@@ -3077,8 +3321,8 @@ void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
                                            : "translation"));
 
     if (!dteValid || !dteTranslate || rootLevel == 0) {
-        // DTE 不处于可走表的状态：**每一个**期望区间都记为未证明。
-        // 不是"0 个失败"，而是"期望 N 个、证明 0 个"。
+        // The DTE is not in a walkable state: **every** expected range is
+        // recorded as unproven. Not "0 failures", but "N expected, 0 proven".
         fM22b2Dma.bizWalkFail = fM22b2Dma.bizWalkExpected;
         setProperty("m2-b2-bizwalk", "SKIP-dte-not-translating");
         setProperty("m2-b2-bizwalk-why",
@@ -3095,10 +3339,11 @@ void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
         return;
     }
 
-    // ---- 读取页表内存的唯一入口 ----
+    // ---- The single entry point for reading page table memory ----
     //
-    // 只允许读本次分配的页表块，越界返回 0（0 的 PR=0，解码为 absent，
-    // 不会伪造出叶子）。与第 17b 步同一套边界检查。
+    // Only this experiment's allocated page table block may be read;
+    // out-of-range returns 0 (PR=0 for 0, decoded as absent, so no leaf can be
+    // forged). Same bounds checks as step 17b.
     const UInt64 ptEnd = ptBase + ptBytes;
     if (!ptv || ptEnd <= ptBase) {
         fM22b2Dma.bizWalkFail = fM22b2Dma.bizWalkExpected;
@@ -3120,14 +3365,14 @@ void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
         return (UInt64)ptv[byteOff / 8 + index];
     };
 
-    // ---- 逐请求、逐方向、逐段 ----
+    // ---- Per request, per direction, per segment ----
     const amdobs::ObsJoin &j = fM22b2ObsJoin;
     UInt32 count = 0;
 
     auto recordRange = [&](UInt32 reqId, UInt8 isRx, UInt8 segIdx,
                            UInt64 addr, UInt32 len) {
-        // 容量上限：**记一笔降级**，不是静默丢弃。第十一轮在这里 return，
-        // 于是被丢掉的区间在输出上不存在。
+        // Capacity cap: **record a downgrade**, never a silent drop. Round 11
+        // returned here, so the dropped ranges did not exist in the output.
         if (count >= fM22b2Dma.kBizWalkMaxSegs) {
             fM22b2Dma.bizWalkCapped++;
             return;
@@ -3155,7 +3400,8 @@ void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
         w.permOk = 0;
         w.why = "ok";
 
-        // 同一份核心代码：探针与 host 回归都跑 amdbw::walkRange()。
+        // The same core code: probe and host regression both run
+        // amdbw::walkRange().
         amdbw::RangeResult r;
         amdbw::walkRange(readEntry, rootLevel, dteRootPA, addr, len,
                          isRx != 0, r);
@@ -3212,8 +3458,8 @@ void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
         }
     }
 
-    // 走到这里时 count/ok/fail/capped 已经是最终值；**不再有**局部 fail
-    // 覆盖成员计数的机会。
+    // At this point count/ok/fail/capped hold their final values; there is
+    // **no longer** any local fail that could overwrite the member counters.
     fM22b2Dma.bizWalkCount = count;
 
     setHexProperty(this, "m2-b2-bizwalk-expected",
@@ -3229,14 +3475,16 @@ void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
                                fM22b2Dma.bizWalkCapped == 0)
                                   ? "all-covered" : "SOME-NOT-COVERED"));
 
-    // ---- 逐段发布 ----
+    // ---- Publish per segment ----
     //
-    // 每段的每一叶的每一级都发布：表物理地址、索引、级别、原始 PTE。这是
-    // "这条业务 DMA 区间经过了哪条真实页表路径"的唯一可复核形式；分析器
-    // 据此独立解码，不依赖这里的任何结论字符串。
+    // Every level of every leaf of every segment is published: table physical
+    // address, index, level, raw PTE. This is the only re-checkable form of
+    // "which real page table path this business DMA range took"; the analyser
+    // decodes it independently and relies on no conclusion string here.
     //
-    // 旧属性名（m2-b2-bw%d-pte%d-*）保留为**第一叶**的别名，这样第十一轮
-    // 的归档仍然可被同一分析器读出；跨叶区间额外有 m2-b2-bw%d-leaf%d-*。
+    // The old property names (m2-b2-bw%d-pte%d-*) are kept as aliases of the
+    // **first leaf**, so round 11's archives remain readable by the same
+    // analyser; cross-leaf ranges additionally have m2-b2-bw%d-leaf%d-*.
     for (UInt32 i = 0; i < count; i++) {
         const auto &w = fM22b2Dma.bizWalk[i];
         char k[64];
@@ -3272,7 +3520,8 @@ void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
         setProperty(k, w.overflow ? "yes" : "no");
         snprintf(k, sizeof(k), "m2-b2-bw%u-capped", (unsigned)i);
         setProperty(k, w.capped ? "yes" : "no");
-        // 走表起点：与 DTE 同源，使"根表来自实际 DTE"可核对
+        // Walk start: same source as the DTE, making "the root table comes from
+        // the actual DTE" checkable
         snprintf(k, sizeof(k), "m2-b2-bw%u-root-pa", (unsigned)i);
         setHexProperty(this, k, w.rootPA);
         snprintf(k, sizeof(k), "m2-b2-bw%u-root-level", (unsigned)i);
@@ -3280,7 +3529,8 @@ void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
         snprintf(k, sizeof(k), "m2-b2-bw%u-dte", (unsigned)i);
         setHexProperty(this, k, w.dteRaw);
 
-        // 叶数：跨叶区间必须逐叶导出，否则"整段已覆盖"无法核对。
+        // Leaf count: cross-leaf ranges must be exported leaf by leaf, or
+        // "the whole range is covered" cannot be checked.
         snprintf(k, sizeof(k), "m2-b2-bw%u-leaves", (unsigned)i);
         setHexProperty(this, k, (UInt64)w.leafCount);
 
@@ -3314,7 +3564,8 @@ void org_example_AMDMapperProbe::m2b2WalkBusinessRanges(
             }
         }
 
-        // 旧名别名（= 第一叶），只覆盖第一叶的级数。
+        // Old-name aliases (= the first leaf), covering only the first leaf's
+        // levels.
         if (w.leafCount > 0) {
             const auto &p = w.path[0];
             for (UInt32 L = 0; L < p.depth; L++) {

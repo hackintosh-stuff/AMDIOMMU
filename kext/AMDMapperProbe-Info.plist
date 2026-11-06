@@ -15,151 +15,155 @@
          Round54 clients require 0.61.0 for a pre-open claim on their selected PCI requester. -->
     <key>OSBundleCompatibleVersion</key><string>0.53.0</string>
     <!--
-      0.71.0 第65轮：两个设备域分别完成PM准备与恢复失效，由共享Controller协调一次暂停和重启。\n      0.72.0 第68轮：双Domain协调式System PM暂缓启用，恢复已验证的普通双网卡生命周期。
-      0.75.0 第69轮：amdiommu_autoattach=1 时选中设备在首次发布即获得 iommu-parent，供无法调用私有 claim 的 Apple 驱动；新增映射容量与拒绝原因属性。
-      0.73.0 第66轮：双Domain PM仅允许启动后显式arm，避免PM-capable boot影响普通网卡生命周期。
-      版本历史：
-        0.70.0 第63轮：设备停用时撤回其 DTE 读写授权；恢复须先完成设备和域失效。
-        0.69.0 第62轮：共享命令环复用上次读回的 HEAD，仅在预留空间不足时刷新硬件寄存器。
-        0.68.0 第61轮：普通页范围精确分段失效，每批共用一次完成等待，确认后才回收。
-        0.67.0 第60轮：普通多页 DMA 优先选择自然对齐的 IOVA，碎片下保留原分配路径；统计失效命令覆盖页。
-        0.66.0 第59轮：单次普通 DMA 映射支持 128 页及 128 个物理段，按 ABI3 导出全部页。
-        0.65.0 第58轮：按域内 IOVA 页保存描述符给出的物理地址，活动与历史快照保持原有 ABI2 格式。
-        0.64.0 第57轮：映射记录槽由每域占用位图统一管理；保留最低空槽选择、起始页索引和同步回收。
-        0.63.0 第56轮：普通 unmap 按本域起始 IOVA 页定位记录，保持完整所有权检查与同步失效后回收。
-        0.62.0 第55轮：IOVA 位图按 64 位字查找最低对齐空闲区间；保留 R54 驱动 ABI 与同步回收。
-        0.61.0 第54轮：显式 requester 由客户端在 PCI open 前申请设备域；普通 DMA 与按设备失效路径沿用 R53。
-        0.60.0 第53轮：按显式requester选择RTL8111/RTL8127混合设备域；未选设备保持直通，共享原有普通DMA后端。
-        0.59.0 第52轮：同一控制器接入两个RTL8127；每设备独立IOMapper、域、页表与IOVA池，共享命令环同步。
-        0.58.0 第51轮：按PCI NPCache选择普通map失效；无NP缓存时省去新map的INV/CW，unmap同步回收不变。
-        0.57.0 第50轮：普通map/unmap按实际IOVA页范围同步失效，首激活及PM仍全域；PM实机验证仍TODO。
-        0.56.0 第49轮：普通map支持64页/64runs，RX改为16组每组64页；PM实机验证仍TODO。
-        0.55.0 第48轮：普通mapper使用低4GiB IOVA池，支持32位DMA地址约束；PM实机验证仍TODO。
-        0.54.0 第47轮：普通auto路径接入运行时IVRS/PCI发现；加入IOMMU暂停/恢复处理，实机PM验证TODO。
-        0.53.0 M2-3y 第44轮：普通设备IOMapper自动发现；常驻控制器与通用MD/IODMACommand映射；正常网卡关闭和开启保留设备域。
-        0.52.0 M2-3x 第43轮：NIC停止前移至DTE切换之前；原生设备域全程只用IOVA，退出不再建立identity恢复映射。
-        0.51.0 M2-3w 第42轮：网卡停止时直接发布全环初始RX IOVA，撤除bootstrap identity后再启动收发。
-        0.50.0 M2-3v 第41轮：修复固定DMA入口的中断重新武装，并按已注册对象识别重建后的TX环。
-        0.49.0 M2-3u 第40轮：TX/RX描述符环与统计缓冲使用标准DMA映射IOVA；接管后活动域不保留identity叶。
-        0.42.0 M2-3n 第33轮：服务对象持有设备域资源；初始化线程返回后持续DMA，显式停止另起收尾线程。
-        0.41.0 M2-3m 第32轮：动态TX IOVA区域、独立活动映射记录、标准DMA容量与复用验证。
-        0.40.0 M2-3l 第31轮：独立内核线程维持RX1024/TX标准映射会话；.session取消计时退出，
-               R31Stop显式请求后沿用排空、R29D、退休确认与完整恢复。
-        0.39.0 M2-3k 第30轮：RX1024全环标准映射及循环复用；8MiB RX IOVA跨5张L1表，
-               全部物理描述符恢复后unmap，沿用R29D尾流与标准TX退休确认。
-        0.38.0 M2-3i 第29轮：RX释放后R29D确认尾流结束；标准TX按句柄确认退休，
-               软件generation与后端owner/slot/CW闭合后才恢复DTE及命令引擎。
-        0.37.0 M2-3h 第28轮：64个RX对象各映射一次并循环使用；Disarm后发布draining，
-               保持TX开放等待最多15秒RX排空，120秒有限授权覆盖60秒翻译窗口。
-        0.36.0 M2-3h 第27轮：.std.alltx.rxstd 增加64个RX spare的一次标准映射闭环；
-               token 只标识运行，req 为内部映射序号。保留四槽与32条历史。
-        0.1.0  M1-A：只验证 copyMapperForDevice(自己) 能否返回本 mapper。
-        0.2.0  M1-B/B1：给真实设备 IOMA（pci1022,1481）设 iommu-parent 并验证。
-        0.3.0  B1 修正：fromPath + 严格 IOName 校验。
-        0.4.0  B2-0：自有 buffer 观察 iovmMapMemory 调用契约。
-        0.5.0  B2-a：实现物理连续单段的恒等映射，并验证碎片被拒。
-        0.6.0  B2-b：支持真实网卡（RTL8127），映射表 + amdiommu=arm 闸门。
-        0.7.0  B2-b 修正：用 gIOFirstPublishNotification 消除注入竞态。
-        0.8.0  M2-0b：只读 PCI 配置空间，取 IOMMU capability 里的 BAR，
-               与 IVRS base / DSDT _CRS 交叉验证。全部只读，不碰 MMIO。
-        0.9.0  M2-1：只读 MMIO 探测。boot-arg amdiommu=mmio 门控，
-               默认完全不执行；开启后只读 EFR 与已知值比对，
-               不匹配立即停止，不写任何寄存器。
-        0.10.0 M2-2a-1：最小 MMIO 写测试。boot-arg amdiommu=write 门控。
-               只写 DEV_TABLE 寄存器一次标记值、读回、立即恢复原值，
-               并确认 CONTROL 未被改变。不使能 IOMMU、不发命令。
-        0.11.0 M2-2a-2：建设备表（不使能）。boot-arg amdiommu=table 门控。
-               分配物理连续内存、全填直通 DTE、写 DEV_TABLE 基址寄存器、
-               确认 CONTROL 未变、恢复原值。IOMMU 始终关闭。
-        0.12.0 M2-2a-3：短窗口使能测试。boot-arg amdiommu=enable 门控。
-               完整走 Linux early_enable_iommu() 序列：设备表 + 命令缓冲 +
-               CMDBUF_EN + IOMMU_EN，读 STATUS 后**立即禁用**，
-               再恢复全部寄存器。窗口极短，用于验证使能动作本身是否安全。
-        0.13.0 M2-2b-1：命令通道验证。boot-arg amdiommu=cmd 门控。
-               三块内存（设备表 / 命令缓冲 / 完成信号 cmd_sem），
-               发一条 CMD_COMPL_WAIT 并轮询 cmd_sem 确认硬件真的执行了。
-               仍是短窗口：使能 → 发命令 → 轮询 → 立即禁用。
-        0.24.0 M2-2b-2 第九轮：驱动侧记录取代读环作为主证据。
-                第八轮的读环方案有三个它自己承认不了的限制：读到的字节
-                无法证明属于同一代次（只有冻结的 tailAfter，槽位在边界
-                采样后被复用看不出来）；寄存器写着某个地址不证明那块
-                内存对象还活着；TSO 段的真实长度在描述符里根本不存在。
-                现在驱动在自己的提交点/完成点记录元数据，并把一段后缀
-                复制进 IORegistry 属性——探针读到的是驱动**仍然持有的
-                对象**的副本，不解引用任何物理地址，配对按驱动自己算的
-                累计索引（与硬件关闭指针同源）进行。
-                同时修正扫描与记账：窗口扫描有明确上限并记录停止原因
-                （异常大的差值不再变成 2^31 次内核循环）；窗口记录使用
-                独立容量，不再与几千条历史快照争用；扫描质量（提前停止、
-                记录丢失、长度不可解码、槽位覆盖）会撤回覆盖资格，而不
-                只是显示在旁边；"完成数 > 提交数"在窗口开始时有在途项
-                的情况下是合法的，不再被判为错误。
-                时间边界：后置关闭指针采样移进窗口**内部**（第八轮是包
-                住窗口，跨度 3.00785 秒对窗口 3.00018 秒）；翻译生效起点
-                改为两条失效命令都收到完成之后。
-        0.23.0 M2-2b-2 第八轮：把生产观测流程真正接通。
-               第七轮的 txSlotLifecycle() 存在、也有回归，但**生产从未
-               调用它**：m2b2CollectTxSegments() 收下 tailCum/cloCum 后
-               直接 (void) 掉，只要能读到关闭指针就把所有非零 TX 地址标
-               成 in-flight。第七轮采集里 tail = clo = 0x6a（队列已排空），
-               却仍把每条历史地址报成 in-flight。
-               现在由 scanTxWindow() 按 [tailBefore, tailAfter) 逐个累计
-               索引走表，每条描述符带自己的槽位、代次、地址、长度与完成
-               状态；正的关闭指针增量可以落到具体槽位/代次/地址/长度。
-               同时修正：快照命中不再被报成"已完成区间"；快照里的间隙
-               不再被当成窗口里的间隙；覆盖改为逐路径记录（TX 整窗覆盖
-               不等于 RX 整窗覆盖）；读环内存新增内容指纹（RX 最后一槽
-               的 RingEnd、TX 地址/长度自洽），寄存器自报不再是唯一依据；
-               边界采样与环扫描分离，扫描不再夹在两次关闭指针采样之间。
-        0.22.1 M2-2b-2 第七轮修正 2：readVerdict 不能用于设备自报地址。
-               0.22.0 把 layoutKnown=false 的严格判据套到环基址上，于是
-               环一个字节都读不到：tx-slots=0、raw-offered=0、
-               unscanned=0x800——记录是对的，但观测完全无用。设备自报
-               地址（驱动写进去、硬件正在用）与描述符里的任意值安全性质
-               不同，前者只需检查映射上限与 MMIO 空洞。
-        0.22.0 M2-2b-2 第七轮修正：地址记录不再受恒等映射上限过滤
-               （记录与解引用彻底分开）；insertCoalesced 插满后仍继续
-               更新包络（第六轮提前 break，导致 txdesc4/5 落在自己声明的
-               envelope-hi 之外）；五类计数分开不再重复计数；描述符按
-               实际格式记录地址+长度；生命周期由驱动的累计提交/关闭指针
-               推导，不再一律标 live；关闭指针寄存器由 TxConfig 推导而非
-               候选选举，差值按 MaxTxDescPtrMask=0x7FFFFFFF 计算而非
-               1024 取模（1000->2024 应为 1024 而非 0）；控制分支必须有
-               实际完成状态；页表路径逐级真读并导出表物理地址/表级/索引。
-        0.21.7 M2-2b-2 第六轮修正：设备 DMA 观察改为按 BAR 寄存器取内存
-               （getDeviceMemoryWithRegister），而不是按数组索引——后者
-               会读到错误的 MMIO 区域。新增寄存器可信性判定。
-        0.21.0 M2-2b-2 第六轮：设备 DMA 观察（只读读 TX/RX 环与描述符）、
-               fault 归属分类、pgtsleep 判定优先级修正、窗口结构移出栈。
-        0.20.0 M2-2b-2：4 级恒等页表 + 单设备 DTE 切换。boot-arg amdiommu=pgt 门控。
-               建 4 级页表（2 MiB 大页恒等映射全部 16 GiB RAM）、开事件日志、
-               使能、CMD_INV_ALL、把 RTL8127 的 DTE 从直通改成翻译、
-               INV_DEV_ENTRY + INV_IOMMU_PAGES、观察 2 秒事件日志、
-               再把 DTE 改回直通并恢复全部寄存器。
+      0.71.0 Round 65: both device domains complete PM prepare and restore invalidation, with the shared Controller coordinating a single suspend and restart.\n      0.72.0 Round 68: coordinated dual-domain System PM deferred; the verified ordinary dual-NIC lifecycle is restored.
+      0.75.0 Round 69: with amdiommu_autoattach=1 the selected device receives iommu-parent at first publish, for Apple drivers that cannot call the private claim; new mapping-capacity and rejection-reason properties.
+      0.73.0 Round 66: dual-domain PM only allows an explicit arm after boot, so a PM-capable boot cannot affect the ordinary NIC lifecycle.
+      Version history:
+        0.70.0 Round 63: the device's DTE read/write authorization is revoked on deactivation; recovery must first complete device and domain invalidation.
+        0.69.0 Round 62: the shared command ring reuses the last read-back HEAD, refreshing hardware registers only when reserved space is insufficient.
+        0.68.0 Round 61: ordinary page-range exact-segment invalidation, each batch sharing one completion wait; reclaimed only after confirmation.
+        0.67.0 Round 60: ordinary multi-page DMA prefers naturally aligned IOVAs, keeping the original allocation path under fragmentation; statistics invalidation commands cover pages.
+        0.66.0 Round 59: a single ordinary DMA mapping supports 128 pages and 128 physical segments, exporting all pages per ABI3.
+        0.65.0 Round 58: physical addresses given by descriptors are saved per in-domain IOVA page; active and historical snapshots keep the original ABI2 format.
+        0.64.0 Round 57: mapping record slots are managed by a per-domain occupancy bitmap; keeps lowest-free-slot selection, the start page index and synchronous reclamation.
+        0.63.0 Round 56: ordinary unmap locates the record by this domain's starting IOVA page, keeping full ownership checks and reclamation after synchronous invalidation.
+        0.62.0 Round 55: the IOVA bitmap searches 64-bit words for the lowest aligned free span; keeps the R54 driver ABI and synchronous reclamation.
+        0.61.0 Round 54: explicit requesters claim a device domain from the client before PCI open; ordinary DMA and per-device invalidation paths follow R53.
+        0.60.0 Round 53: the device domain is selected by explicit requester for the RTL8111/RTL8127 mix; unselected devices stay pass-through, sharing the original ordinary-DMA backend.
+        0.59.0 Round 52: two RTL8127s on one controller; per-device IOMapper, domain, page table and IOVA pool, with shared command ring synchronization.
+        0.58.0 Round 51: ordinary map invalidation is selected by PCI NPCache; without an NP cache a new map skips INV/CW, and unmap's synchronous reclamation is unchanged.
+        0.57.0 Round 50: ordinary map/unmap invalidate synchronously by the actual IOVA page range; first activation and PM remain whole-domain; PM on-machine verification still TODO.
+        0.56.0 Round 49: ordinary map supports 64 pages/64 runs; RX changed to 16 groups of 64 pages each; PM on-machine verification still TODO.
+        0.55.0 Round 48: the ordinary mapper uses a low-4GiB IOVA pool, supporting 32-bit DMA address constraints; PM on-machine verification still TODO.
+        0.54.0 Round 47: the ordinary auto path gains runtime IVRS/PCI discovery; IOMMU suspend/resume handling added; on-machine PM verification TODO.
+        0.53.0 M2-3y Round 44: automatic discovery of ordinary-device IOMappers; a resident controller with generic MD/IODMACommand mapping; the device domain is kept across normal NIC close and open.
+        0.52.0 M2-3x Round 43: NIC stop moved earlier, before the DTE switch; the native device domain uses only IOVAs throughout, and exit no longer builds identity recovery mappings.
+        0.51.0 M2-3w Round 42: on NIC stop the full ring's initial RX IOVAs are published directly; bootstrap identity is withdrawn before starting TX/RX.
+        0.50.0 M2-3v Round 41: fixed the fixed-DMA entry's interrupt re-arming, and recognizes a rebuilt TX ring by its registered object.
+        0.49.0 M2-3u Round 40: TX/RX descriptor rings and the statistics buffer use standard DMA-mapped IOVAs; after takeover the active domain keeps no identity leaves.
+        0.42.0 M2-3n Round 33: the service object owns the device domain's resources; DMA continues after the init thread returns, and an explicit stop starts a separate teardown thread.
+        0.41.0 M2-3m Round 32: dynamic TX IOVA region, independent active mapping records, standard DMA capacity and reuse verification.
+        0.40.0 M2-3l Round 31: a dedicated kernel thread maintains the RX1024/TX standard mapping sessions; .session cancels the timed exit,
+               after an explicit R31Stop the drain, R29D, retirement confirmation and full recovery proceed as before.
+        0.39.0 M2-3k Round 30: RX1024 full-ring standard mapping with cyclic reuse; the 8MiB RX IOVA spans 5 L1 tables,
+               unmapped after all physical descriptors are recovered, keeping the R29D tail flow and the standard TX retirement confirmation.
+        0.38.0 M2-3i Round 29: after RX release, R29D confirms the tail flow has ended; standard TX confirms retirement by handle,
+               and the DTE and command engine are restored only after the software generation and the backend's owner/slot/CW close.
+        0.37.0 M2-3h Round 28: 64 RX objects are each mapped once and reused cyclically; draining is published after Disarm,
+               TX stays open waiting up to 15 s for the RX drain, with a 120 s bounded authorization covering the 60 s translation window.
+        0.36.0 M2-3h Round 27: .std.alltx.rxstd adds a one-shot standard-mapping closed loop for 64 RX spares;
+               the token only identifies the run and req is the internal mapping sequence. Four slots and 32 history entries kept.
+        0.1.0  M1-A: only verify that copyMapperForDevice(self) can return this mapper.
+        0.2.0  M1-B/B1: give a real device's IOMA (pci1022,1481) an iommu-parent and verify.
+        0.3.0  B1 fix: fromPath + strict IOName validation.
+        0.4.0  B2-0: observe the iovmMapMemory call contract with our own buffer.
+        0.5.0  B2-a: implement identity mapping for a physically contiguous single segment and verify fragmentation is rejected.
+        0.6.0  B2-b: support a real NIC (RTL8127), mapping table + the amdiommu=arm gate.
+        0.7.0  B2-b fix: eliminate the injection race with gIOFirstPublishNotification.
+        0.8.0  M2-0b: read-only PCI config space, take the BAR in the IOMMU capability,
+               cross-checking against the IVRS base / DSDT _CRS. All read-only, no MMIO touched.
+        0.9.0  M2-1: read-only MMIO probing. Gated by boot-arg amdiommu=mmio,
+               not executed at all by default; when enabled, reads EFR read-only and compares with the known value,
+               stopping immediately on mismatch, writing no registers.
+        0.10.0 M2-2a-1: minimal MMIO write test. Gated by boot-arg amdiommu=write.
+               Writes a marker value to the DEV_TABLE register once, reads it back, immediately restores the original,
+               and confirms CONTROL was not changed. No IOMMU enable, no commands.
+        0.11.0 M2-2a-2: build the device table (no enable). Gated by boot-arg amdiommu=table.
+               Allocate physically contiguous memory, fill all pass-through DTEs, write the DEV_TABLE base register,
+               confirm CONTROL unchanged, restore the original. The IOMMU stays off throughout.
+        0.12.0 M2-2a-3: short-window enable test. Gated by boot-arg amdiommu=enable.
+               Walks the full Linux early_enable_iommu() sequence: device table + command buffer +
+               CMDBUF_EN + IOMMU_EN, reads STATUS then **disables immediately**,
+               then restores all registers. An extremely short window, to verify that the enable action itself is safe.
+        0.13.0 M2-2b-1: command channel verification. Gated by boot-arg amdiommu=cmd.
+               Three memory blocks (device table / command buffer / completion signal cmd_sem),
+               issue one CMD_COMPL_WAIT and poll cmd_sem to confirm the hardware really executed it.
+               Still a short window: enable -> issue command -> poll -> immediately disable.
+        0.24.0 M2-2b-2 Round 9: driver-side records replace ring reading as the primary evidence.
+                Round 8's ring-reading scheme had three limitations it could not reconcile: the bytes read
+                cannot be proven to belong to one generation (only the frozen tailAfter exists, and a slot
+                reused after boundary sampling is indistinguishable); a register naming an address does not
+                prove the memory object is still alive; TSO segments' true lengths do not exist in the descriptor.
+                Now the driver records metadata at its own submit/complete points and copies a suffix
+                into an IORegistry property -- what the probe reads is a copy of an object the driver
+                **still holds**, dereferencing no physical address, with pairing done on the driver's own
+                cumulative indices (same source as the hardware close pointer).
+                Scan and accounting also fixed: the window scan has an explicit cap and records its stop reason
+                (an abnormally large delta no longer becomes 2^31 kernel loop iterations); window records use
+                dedicated capacity, no longer contending with thousands of historical snapshots; scan quality
+                (early stop, lost records, undecodable lengths, overwritten slots) withdraws coverage eligibility
+                instead of being merely displayed alongside; "completions > submits" is legal when in-flight items
+                existed at window start and is no longer judged an error.
+                Time boundaries: the post close-pointer sample moved **inside** the window (round 8 wrapped it,
+                a 3.00785 s span over a 3.00018 s window); the translation-activation point
+                moved to after both invalidation commands received completions.
+        0.23.0 M2-2b-2 Round 8: actually wiring up the production observation flow.
+               Round 7's txSlotLifecycle() existed and had regressions, but **production never
+               called it**: m2b2CollectTxSegments() accepted tailCum/cloCum and then
+               (void)-ed them, labelling every non-zero TX address in-flight as long as a close
+               pointer was readable. In round 7's capture tail = clo = 0x6a (queue drained),
+               yet every historical address was still reported in-flight.
+               Now scanTxWindow() walks by cumulative index over [tailBefore, tailAfter),
+               each descriptor carrying its own slot, generation, address, length and completion
+               state; a positive close-pointer delta lands on a concrete slot/generation/address/length.
+               Also fixed: snapshot hits are no longer reported as "completed ranges"; gaps in the
+               snapshot are no longer taken as gaps in the window; coverage is recorded per path (TX
+               whole-window coverage does not equal RX whole-window coverage); ring memory gains a
+               content fingerprint (the RX last slot's RingEnd, TX address/length self-consistency), so the
+               register's self-report is no longer the sole basis; boundary sampling and the ring scan are
+               separated, and the scan no longer sits between two close-pointer samples.
+        0.22.1 M2-2b-2 Round 7 fix 2: readVerdict must not apply to device-reported addresses.
+               0.22.0 applied layoutKnown=false's strict criterion to the ring base as well, so the
+               ring could not be read at all: tx-slots=0, raw-offered=0,
+               unscanned=0x800 -- the records were right, but the observation was useless. A device-reported
+               address (written by the driver, in use by hardware) differs in safety nature
+               from an arbitrary value in a descriptor; the former needs only a mapping-ceiling and
+               MMIO-hole check.
+        0.22.0 M2-2b-2 Round 7 fix: address recording is no longer filtered by the identity-mapping ceiling
+               (recording and dereferencing completely separated); insertCoalesced keeps
+               updating the envelope even when full (round 6's early break caused txdesc4/5 to fall
+               outside their declared envelope-hi); the five counter classes are separate and never
+               double-counted; descriptors record address+length in their actual format; lifecycle is
+               derived from the driver's cumulative submit/close pointers, no longer uniformly labelled
+               live; the close-pointer register is derived from TxConfig rather than elected among
+               candidates, and the delta uses MaxTxDescPtrMask=0x7FFFFFFF rather than ring
+               modulo 1024 (1000->2024 should be 1024, not 0); the control branch must have an
+               actual completion state; page table paths are truly read level by level and the table
+               physical address/level/index exported.
+        0.21.7 M2-2b-2 Round 6 fix: device DMA observation now takes memory via BAR registers
+               (getDeviceMemoryWithRegister) rather than array indices -- the latter
+               reads the wrong MMIO region. Register trustworthiness judgement added.
+        0.21.0 M2-2b-2 Round 6: device DMA observation (read-only reads of TX/RX rings and descriptors),
+               fault attribution classification, pgtsleep verdict priority fix, window structs moved off the stack.
+        0.20.0 M2-2b-2: 4-level identity page table + single-device DTE switch. Gated by boot-arg amdiommu=pgt.
+               Builds the 4-level table (2 MiB large pages identity-mapping all 16 GiB of RAM), opens the event log,
+               enables, CMD_INV_ALL, switches the RTL8127's DTE from pass-through to translation,
+               INV_DEV_ENTRY + INV_IOMMU_PAGES, observes the event log for 2 s,
+               then switches the DTE back to pass-through and restores all registers.
 
-        0.27.0 M2-3b 第十七轮：原生 mbuf 的非恒等 TX 映射与逐包回收。
-                不再使用 staging 拷贝：直接把报文自己的 physical segments
-                交给映射后端，保持每段长度、顺序与页内偏移，描述符使用
-                返回的非恒等 IOVA。每个请求在硬件完成与撤图失效之后立即
-                释放自己的 mbuf 并允许复用 IOVA/页槽，不再累积到 Detach。
-                有限的是证据数组（32 代）与命令预算（160 次提交），
-                不是 DMA 持有者；预算不足时明确拒绝且不留下映射。
-                新增提交/完成交接状态（kPosting/kSubmitted/kPending），
-                使极快 completion 不能跨代读写同一份 witness。
+        0.27.0 M2-3b Round 17: non-identity TX mapping of native mbufs with per-packet reclamation.
+                No more staging copies: the packet's own physical segments go straight
+                to the mapping backend, keeping each segment's length, order and intra-page offset; descriptors
+                use the returned non-identity IOVA. Each request releases its mbuf immediately after hardware
+                completion and unmap invalidation, and allows IOVA/page-slot reuse, no longer accumulating until Detach.
+                What is bounded is the evidence array (32 generations) and the command budget (160 submissions),
+                not the DMA holder; on budget exhaustion it refuses explicitly and leaves no mapping.
+                New submit/completion handoff states (kPosting/kSubmitted/kPending),
+                so even a very fast completion cannot read or write the same witness across generations.
 
-        0.28.0 M2-3c 第十八轮：标准 IOMapper / IODMACommand 接入真实 TX。
-                驱动为每个报文建立 IOMemoryDescriptor，并用探针自身的
-                IOMapper（非 system mapper）构造 IODMACommand；由 IOKit 在
-                prepare() 内实际调用 iovmMapMemory() 生成非恒等 IOVA，
-                描述符使用该 IOVA；complete() 由框架实际调用
-                iovmUnmapMemory() 完成撤图与失效，之后才释放 descriptor、
-                command 与 mbuf。只支持单段物理连续的报文布局，其余在
-                prepare() 之前明确拒绝。同时修正退休定时器的主动收割：
-                先非阻塞取得 __POLLING，占用时跳过，释放后再做 retire 与
-                IOMMU 失效等待。
+        0.28.0 M2-3c Round 18: standard IOMapper / IODMACommand wired into real TX.
+                The driver builds an IOMemoryDescriptor per packet and constructs an IODMACommand with the
+                probe's own IOMapper (not the system mapper); IOKit actually calls
+                iovmMapMemory() inside prepare() to produce the non-identity IOVA,
+                which the descriptors use; complete() has the framework actually call
+                iovmUnmapMemory() to perform unmap and invalidation, after which the descriptor,
+                command and mbuf are released. Only single-segment physically contiguous packet layouts are
+                supported; everything else is rejected explicitly before prepare(). Also fixes the retire
+                timer's active reaping: first acquire __POLLING non-blockingly, skip if held, then
+                retire and wait for IOMMU invalidation after release.
 
-      匹配 IOResources 而非任何 PCI 设备。IOResources 是全局资源节点、不持有 DMA，
-      因此即使本 mapper 的 iovm* 全部返回失败，也没有设备会因此受损。
+      Matches IOResources rather than any PCI device. IOResources is a global resource node holding no
+      DMA, so even if this mapper's iovm* calls all fail, no device is harmed by it.
     -->
     <key>IOKitPersonalities</key>
     <dict>
@@ -179,24 +183,25 @@
         <key>com.apple.kpi.mach</key><string>25.0.0</string>
         <key>com.apple.kpi.bsd</key><string>25.0.0</string>
         <!--
-          0.8.0 新增：直接依赖 IOPCIFamily。
+          0.8.0 addition: a direct dependency on IOPCIFamily.
 
-          为什么必须显式声明（这是 0.8.0 部署时踩到的真实问题）：
-            M2-0b 用 OSDynamicCast(IOPCIDevice, fTarget)，而 OSDynamicCast
-            展开成 OSMetaClassBase::safeMetaCast(inst, OSTypeID(IOPCIDevice))，
-            其中 OSTypeID(T) = T::metaClass —— 这会**引用**
-            IOPCIDevice::metaClass 这个符号。
+          Why it must be declared explicitly (a real problem hit at the 0.8.0 deployment):
+            M2-0b uses OSDynamicCast(IOPCIDevice, fTarget), and OSDynamicCast
+            expands to OSMetaClassBase::safeMetaCast(inst, OSTypeID(IOPCIDevice)),
+            where OSTypeID(T) = T::metaClass -- this **references** the
+            IOPCIDevice::metaClass symbol.
 
-            kmutil 报：
+            kmutil reported:
               Failed to bind '__ZN11IOPCIDevice9metaClassE' ... as could not
               find a kext which exports this symbol
 
-            但该符号其实存在于 IOPCIFamily 的导出表里（已核实）。原因是
-            探针的 OSBundleLibraries 只列了 kpi.* 系列，没有声明对
-            IOPCIFamily 的依赖，于是 AuxKC 链接时不知道去哪儿找它。
+            Yet the symbol does exist in IOPCIFamily's export table (verified). The cause:
+            the probe's OSBundleLibraries listed only the kpi.* series and never declared
+            its dependency on IOPCIFamily, so at AuxKC link time the linker did not know
+            where to find it.
 
-          版本号 2.9 与实测的运行版本一致（kmutil showloaded 显示
-          com.apple.iokit.IOPCIFamily (2.9)）。
+          Version 2.9 matches the measured running version (kmutil showloaded shows
+          com.apple.iokit.IOPCIFamily (2.9)).
         -->
         <key>com.apple.iokit.IOPCIFamily</key><string>2.9</string>
         <!-- Runtime IVRS acquisition and IOACPIPlatformDevice metaClass. -->

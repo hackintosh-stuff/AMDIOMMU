@@ -9,17 +9,20 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
-// IOPCIDevice.h 在 SDK 里自身会触发两个 -Werror 级警告：
-//   1. IOPCIDevice 被标 __kpi_deprecated("Use PCIDriverKit")
-//   2. 其内部的 setProperty 重载未标 override（-Winconsistent-missing-override）
+// IOPCIDevice.h itself triggers two -Werror-level warnings from within the SDK:
+//   1. IOPCIDevice is marked __kpi_deprecated("Use PCIDriverKit")
+//   2. Its internal setProperty overload is not marked override (-Winconsistent-missing-override)
 //
-// 这两条都是 **Apple 头文件自身的问题**，不是本项目的代码缺陷：
-//   - PCIDriverKit 是用户态 DriverKit 框架，无法实现 IOMapper 子类，
-//     本项目必须是内核内 IOKit kext，只能用 IOPCIDevice。
-//   - override 警告来自 SDK 声明，我们无法也不应修改 SDK 头。
+// Both are **problems in Apple's own headers**, not defects in this project's code:
+//   - PCIDriverKit is a userspace DriverKit framework and cannot implement an
+//     IOMapper subclass; this project must be an in-kernel IOKit kext and can
+//     only use IOPCIDevice.
+//   - The override warning comes from SDK declarations; we cannot and should
+//     not modify SDK headers.
 //
-// 因此仅在包含该头时抑制这两条，不全局关闭——其他真正的
-// deprecation / override 问题仍会照常报错。
+// Therefore suppress only these two while including that header, without
+// disabling them globally -- other genuine deprecation / override issues
+// will still be reported as errors as usual.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"
@@ -32,13 +35,15 @@
 #include <kern/clock.h>
 #include <libkern/OSByteOrder.h>
 
-// 页表编码/解码的唯一实现。生产代码与 host 回归测试**包含同一个文件**，
-// 测试跑的就是这里的分支，不是另写一份 Python 复述。
-// 见 tests/pte-core-test.cpp 与 docs/m2-2b-2-round5-result.md。
+// The single implementation of page table encoding/decoding. Production code
+// and the host regression tests **include the same file**, so the tests run
+// exactly these branches rather than a separately written Python restatement.
+// See tests/pte-core-test.cpp and docs/m2-2b-2-round5-result.md.
 #include "amd_iommu_pte_core.hpp"
 
-// OSPtr<T> 的定义取决于 IOKIT_ENABLE_SHARED_PTR（SDK libkern/c++/OSPtr.h）：
-//   定义时 = OSSharedPtr<T>；未定义时 = T*。SDK 默认未定义。
+// The definition of OSPtr<T> depends on IOKIT_ENABLE_SHARED_PTR (SDK
+// libkern/c++/OSPtr.h): defined = OSSharedPtr<T>; undefined = T*.
+// The SDK default is undefined.
 #if defined(IOKIT_ENABLE_SHARED_PTR)
     #define M1A_HAS_SHARED_PTR 1
 #else
@@ -50,21 +55,26 @@
 // ===== AMDMapperProbeNic.cpp (original lines 156..215) =====
 
 // ===== AMDMapperProbeNic.cpp (original lines 575..618) =====
-// ------------------------------------------------------ B2-b 发布通知（解决竞态）
+// ------------------------------------------------------ B2-b publish notifier (race fix)
 //
-// 目标：在 Lucy probe/start **之前**把 iommu-parent 挂到网卡上。
+// Goal: attach iommu-parent to the NIC **before** Lucy probes/starts it.
 //
-// 为什么用 gIOFirstPublishNotification 而不是枚举或延时：
-//   IOKit 文档（IOService.h:279）明确：registerService 时会先构造匹配列表
-//   （含已安装的 publish 通知），**然后**才 attach/probe/start 驱动。
-//   所以在 publish 通知里挂属性，一定早于 Lucy 读它。
-//   枚举（serviceMatching）要求 PCI 枚举完成，太晚；
-//   延时（thread_call）不确定，且 start() 里不便等待。
+// Why gIOFirstPublishNotification instead of enumeration or a delay:
+//   The IOKit documentation (IOService.h:279) is explicit: at registerService
+//   time the matching list is built first (including already-installed publish
+//   notifications), and only **then** is the driver attached/probed/started.
+//   So attaching the property inside a publish notification always happens
+//   earlier than Lucy reading it.
+//   Enumeration (serviceMatching) requires PCI enumeration to be complete --
+//   too late; a delay (thread_call) is non-deterministic, and waiting inside
+//   start() is impractical.
 //
-// 为什么不用 gIOMatchedNotification：
-//   那个是「驱动已经 probe 并 start 完」才投递，对我们是**太晚**的。
+// Why not gIOMatchedNotification:
+//   That one is delivered only after the driver has already probed and
+//   started, which is **too late** for us.
 //
-// 注意 handler 必须返回 true，否则通知会被自动移除。
+// Note: the handler must return true, otherwise the notification is
+// automatically removed.
 
 bool org_example_AMDMapperProbe::publishHandler(
     void *target, void *refCon, IOService *newService, IONotifier *notifier) {
@@ -90,13 +100,14 @@ bool org_example_AMDMapperProbe::publishHandler(
     }
     if (did) did->release();
 
-    if (!isTarget) return true;     // 不是网卡，继续等
+    if (!isTarget) return true;     // not the NIC, keep waiting
 
     self->fPublishHits++;
     self->setProperty("r44-notify-hits", (unsigned long long)self->fPublishHits, 64);
 
-    // 已经挂过就不再重复（gIOFirstPublishNotification 每实例只投一次，
-    // 但 kIOServiceSynchronous 下可能在同一实例上重复触发）
+    // Do not attach twice (gIOFirstPublishNotification is delivered once per
+    // instance, but under kIOServiceSynchronous it may fire more than once on
+    // the same instance)
     if (self->fNicDevice == newService) return true;
 
     self->armNic(newService);
@@ -105,13 +116,15 @@ bool org_example_AMDMapperProbe::publishHandler(
 }
 
 // ===== AMDMapperProbeNic.cpp (original lines 620..644) =====
-// 给网卡挂 iommu-parent。可在 start() 里调用，也可在通知回调里调用。
+// Attach iommu-parent to the NIC. Callable from start() or from the
+// notification callback.
 
 // ===== AMDMapperProbeNic.cpp (original lines 646..669) =====
 void org_example_AMDMapperProbe::installPublishNotifier() {
-    // 匹配字典：只关心 IOPCIDevice。device-id 在 handler 里核对，
-    // 因为 publish 阶段的属性可能还没全部就位，用 propertyMatching 过滤
-    // 反而可能漏掉。
+    // Matching dictionary: only IOPCIDevice matters here. The device-id is
+    // verified in the handler, because during the publish phase not all
+    // properties may be in place yet, and filtering via propertyMatching
+    // could actually miss the device.
     OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
     if (!matching) {
         setProperty("m1bb-notifier", "FAIL-no-matching");
@@ -126,8 +139,8 @@ void org_example_AMDMapperProbe::installPublishNotifier() {
         nullptr,    // refCon
         0);         // priority
 
-    // addMatchingNotification 不消耗字典引用（与 addNotification 不同），
-    // 所以这里要自己释放。
+    // addMatchingNotification does not consume a reference to the dictionary
+    // (unlike addNotification), so we must release it ourselves here.
     matching->release();
 
     setProperty("m1bb-notifier", fPublishNotifier ? "installed" : "FAIL");

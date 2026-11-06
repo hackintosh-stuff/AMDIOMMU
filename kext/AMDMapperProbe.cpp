@@ -10,17 +10,20 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
-// IOPCIDevice.h 在 SDK 里自身会触发两个 -Werror 级警告：
-//   1. IOPCIDevice 被标 __kpi_deprecated("Use PCIDriverKit")
-//   2. 其内部的 setProperty 重载未标 override（-Winconsistent-missing-override）
+// IOPCIDevice.h itself triggers two -Werror-level warnings from within the SDK:
+//   1. IOPCIDevice is marked __kpi_deprecated("Use PCIDriverKit")
+//   2. Its internal setProperty overload is not marked override (-Winconsistent-missing-override)
 //
-// 这两条都是 **Apple 头文件自身的问题**，不是本项目的代码缺陷：
-//   - PCIDriverKit 是用户态 DriverKit 框架，无法实现 IOMapper 子类，
-//     本项目必须是内核内 IOKit kext，只能用 IOPCIDevice。
-//   - override 警告来自 SDK 声明，我们无法也不应修改 SDK 头。
+// Both are **problems in Apple's own headers**, not defects in this project's code:
+//   - PCIDriverKit is a userspace DriverKit framework and cannot implement an
+//     IOMapper subclass; this project must be an in-kernel IOKit kext and can
+//     only use IOPCIDevice.
+//   - The override warning comes from SDK declarations; we cannot and should
+//     not modify SDK headers.
 //
-// 因此仅在包含该头时抑制这两条，不全局关闭——其他真正的
-// deprecation / override 问题仍会照常报错。
+// Therefore suppress only these two while including that header, without
+// disabling them globally -- other genuine deprecation / override issues
+// will still be reported as errors as usual.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"
@@ -35,13 +38,15 @@
 #include <libkern/c++/OSBoolean.h>
 #include <libkern/c++/OSDictionary.h>
 
-// 页表编码/解码的唯一实现。生产代码与 host 回归测试**包含同一个文件**，
-// 测试跑的就是这里的分支，不是另写一份 Python 复述。
-// 见 tests/pte-core-test.cpp 与 docs/m2-2b-2-round5-result.md。
+// The single implementation of page table encoding/decoding. Production code
+// and the host regression tests **include the same file**, so the tests run
+// exactly these branches rather than a separately written Python restatement.
+// See tests/pte-core-test.cpp and docs/m2-2b-2-round5-result.md.
 #include "amd_iommu_pte_core.hpp"
 
-// OSPtr<T> 的定义取决于 IOKIT_ENABLE_SHARED_PTR（SDK libkern/c++/OSPtr.h）：
-//   定义时 = OSSharedPtr<T>；未定义时 = T*。SDK 默认未定义。
+// The definition of OSPtr<T> depends on IOKIT_ENABLE_SHARED_PTR (SDK
+// libkern/c++/OSPtr.h): defined = OSSharedPtr<T>; undefined = T*.
+// The SDK default is undefined.
 #if defined(IOKIT_ENABLE_SHARED_PTR)
     #define M1A_HAS_SHARED_PTR 1
 #else
@@ -83,7 +88,7 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
     fRealUnmapCalls = 0;
     fTablePeak = 0;
 
-    // ---- M2-2b-2 延迟定时器 ----
+    // ---- M2-2b-2 deferred timer ----
     fM22b2Timer = nullptr;
     fM22b2DelayMS = 0;
     fR31Session = false;
@@ -101,34 +106,36 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
         fMaps[i].used = false;
     }
 
-    // ---- 崩溃安全：把 fAllocName 归零 ----
+    // ---- Crash safety: zero out fAllocName ----
     //
-    // 为什么必须做（这是 B2-a 才引入的新风险）：
-    //   B2-a 是第一个会让 iovmMapMemory **返回成功**的版本。一旦成功，
-    //   IOMemoryDescriptor::dmaMapRecord() 会执行
+    // Why this is required (a new risk introduced only in B2-a):
+    //   B2-a is the first version that lets iovmMapMemory **return success**.
+    //   Once it succeeds, IOMemoryDescriptor::dmaMapRecord() executes
     //       if ((alloc = mapper->fAllocName)) kern_allocation_update_size(alloc, ...);
-    //   也就是说它会解引用 fAllocName。而在 0.4.0 及之前，映射全部失败，
-    //   这行代码从未被执行过，所以从未暴露。
+    //   i.e. it dereferences fAllocName. In 0.4.0 and earlier every mapping
+    //   failed, that line never executed, and the hazard never surfaced.
     //
-    //   fAllocName 只存在于 XNU_KERNEL_PRIVATE 视图（IOMapper.h:75），
-    //   第三方 kext 看不到这个名字；但在 SDK 视图里它就落在
-    //   __reserved[6]（offset 48..56）。tools/layout-check.cpp 已用
-    //   offsetof 机械验证过这条别名关系（48 == 48）。
+    //   fAllocName only exists in the XNU_KERNEL_PRIVATE view (IOMapper.h:75);
+    //   third-party kexts cannot see that name, but in the SDK view it lands
+    //   in __reserved[6] (offset 48..56). tools/layout-check.cpp has verified
+    //   this aliasing mechanically with offsetof (48 == 48).
     //
-    //   正常路径下 fAllocName 由 IOMapper::copyMapperForDeviceWithIndex()
-    //   在返回 mapper 前分配（IOMapper.cpp:211-223），而 B1 的
-    //   runB1SelfTest() 正好会调用它。但它只在 fAllocName 为 **NULL** 时
-    //   才分配；若这里是未初始化垃圾值，它会被当成合法指针解引用 → panic。
+    //   On the normal path fAllocName is allocated by
+    //   IOMapper::copyMapperForDeviceWithIndex() before it returns the mapper
+    //   (IOMapper.cpp:211-223), and B1's runB1SelfTest() happens to call it.
+    //   But it only allocates when fAllocName is **NULL**; if it holds
+    //   uninitialized garbage here, it is dereferenced as a valid-looking
+    //   pointer -> panic.
     //
-    //   所以：先清零 → copyMapperForDevice 看到 NULL → 正确分配。
-    //   若 B1 没跑（findTarget 失败），fAllocName 保持 NULL，
-    //   dmaMapRecord 的 if 判断为假，同样安全。两条路都安全。
+    //   So: zero it first -> copyMapperForDevice sees NULL -> allocates
+    //   correctly. If B1 never ran (findTarget failed), fAllocName stays NULL
+    //   and dmaMapRecord's if is false -- equally safe. Both paths are safe.
     //
-    // 为什么不会破坏 fPageSize：
-    //   __reserved[6] 占 [48,56)，fPageSize 在 [60,64)，不重叠
-    //   （layout-check 已断言 56 <= 60）。而且 fPageSize 是
-    //   IOMapper::start() 在 initHardware() **之后**才写的，
-    //   时序上也不会被这里覆盖。
+    // Why this cannot corrupt fPageSize:
+    //   __reserved[6] occupies [48,56) and fPageSize sits at [60,64); they do
+    //   not overlap (layout-check asserts 56 <= 60). Also fPageSize is written
+    //   by IOMapper::start() only **after** initHardware(), so in time it can
+    //   never be overwritten here either.
     __reserved[6] = 0;
 
     return true;
