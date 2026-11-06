@@ -38,7 +38,7 @@
 // WHY THE INCLUDES ARE BARE NAMES
 // -------------------------------
 // tools/test.sh passes -I tools/lucy-obs, and the same test is compiled against
-// the OLD protocol header by tools/r14/verify-rearm-protocol.py. A relative
+// the OLD protocol header by the retired rearm-protocol verifier. A relative
 // path would defeat that substitution and every version would "pass".
 #include "RTL812xRxPost.hpp"
 #include "RTL812xObsWrite.hpp"

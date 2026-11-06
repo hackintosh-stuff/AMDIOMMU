@@ -171,7 +171,7 @@ python3 "$ROOT/tools/verify/obs-layout.py"
 # known to be sensitive to the defect.
 python3 "$ROOT/tools/verify/wrapped-publish.py"
 
-# The round-11 split checker (tools/r11/verify-split.py) was retired here: its
+# The round-11 split checker was retired here: its
 # invariants (original-line markers, a single metaclass block, production
 # definitions for Debug-only methods) describe the pre-refactor tree and can no
 # longer distinguish a real split defect from later, unrelated edits.
@@ -225,7 +225,7 @@ python3 "$ROOT/tools/verify/reproducibility.py"
 # r15/r16/r17 analysis+capture tools. Early rounds are no longer replayed from
 # this checkout, so there is nothing here to gate.
 
-# The round-12 archive replay (tools/r13/replay-archives.py) was retired here:
+# The round-12 archive replay was retired here:
 # it re-judges real captures under docs/evidence/, which are not part of this
 # checkout. A replay that cannot open its archives would fail for absence of
 # data, not for a change in verdict.
