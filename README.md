@@ -33,7 +33,7 @@ at its first mapping, to that ceiling:
 - after the first activation capacity is frozen for the reason R69 §6.3 gave for
   forbidding a runtime resize: a live domain must never change the meaning of an
   address a client is already using;
-- a failed growth keeps the prepared arena and publishes `r44-growth-state`; it
+- a failed growth keeps the prepared arena and publishes `iommu-growth-state`; it
   never fails the mapping.
 
 The per-device identity table did not go away, but it is advisory now: it is the
@@ -48,20 +48,28 @@ the arena starts there and grows from actual demand.
 | PCI class fallback | base class `0x01` (storage) | `rl-10g` |
 | otherwise | — | `native-legacy` |
 
-The suggestion is published per device as `r44-profile-suggested` with
-`r44-profile-source` = `boot-arg` \| `id-table` \| `class-table` \|
+The suggestion is published per device as `iommu-profile-suggested` with
+`iommu-profile-source` = `boot-arg` \| `id-table` \| `class-table` \|
 `legacy-fallback`. A claim-based client (Lucy, the board RTL8111) keeps the
 accepted ABI3 arena: its ceiling stays `native-legacy` unless an operator raises
 it explicitly. `amdiommu_autoattach` was removed — `amdiommu=auto-attach` is the
 only switch.
 
-Growth evidence, per device: `r44-profile-prepared` (`native-legacy`),
-`r44-profile-ceiling`, `r44-profile-ceiling-source` (`boot-arg` | `default`),
-`r44-growth-policy` (`first-map` | `disabled`), `r44-capacity-grown`
-(`no` | `yes` | `no-growth-failed`), `r44-profile-grown-from`,
-`r44-map-window-bytes`, plus `r44-growth-state`/`r44-growth-time` in the mapper
-snapshot (`r44-growth-state` is `grown`, `not-needed`, `closed-live` or one of
+Growth evidence, per device: `iommu-profile-prepared` (`native-legacy`),
+`iommu-profile-ceiling`, `iommu-profile-ceiling-source` (`boot-arg` | `default`),
+`iommu-growth-policy` (`first-map` | `disabled`), `iommu-capacity-grown`
+(`no` | `yes` | `no-growth-failed`), `iommu-profile-grown-from`,
+`mapper-map-window-bytes`, plus `iommu-growth-state`/`iommu-growth-time` in the mapper
+snapshot (`iommu-growth-state` is `grown`, `not-needed`, `closed-live` or one of
 the `failed-*` reasons).
+
+Published properties no longer carry round prefixes. The release surface uses
+semantic families: `iommu-*` (mode, state, controller/domain hardware evidence,
+profile and growth), `discovery-*` (IVRS/PCI discovery facts), `mapper-*`
+(per-device mapper statistics and raw dumps), `invalidation-*` (invalidation
+counters), `pm-*` (suspend/resume), `dma-*` (DMA park gate), plus standalone
+keys such as `probe-stage`, `publish-notifier`, `device-selection`,
+`snapshot-domains` and `admission`.
 
 Current example (CX4 Lx on this machine). No profile argument is needed because
 the arena now follows demand:

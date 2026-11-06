@@ -103,7 +103,7 @@ bool org_example_AMDMapperProbe::publishHandler(
     if (!isTarget) return true;     // not the NIC, keep waiting
 
     self->fPublishHits++;
-    self->setProperty("r44-notify-hits", (unsigned long long)self->fPublishHits, 64);
+    self->setProperty("publish-hits", (unsigned long long)self->fPublishHits, 64);
 
     // Do not attach twice (gIOFirstPublishNotification is delivered once per
     // instance, but under kIOServiceSynchronous it may fire more than once on
@@ -127,7 +127,7 @@ void org_example_AMDMapperProbe::installPublishNotifier() {
     // could actually miss the device.
     OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
     if (!matching) {
-        setProperty("m1bb-notifier", "FAIL-no-matching");
+        setProperty("publish-notifier", "FAIL-no-matching");
         return;
     }
 
@@ -143,7 +143,7 @@ void org_example_AMDMapperProbe::installPublishNotifier() {
     // (unlike addNotification), so we must release it ourselves here.
     matching->release();
 
-    setProperty("m1bb-notifier", fPublishNotifier ? "installed" : "FAIL");
+    setProperty("publish-notifier", fPublishNotifier ? "installed" : "FAIL");
 }
 
 // ===== AMDMapperProbeNic.cpp (original lines 698..804) =====

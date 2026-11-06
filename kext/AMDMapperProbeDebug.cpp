@@ -63,7 +63,7 @@
 
 // ===== AMDMapperProbe.cpp (original lines 7584..7713) =====
 bool org_example_AMDMapperProbe::start(IOService *provider) {
-    setProperty("m1b-stage", "0-entered-start");
+    setProperty("probe-stage", "0-entered-start");
 
     // Safety gate: must happen before super::start().
     // When fIsSystem is true, IOMapper::start() sets gSystem = this -- a global
@@ -71,17 +71,17 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
     fIsSystem = false;
 
     if (!super::start(provider)) {
-        setProperty("m1b-stage", "1-super-start-FAILED");
+        setProperty("probe-stage", "1-super-start-FAILED");
         return false;
     }
-    setProperty("m1b-stage", "2-super-start-ok");
+    setProperty("probe-stage", "2-super-start-ok");
     if (fOwner) {
         // This instance is attached to the controller service, not matched to
         // PCI. The owner prepares its domain before publishing iommu-parent.
         fAuto = true;
-        setProperty("r44-mode", "auto");
-        setProperty("r52-role", "device");
-        setProperty("r44-system-mapper", "no");
+        setProperty("iommu-mode", "auto");
+        setProperty("iommu-role", "device");
+        setProperty("iommu-system-mapper", "no");
         return true;
     }
 
@@ -138,9 +138,9 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
 
     // ---- B1: the real device obtains the mapper ----
     if (!findTarget()) {
-        setProperty("m1b-stage", "3-target-not-found");
+        setProperty("probe-stage", "3-target-not-found");
     } else {
-        setProperty("m1b-stage", "3-target-found");
+        setProperty("probe-stage", "3-target-found");
         runB1SelfTest();
 
         // ---- M2-0b: read-only PCI config space, get the IOMMU's own BAR ----
@@ -232,12 +232,12 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
     publishB2bStats();
 
     if (IOMapper::gSystem) {
-        setProperty("m1b-gsystem", "NONNULL");
+        setProperty("iomapper-gsystem", "NONNULL");
     } else {
-        setProperty("m1b-gsystem", "NULL-as-expected");
+        setProperty("iomapper-gsystem", "NULL-as-expected");
     }
 
-    setProperty("m1b-stage", "4-complete");
+    setProperty("probe-stage", "4-complete");
     return true;
 }
 
@@ -686,7 +686,7 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
 
     fInsertCalls++;
     if (fAuto) {
-        setProperty("r44-insert-rejects", (unsigned long long)fInsertCalls, 32);
+        setProperty("iommu-insert-rejects", (unsigned long long)fInsertCalls, 32);
         return kIOReturnUnsupported;
     }
     // In the standard path this must stay ZERO: returning mapLength == length

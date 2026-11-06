@@ -263,7 +263,7 @@ bool org_example_AMDMapperProbe::ReadDeviceSelection() {
                                               sizeof(selection) - 1);
     fRequesterCount = 0;
     if (!fSelectionExplicit) {
-        setProperty("r53-device-selection", "default-rtl8127");
+        setProperty("device-selection", "default-rtl8127");
         return true;
     }
     // One to kMaxDomains four-hex-digit segment-zero requester IDs, no
@@ -278,17 +278,17 @@ bool org_example_AMDMapperProbe::ReadDeviceSelection() {
         while (*cursor && !IsHexDigit(*cursor)) ++cursor;
         if (!*cursor) break;
         if (fRequesterCount == kMaxDomains) {
-            setProperty("r44-state", "failed-device-selection");
+            setProperty("iommu-state", "failed-device-selection");
             return false;
         }
         UInt32 id = 0;
         if (!ParseRequester(cursor, id)) {
-            setProperty("r44-state", "failed-device-selection");
+            setProperty("iommu-state", "failed-device-selection");
             return false;
         }
         for (UInt32 i = 0; i < fRequesterCount; ++i) {
             if (fRequesters[i] == id) {
-                setProperty("r44-state", "failed-device-selection");
+                setProperty("iommu-state", "failed-device-selection");
                 return false;
             }
         }
@@ -296,11 +296,11 @@ bool org_example_AMDMapperProbe::ReadDeviceSelection() {
         cursor += 4;
     }
     if (!fRequesterCount) {
-        setProperty("r44-state", "failed-device-selection");
+        setProperty("iommu-state", "failed-device-selection");
         return false;
     }
-    setProperty("r53-device-selection", selection);
-    setProperty("r53-selected-count", fRequesterCount, 32);
+    setProperty("device-selection", selection);
+    setProperty("device-selection-count", fRequesterCount, 32);
     return true;
 }
 
@@ -315,13 +315,13 @@ bool org_example_AMDMapperProbe::SelectProfile() {
     const mapper_abi::Profile *ceiling = Ceiling(forced);
     fProfile = *ceiling;
     fProfileForced = forced;
-    if (named) setProperty("r44-profile-request", requested);
-    setProperty("r44-profile-mode", forced ? "forced" : "first-map-growth");
-    setProperty("r44-profile", ceiling->name);
-    setProperty("r44-profile-ceiling", ceiling->name);
-    setProperty("r44-profile-records", ceiling->records, 32);
-    setProperty("r44-profile-pages", ceiling->pages, 32);
-    setProperty("r44-profile-table-pages", ceiling->tablePages, 32);
+    if (named) setProperty("iommu-profile-request", requested);
+    setProperty("iommu-profile-mode", forced ? "forced" : "first-map-growth");
+    setProperty("iommu-profile", ceiling->name);
+    setProperty("iommu-profile-ceiling", ceiling->name);
+    setProperty("iommu-profile-records", ceiling->records, 32);
+    setProperty("iommu-profile-pages", ceiling->pages, 32);
+    setProperty("iommu-profile-table-pages", ceiling->tablePages, 32);
     // An unknown name must never widen the pool. It is reported as refused and
     // leaves the legacy ceiling in place, which also disables growth.
     return !named || mapper_abi::profileForName(requested) != nullptr;
@@ -384,15 +384,15 @@ const mapper_abi::Profile *org_example_AMDMapperProbe::ProfileForDevice(
 
 bool org_example_AMDMapperProbe::StartAuto() {
     IOLog("AMDMapperProbe: auto-start enter\n");
-    setProperty("r44-mode", "auto");
-    setProperty("r52-role", "controller");
-    setProperty("r52-snapshot-consistency", "per-domain");
-    setProperty("r52-max-domains", kMaxDomains, 32);
-    setProperty("r52-domain-count", 0ULL, 64);
-    setProperty("r44-state", "waiting-for-pci-publication");
-    setProperty("r44-controller-ready", "no");
-    setProperty("r44-system-mapper", "no");
-    setProperty("m1b-gsystem", IOMapper::gSystem ? "NONNULL" : "NULL-as-expected");
+    setProperty("iommu-mode", "auto");
+    setProperty("iommu-role", "controller");
+    setProperty("snapshot-consistency", "per-domain");
+    setProperty("iommu-max-domains", kMaxDomains, 32);
+    setProperty("iommu-domain-count", 0ULL, 64);
+    setProperty("iommu-state", "waiting-for-pci-publication");
+    setProperty("iommu-controller-ready", "no");
+    setProperty("iommu-system-mapper", "no");
+    setProperty("iomapper-gsystem", IOMapper::gSystem ? "NONNULL" : "NULL-as-expected");
     if (!ReadDeviceSelection()) {
         return false;
     }
@@ -401,13 +401,13 @@ bool org_example_AMDMapperProbe::StartAuto() {
     // the only switch: it publishes iommu-parent at first publish (before their
     // probe) for the selected requesters only. Plain amdiommu=auto keeps the
     // offer/claim protocol intact.
-    setProperty("r69-autoattach", fAutoAttach ? "yes" : "no");
+    setProperty("auto-attach", fAutoAttach ? "yes" : "no");
     SelectProfile();
     fAttachLock = IOLockAlloc();
     if (!fAttachLock) return false;
     installPublishNotifier();
     if (!fPublishNotifier) {
-        setProperty("r44-state", "failed-publish-notifier");
+        setProperty("iommu-state", "failed-publish-notifier");
         IOLockFree(fAttachLock); fAttachLock = nullptr;
         return false;
     }
@@ -462,8 +462,8 @@ bool org_example_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
         if (!claim && !fAutoAttach) {
             if (offered) return offered == nic;  // first publish or replay
             if (nic->isOpen() || nic->getProperty("iommu-parent")) {
-                setProperty("r52-attach-failure", "already-open-or-bound");
-                setProperty("r52-rejected-requester", requester, 32);
+                setProperty("attach-failure", "already-open-or-bound");
+                setProperty("attach-rejected-requester", requester, 32);
                 nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
                 return false;
             }
@@ -484,24 +484,24 @@ bool org_example_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
     }
     AttachPolicy policy(nic);
     ++fPublishHits;
-    setProperty("r44-notify-hits", (unsigned long long)fPublishHits, 64);
+    setProperty("publish-hits", (unsigned long long)fPublishHits, 64);
     UInt32 slot = kMaxDomains;
     for (UInt32 i = 0; i < kMaxDomains; ++i) {
         auto *mapper = fMappers[i];
         if (!mapper) { if (slot == kMaxDomains) slot = i; continue; }
         if (mapper->fNicDevice == nic) { policy.mapped = true; return true; }
         if (mapper->fDomain && mapper->fDomain->deviceID == requester) {
-            setProperty("r52-attach-failure", "duplicate-requester");
+            setProperty("attach-failure", "duplicate-requester");
             return false;
         }
     }
     if (slot == kMaxDomains) {
-        setProperty("r52-attach-failure", "domain-capacity");
+        setProperty("attach-failure", "domain-capacity");
         return false;
     }
     if (nic->isOpen() || (claim && nic->getProperty("iommu-parent"))) {
-        setProperty("r52-attach-failure", "already-open-or-bound");
-        setProperty("r52-rejected-requester", requester, 32);
+        setProperty("attach-failure", "already-open-or-bound");
+        setProperty("attach-rejected-requester", requester, 32);
         return false;
     }
     auto *mapper = new org_example_AMDMapperProbe;
@@ -514,8 +514,8 @@ bool org_example_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
         mapper->detach(this); mapper->release(); return false;
     }
     if (!mapper->PrepareDomain(nic, slot, deviceProfile, profileSource)) {
-        setProperty("r52-attach-failure", "device-prepare");
-        setProperty("r52-rejected-requester", requester, 32);
+        setProperty("attach-failure", "device-prepare");
+        setProperty("attach-rejected-requester", requester, 32);
         mapper->ReleaseDomain();
         mapper->stop(this);
         mapper->detach(this); mapper->release();
@@ -570,7 +570,7 @@ bool org_example_AMDMapperProbe::PrepareController(const HardwareInfo &hardware)
             c->base = (volatile UInt8 *)c->mmioMap->getVirtualAddress();
             if (c->hardware.pciEfrSupported)
                 c->startupEfr = mmioRead64(c->base, M21_OFF_EXT_FEAT);
-            setProperty("r47-mmio-efr", (unsigned long long)c->startupEfr, 64);
+            setProperty("iommu-mmio-efr", (unsigned long long)c->startupEfr, 64);
             // Host four-level translation, INV_DEV/INV_PAGES and CW are the
             // basic path. Guest/PASID/performance EFR bits are not requirements.
             // If firmware supplies an EFR image, verify the same unit's actual
@@ -579,15 +579,15 @@ bool org_example_AMDMapperProbe::PrepareController(const HardwareInfo &hardware)
                 (c->hardware.firmwareEfrPresent &&
                  (!c->hardware.pciEfrSupported ||
                   c->startupEfr != c->hardware.firmwareEfr))) {
-                setProperty("r47-efr-match", "no");
+                setProperty("iommu-efr-match", "no");
                 failure = "failed-iommu-efr";
             } else {
-                setProperty("r47-efr-match", !c->hardware.pciEfrSupported ?
+                setProperty("iommu-efr-match", !c->hardware.pciEfrSupported ?
                     "not-reported" : (c->hardware.firmwareEfrPresent ?
                     "yes" : "firmware-absent"));
             }
         }
-        setProperty("r47-discovery-state", failure ? failure : "ready");
+        setProperty("discovery-state", failure ? failure : "ready");
     }
     if (!failure) {
         c->originalDT = mmioRead64(c->base, M2B2_OFF_DEV_TABLE);
@@ -598,7 +598,7 @@ bool org_example_AMDMapperProbe::PrepareController(const HardwareInfo &hardware)
             failure = "failed-iommu-already-enabled";
     }
     if (failure) {
-        setProperty("r44-state", failure);
+        setProperty("iommu-state", failure);
         c->releaseBuffers();
         fController = nullptr;
         IOFree(c, sizeof(*c));
@@ -632,7 +632,7 @@ bool org_example_AMDMapperProbe::PrepareController(const HardwareInfo &hardware)
     mmioWrite64(c->base, M2B2_OFF_CONTROL, control);
     if ((mmioRead64(c->base, M2B2_OFF_CONTROL) & kEnabled) != kEnabled) {
         c->state = "failed-controller-enable";
-        setProperty("r44-failure", c->state);
+        setProperty("iommu-failure", c->state);
         if (c->restore()) {
             c->releaseBuffers();
             fController = nullptr;
@@ -693,9 +693,9 @@ bool org_example_AMDMapperProbe::PrepareDomain(
         mapper_abi::profileForFirstMapGrowth(prepared, ceiling) != nullptr;
     // Per-instance admission evidence: the device mapper is its own instance,
     // so record whether this instance saw the boot-arg override at all.
-    nic->setProperty("r44-attach-forced", ForcedProfile() ? "yes" : "no");
-    nic->setProperty("r44-attach-instance", getRegistryEntryID(), 64);
-    nic->setProperty("r44-profile-source",
+    nic->setProperty("iommu-attach-forced", ForcedProfile() ? "yes" : "no");
+    nic->setProperty("iommu-attach-instance", getRegistryEntryID(), 64);
+    nic->setProperty("iommu-profile-source",
         source == mapper_abi::ProfileSource::bootArg ? "boot-arg"
         : (source == mapper_abi::ProfileSource::idTable ? "id-table"
         : (source == mapper_abi::ProfileSource::classTable ? "class-table"
@@ -704,15 +704,15 @@ bool org_example_AMDMapperProbe::PrepareDomain(
     // records what identity-based sizing would have picked. It cannot cost a real
     // client its arena any more, because the arena starts at legacy and grows
     // from demand.
-    nic->setProperty("r44-profile-suggested", requested->name);
-    nic->setProperty("r44-profile-prepared", prepared->name);
-    nic->setProperty("r44-profile-ceiling-source",
+    nic->setProperty("iommu-profile-suggested", requested->name);
+    nic->setProperty("iommu-profile-prepared", prepared->name);
+    nic->setProperty("iommu-profile-ceiling-source",
                      forcedCeiling ? "boot-arg" : "default");
-    nic->setProperty("r44-profile-ceiling",
+    nic->setProperty("iommu-profile-ceiling",
                      unsupported ? "unsupported-name" : ceiling->name);
-    nic->setProperty("r44-growth-policy", growth ? "first-map" : "disabled");
-    nic->setProperty("r44-capacity-grown", "no");
-    nic->setProperty("r44-profile", prepared->name);
+    nic->setProperty("iommu-growth-policy", growth ? "first-map" : "disabled");
+    nic->setProperty("iommu-capacity-grown", "no");
+    nic->setProperty("iommu-profile", prepared->name);
     const UInt64 preparedBytes = mapper_abi::arenaBytesFor(*prepared);
     const bool preparedOK = preparedBytes &&
         preparedBytes <= mapper_abi::kMaxArenaBytes &&
@@ -722,7 +722,7 @@ bool org_example_AMDMapperProbe::PrepareDomain(
         PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
             d->tablePA, prepared->tablePages, M2B2_PAGE_MODE_4_LEVEL, *prepared);
     if (!preparedOK) {
-        nic->setProperty("r69-admission", "refused-no-arena");
+        nic->setProperty("admission", "refused-no-arena");
         IOLog("AMDMapperProbe: admission refused, the legacy arena did not prepare\n");
         if (fAutoAttach)
             panic("AMDMapperProbe: admission-refused: legacy arena did not prepare");
@@ -738,7 +738,7 @@ bool org_example_AMDMapperProbe::PrepareDomain(
         ? (ceiling == &mapper_abi::kProfileRl10gMax
                ? "granted-rl-10g-max-on-demand" : "granted-rl-10g-on-demand")
         : "granted-native-legacy";
-    nic->setProperty("r69-admission", admission);
+    nic->setProperty("admission", admission);
     IOLog("AMDMapperProbe: domain %u prepared %s, ceiling %s (growth %s)\n",
           slot, prepared->name, unsupported ? "unsupported-name" : ceiling->name,
           growth ? "first-map" : "disabled");
@@ -752,18 +752,18 @@ bool org_example_AMDMapperProbe::PrepareDomain(
         d->state = "ready-passthrough";
     }
     nic->retain(); fNicDevice = nic;
-    setProperty("r52-requester", d->deviceID, 32);
-    setProperty("r52-mapper-id", getRegistryEntryID(), 64);
-    setProperty("r52-owner-id", fOwner->getRegistryEntryID(), 64);
-    setProperty("r52-device-entry-id", nic->getRegistryEntryID(), 64);
-    setProperty("r47-mmio-efr", c->startupEfr, 64);
-    setProperty("r47-efr-match", c->hardware.pciEfrSupported ?
+    setProperty("attach-requester-id", d->deviceID, 32);
+    setProperty("mapper-entry-id", getRegistryEntryID(), 64);
+    setProperty("owner-entry-id", fOwner->getRegistryEntryID(), 64);
+    setProperty("device-entry-id", nic->getRegistryEntryID(), 64);
+    setProperty("iommu-mmio-efr", c->startupEfr, 64);
+    setProperty("iommu-efr-match", c->hardware.pciEfrSupported ?
         (c->hardware.firmwareEfrPresent ? "yes" : "firmware-absent") : "not-reported");
     // Identity and a complete domain snapshot precede copyMapperForDevice().
     // Only first map activates this endpoint's DTE, after the endpoint driver's reset.
     PublishMappings();
     if (!nic->setProperty("iommu-parent", this)) return false;
-    setProperty("r44-parent", fOwner->fAutoAttach
+    setProperty("iommu-parent-policy", fOwner->fAutoAttach
         ? "set-at-first-publish-autoattach"
         : (fOwner->fSelectionExplicit
             ? "set-on-client-claim-before-pci-open" : "set-before-driver-start"));
@@ -873,7 +873,7 @@ bool org_example_AMDMapperProbe::InvalidateLocked(
             ((UInt64)M2B2_PAGE_MODE_4_LEVEL << M2B2_DEV_ENTRY_MODE_SHIFT) |
             DTE_V | DTE_TV | (fDMAParked ? 0 : (DTE_IR | DTE_IW));
         OSSynchronizeIO();
-        if (!m2b2Submit(c->base, &c->command, "r44-activate-device", d->deviceID,
+        if (!m2b2Submit(c->base, &c->command, "activate-device", d->deviceID,
                 ((UInt32)M2B2_CMD_INV_DEV_ENTRY << 28), 0, 0)) {
             d->state = "failed-device-invalidation";
             return false;
@@ -893,7 +893,7 @@ bool org_example_AMDMapperProbe::InvalidateLocked(
     } else {
         count = PlanRange(opcode, address, bytes, cmd, covered);
     }
-    if (!count || !m2b2SubmitBatch(c->base, &c->command, "r44-invalidate-pages", cmd, count)) {
+    if (!count || !m2b2SubmitBatch(c->base, &c->command, "invalidate-pages", cmd, count)) {
         d->state = "failed-page-invalidation";
         return false;
     }
@@ -973,7 +973,7 @@ IOReturn org_example_AMDMapperProbe::SetSystemPM(bool armed) {
         if (c->suspended) return kIOReturnBusy;
         c->coordinatedPMArmed = false;
     }
-    setProperty("r66-pm-armed", c->coordinatedPMArmed ? "yes" : "no");
+    setProperty("pm-coordinated-armed", c->coordinatedPMArmed ? "yes" : "no");
     return kIOReturnSuccess;
 }
 
@@ -1192,14 +1192,14 @@ void org_example_AMDMapperProbe::PublishAuto() {
     auto number = [this](const char *key, UInt64 value) {
         setProperty(key, (unsigned long long)value, 64);
     };
-    setProperty("r44-state", d->state ? d->state : "preparing");
-    setProperty("r44-controller-ready", c->ready ? "yes" : "no");
-    setProperty("r44-dte-active", d->active && c->configured ? "yes" : "no");
-    setProperty("r44-registers-restored", c->restored ? "yes" : "no");
-    setProperty("r44-event-overflow", c->eventOverflow ? "yes" : "no");
-    setProperty("r44-event-valid", c->eventInvalid ? "no" : "yes");
-    setProperty("r44-command-failed", c->command.failed ? "yes" : "no");
-    setProperty("r47-pm-state", c->powerFailed ? "failed" :
+    setProperty("iommu-state", d->state ? d->state : "preparing");
+    setProperty("iommu-controller-ready", c->ready ? "yes" : "no");
+    setProperty("iommu-dte-active", d->active && c->configured ? "yes" : "no");
+    setProperty("iommu-registers-restored", c->restored ? "yes" : "no");
+    setProperty("iommu-event-overflow", c->eventOverflow ? "yes" : "no");
+    setProperty("iommu-event-valid", c->eventInvalid ? "no" : "yes");
+    setProperty("iommu-command-failed", c->command.failed ? "yes" : "no");
+    setProperty("pm-controller-state", c->powerFailed ? "failed" :
                 (c->suspended ? "suspended" : "awake"));
     UInt32 pmSuspendReady = 0, pmResumeReady = 0;
     for (UInt32 i = 0; i < kMaxDomains; ++i) {
@@ -1207,89 +1207,89 @@ void org_example_AMDMapperProbe::PublishAuto() {
         pmSuspendReady += c->domains[i]->pmSuspendReady ? 1 : 0;
         pmResumeReady += c->domains[i]->pmResumeReady ? 1 : 0;
     }
-    number("r66_2-pm-suspends", d->pmSuspends);
-    number("r66_2-pm-resumes", d->pmResumes);
-    number("r66_2-pm-suspend-cw", d->pmSuspendSequence);
-    number("r66_2-pm-resume-dev-cw", d->pmResumeDevSequence);
-    number("r66_2-pm-resume-pages-cw", d->pmResumePagesSequence);
-    number("r65-pm-domain-count", c->domainCount);
-    setProperty("r66-pm-armed", c->coordinatedPMArmed ? "yes" : "no");
-    number("r65-pm-suspend-ready", pmSuspendReady);
-    number("r65-pm-resume-ready", pmResumeReady);
-    setProperty("r47-resume-registers-restored",
+    number("pm-domain-suspend-count", d->pmSuspends);
+    number("pm-domain-resume-count", d->pmResumes);
+    number("pm-domain-suspend-sequence", d->pmSuspendSequence);
+    number("pm-domain-resume-device-sequence", d->pmResumeDevSequence);
+    number("pm-domain-resume-pages-sequence", d->pmResumePagesSequence);
+    number("pm-domain-count", c->domainCount);
+    setProperty("pm-coordinated-armed", c->coordinatedPMArmed ? "yes" : "no");
+    number("pm-suspend-ready", pmSuspendReady);
+    number("pm-resume-ready", pmResumeReady);
+    setProperty("pm-resume-registers-restored",
                 c->resumeRegistersRestored ? "yes" : "no");
-    number("r47-suspend-count", c->suspendCount);
-    number("r47-resume-count", c->resumeCount);
-    number("r47-pm-failures", c->powerFailures);
-    number("r47-suspend-at", c->suspendTime);
-    number("r47-resume-at", c->resumeTime);
-    number("r47-suspend-cw-sequence", c->suspendSequence);
-    number("r47-resume-inv-dev-sequence", c->resumeDevSequence);
-    number("r47-resume-inv-pages-sequence", c->resumePagesSequence);
-    setProperty("r52-command-counters-scope", "controller");
-    setProperty("r52-pm-support", c->domainCount > 1 ? "unsupported-shared" : "single-device");
-    number("r52-domain-cmd-completed", d->invDevCompleted + d->invPagesCompleted);
-    number("r44-target-devid", d->deviceID);
-    number("r44-domain-id", d->domainID);
-    number("r44-root-pa", d->tablePA);
-    number("r44-table-pa", d->tablePA);
-    number("r44-table-bytes", (UInt64)d->tablePages * M2B2_PAGE_SIZE);
-    setProperty("r44-domain-profile", d->profileName ? d->profileName : "unknown");
-    number("r44-domain-profile-records", d->profileRecords);
-    number("r44-domain-profile-pages", d->profilePages);
-    number("r44-device-table-pa", c->devicePA);
-    number("r44-command-pa", c->commandPA);
-    number("r44-event-pa", c->eventPA);
-    number("r44-controller-ready-time", c->readyTime);
-    number("r44-dte-active-time", d->activeTime);
-    setProperty("r63-dma-parked", c->command.failed ? "unknown" : (fDMAParked ? "yes" : "no"));
-    number("r63-park-count", d->parkCount);
-    number("r63-restore-count", d->restoreCount);
-    number("r63-last-dev-cw", d->gateDevSequence);
-    number("r63-last-pages-cw", d->gatePagesSequence);
-    number("r44-inv-dev-completed", d->invDevCompleted);
-    number("r44-inv-pages-completed", d->invPagesCompleted);
-    number("r51-npcache", (c->hardware.capabilityHeader & kNpCache) ? 1 : 0);
-    number("r51-map-invalidation-skipped", d->mapInvalidationSkipped);
-    number("r50-inv-full-completed", d->invFullCompleted);
-    number("r50-inv-range-completed", d->invRangeCompleted);
-    number("r50-inv-range-pages", d->invRangePages);
-    number("r60-inv-range-covered-pages", d->invRangeCoveredPages);
-    number("r61-range-descriptors", d->rangeDescriptors);
-    number("r61-split-batches", d->splitBatches);
+    number("pm-controller-suspend-count", c->suspendCount);
+    number("pm-controller-resume-count", c->resumeCount);
+    number("pm-controller-failures", c->powerFailures);
+    number("pm-controller-suspend-time", c->suspendTime);
+    number("pm-controller-resume-time", c->resumeTime);
+    number("pm-controller-suspend-sequence", c->suspendSequence);
+    number("pm-controller-resume-device-invalidation-sequence", c->resumeDevSequence);
+    number("pm-controller-resume-pages-invalidation-sequence", c->resumePagesSequence);
+    setProperty("command-counters-scope", "controller");
+    setProperty("pm-support-scope", c->domainCount > 1 ? "unsupported-shared" : "single-device");
+    number("invalidation-completed-total", d->invDevCompleted + d->invPagesCompleted);
+    number("iommu-device-id", d->deviceID);
+    number("iommu-domain-id", d->domainID);
+    number("iommu-root-pa", d->tablePA);
+    number("iommu-table-pa", d->tablePA);
+    number("iommu-table-bytes", (UInt64)d->tablePages * M2B2_PAGE_SIZE);
+    setProperty("iommu-domain-profile", d->profileName ? d->profileName : "unknown");
+    number("iommu-domain-profile-records", d->profileRecords);
+    number("iommu-domain-profile-pages", d->profilePages);
+    number("iommu-device-table-pa", c->devicePA);
+    number("iommu-command-pa", c->commandPA);
+    number("iommu-event-pa", c->eventPA);
+    number("iommu-controller-ready-time", c->readyTime);
+    number("iommu-dte-active-time", d->activeTime);
+    setProperty("dma-parked", c->command.failed ? "unknown" : (fDMAParked ? "yes" : "no"));
+    number("dma-park-count", d->parkCount);
+    number("dma-restore-count", d->restoreCount);
+    number("dma-last-device-sequence", d->gateDevSequence);
+    number("dma-last-pages-sequence", d->gatePagesSequence);
+    number("invalidation-device-completed", d->invDevCompleted);
+    number("invalidation-pages-completed", d->invPagesCompleted);
+    number("iommu-np-cache", (c->hardware.capabilityHeader & kNpCache) ? 1 : 0);
+    number("invalidation-map-skipped", d->mapInvalidationSkipped);
+    number("invalidation-full-completed", d->invFullCompleted);
+    number("invalidation-range-completed", d->invRangeCompleted);
+    number("invalidation-range-pages", d->invRangePages);
+    number("invalidation-range-covered-pages", d->invRangeCoveredPages);
+    number("invalidation-range-descriptors", d->rangeDescriptors);
+    number("invalidation-split-batches", d->splitBatches);
     if (d->splitCount) {
-        number("r61-split-address", d->splitAddress);
-        number("r61-split-bytes", d->splitBytes);
-        number("r61-split-sequence", d->splitSequence);
-        setProperty("r61-split-commands", d->splitWords, d->splitCount * sizeof(d->splitWords[0]));
+        number("invalidation-split-address", d->splitAddress);
+        number("invalidation-split-bytes", d->splitBytes);
+        number("invalidation-split-sequence", d->splitSequence);
+        setProperty("invalidation-split-commands", d->splitWords, d->splitCount * sizeof(d->splitWords[0]));
     }
-    number("r50-last-range-address", d->lastRangeAddress);
-    number("r50-last-range-bytes", d->lastRangeBytes);
-    number("r50-last-range-sequence", d->lastRangeSequence);
+    number("invalidation-last-range-address", d->lastRangeAddress);
+    number("invalidation-last-range-bytes", d->lastRangeBytes);
+    number("invalidation-last-range-sequence", d->lastRangeSequence);
     for (UInt32 i = 0; i < 4; ++i) {
         char key[32];
-        snprintf(key, sizeof(key), "r50-last-range-command%u", i);
+        snprintf(key, sizeof(key), "invalidation-last-range-command%u", i);
         number(key, d->lastRangeCommand[i]);
     }
-    number("r44-cmd-submits", c->command.submits);
-    number("r44-cmd-completed", c->command.completed);
-    number("r44-cmd-wraps", c->command.wraps);
-    number("r44-cmd-post-wrap", c->command.postWrapCompleted);
-    number("r44-cmd-completion-sequence", c->command.completionSequence);
-    number("r44-event-entries", c->eventEntries);
-    number("r44-target-faults", d->targetFaults);
+    number("iommu-command-submits", c->command.submits);
+    number("iommu-command-completed", c->command.completed);
+    number("iommu-command-wraps", c->command.wraps);
+    number("iommu-command-post-wrap-completed", c->command.postWrapCompleted);
+    number("iommu-command-completion-sequence", c->command.completionSequence);
+    number("iommu-event-entries", c->eventEntries);
+    number("iommu-target-faults", d->targetFaults);
     for (UInt32 i = 0; i < 4; ++i) {
         char key[32];
-        snprintf(key, sizeof(key), "r44-last-event%u", i);
+        snprintf(key, sizeof(key), "iommu-last-event%u", i);
         number(key, d->lastEvent[i]);
     }
     // A snapshot taken while suspended must never probe powered-down MMIO.
-    number("r44-control", c->observedControl);
+    number("iommu-control-register", c->observedControl);
     if (c->devices) {
         const volatile UInt64 *dte =
             (volatile UInt64 *)c->devices->getBytesNoCopy();
-        number("r44-dte0", dte[d->deviceID * 4]);
-        number("r44-dte1", dte[d->deviceID * 4 + 1]);
+        number("iommu-dte0", dte[d->deviceID * 4]);
+        number("iommu-dte1", dte[d->deviceID * 4 + 1]);
     }
 }
 
@@ -1307,7 +1307,7 @@ void org_example_AMDMapperProbe::PublishDomains() {
         if (!properties) continue;
         domains->setObject(properties);
         // Retain the historical single-device inspection surface on the owner.
-        // R52 tools explicitly consume every dictionary in r52-domains.
+        // Tools explicitly consume every dictionary in snapshot-domains.
         if (domains->getCount() == 1) {
             OSCollectionIterator *keys = OSCollectionIterator::withCollection(properties);
             if (keys) {
@@ -1315,9 +1315,8 @@ void org_example_AMDMapperProbe::PublishDomains() {
                     OSString *key = OSDynamicCast(OSString, object);
                     if (!key) continue;
                     const char *name = key->getCStringNoCopy();
-                    if (!strncmp(name, "r44-", 4) || !strncmp(name, "r47-", 4) ||
-                        !strncmp(name, "r48-", 4) || !strncmp(name, "r50-", 4) ||
-                        !strncmp(name, "r51-", 4))
+                    if (!strncmp(name, "iommu-", 6) || !strncmp(name, "mapper-", 7) ||
+                        !strncmp(name, "pm-", 3))
                         setProperty(name, properties->getObject(name));
                 }
                 keys->release();
@@ -1325,10 +1324,10 @@ void org_example_AMDMapperProbe::PublishDomains() {
         }
         properties->release();
     }
-    setProperty("r52-domains", domains);
-    setProperty("r52-domain-count", domains->getCount(), 32);
-    setProperty("r52-snapshot-sequence", ++fSnapshotSequence, 64);
-    setProperty("r52-snapshot-time", mach_absolute_time(), 64);
+    setProperty("snapshot-domains", domains);
+    setProperty("iommu-domain-count", domains->getCount(), 32);
+    setProperty("snapshot-sequence", ++fSnapshotSequence, 64);
+    setProperty("snapshot-time", mach_absolute_time(), 64);
     domains->release();
     Controller *c = fController;
     if (!c) return;
@@ -1337,21 +1336,21 @@ void org_example_AMDMapperProbe::PublishDomains() {
     auto number = [this](const char *key, UInt64 value) {
         setProperty(key, (unsigned long long)value, 64);
     };
-    number("r52-controller-device-table-pa", c->devicePA);
-    number("r52-controller-command-pa", c->commandPA);
-    number("r52-controller-event-pa", c->eventPA);
-    number("r52-controller-cmd-submits", c->command.submits);
-    number("r52-controller-cmd-completed", c->command.completed);
-    number("r52-controller-cmd-completion-sequence", c->command.completionSequence);
-    number("r52-controller-cmd-wraps", c->command.wraps);
-    number("r52-controller-cmd-head-reads", c->headCache.reads);
-    number("r52-controller-cmd-cached-batches", c->headCache.cachedBatches);
-    number("r52-controller-event-entries", c->eventEntries);
-    number("r52-controller-target-faults", c->targetFaults);
-    setProperty("r52-controller-ready", c->ready ? "yes" : "no");
-    setProperty("r52-controller-command-failed", c->command.failed ? "yes" : "no");
-    setProperty("r52-controller-event-overflow", c->eventOverflow ? "yes" : "no");
-    setProperty("r52-controller-event-valid", c->eventInvalid ? "no" : "yes");
+    number("iommu-controller-device-table-pa", c->devicePA);
+    number("iommu-controller-command-pa", c->commandPA);
+    number("iommu-controller-event-pa", c->eventPA);
+    number("iommu-controller-command-submits", c->command.submits);
+    number("iommu-controller-command-completed", c->command.completed);
+    number("iommu-controller-command-completion-sequence", c->command.completionSequence);
+    number("iommu-controller-command-wraps", c->command.wraps);
+    number("iommu-controller-head-reads", c->headCache.reads);
+    number("iommu-controller-cached-batches", c->headCache.cachedBatches);
+    number("iommu-controller-event-entries", c->eventEntries);
+    number("iommu-controller-target-faults", c->targetFaults);
+    setProperty("iommu-controller-ready", c->ready ? "yes" : "no");
+    setProperty("iommu-controller-command-failed", c->command.failed ? "yes" : "no");
+    setProperty("iommu-controller-event-overflow", c->eventOverflow ? "yes" : "no");
+    setProperty("iommu-controller-event-valid", c->eventInvalid ? "no" : "yes");
 }
 
 bool org_example_AMDMapperProbe::StopAuto() {
@@ -1360,11 +1359,11 @@ bool org_example_AMDMapperProbe::StopAuto() {
         // by the controller service until all domains can be stopped together.
         // In particular, interface disable/enable never stops this controller.
         if (!QuiesceMappings()) {
-            setProperty("r52-device-stop", "retained-live-mappings");
+            setProperty("device-stop-state", "retained-live-mappings");
             return false;
         }
         PublishMappings();
-        setProperty("r52-device-stop", "quiesced");
+        setProperty("device-stop-state", "quiesced");
         return true;
     }
     if (!fAttachLock) return !fController;
@@ -1384,7 +1383,7 @@ bool org_example_AMDMapperProbe::StopAuto() {
         for (UInt32 i = 0; i < kMaxDomains; ++i) {
             auto *mapper = fMappers[i];
             if (!mapper || mapper->QuiesceMappings()) continue;
-            setProperty("r44-state", "retained-live-mappings");
+            setProperty("iommu-state", "retained-live-mappings");
             if (c && !c->pinned) { c->pinned = true; retain(); }
             return false;
         }
@@ -1392,7 +1391,7 @@ bool org_example_AMDMapperProbe::StopAuto() {
             LockGuard guard(c->lock);
             if (!c->restore()) {
                 c->state = "retained-hardware-stop-failed";
-                setProperty("r44-state", c->state);
+                setProperty("iommu-state", c->state);
                 if (!c->pinned) { c->pinned = true; retain(); }
                 return false;
             }
@@ -1415,7 +1414,7 @@ bool org_example_AMDMapperProbe::StopAuto() {
             if (pinned) release();
         }
     }
-    setProperty("r44-state", "stopped");
+    setProperty("iommu-state", "stopped");
     return true;
 }
 

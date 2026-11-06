@@ -44,7 +44,7 @@ struct Snapshot {
     uint64_t preparedAt, firstMapAt, lastMapAt, lastUnmapAt;
     uint64_t snapshotSequence, snapshotTime;
     // Only the most recent successes/failures are retained; authoritative
-    // active mappings are exported separately in r44-live-raw.
+    // active mappings are exported separately in mapper-live-raw.
     Record lastMap, lastUnmap;
 };
 static_assert(sizeof(RecordHeader) == 104, "ordinary mapper record prefix");

@@ -309,21 +309,21 @@ bool org_example_AMDMapperProbe::GrowBeforeFirstMap(MapperState *d) {
     // Publish the decision immediately: the raw snapshot is RPC-triggered, and a
     // capacity change must not be invisible until somebody asks for one.
     if (fNicDevice) {
-        fNicDevice->setProperty("r44-profile", target->name);
-        fNicDevice->setProperty("r44-capacity-grown", "yes");
-        fNicDevice->setProperty("r44-profile-grown-from",
+        fNicDevice->setProperty("iommu-profile", target->name);
+        fNicDevice->setProperty("iommu-capacity-grown", "yes");
+        fNicDevice->setProperty("iommu-profile-grown-from",
             prepared ? prepared->name : "unknown");
         // The length argument is required: a bare UInt64 selects the bool
         // overload and publishes "Yes" instead of the number.
-        fNicDevice->setProperty("r44-table-bytes",
+        fNicDevice->setProperty("iommu-table-bytes",
             (unsigned long long)((UInt64)target->tablePages * M2B2_PAGE_SIZE), 64);
-        fNicDevice->setProperty("r44-map-window-bytes",
+        fNicDevice->setProperty("mapper-map-window-bytes",
             (unsigned long long)((UInt64)target->pages * 4096ULL), 64);
-        fNicDevice->setProperty("r44-profile-records", target->records, 32);
-        fNicDevice->setProperty("r44-profile-pages", target->pages, 32);
+        fNicDevice->setProperty("iommu-profile-records", target->records, 32);
+        fNicDevice->setProperty("iommu-profile-pages", target->pages, 32);
     }
-    setProperty("r44-capacity-grown", "yes");
-    setProperty("r44-growth-state", d->growthState);
+    setProperty("iommu-capacity-grown", "yes");
+    setProperty("iommu-growth-state", d->growthState);
     return true;
 }
 
@@ -626,21 +626,21 @@ void org_example_AMDMapperProbe::PublishCapacity() {
     fPublishedLivePages = fLivePages;
     fPublishedPeakMaps = fPeakMaps;
     fPublishedPeakPages = fPeakPages;
-    setProperty("r44-map-ok-live", fMapOk, 64);
-    setProperty("r44-unmap-ok-live", fUnmapOk, 64);
-    setProperty("r44-live-maps-live", fLiveMaps, 32);
-    setProperty("r44-live-pages-live", fLivePages, 32);
-    setProperty("r44-peak-maps-live", fPeakMaps, 32);
-    setProperty("r44-peak-pages-live", fPeakPages, 32);
-    setProperty("r69-max-map-length", fMaxLength, 64);
-    setProperty("r69-max-map-pages", fMaxPages, 64);
-    setProperty("r69-max-map-runs", fMaxRuns, 64);
-    setProperty("r69-rejects-length", (unsigned long long)fRejectedLength, 32);
-    setProperty("r69-rejects-options", (unsigned long long)fRejectedOptions, 32);
-    setProperty("r69-rejects-layout", (unsigned long long)fRejectedLayout, 32);
-    setProperty("r69-rejects-records", (unsigned long long)fRejectedRecords, 32);
-    setProperty("r69-rejects-norange", (unsigned long long)fRejectedNoRange, 32);
-    setProperty("r69-rejects-bits", (unsigned long long)fRejectedBits, 32);
+    setProperty("mapper-map-ok-live", fMapOk, 64);
+    setProperty("mapper-unmap-ok-live", fUnmapOk, 64);
+    setProperty("mapper-live-maps-live", fLiveMaps, 32);
+    setProperty("mapper-live-pages-live", fLivePages, 32);
+    setProperty("mapper-peak-maps-live", fPeakMaps, 32);
+    setProperty("mapper-peak-pages-live", fPeakPages, 32);
+    setProperty("mapper-max-map-length", fMaxLength, 64);
+    setProperty("mapper-max-map-pages", fMaxPages, 64);
+    setProperty("mapper-max-map-runs", fMaxRuns, 64);
+    setProperty("mapper-rejects-length", (unsigned long long)fRejectedLength, 32);
+    setProperty("mapper-rejects-options", (unsigned long long)fRejectedOptions, 32);
+    setProperty("mapper-rejects-layout", (unsigned long long)fRejectedLayout, 32);
+    setProperty("mapper-rejects-records", (unsigned long long)fRejectedRecords, 32);
+    setProperty("mapper-rejects-no-range", (unsigned long long)fRejectedNoRange, 32);
+    setProperty("mapper-rejects-bits", (unsigned long long)fRejectedBits, 32);
 }
 
 IOReturn org_example_AMDMapperProbe::UnmapMemory(
@@ -740,31 +740,31 @@ void org_example_AMDMapperProbe::PublishMappings(OSDictionary **copy) {
     OSData *active = d->copyLiveRecords();
     OSData *tables = OSData::withBytes((const void *)d->tables, (unsigned)s.ptBytes);
     if (summary && active && tables) {
-        setProperty("r44-mapper-raw", summary);
-        setProperty("r44-live-raw", active);
-        setProperty("r44-pt-raw", tables);
-        setProperty("r44-mapper-abi", mapper_abi::kVersion, 32);
-        setProperty("r44-live-maps", s.liveCount, 32);
-        setProperty("r44-live-pages", s.livePages, 32);
+        setProperty("mapper-state-raw", summary);
+        setProperty("mapper-live-raw", active);
+        setProperty("mapper-page-table-raw", tables);
+        setProperty("mapper-abi-version", mapper_abi::kVersion, 32);
+        setProperty("mapper-live-maps", s.liveCount, 32);
+        setProperty("mapper-live-pages", s.livePages, 32);
         // S3 measurement: peaks since this domain was prepared, published with
         // the ordinary snapshot so a read never races the DMA path.
-        setProperty("r44-peak-maps", s.peakMaps, 32);
-        setProperty("r44-peak-pages", s.peakPages, 32);
-        setProperty("r44-map-ok", s.mapOk, 64);
-        setProperty("r44-unmap-ok", s.unmapOk, 64);
-        setProperty("r44-map-rejected", s.mapRejected, 64);
-        setProperty("r44-unmap-rejected", s.unmapRejected, 64);
-        setProperty("r44-snapshot-sequence", s.snapshotSequence, 64);
-        setProperty("r48-map32-ok", d->map32Ok, 64);
-        setProperty("r48-map-high-pa-ok", d->mapHighPAOk, 64);
-        setProperty("r48-mapped-high-pa-pages", d->mappedHighPAPages, 64);
-        setProperty("r48-map-min-bits", d->minMapBits, 32);
-        setProperty("r48-map-max-bits", d->maxMapBits, 32);
+        setProperty("mapper-peak-maps", s.peakMaps, 32);
+        setProperty("mapper-peak-pages", s.peakPages, 32);
+        setProperty("mapper-map-ok", s.mapOk, 64);
+        setProperty("mapper-unmap-ok", s.unmapOk, 64);
+        setProperty("mapper-map-rejected", s.mapRejected, 64);
+        setProperty("mapper-unmap-rejected", s.unmapRejected, 64);
+        setProperty("mapper-snapshot-sequence", s.snapshotSequence, 64);
+        setProperty("mapper-map-32bit-ok", d->map32Ok, 64);
+        setProperty("mapper-map-high-pa-ok", d->mapHighPAOk, 64);
+        setProperty("mapper-mapped-high-pa-pages", d->mappedHighPAPages, 64);
+        setProperty("mapper-map-min-bits", d->minMapBits, 32);
+        setProperty("mapper-map-max-bits", d->maxMapBits, 32);
         // R71-B: growth state. Also published directly at the swap, because the
         // raw snapshot above is only produced when a reader asks for one.
-        setProperty("r44-capacity-grown", d->grown ? "yes" : "no");
-        setProperty("r44-growth-state", d->growthState ? d->growthState : "unknown");
-        setProperty("r44-growth-time", d->growthTime, 64);
+        setProperty("iommu-capacity-grown", d->grown ? "yes" : "no");
+        setProperty("iommu-growth-state", d->growthState ? d->growthState : "unknown");
+        setProperty("iommu-growth-time", d->growthTime, 64);
     }
     if (summary) summary->release();
     if (active) active->release();
@@ -773,11 +773,11 @@ void org_example_AMDMapperProbe::PublishMappings(OSDictionary **copy) {
         if (data) setProperty(key, data);
         else removeProperty(key);
     };
-    boundary("r47-suspend-live-raw", d->suspendLive);
-    boundary("r47-suspend-pt-raw", d->suspendPT);
-    boundary("r47-resume-live-raw", d->resumeLive);
-    boundary("r47-resume-pt-raw", d->resumePT);
-    setProperty("r47-pm-snapshots-valid",
+    boundary("pm-suspend-live-raw", d->suspendLive);
+    boundary("pm-suspend-pt-raw", d->suspendPT);
+    boundary("pm-resume-live-raw", d->resumeLive);
+    boundary("pm-resume-pt-raw", d->resumePT);
+    setProperty("pm-snapshots-valid",
         d->suspendLive && d->suspendPT && d->resumeLive && d->resumePT ? "yes" : "no");
     // Keep this domain's raw state, PTE bytes and hardware counters in one
     // snapshot. Hardware export takes only the controller lock after this lock.

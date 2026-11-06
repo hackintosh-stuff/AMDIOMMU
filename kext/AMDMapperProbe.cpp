@@ -150,7 +150,7 @@ bool org_example_AMDMapperProbe::initHardware(IOService *provider) {
 #if !AMD_MAPPER_PROBE_DEBUG
 
 bool org_example_AMDMapperProbe::start(IOService *provider) {
-    setProperty("m1b-stage", "0-entered-start");
+    setProperty("probe-stage", "0-entered-start");
 
     // Safety gate: must precede super::start(). When fIsSystem is true,
     // IOMapper::start() sets gSystem = this, a global side effect that cannot
@@ -158,16 +158,16 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
     fIsSystem = false;
 
     if (!super::start(provider)) {
-        setProperty("m1b-stage", "1-super-start-FAILED");
+        setProperty("probe-stage", "1-super-start-FAILED");
         return false;
     }
-    setProperty("m1b-stage", "2-super-start-ok");
+    setProperty("probe-stage", "2-super-start-ok");
     if (fOwner) {
         // Device instance attached to the controller service.
         fAuto = true;
-        setProperty("r44-mode", "auto");
-        setProperty("r52-role", "device");
-        setProperty("r44-system-mapper", "no");
+        setProperty("iommu-mode", "auto");
+        setProperty("iommu-role", "device");
+        setProperty("iommu-system-mapper", "no");
         return true;
     }
 
@@ -181,8 +181,8 @@ bool org_example_AMDMapperProbe::start(IOService *provider) {
     }
 
     // No supported mode: stay inert. No notifier, no device arm, no MMIO.
-    setProperty("m1b-stage", "3-no-auto-mode");
-    setProperty("r44-mode", "inert");
+    setProperty("probe-stage", "3-no-auto-mode");
+    setProperty("iommu-mode", "inert");
     return true;
 }
 
@@ -293,7 +293,7 @@ IOReturn org_example_AMDMapperProbe::iovmInsert(
     (void)physicalAddress; (void)length;
     fInsertCalls++;
     if (fAuto) {
-        setProperty("r44-insert-rejects", (unsigned long long)fInsertCalls, 32);
+        setProperty("iommu-insert-rejects", (unsigned long long)fInsertCalls, 32);
     }
     return kIOReturnUnsupported;
 }
