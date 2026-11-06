@@ -96,7 +96,7 @@ amdiommu=auto-attach amdiommu_devices=n2300,n2301
 When `amdiommu_devices` is omitted, the kext matches devices by identity against
 the `AMDMapperProbeDevices` value inside its own `Info.plist` personality
 (`IOKitPersonalities/AMDMapperProbe`). The value uses the **`IOPCIMatch`
-format**: whitespace-separated `0xVVVVDDDD` words, each optionally followed by
+format**: whitespace-separated `0xDDDDVVVV` words, each optionally followed by
 `&0xMMMMMMMM`; `VVVV` is the PCI vendor, `DDDD` the device, compared as
 `(device << 16 | vendor) & mask`. The personality dictionary becomes the driver
 instance's property table, so the kext reads it with `getProperty()`.
