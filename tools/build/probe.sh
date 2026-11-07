@@ -80,12 +80,16 @@ done
 echo "== 编译（$(echo "$SRCS" | wc -w | tr -d ' ') 个编译单元）=="
 # 注意：不定义 IOKIT_ENABLE_SHARED_PTR。SDK 默认未定义，此时 OSPtr<T> 就是 T*。
 # 打开它会让 IOKit 直接 #error（要求额外定义 EXPERIMENTAL 宏，且声明 API 不稳定）。
+# PROBE_TRACE_DEFINE adds one extra -D to the production build without changing
+# its defaults, e.g. -DAMD_MAPPER_PM_TRACE=1 for the PM fault tracer. The release
+# build leaves it unset, so the tracer is not compiled in at all.
+TRACE_DEFINE=${PROBE_TRACE_DEFINE:-}
 CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
     -isysroot $SDK -mmacosx-version-min=$SDKVER \
     -I $HEADERS -I $ROOT/include -nostdinc++ -std=c++17 \
     -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE \
     -fno-builtin -fno-common -fno-exceptions -fno-rtti \
-    -fno-stack-protector -Wall -Wextra -Werror -O0 -g $DEBUG_DEFINE"
+    -fno-stack-protector -Wall -Wextra -Werror -O0 -g $DEBUG_DEFINE $TRACE_DEFINE"
 
 OBJS=""
 for f in $SRCS; do

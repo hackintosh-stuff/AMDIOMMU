@@ -132,6 +132,15 @@ struct org_maz1_AMDMapperProbe::Domain {
     }
     UInt64 targetFaults;
     UInt32 lastEvent[4];
+#if AMD_MAPPER_PM_TRACE
+    // PM fault tracer: which fault, where it pointed, and the PM phase that was
+    // live when it was observed. Only compiled into a trace build.
+    UInt64 faultObservedTime;
+    UInt64 faultIOVA;
+    UInt32 faultType;
+    UInt32 faultCount;
+    const char *faultPhase;
+#endif
     // R72: live mappings as this domain's mapper counts them, and the evidence
     // that a suspend closed admission (so a later DMA call may reopen it).
     UInt32 pmLiveMaps;
@@ -177,6 +186,16 @@ struct org_maz1_AMDMapperProbe::Controller {
     // R72: self-driven PM evidence.
     UInt64 lazyRestores, retainedSuspends, resumeFailures, commandRecoveries;
     const char *pmReason;
+#if AMD_MAPPER_PM_TRACE
+    // PM fault tracer (trace build only). `phase` names the PM window a drain is
+    // observing; the ring copy keeps what the producer wrote before the reset,
+    // because S3 clears EVT_HEAD/TAIL and the normal walk cannot reach it.
+    const char *pmPhase;
+    UInt8 *traceRing;
+    UInt64 traceTailAtSuspend;
+    UInt64 traceDrains, traceRingFaults;
+    bool traceHaveTail;
+#endif
 
     // R72: is the register image this driver installed still in the controller?
     // A real S3 clears CONTROL and all three ring bases, so this is also the wake
@@ -253,12 +272,61 @@ struct org_maz1_AMDMapperProbe::Controller {
                     ++d->targetFaults;
                     ++targetFaults;
                     for (UInt32 i = 0; i < 4; ++i) d->lastEvent[i] = lastEvent[i];
+#if AMD_MAPPER_PM_TRACE
+                    // The IOMMU does not timestamp an event, so this records when
+                    // the drain saw it and which PM window was live at that time.
+                    ++d->faultCount;
+                    d->faultObservedTime = mach_absolute_time();
+                    d->faultIOVA = (UInt64)lastEvent[2] | ((UInt64)lastEvent[3] << 32);
+                    d->faultType = type;
+                    d->faultPhase = pmPhase ? pmPhase : "unknown";
+#endif
                 }
                 head = (head + 16) % M2B2_EVT_BUFFER_SIZE;
             }
             mmioWrite64(base, M2B2_OFF_EVT_HEAD, head);
         }
     }
+
+#if AMD_MAPPER_PM_TRACE
+    // S3 clears EVT_HEAD/TAIL, so the normal walk cannot reach what the producer
+    // wrote after the last drain. The buffer contents survive in RAM, and the
+    // producer writes forward from the tail observed before the transition, so a
+    // zero type field marks the end of what it managed to publish.
+    void scanPreResetRing() {
+        if (!traceRing || !traceHaveTail) return;
+        UInt64 cursor = traceTailAtSuspend;
+        if (cursor >= M2B2_EVT_BUFFER_SIZE || (cursor & 15)) return;
+        for (UInt32 n = 0; n < M2B2_EVT_BUFFER_SIZE / 16; ++n) {
+            const UInt32 entry = (UInt32)cursor / 4;
+            const UInt32 words[4] = {
+                *(const UInt32 *)(traceRing + (entry + 0) * 4),
+                *(const UInt32 *)(traceRing + (entry + 1) * 4),
+                *(const UInt32 *)(traceRing + (entry + 2) * 4),
+                *(const UInt32 *)(traceRing + (entry + 3) * 4)};
+            const UInt32 type = words[1] >> M2B2_EVENT_TYPE_SHIFT;
+            if (!type) break;
+            ++eventEntries;
+            for (UInt32 i = 0; i < 4; ++i) lastEvent[i] = words[i];
+            for (UInt32 slot = 0; slot < kMaxDomains; ++slot) {
+                Domain *d = domains[slot];
+                if (!d || (lastEvent[0] & M2B2_EVENT_DEVID_MASK) != d->deviceID)
+                    continue;
+                ++d->targetFaults;
+                ++targetFaults;
+                ++traceRingFaults;
+                ++d->faultCount;
+                d->faultObservedTime = mach_absolute_time();
+                d->faultIOVA = (UInt64)lastEvent[2] | ((UInt64)lastEvent[3] << 32);
+                d->faultType = type;
+                d->faultPhase = "pre-restore-ring";
+                for (UInt32 i = 0; i < 4; ++i) d->lastEvent[i] = lastEvent[i];
+            }
+            cursor = (cursor + 16) % M2B2_EVT_BUFFER_SIZE;
+        }
+        traceHaveTail = false;
+    }
+#endif
 
     bool powerFailure(const char *reason) {
         ready = false;
@@ -287,6 +355,12 @@ struct org_maz1_AMDMapperProbe::Controller {
     }
 
     void releaseBuffers() {
+#if AMD_MAPPER_PM_TRACE
+        if (traceRing) {
+            IOFree(traceRing, (size_t)M2B2_EVT_BUFFER_SIZE);
+            traceRing = nullptr;
+        }
+#endif
         if (mmioMap) mmioMap->release();
         if (mmioMemory) mmioMemory->release();
         if (events) events->release();
@@ -748,6 +822,13 @@ bool org_maz1_AMDMapperProbe::PrepareController(const HardwareInfo &hardware) {
     c->command.semPA = c->semaphorePA;
     c->command.headCache = &c->headCache;
     c->command.pageMode = M2B2_PAGE_MODE_4_LEVEL;
+#if AMD_MAPPER_PM_TRACE
+    // One private copy of the event ring, so a fault written before the S3 reset
+    // can still be read after it. Trace build only.
+    c->traceRing = (UInt8 *)IOMalloc((vm_size_t)M2B2_EVT_BUFFER_SIZE);
+    if (c->traceRing) bzero(c->traceRing, (size_t)M2B2_EVT_BUFFER_SIZE);
+    c->pmPhase = "boot";
+#endif
 
     OSSynchronizeIO();
     c->configured = true;
@@ -1259,6 +1340,15 @@ bool org_maz1_AMDMapperProbe::RestoreHardwareAfterWake(MapperState *state) {
     // stopped command/event rings, then enables and invalidates. Only the ring
     // position restarts: sequence numbers and evidence counters stay monotonic,
     // so an old semaphore value can never complete a new completion wait.
+#if AMD_MAPPER_PM_TRACE
+    // Keep what the producer wrote before the reset. S3 cleared HEAD/TAIL, so
+    // this is the only chance to see a fault that landed during the requesters'
+    // own teardown.
+    if (c->traceRing && c->traceHaveTail) {
+        memcpy(c->traceRing, c->events->getBytesNoCopy(), M2B2_EVT_BUFFER_SIZE);
+        c->scanPreResetRing();
+    }
+#endif
     bzero(c->commands->getBytesNoCopy(), M23_CMD_BUF_SIZE);
     bzero(c->events->getBytesNoCopy(), M2B2_EVT_BUFFER_SIZE);
     c->headCache.valid = false; // no cached position survives a hardware ring reset
@@ -1365,6 +1455,12 @@ bool org_maz1_AMDMapperProbe::EnsureControllerOperationalLocked(
         return false;
     }
     ++c->lazyRestores;
+#if AMD_MAPPER_PM_TRACE
+    // The requester reached the controller before the wake notification did.
+    c->pmPhase = "post-restore-lazy";
+    c->collectEvents();
+    ++c->traceDrains;
+#endif
     return true;
 }
 
@@ -1656,6 +1752,20 @@ IOReturn org_maz1_AMDMapperProbe::sleepWakeHandler(
 void org_maz1_AMDMapperProbe::SystemWillSleep() {
     if (fOwner || !fAttachLock) return;
     uint32_t suspended = 0, failed = 0;
+#if AMD_MAPPER_PM_TRACE
+    // Baseline drain: everything the controller logged up to this point belongs
+    // to ordinary operation. The tail is kept so a fault the producer writes
+    // after this point can still be recovered from the ring copy taken at wake.
+    if (fController && fController->configured && fController->traceRing) {
+        Controller *c = fController;
+        c->pmPhase = "pre-suspend";
+        c->collectEvents();
+        ++c->traceDrains;
+        c->traceTailAtSuspend = mmioRead64(c->base, M2B2_OFF_EVT_TAIL);
+        c->traceHaveTail = c->traceTailAtSuspend < M2B2_EVT_BUFFER_SIZE &&
+            !(c->traceTailAtSuspend & 15);
+    }
+#endif
     {
         LockGuard attachment(fAttachLock);
         for (UInt32 i = 0; i < kMaxDomains; ++i) {
@@ -1669,6 +1779,14 @@ void org_maz1_AMDMapperProbe::SystemWillSleep() {
                 (unsigned long long)fSleepNotifications, 64);
     setProperty("pm-last-suspend-domains", (unsigned long long)suspended, 32);
     setProperty("pm-last-suspend-failures", (unsigned long long)failed, 32);
+#if AMD_MAPPER_PM_TRACE
+    // What the transition itself produced, before the requesters tear down.
+    if (fController && fController->configured && fController->traceRing) {
+        fController->pmPhase = "post-suspend";
+        fController->collectEvents();
+        ++fController->traceDrains;
+    }
+#endif
     for (UInt32 i = 0; i < kMaxDomains; ++i) {
         auto *mapper = fMappers[i];
         if (mapper && mapper->fDomain) mapper->PublishPMNow("system-will-sleep");
@@ -1678,6 +1796,16 @@ void org_maz1_AMDMapperProbe::SystemWillSleep() {
 void org_maz1_AMDMapperProbe::SystemHasPoweredOn() {
     if (fOwner || !fAttachLock) return;
     uint32_t resumed = 0, failed = 0;
+#if AMD_MAPPER_PM_TRACE
+    // Only meaningful when the image survived; after a real S3 the pointers are
+    // zero and the ring copy taken at restore covers the gap instead.
+    if (fController && fController->configured && fController->traceRing &&
+        fController->signatureOK()) {
+        fController->pmPhase = "wake-entry";
+        fController->collectEvents();
+        ++fController->traceDrains;
+    }
+#endif
     {
         LockGuard attachment(fAttachLock);
         for (UInt32 i = 0; i < kMaxDomains; ++i) {
@@ -1690,6 +1818,14 @@ void org_maz1_AMDMapperProbe::SystemHasPoweredOn() {
     setProperty("pm-wake-notifications", (unsigned long long)fWakeNotifications, 64);
     setProperty("pm-last-resume-domains", (unsigned long long)resumed, 32);
     setProperty("pm-last-resume-failures", (unsigned long long)failed, 32);
+#if AMD_MAPPER_PM_TRACE
+    // Anything the restored engines logged between enable and this point.
+    if (fController && fController->configured && fController->traceRing) {
+        fController->pmPhase = "post-resume";
+        fController->collectEvents();
+        ++fController->traceDrains;
+    }
+#endif
     for (UInt32 i = 0; i < kMaxDomains; ++i) {
         auto *mapper = fMappers[i];
         if (mapper && mapper->fDomain) mapper->PublishPMNow("system-has-powered-on");
@@ -1704,6 +1840,9 @@ void org_maz1_AMDMapperProbe::PublishAuto() {
     // The per-device snapshot holds its mapper lock. The shared lock also
     // serializes event HEAD consumption and queue counters across both NICs.
     if (c->configured && !c->suspended) {
+#if AMD_MAPPER_PM_TRACE
+        c->pmPhase = "awake";
+#endif
         c->collectEvents();
         c->observedControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
     }
@@ -1814,6 +1953,19 @@ void org_maz1_AMDMapperProbe::PublishAuto() {
         snprintf(key, sizeof(key), "iommu-last-event%u", i);
         number(key, d->lastEvent[i]);
     }
+#if AMD_MAPPER_PM_TRACE
+    // Trace build only: when the drain saw the last fault, and in which PM
+    // window. Compare iommu-fault-observed-time against pm-controller-suspend-time
+    // and pm-controller-resume-time; "pre-restore-ring" means the fault was
+    // written before the controller was reprogrammed.
+    number("iommu-fault-count", d->faultCount);
+    number("iommu-fault-type", d->faultType);
+    number("iommu-fault-iova", d->faultIOVA);
+    number("iommu-fault-observed-time", d->faultObservedTime);
+    setProperty("iommu-fault-phase", d->faultPhase ? d->faultPhase : "none");
+    number("iommu-fault-ring-recovered", c->traceRingFaults);
+    number("iommu-trace-drains", c->traceDrains);
+#endif
     // A snapshot taken while suspended must never probe powered-down MMIO.
     number("iommu-control-register", c->observedControl);
     if (c->devices) {
