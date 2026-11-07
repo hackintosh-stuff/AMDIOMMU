@@ -1388,6 +1388,10 @@ bool org_maz1_AMDMapperProbe::ResumeAuto() {
                 return c->powerFailure("failed-pm-domain-resume-invalidation");
             d->recordPMResume();
             d->pmResumeReady = true;
+            // Every resume path has to consume this domain's suspend flag.
+            // Leaving it set makes the next SuspendAuto() treat a fresh cycle as
+            // a second suspend and report it as a suspend failure.
+            d->pmSuspendReady = false;
             d->state = "pm-resume-ready";
             c->resumeDevSequence = d->lastInvDevSequence;
             c->resumePagesSequence = d->lastInvPagesSequence;
