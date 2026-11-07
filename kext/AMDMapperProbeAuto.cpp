@@ -668,26 +668,48 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
         IOService *&offered = fOffers[match];
         // A client that claims keeps the R54 ordering guarantees: the offer was
         // published before its PCI open and this call must match that record.
-        if (!claim && !fAutoAttach) {
-            if (offered) return offered == nic;  // first publish or replay
-            if (nic->isOpen() || nic->getProperty("iommu-parent")) {
-                setProperty("attach-failure", "already-open-or-bound");
-                setProperty("attach-rejected-requester", requester, 32);
-                nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
-                return false;
+        if (!fAutoAttach) {
+            if (!claim) {
+                if (offered) return offered == nic;  // first publish or replay
+                if (nic->isOpen() || nic->getProperty("iommu-parent")) {
+                    setProperty("attach-failure", "already-open-or-bound");
+                    setProperty("attach-rejected-requester", requester, 32);
+                    nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
+                    return false;
+                }
+                if (!nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kSelected) ||
+                    !nic->setProperty(amd_iommu_policy::kOffer, this)) {
+                    nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
+                    return false;
+                }
+                nic->retain();
+                offered = nic;
+                return true;  // no mapper, page table or translated DTE yet
             }
-            if (!nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kSelected) ||
-                !nic->setProperty(amd_iommu_policy::kOffer, this)) {
-                nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
-                return false;
-            }
-            nic->retain();
-            offered = nic;
-            return true;  // no mapper, page table or translated DTE yet
-        }
-        if (claim) {
             if (offered != nic || nic->getProperty(amd_iommu_policy::kOffer) != this)
                 return false;
+            nic->removeProperty(amd_iommu_policy::kOffer);
+        } else if (!claim) {
+            // Auto-attach keeps an offer published as well. The mapper is still
+            // attached right below at first publish, but a client that runs the
+            // claim handshake before its PCI open must find the record it is
+            // supposed to match; without it the handshake would answer
+            // kIOReturnNotReady for a device that is already mapped.
+            if (!offered) {
+                if (!nic->setProperty(amd_iommu_policy::kOffer, this))
+                    return false;
+                nic->retain();
+                offered = nic;
+            } else if (offered != nic) {
+                return false;
+            }
+        } else {
+            // A claim in auto-attach mode usually arrives after the attachment,
+            // so accept it while the offer still names this device and let the
+            // lookup below turn it into a success. A device that failed to
+            // prepare falls through to a second attempt, which is the only way
+            // a client can retry without rebooting.
+            if (offered != nic) return false;
             nic->removeProperty(amd_iommu_policy::kOffer);
         }
     }

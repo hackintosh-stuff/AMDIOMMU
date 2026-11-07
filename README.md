@@ -28,7 +28,7 @@ Two build variants exist and accept different boot-args:
 | Argument | Values | Meaning |
 |---|---|---|
 | `amdiommu=<mode>` | `passive` | Auto-attach off: keeps the R54–R67 offer/claim handshake; clients must call `AMDIOMMUClaimRequesterV1`. |
-| | `auto-attach` | Publishes `iommu-parent` at first publish for selected requesters, so Apple's own Ethernet kexts (which only call `IOMapper::copyMapperForDevice()`) get the mapper. |
+| | `auto-attach` | Publishes `iommu-parent` at first publish for selected requesters, so Apple's own Ethernet kexts (which only call `IOMapper::copyMapperForDevice()`) get the mapper. The offer is published as well, so a client that does run the claim handshake gets a definite answer instead of `kIOReturnNotReady`. |
 | | absent / any other value (incl. `off`) | Inert: no notifier, no device arm, no MMIO. `off` is not a recognised value — it simply matches no mode. |
 | `amdiommu_devices=<ids>` | decimals prefixed with `n`, e.g. `n2200,n2201` or `n2300,n2301` | Selects PCI requesters (segment zero). **Prefix each ID with a non-hex character (`n`)**: kernel's `PE_parse_boot_argn` rewrites an all-digit value into a 32-bit integer in the caller's buffer (`3400` arrived as `0x0D48`). The parser skips non-hex bytes before reading four hex digits. Omit to fall back to the identity list in the kext's `Info.plist` (`AMDMapperProbeDevices`, see below). |
 | `amdiommu_profile=<name>` | `rl-10g-max` | Growth ceiling, and the default: 65535 records / 262144 pages (1 GiB), 516 table pages. |
@@ -112,8 +112,10 @@ The checked-in list is the verified adapter set:
 Everything outside this list keeps physical (pass-through) DMA. Identity
 matching does not define offer slots, so `claim` is only honoured for
 boot-arg-selected requesters; a plist-matched device attaches at first publish
-in `auto-attach` mode and without a claim in `passive` mode, exactly like the
-former hardcoded RTL8127 default.
+in `auto-attach` mode and gets no offer in `passive` mode, exactly like the
+former hardcoded RTL8127 default. For boot-arg-selected requesters the offer is
+published in both modes, so a claim is answered whether auto-attach has already
+attached the device or not.
 
 ### Retired M2 experiment modes (Debug build only)
 
