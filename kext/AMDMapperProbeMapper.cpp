@@ -377,6 +377,9 @@ IOReturn org_maz1_AMDMapperProbe::PowerTransition(UInt32 operation) {
             d->capturePowerBoundary(d->resumeLive, d->resumePT);
             d->accepting = true;
             d->snapshot.flags |= mapper_abi::kAccepting;
+            // Admission is open again, so the suspend record is consumed here
+            // rather than inside ResumeAuto(), which no longer clears it.
+            SetSuspendRequested(false);
         }
     }
     if (!ok) d->snapshot.flags |= mapper_abi::kFailed;

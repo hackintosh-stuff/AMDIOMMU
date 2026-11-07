@@ -1203,6 +1203,12 @@ bool org_maz1_AMDMapperProbe::SuspendAuto() {
             return c->powerFailure("failed-pm-suspend-controller");
         c->collectEvents();
         c->state = "suspended";
+        // Only a stopped controller is not ready. A retained suspend leaves the
+        // engines programmed, and claiming otherwise would send every DMA call
+        // the requester still makes during its own teardown through a full
+        // restore: hundreds of invalidations, each with its own completion wait,
+        // on the path that is trying to sleep.
+        c->ready = false;
     } else {
         // Retained: the requester still owns mappings, so the image is left
         // programmed. Entering S3 resets it anyway and the wake path reprograms
@@ -1212,7 +1218,6 @@ bool org_maz1_AMDMapperProbe::SuspendAuto() {
         c->pmReason = "suspend-retained-live-mappings";
         c->state = "suspended-retained";
     }
-    c->ready = false;
     c->suspended = true;
     c->suspendTime = mach_absolute_time();
     ++c->suspendCount;
@@ -1337,7 +1342,10 @@ bool org_maz1_AMDMapperProbe::ReconcileControllerLocked(MapperState *state) {
     c->resumePagesSequence = d->lastInvPagesSequence;
     d->recordPMResume();
     d->pmResumeReady = true;
-    d->pmSuspendRequested = false;
+    // pmSuspendRequested is deliberately NOT cleared here. It is the flag that
+    // lets MapMemory reopen an admission this transition closed; clearing it
+    // while admission is still closed would make every later map return
+    // kIOReturnNotReady until something else reopened the domain.
     d->state = "pm-resume-ready";
     return true;
 }
@@ -1411,7 +1419,9 @@ bool org_maz1_AMDMapperProbe::ResumeAuto() {
             if (!d->pmResumeReady) d->recordPMResume();
             d->pmResumeReady = true;
             d->pmSuspendReady = false;
-            d->pmSuspendRequested = false;
+            // pmSuspendRequested stays set until the caller that reopens
+            // admission clears it, so a map cannot be refused for a domain that
+            // is merely waiting to be reopened.
             d->state = "pm-resume-ready";
             c->resumeDevSequence = d->lastInvDevSequence;
             c->resumePagesSequence = d->lastInvPagesSequence;
