@@ -164,8 +164,13 @@ required for a real S3 to reach it.
   the hardware running because DMA had not quiesced), `pm-lazy-restores`,
   `pm-command-recoveries`, `pm-resume-failures`, `pm-last-reason`,
   `pm-sleep-notifications`/`pm-wake-notifications`, and `pm-support-scope`
-  (`single-device` | `coordinated-armed` | `coordinated-unarmed`). One domain is a
-  legal PM scope; `R66ArmSystemPM` arms the two-requester barrier only.
+  (`single-device` | `coordinated-armed` | `coordinated-unarmed`). A single
+  requester is a legal PM scope, and the barrier itself is written over every
+  slot: each requester fences its own DTE and publishes readiness, the last one
+  stops the shared controller, the first one to resume restores it and the rest
+  invalidate their own domains. `R66ArmSystemPM` still gates the
+  `R47PowerTransition` RPC for more than one requester; the self-driven sleep/wake
+  path does not wait for it, because a real S3 will not.
 
 **Recorded result.** One real sleep/wake cycle has run with this mapper
 translating — 0.98.0, single domain, RTL8111H, 213 s asleep, RTC wake:
