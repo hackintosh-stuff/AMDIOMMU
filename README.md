@@ -167,12 +167,22 @@ required for a real S3 to reach it.
   (`single-device` | `coordinated-armed` | `coordinated-unarmed`). One domain is a
   legal PM scope; `R66ArmSystemPM` arms the two-requester barrier only.
 
-**Not verified:** a real sleep/wake cycle on this board has not been recorded
-with this driver. `pm-resume-registers-restored = yes` together with
-`pm-resume-failures = 0`, an unchanged `kern.boottime`, one added Sleep/Wakes
-entry in `pmset -g log`, one controller suspend/resume each, equal live/PT hashes
-across the boundary and zero target faults are the acceptance criteria, not a
-result.
+**Recorded result.** One real sleep/wake cycle has run with this mapper
+translating — 0.98.0, single domain, RTL8111H, 213 s asleep, RTC wake:
+`kern.boottime` unchanged, `pmset -g log` Sleep/Wakes 0 → 1, controller
+suspend/resume 1/1, `pm-resume-registers-restored = yes`, `pm-resume-failures = 0`,
+`iommu-target-faults = 0`, and DHCP re-acquired 4 s after wake. The suspend was
+recorded as retained (`pm-suspend-retained = 1`): 35 mappings were still live when
+the notification arrived, so the controller was deliberately left programmed and
+the wake path rebuilt it — once from the first DMA call (`pm-lazy-restores = 1`)
+and once more from the wake notification, which found the image gone again.
+
+The suspend and resume boundary captures have the same length but different
+content: the client retires its descriptors before sleep and recreates them after
+wake, so equal live/PT hashes are only expected from a client that keeps its
+mapping set across the boundary. What survives unconditionally is the table area
+itself — same root physical address, no reallocation, `iommu-capacity-grown`
+unchanged.
 
 ## Compatibility
 
