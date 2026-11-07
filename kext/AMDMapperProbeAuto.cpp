@@ -1119,10 +1119,12 @@ bool org_maz1_AMDMapperProbe::PowerSupported() const {
     Controller *c = fController;
     if (!c || !fDomain) return false;
     LockGuard guard(c->lock);
-    // Single-domain behavior remains unchanged. Two-domain PM is enabled
-    // only by an explicit runtime arm after both NICs are fully initialized.
+    // A single requester needs no barrier. Two or more are enabled only by an
+    // explicit runtime arm after every requester has been initialized, and the
+    // barrier itself is written over kMaxDomains, so the count is not limited.
+    if (!c->domainCount) return false;
     if (c->domainCount == 1) return true;
-    if (c->domainCount != 2 || !c->coordinatedPMArmed) return false;
+    if (!c->coordinatedPMArmed) return false;
     UInt32 present = 0;
     for (UInt32 i = 0; i < kMaxDomains; ++i) {
         Domain *domain = c->domains[i];
@@ -1130,7 +1132,7 @@ bool org_maz1_AMDMapperProbe::PowerSupported() const {
         ++present;
         if (!domain->active) return false;
     }
-    return present == 2;
+    return present == c->domainCount;
 }
 
 // R72: suspend is reached from two triggers - the private R47PowerTransition RPC
@@ -1143,14 +1145,13 @@ bool org_maz1_AMDMapperProbe::SuspendAuto() {
     Domain *d = fDomain;
     if (!c || !d) return false;
     LockGuard guard(c->lock);
-    if ((c->domainCount != 1 && c->domainCount != 2) ||
-        !c->ready || c->suspended || c->powerFailed)
+    if (!c->domainCount || !c->ready || c->suspended || c->powerFailed)
         return false;
     c->resumeRegistersRestored = false;
     c->sleepControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
     if ((c->sleepControl & kEnabled) != kEnabled)
         return c->powerFailure("failed-pm-suspend-controller-not-enabled");
-    if (c->domainCount == 2) {
+    if (c->domainCount > 1) {
         if (d->pmSuspendReady) return false;
         if (d->pmResumeReady) {
             bool allResumed = true;
@@ -1367,11 +1368,10 @@ bool org_maz1_AMDMapperProbe::ResumeAuto() {
     MapperState *state = fMapper;
     if (!c || !d || !state) return false;
     LockGuard guard(c->lock);
-    if ((c->domainCount != 1 && c->domainCount != 2) ||
-        !c->suspended || c->powerFailed) {
+    if (!c->domainCount || !c->suspended || c->powerFailed) {
         // The first requester restored the shared controller. Later requesters
         // only need to invalidate their own DTE/domain before reopening.
-        if (c->domainCount == 2 && c->ready && !c->suspended &&
+        if (c->domainCount > 1 && c->ready && !c->suspended &&
             !c->powerFailed && !d->pmResumeReady && c->resumeRegistersRestored &&
             c->suspendCount == c->resumeCount + 1) {
             // This is the second requester only after the first has restored
@@ -1423,18 +1423,18 @@ bool org_maz1_AMDMapperProbe::ResumeAuto() {
                 // Count only a resume that answers a recorded suspend, so a
                 // notification without one cannot inflate the cycle counter.
                 if (c->suspendCount > c->resumeCount) ++c->resumeCount;
-                c->state = c->domainCount == 2 ? "ready-all-domains"
-                                               : "ready-shared-controller";
+                c->state = c->domainCount > 1 ? "ready-all-domains"
+                                              : "ready-shared-controller";
             } else {
                 c->state = "ready-awaiting-domain-resume";
             }
             return true;
         }
-        if (c->domainCount == 2 && !c->powerFailed)
+        if (c->domainCount > 1 && !c->powerFailed)
             return c->powerFailure("failed-pm-resume-before-controller-restore");
         return false;
     }
-    if (c->domainCount == 2) {
+    if (c->domainCount > 1) {
         for (UInt32 i = 0; i < kMaxDomains; ++i)
             if (c->domains[i] && !c->domains[i]->pmSuspendReady)
                 return c->powerFailure("failed-pm-resume-incomplete-suspend-barrier");
@@ -1448,7 +1448,7 @@ bool org_maz1_AMDMapperProbe::ResumeAuto() {
     }
     if (!ReconcileControllerLocked(state))
         return c->powerFailure(c->pmReason ? c->pmReason : "failed-pm-resume");
-    if (c->domainCount == 2) {
+    if (c->domainCount > 1) {
         d->pmResumeReady = true;
         d->state = "pm-resume-ready";
         for (UInt32 i = 0; i < kMaxDomains; ++i)
