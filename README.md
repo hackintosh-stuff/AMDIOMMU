@@ -172,15 +172,22 @@ required for a real S3 to reach it.
   `R47PowerTransition` RPC for more than one requester; the self-driven sleep/wake
   path does not wait for it, because a real S3 will not.
 
-**Recorded result.** One real sleep/wake cycle has run with this mapper
-translating — 0.98.0, single domain, RTL8111H, 213 s asleep, RTC wake:
+**Recorded result.** Sleep/wake cycles have run with this mapper translating, both
+with one domain (RTL8111H) and with four at once (two ConnectX-4 Lx ports driven
+by the MLX5 DriverKit extension, RTL8127, RTL8111H) — 213 s asleep, RTC wake,
 `kern.boottime` unchanged, `pmset -g log` Sleep/Wakes 0 → 1, controller
-suspend/resume 1/1, `pm-resume-registers-restored = yes`, `pm-resume-failures = 0`,
-`iommu-target-faults = 0`, and DHCP re-acquired 4 s after wake. The suspend was
-recorded as retained (`pm-suspend-retained = 1`): 35 mappings were still live when
-the notification arrived, so the controller was deliberately left programmed and
-the wake path rebuilt it — once from the first DMA call (`pm-lazy-restores = 1`)
-and once more from the wake notification, which found the image gone again.
+suspend/resume 1/1, one suspend and one resume recorded per domain,
+`pm-resume-registers-restored = yes` on every domain, `pm-resume-failures = 0`,
+`pm-command-recoveries = 0`, `iommu-target-faults = 0` everywhere, and the
+interface back on a DHCP lease seconds after wake.
+
+In both cases the suspend is recorded as retained (`pm-suspend-retained = 1`):
+mappings are still live when the notification arrives, so the controller is
+deliberately left programmed and keeps running — `pm-controller-state` says
+`suspended` while the engines are untouched — and the wake path rebuilds it from
+the first DMA call (`pm-lazy-restores = 1`), because a client that keeps using its
+translations gets there before the wake notification. Only a suspend that found no
+live mapping at all stops the engines and clears readiness.
 
 The suspend and resume boundary captures have the same length but different
 content: the client retires its descriptors before sleep and recreates them after
