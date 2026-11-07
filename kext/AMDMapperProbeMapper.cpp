@@ -431,6 +431,34 @@ bool org_maz1_AMDMapperProbe::ResumeDomain() {
     return ok;
 }
 
+// R72: the boundary blobs are otherwise published only by R44Snapshot, so the
+// cross-boundary hash comparison would need a snapshot nobody asks for while
+// judging a wake. The pointers are swapped by capturePowerBoundary under the
+// mapper lock, so they are retained here before the property writes can block.
+void org_maz1_AMDMapperProbe::PublishPMBoundary() {
+    MapperState *state = fMapper;
+    if (!state) return;
+    OSData *suspendLive, *suspendPT, *resumeLive, *resumePT;
+    IOLockLock(state->lock);
+    suspendLive = state->suspendLive; suspendPT = state->suspendPT;
+    resumeLive = state->resumeLive; resumePT = state->resumePT;
+    if (suspendLive) suspendLive->retain();
+    if (suspendPT) suspendPT->retain();
+    if (resumeLive) resumeLive->retain();
+    if (resumePT) resumePT->retain();
+    const bool valid = suspendLive && suspendPT && resumeLive && resumePT;
+    IOLockUnlock(state->lock);
+    auto publish = [this](const char *key, OSData *data) {
+        if (data) { setProperty(key, data); data->release(); }
+        else removeProperty(key);
+    };
+    publish("pm-suspend-live-raw", suspendLive);
+    publish("pm-suspend-pt-raw", suspendPT);
+    publish("pm-resume-live-raw", resumeLive);
+    publish("pm-resume-pt-raw", resumePT);
+    setProperty("pm-snapshots-valid", valid ? "yes" : "no");
+}
+
 IOReturn org_maz1_AMDMapperProbe::SetRequesterDMA(bool park) {
     auto *m = fMapper;
     if (!m) return kIOReturnNotReady;

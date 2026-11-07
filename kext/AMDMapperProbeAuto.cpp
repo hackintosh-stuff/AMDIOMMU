@@ -1585,6 +1585,9 @@ void org_maz1_AMDMapperProbe::PublishPMNow(const char *reason) {
     setProperty("pm-suspend-retained", (unsigned long long)retained, 64);
     setProperty("pm-command-recoveries", (unsigned long long)recoveries, 64);
     setProperty("pm-resume-failures", (unsigned long long)resumes, 64);
+    // Cross-boundary evidence: lives in AMDMapperProbeMapper.cpp because it has
+    // to retain the blobs under the mapper lock.
+    PublishPMBoundary();
     if (reason) setProperty("pm-last-transition", reason);
 }
 

@@ -214,6 +214,8 @@ private:
     bool ReconcileControllerLocked(MapperState *);
     bool RestoreHardwareAfterWake(MapperState *);
     void PublishPMNow(const char *);
+    // R72: the suspend/resume boundary blobs, published at the transition.
+    void PublishPMBoundary();
     bool StartAuto();
     bool AttachAuto(IOService *, bool claim = false);
     bool StopAuto();
