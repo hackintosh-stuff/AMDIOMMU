@@ -1507,12 +1507,21 @@ bool org_maz1_AMDMapperProbe::PMNotifierRegistered() const {
 }
 
 // R72: PM state is published at the transition, not only when a snapshot is
-// requested, so a wake can be judged from the registry immediately.
+// requested, so a wake can be judged from the registry immediately. That includes
+// the sequences and timestamps: R44Snapshot is the only other publisher, and
+// nobody asks for one while judging a wake, so those keys would otherwise keep
+// their prepare-time zeros and the transition's own completion waits would be
+// invisible.
 void org_maz1_AMDMapperProbe::PublishPMNow(const char *reason) {
     Controller *c = fController;
+    Domain *d = fDomain;
     if (!c) return;
     UInt64 suspendCount, resumeCount, failures, lazy, retained, recoveries, resumes;
-    bool ready, suspended, restored, failed;
+    UInt64 suspendTime, resumeTime, suspendSequence, resumeDevSeq, resumePagesSeq;
+    UInt64 pmSuspends = 0, pmResumes = 0, pmSuspendSeq = 0;
+    UInt64 pmDevSeq = 0, pmPagesSeq = 0;
+    UInt32 liveMaps = 0, domainCount = 0, suspendReady = 0, resumeReady = 0;
+    bool ready, suspended, restored, failed, armed;
     const char *state;
     {
         LockGuard guard(c->lock);
@@ -1520,12 +1529,30 @@ void org_maz1_AMDMapperProbe::PublishPMNow(const char *reason) {
         failures = c->powerFailures; lazy = c->lazyRestores;
         retained = c->retainedSuspends; recoveries = c->commandRecoveries;
         resumes = c->resumeFailures;
+        suspendTime = c->suspendTime; resumeTime = c->resumeTime;
+        suspendSequence = c->suspendSequence;
+        resumeDevSeq = c->resumeDevSequence; resumePagesSeq = c->resumePagesSequence;
+        armed = c->coordinatedPMArmed;
         ready = c->ready; suspended = c->suspended;
         restored = c->resumeRegistersRestored; failed = c->powerFailed;
         state = c->state;
+        domainCount = c->domainCount;
+        for (UInt32 i = 0; i < kMaxDomains; ++i) {
+            if (!c->domains[i]) continue;
+            suspendReady += c->domains[i]->pmSuspendReady ? 1 : 0;
+            resumeReady += c->domains[i]->pmResumeReady ? 1 : 0;
+        }
+        // Statistics only, and this runs on the PM thread: a live count read
+        // without the mapper lock cannot put a PTE at risk.
+        if (d) {
+            pmSuspends = d->pmSuspends; pmResumes = d->pmResumes;
+            pmSuspendSeq = d->pmSuspendSequence;
+            pmDevSeq = d->pmResumeDevSequence; pmPagesSeq = d->pmResumePagesSequence;
+            liveMaps = d->pmLiveMaps;
+        }
     }
-    // The register reads above were taken under the controller lock; the property
-    // writes may allocate and therefore happen outside it.
+    // The reads above were taken under the controller lock; the property writes
+    // may allocate and therefore happen outside it.
     setProperty("pm-controller-state", failed ? "failed" :
                 (suspended ? "suspended" : "awake"));
     setProperty("iommu-controller-ready", ready ? "yes" : "no");
@@ -1534,6 +1561,26 @@ void org_maz1_AMDMapperProbe::PublishPMNow(const char *reason) {
     setProperty("pm-controller-suspend-count", (unsigned long long)suspendCount, 64);
     setProperty("pm-controller-resume-count", (unsigned long long)resumeCount, 64);
     setProperty("pm-controller-failures", (unsigned long long)failures, 64);
+    setProperty("pm-controller-suspend-time", (unsigned long long)suspendTime, 64);
+    setProperty("pm-controller-resume-time", (unsigned long long)resumeTime, 64);
+    setProperty("pm-controller-suspend-sequence",
+                (unsigned long long)suspendSequence, 64);
+    setProperty("pm-controller-resume-device-invalidation-sequence",
+                (unsigned long long)resumeDevSeq, 64);
+    setProperty("pm-controller-resume-pages-invalidation-sequence",
+                (unsigned long long)resumePagesSeq, 64);
+    setProperty("pm-domain-count", (unsigned long long)domainCount, 32);
+    setProperty("pm-coordinated-armed", armed ? "yes" : "no");
+    setProperty("pm-support-scope", domainCount > 1
+        ? (armed ? "coordinated-armed" : "coordinated-unarmed") : "single-device");
+    setProperty("pm-suspend-ready", (unsigned long long)suspendReady, 32);
+    setProperty("pm-resume-ready", (unsigned long long)resumeReady, 32);
+    setProperty("pm-domain-suspend-count", (unsigned long long)pmSuspends, 64);
+    setProperty("pm-domain-resume-count", (unsigned long long)pmResumes, 64);
+    setProperty("pm-domain-suspend-sequence", (unsigned long long)pmSuspendSeq, 64);
+    setProperty("pm-domain-resume-device-sequence", (unsigned long long)pmDevSeq, 64);
+    setProperty("pm-domain-resume-pages-sequence", (unsigned long long)pmPagesSeq, 64);
+    setProperty("pm-domain-live-mappings", (unsigned long long)liveMaps, 32);
     setProperty("pm-lazy-restores", (unsigned long long)lazy, 64);
     setProperty("pm-suspend-retained", (unsigned long long)retained, 64);
     setProperty("pm-command-recoveries", (unsigned long long)recoveries, 64);
