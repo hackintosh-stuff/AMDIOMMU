@@ -1393,15 +1393,42 @@ bool org_maz1_AMDMapperProbe::ResumeAuto() {
             }
             return true;
         }
-        // R72: already awake. A lazy reconcile ran before this notification, or
-        // the suspend was retained; neither is a failure as long as the image is
-        // still the one this driver installed.
+        // R72: already awake. Either a lazy reconcile completed the resume before
+        // this notification arrived, or the suspend was retained and the image
+        // never left. Both are a completed resume, and both must be counted:
+        // otherwise suspendCount stays one ahead of resumeCount for the rest of
+        // the boot and the second-requester test above can never fire again.
         if (c->ready && !c->suspended && !c->powerFailed) {
-            if (c->signatureOK()) {
-                d->pmSuspendRequested = false;
-                return true;
+            // A wake that produced no suspend notification can also leave the
+            // image gone while an earlier DMA call already marked the controller
+            // ready; repair that here instead of failing the whole domain.
+            if (!c->signatureOK() && !ReconcileControllerLocked(state))
+                return c->powerFailure(c->pmReason ? c->pmReason
+                                                   : "failed-pm-resume-state");
+            c->resumeRegistersRestored = true;
+            // The lazy path already recorded this domain's resume; the retained
+            // path has not, and recordPMResume() is per domain.
+            if (!d->pmResumeReady) d->recordPMResume();
+            d->pmResumeReady = true;
+            d->pmSuspendReady = false;
+            d->pmSuspendRequested = false;
+            d->state = "pm-resume-ready";
+            c->resumeDevSequence = d->lastInvDevSequence;
+            c->resumePagesSequence = d->lastInvPagesSequence;
+            bool allReady = true;
+            for (UInt32 i = 0; i < kMaxDomains; ++i)
+                if (c->domains[i] && !c->domains[i]->pmResumeReady) allReady = false;
+            if (allReady) {
+                c->resumeTime = mach_absolute_time();
+                // Count only a resume that answers a recorded suspend, so a
+                // notification without one cannot inflate the cycle counter.
+                if (c->suspendCount > c->resumeCount) ++c->resumeCount;
+                c->state = c->domainCount == 2 ? "ready-all-domains"
+                                               : "ready-shared-controller";
+            } else {
+                c->state = "ready-awaiting-domain-resume";
             }
-            return c->powerFailure("failed-pm-resume-state");
+            return true;
         }
         if (c->domainCount == 2 && !c->powerFailed)
             return c->powerFailure("failed-pm-resume-before-controller-restore");
