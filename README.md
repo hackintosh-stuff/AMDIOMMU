@@ -129,72 +129,17 @@ Available only with `AMD_MAPPER_PROBE_DEBUG=1`. The parsers live in
 
 ## Power management
 
-The mapper owns its own sleep/wake transitions; a client RPC is no longer
-required for a real S3 to reach it.
+The mapper handles system sleep and wake itself, so a real S3 reaches it without a
+client RPC; `amdiommu_pm=off` turns that off and `R47PowerTransition` stays as a
+compatibility entry for a client that drives PM itself. It stops the translation
+hardware only when no requester still holds a live mapping, and repairs a
+controller that lost its image from the DMA path.
 
-- **Trigger.** The controller instance registers a sleep/wake interest with the
-  root domain (`registerSleepWakeInterest`). It does not take an IOKit power
-  state of its own, so it never drives the power tree. `amdiommu_pm=off` skips
-  the registration. `R47PowerTransition` remains available as a compatibility
-  entry point for a client that still drives PM itself.
-- **Suspend.** Admission closes and the suspend boundary snapshot is taken. The
-  translation hardware is stopped only when the mapper's own live-mapping count
-  for every domain is zero; otherwise the image is left programmed and the
-  transition is recorded as *retained*. With `IOMMU_EN` cleared a requester that
-  is still DMAing would address physical memory directly, so quiescence is
-  checked rather than assumed. A retained suspend needs no recovery of its own:
-  entering S3 resets the controller anyway.
-- **Wake.** The register image is compared with the one this driver installed
-  (CONTROL enable bits plus the three ring base registers). If it survived, only
-  readiness is re-established. If it was lost, the device table, command and
-  event rings are reprogrammed in the fixed order `CMDBUF_EN` → `EVT_LOG_EN` →
-  `IOMMU_EN`, the read-back and the `CMDBUF_RUN`/`EVT_RUN` bits are checked, and
-  the whole domain is invalidated before admission reopens. `completionSequence`
-  stays monotonic across the reset, so a stale semaphore value can never complete
-  a new completion wait.
-- **Lazy reconcile.** Map and unmap entry points compare the register image
-  before touching a PTE, so a wake that delivered no notification is repaired
-  instead of submitted into a dead ring. An owned live mapping is retired only
-  against a controller that can confirm the invalidation; when it cannot be
-  restored the mapper keeps the fail-stop, because XNU unwires the descriptor even
-  when the unmap returns an error.
-- **Evidence.** `pm-self-driven`, `pm-controller-state`,
-  `pm-controller-suspend-count`/`pm-controller-resume-count`,
-  `pm-resume-registers-restored`, `pm-suspend-retained` (`>0` means a suspend left
-  the hardware running because DMA had not quiesced), `pm-lazy-restores`,
-  `pm-command-recoveries`, `pm-resume-failures`, `pm-last-reason`,
-  `pm-sleep-notifications`/`pm-wake-notifications`, and `pm-support-scope`
-  (`single-device` | `coordinated-armed` | `coordinated-unarmed`). A single
-  requester is a legal PM scope, and the barrier itself is written over every
-  slot: each requester fences its own DTE and publishes readiness, the last one
-  stops the shared controller, the first one to resume restores it and the rest
-  invalidate their own domains. `R66ArmSystemPM` still gates the
-  `R47PowerTransition` RPC for more than one requester; the self-driven sleep/wake
-  path does not wait for it, because a real S3 will not.
-
-**Recorded result.** Sleep/wake cycles have run with this mapper translating, both
-with one domain (RTL8111H) and with four at once (two ConnectX-4 Lx ports driven
-by the MLX5 DriverKit extension, RTL8127, RTL8111H) — 213 s asleep, RTC wake,
-`kern.boottime` unchanged, `pmset -g log` Sleep/Wakes 0 → 1, controller
-suspend/resume 1/1, one suspend and one resume recorded per domain,
-`pm-resume-registers-restored = yes` on every domain, `pm-resume-failures = 0`,
-`pm-command-recoveries = 0`, `iommu-target-faults = 0` everywhere, and the
-interface back on a DHCP lease seconds after wake.
-
-In both cases the suspend is recorded as retained (`pm-suspend-retained = 1`):
-mappings are still live when the notification arrives, so the controller is
-deliberately left programmed and keeps running — `pm-controller-state` says
-`suspended` while the engines are untouched — and the wake path rebuilds it from
-the first DMA call (`pm-lazy-restores = 1`), because a client that keeps using its
-translations gets there before the wake notification. Only a suspend that found no
-live mapping at all stops the engines and clears readiness.
-
-The suspend and resume boundary captures have the same length but different
-content: the client retires its descriptors before sleep and recreates them after
-wake, so equal live/PT hashes are only expected from a client that keeps its
-mapping set across the boundary. What survives unconditionally is the table area
-itself — same root physical address, no reallocation, `iommu-capacity-grown`
-unchanged.
+Sleep/wake cycles have run with translation active, one domain and four at a time:
+registers restored, no resume failures, no target faults. The published state is
+`pm-self-driven`, `pm-controller-state`, the suspend/resume counts,
+`pm-resume-registers-restored`, `pm-suspend-retained`, `pm-lazy-restores` and
+`pm-resume-failures`. Acceptance criteria live in the requirements document.
 
 ## Compatibility
 
