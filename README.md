@@ -9,7 +9,7 @@ domain. It then publishes itself, so a driver either claims it explicitly
 (`amdiommu=passive`) or Apple's own Ethernet kexts find it through
 `IOMapper::copyMapperForDevice()` (`amdiommu=auto-attach`).
 
-Status: experimental, 0.97.0. Verified board/CPU/device combinations are listed
+Status: experimental, 0.98.0. Verified board/CPU/device combinations are listed
 in [COMPATIBILITY.md](COMPATIBILITY.md); building, deploying into OpenCore and
 setting boot-args are covered below.
 
@@ -35,6 +35,7 @@ Two build variants exist and accept different boot-args:
 | | `rl-10g` | Ceiling at 16384 records / 131072 pages (512 MiB), 260 table pages. |
 | | `native-legacy` | Ceiling at the accepted ABI3 window (1024 records / 16 MiB): growth is disabled. |
 | | unknown name | Widen nothing: growth is disabled and `r44-profile-ceiling=unsupported-name` is recorded. |
+| `amdiommu_pm=off` | `off` | Do not register the self-driven sleep/wake interest. The DMA path still repairs a controller that lost its register image; the mapper simply learns about the loss later. Absent means registered. |
 
 `amdiommu_profile` names the **ceiling**, not the arena a domain is prepared
 with. Every domain is prepared at `native-legacy` and may grow **exactly once**,
@@ -125,6 +126,53 @@ Available only with `AMD_MAPPER_PROBE_DEBUG=1`. The parsers live in
 | | `pgt`, `pgt4k`, `pgthold`, `pgtsleep`, `pgt3l` | M2-2b-2 page-table translation experiments (4-level identity table, 4 KiB leaves, 20 s held-translation window, sleep-only control, 3-level table). `pgt` is a prefix match, so `pgt4k` also opens the main gate. |
 | | `.batch<N>`, `.t0x<N>` / `.token<N>`, `.std`, `.alltx`, `.rxstd`, `.session` | Suffixes inside the same `amdiommu=` value, e.g. `amdiommu=pgt.batch512.t0x2a.std.alltx.rxstd.session`. The parser scans every `.key` segment; a separate trailing boot-arg is not a dependable channel on this kernel. |
 | `m2b2delay=<seconds>` | 1–300 | Delay before the one-shot M2-2b-2 page-table probe (default 20000 ms). |
+
+## Power management
+
+The mapper owns its own sleep/wake transitions; a client RPC is no longer
+required for a real S3 to reach it.
+
+- **Trigger.** The controller instance registers a sleep/wake interest with the
+  root domain (`registerSleepWakeInterest`). It does not take an IOKit power
+  state of its own, so it never drives the power tree. `amdiommu_pm=off` skips
+  the registration. `R47PowerTransition` remains available as a compatibility
+  entry point for a client that still drives PM itself.
+- **Suspend.** Admission closes and the suspend boundary snapshot is taken. The
+  translation hardware is stopped only when the mapper's own live-mapping count
+  for every domain is zero; otherwise the image is left programmed and the
+  transition is recorded as *retained*. With `IOMMU_EN` cleared a requester that
+  is still DMAing would address physical memory directly, so quiescence is
+  checked rather than assumed. A retained suspend needs no recovery of its own:
+  entering S3 resets the controller anyway.
+- **Wake.** The register image is compared with the one this driver installed
+  (CONTROL enable bits plus the three ring base registers). If it survived, only
+  readiness is re-established. If it was lost, the device table, command and
+  event rings are reprogrammed in the fixed order `CMDBUF_EN` → `EVT_LOG_EN` →
+  `IOMMU_EN`, the read-back and the `CMDBUF_RUN`/`EVT_RUN` bits are checked, and
+  the whole domain is invalidated before admission reopens. `completionSequence`
+  stays monotonic across the reset, so a stale semaphore value can never complete
+  a new completion wait.
+- **Lazy reconcile.** Map and unmap entry points compare the register image
+  before touching a PTE, so a wake that delivered no notification is repaired
+  instead of submitted into a dead ring. An owned live mapping is retired only
+  against a controller that can confirm the invalidation; when it cannot be
+  restored the mapper keeps the fail-stop, because XNU unwires the descriptor even
+  when the unmap returns an error.
+- **Evidence.** `pm-self-driven`, `pm-controller-state`,
+  `pm-controller-suspend-count`/`pm-controller-resume-count`,
+  `pm-resume-registers-restored`, `pm-suspend-retained` (`>0` means a suspend left
+  the hardware running because DMA had not quiesced), `pm-lazy-restores`,
+  `pm-command-recoveries`, `pm-resume-failures`, `pm-last-reason`,
+  `pm-sleep-notifications`/`pm-wake-notifications`, and `pm-support-scope`
+  (`single-device` | `coordinated-armed` | `coordinated-unarmed`). One domain is a
+  legal PM scope; `R66ArmSystemPM` arms the two-requester barrier only.
+
+**Not verified:** a real sleep/wake cycle on this board has not been recorded
+with this driver. `pm-resume-registers-restored = yes` together with
+`pm-resume-failures = 0`, an unchanged `kern.boottime`, one added Sleep/Wakes
+entry in `pmset -g log`, one controller suspend/resume each, equal live/PT hashes
+across the boundary and zero target faults are the acceptance criteria, not a
+result.
 
 ## Compatibility
 

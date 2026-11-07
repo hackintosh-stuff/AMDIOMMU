@@ -340,9 +340,11 @@ bool org_maz1_AMDMapperProbe::QuiesceMappings() {
     return drained;
 }
 
-// TODO(R47-PM-HARDWARE): implemented from the existing lifetime/command
-// contracts; real system sleep/resume validation is pending. R47 exercises
-// normal networking only and does not trigger this transition for testing.
+// Compatibility entry point for a client that still drives PM through the
+// private R47PowerTransition RPC. Since R72 the mapper also hears about system
+// sleep/wake itself (registerSleepWakeInterest) and reconciles a lost controller
+// from the DMA path, so PM no longer depends on this call. A client that does
+// call it still gets the same admission/pairing contract.
 IOReturn org_maz1_AMDMapperProbe::PowerTransition(UInt32 operation) {
     auto *d = fMapper;
     if (!d) return kIOReturnNotReady;
@@ -380,6 +382,53 @@ IOReturn org_maz1_AMDMapperProbe::PowerTransition(UInt32 operation) {
     if (!ok) d->snapshot.flags |= mapper_abi::kFailed;
     IOLockUnlock(d->lock);
     return ok ? kIOReturnSuccess : kIOReturnIOError;
+}
+
+// R72: the sleep side, driven by the controller's sleep/wake interest rather
+// than by a client RPC. Admission closes here and the boundary snapshots are
+// taken; SuspendAuto() decides from the live-mapping count whether the
+// translation hardware may actually be stopped.
+bool org_maz1_AMDMapperProbe::SuspendDomain() {
+    MapperState *state = fMapper;
+    if (!state || !fController || !fDomain) return true; // nothing attached yet
+    IOLockLock(state->lock);
+    if (state->accepting) {
+        state->accepting = false;
+        state->snapshot.flags &= ~mapper_abi::kAccepting;
+        if (state->resumeLive) { state->resumeLive->release(); state->resumeLive = nullptr; }
+        if (state->resumePT) { state->resumePT->release(); state->resumePT = nullptr; }
+        state->capturePowerBoundary(state->suspendLive, state->suspendPT);
+    }
+    // Recorded before the transition is attempted: admission is closed either
+    // way, so the DMA path may reopen it once the controller is proven usable
+    // even if the suspend bookkeeping itself failed.
+    SetSuspendRequested(true);
+    const bool ok = SuspendAuto();
+    IOLockUnlock(state->lock);
+    return ok;
+}
+
+// R72: the wake side. Admission is reopened only after the register image and a
+// complete domain flush have both been confirmed.
+bool org_maz1_AMDMapperProbe::ResumeDomain() {
+    MapperState *state = fMapper;
+    if (!state || !fController || !fDomain) return true;
+    IOLockLock(state->lock);
+    bool ok = ResumeAuto();
+    if (!ok) {
+        // The PM bookkeeping alone must not strand admission: if the hardware
+        // can still be proven operational, reopening is the safe outcome. A
+        // controller that cannot confirm an invalidation keeps it closed.
+        ok = EnsureControllerOperationalLocked(state, "resume") && ControllerReady();
+    }
+    if (ok) {
+        state->capturePowerBoundary(state->resumeLive, state->resumePT);
+        state->accepting = true;
+        state->snapshot.flags |= mapper_abi::kAccepting;
+        SetSuspendRequested(false);
+    }
+    IOLockUnlock(state->lock);
+    return ok;
 }
 
 IOReturn org_maz1_AMDMapperProbe::SetRequesterDMA(bool park) {
@@ -437,7 +486,23 @@ IOReturn org_maz1_AMDMapperProbe::MapMemory(
     ++s.mapCalls;
     IOReturn result = kIOReturnUnsupported;
     do {
-        if (!d->accepting || fDMAParked) { result = kIOReturnNotReady; break; }
+        // R72: admission closed by a system suspend is a restorable state, not a
+        // refusal; a parked requester or a failed domain still is. The controller
+        // check below runs before any PTE is published, so a wake that produced
+        // no suspend notification is repaired instead of mapped around.
+        const bool suspended = !d->accepting;
+        if (suspended && (!SuspendRequested() || (s.flags & mapper_abi::kFailed))) {
+            result = kIOReturnNotReady; break;
+        }
+        if (fDMAParked) { result = kIOReturnNotReady; break; }
+        if (!EnsureControllerOperationalLocked(d, "map")) {
+            ++fRejectedUnavailable; result = kIOReturnNotReady; break;
+        }
+        if (suspended) {
+            d->accepting = true;
+            s.flags |= mapper_abi::kAccepting;
+            SetSuspendRequested(false);
+        }
         if (!memory || !mapAddress || !mapLength || !length ||
             descriptorOffset > memory->getLength() ||
             length > memory->getLength() - descriptorOffset) {
@@ -546,6 +611,9 @@ IOReturn org_maz1_AMDMapperProbe::MapMemory(
         OSSynchronizeIO();
         record.tPublish = mach_absolute_time(); record.state = mapper_abi::kMapPublished;
         ++s.liveCount;
+        // R72: the shared controller reads this to decide whether a suspend may
+        // stop the translation hardware at all.
+        NoteLiveMapping(true);
         if (s.liveCount > s.peakMaps) s.peakMaps = s.liveCount;
         if (layout.pages > s.maxObservedPages) s.maxObservedPages = layout.pages;
         if (layout.runs > s.maxObservedRuns) s.maxObservedRuns = layout.runs;
@@ -598,7 +666,7 @@ IOReturn org_maz1_AMDMapperProbe::MapMemory(
 void org_maz1_AMDMapperProbe::PublishCapacity() {
     const UInt64 rejects = (UInt64)fRejectedLength + fRejectedOptions +
         fRejectedLayout + fRejectedRecords + fRejectedNoRange +
-        fRejectedBits;
+        fRejectedBits + fRejectedUnavailable;
     // Peak/max/reject changes are rare and must be published immediately. The
     // monotonic counters move on every map, so they are only republished once
     // 128 of them accumulate: this keeps the DMA path out of the registry for
@@ -641,6 +709,8 @@ void org_maz1_AMDMapperProbe::PublishCapacity() {
     setProperty("mapper-rejects-records", (unsigned long long)fRejectedRecords, 32);
     setProperty("mapper-rejects-no-range", (unsigned long long)fRejectedNoRange, 32);
     setProperty("mapper-rejects-bits", (unsigned long long)fRejectedBits, 32);
+    setProperty("mapper-rejects-unavailable",
+                (unsigned long long)fRejectedUnavailable, 32);
 }
 
 IOReturn org_maz1_AMDMapperProbe::UnmapMemory(
@@ -671,8 +741,15 @@ IOReturn org_maz1_AMDMapperProbe::UnmapMemory(
         if (record.state & mapper_abi::kUnmapConfirmed) {
             result = kIOReturnInternalError; break;
         }
-        if (!d->accepting)
-            DMAFailStop("owned unmap while domain unavailable", record);
+        // R72: an owned live mapping may only be retired against a controller
+        // that is provably able to confirm the invalidation. A wake that
+        // delivered no suspend notification is repaired here, before the PTE is
+        // cleared; a controller that cannot be restored keeps the fail-stop,
+        // because XNU unwires the descriptor even when this call fails.
+        if (!EnsureControllerOperationalLocked(d, "unmap")) {
+            DMAFailStop(ControllerReady() ? "owned unmap while domain unavailable"
+                                          : "wake-restore-required", record);
+        }
         if (record.state != (mapper_abi::kMapPublished | mapper_abi::kMapConfirmed))
             DMAFailStop("owned unmap with unretired state", record);
         for (unsigned i = 0; i < record.pages; ++i) d->leaf(record.basePage + i) = 0;
@@ -697,6 +774,7 @@ IOReturn org_maz1_AMDMapperProbe::UnmapMemory(
             result = kIOReturnInternalError; break;
         }
         d->slotByStartPage[page] = 0;
+        NoteLiveMapping(false);
         --s.liveCount; ++s.unmapOk;
         fUnmapOk = s.unmapOk;
         fLiveMaps = s.liveCount;

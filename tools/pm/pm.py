@@ -42,7 +42,8 @@ def read_state(config):
             'requester': requester,
             'driver_class': value['binding']['driver_class'],
             'driver': C.C.scalars(value['node'], ('rtl8111-', 'rtl812x-')),
-            'probe': C.C.scalars(p, ('r44-', 'r47-', 'r52-', 'r63-', 'r65-', 'r66-', 'r66_2-')),
+            'probe': C.C.scalars(p, ('r44-', 'r47-', 'r52-', 'r63-', 'r65-', 'r66-',
+                                     'r66_2-', 'pm-')),
             'pm_raw_sha256': {k: hashlib.sha256(v).hexdigest() for k, v in p.items()
                               if k.startswith('r47-') and isinstance(v, bytes)}}
     return tree, state, owner_id
@@ -186,7 +187,12 @@ def main():
         SESSION['set_boolean_property']('R66ArmSystemPM', value=False)
     _, after, _ = read_state(config)
     expected = 'yes' if args.action == 'arm' else 'no'
-    need(all(d['probe']['r66-pm-armed'] == expected for d in after['devices'].values()),
+    # The release surface publishes `pm-coordinated-armed`; the archived R66-2
+    # builds published `r66-pm-armed`. Accept either so the arm path works on a
+    # release build without renaming the rest of this evidence schema.
+    def armed(row):
+        return row.get('pm-coordinated-armed', row.get('r66-pm-armed'))
+    need(all(armed(d['probe']) == expected for d in after['devices'].values()),
          'arm-state readback differs')
     print('coordinated PM armed=' + expected)
     return 0

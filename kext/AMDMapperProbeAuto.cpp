@@ -6,6 +6,8 @@
 #include "amd_iommu_device_policy.hpp"
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSCollectionIterator.h>
+#include <IOKit/pwr_mgt/RootDomain.h>
+#include <IOKit/IOMessage.h>
 #include <kern/debug.h>
 
 namespace {
@@ -130,6 +132,11 @@ struct org_maz1_AMDMapperProbe::Domain {
     }
     UInt64 targetFaults;
     UInt32 lastEvent[4];
+    // R72: live mappings as this domain's mapper counts them, and the evidence
+    // that a suspend closed admission (so a later DMA call may reopen it).
+    UInt32 pmLiveMaps;
+    bool pmSuspendRequested;
+    bool pmParkedBySuspend;
     // S2: the admission record for this domain. Shown per device so a refused
     // or legacy domain cannot be mistaken for a pool-sized one.
     const char *profileName;
@@ -167,6 +174,40 @@ struct org_maz1_AMDMapperProbe::Controller {
     bool eventOverflow, eventInvalid;
     bool suspended, powerFailed, resumeRegistersRestored;
     bool coordinatedPMArmed = false;
+    // R72: self-driven PM evidence.
+    UInt64 lazyRestores, retainedSuspends, resumeFailures, commandRecoveries;
+    const char *pmReason;
+
+    // R72: is the register image this driver installed still in the controller?
+    // A real S3 clears CONTROL and all three ring bases, so this is also the wake
+    // detector for a wake that delivered no suspend notification. Kext-side only:
+    // no lock, no allocation, four MMIO reads.
+    bool signatureOK() {
+        if (!configured || !base) return false;
+        if ((mmioRead64(base, M2B2_OFF_CONTROL) & kEnabled) != kEnabled)
+            return false;
+        if (mmioRead64(base, M2B2_OFF_DEV_TABLE) !=
+            (devicePA | ((M22B_TABLE_SIZE_FULL >> 12) - 1))) return false;
+        if (mmioRead64(base, M2B2_OFF_CMD_BUF) !=
+            (commandPA | M23_CMD_SIZE_CODE)) return false;
+        if (mmioRead64(base, M2B2_OFF_EVT_BUF) !=
+            (eventPA | M2B2_EVT_LEN_MASK)) return false;
+        return true;
+    }
+    // A device left in D3 answers all-ones. Restoring is impossible there, and
+    // silently treating it as "no change needed" would submit into a dead ring.
+    bool responding() {
+        if (!configured || !base) return false;
+        return mmioRead64(base, M2B2_OFF_CONTROL) != ~((UInt64)0);
+    }
+    // The suspend side may touch the translation hardware only when nobody holds
+    // a live mapping: with IOMMU_EN cleared a requester that is still DMAing
+    // would address physical memory directly.
+    bool allDmaQuiesced() const {
+        for (UInt32 i = 0; i < kMaxDomains; ++i)
+            if (domains[i] && domains[i]->pmLiveMaps) return false;
+        return true;
+    }
 
     // The driver has already stopped DMA. Stop the hardware producers before
     // changing their ring pointers or returning the controller to firmware.
@@ -502,6 +543,10 @@ bool org_maz1_AMDMapperProbe::StartAuto() {
         IOLockFree(fAttachLock); fAttachLock = nullptr;
         return false;
     }
+    // R72: this instance is the controller, so it is the one that listens for a
+    // real system sleep/wake. Registration is optional: without it the DMA path
+    // still repairs a lost controller, it just learns about the loss later.
+    RegisterSystemPM();
     // Offer explicit requesters to pre-open clients; keep eager attach for the default.
     // Replay published endpoints through the same path as the notification.
     AttachExistingDevices();
@@ -1048,7 +1093,7 @@ IOReturn org_maz1_AMDMapperProbe::SetSystemPM(bool armed) {
     if (!fAuto || fOwner || !c) return kIOReturnBadArgument;
     LockGuard guard(c->lock);
     if (armed) {
-        if (!c->ready || c->suspended || c->powerFailed || c->domainCount != 2)
+        if (!c->ready || c->suspended || c->powerFailed)
             return kIOReturnNotReady;
         UInt32 present = 0;
         for (UInt32 i = 0; i < kMaxDomains; ++i) {
@@ -1057,7 +1102,10 @@ IOReturn org_maz1_AMDMapperProbe::SetSystemPM(bool armed) {
             ++present;
             if (!domain->active) return kIOReturnNotReady;
         }
-        if (present != 2) return kIOReturnNotReady;
+        // R72: a single domain needs no cross-requester barrier, so arming it is
+        // legal. The published scope says which topology is in force instead of
+        // refusing the request outright.
+        if (!present || present != c->domainCount) return kIOReturnNotReady;
         c->coordinatedPMArmed = true;
     } else {
         if (c->suspended) return kIOReturnBusy;
@@ -1085,11 +1133,12 @@ bool org_maz1_AMDMapperProbe::PowerSupported() const {
     return present == 2;
 }
 
-// TODO(R47-PM-HARDWARE): validate the real suspend/resume sequence once this
-// AMD platform can sleep reliably. R47 acceptance does not invoke this path.
+// R72: suspend is reached from two triggers - the private R47PowerTransition RPC
+// and the self-driven system sleep notification. Both close admission, and both
+// touch the translation hardware only when no requester still holds a live
+// mapping. With IOMMU_EN cleared a client that is still DMAing would address
+// physical memory directly, which is worse than a failed transition.
 bool org_maz1_AMDMapperProbe::SuspendAuto() {
-    // The mapper lock is held and admission is closed. Lucy's PM gate has
-    // already completed the network family's disable/clearRxTxRings path.
     Controller *c = fController;
     Domain *d = fDomain;
     if (!c || !d) return false;
@@ -1119,6 +1168,7 @@ bool org_maz1_AMDMapperProbe::SuspendAuto() {
         d->pmSuspendSequence = c->command.completionSequence;
         d->pmSuspendReady = true;
         d->state = "pm-suspend-ready";
+        d->pmSuspendRequested = true;
         bool allReady = true;
         for (UInt32 i = 0; i < kMaxDomains; ++i)
             if (c->domains[i] && !c->domains[i]->pmSuspendReady) allReady = false;
@@ -1128,27 +1178,194 @@ bool org_maz1_AMDMapperProbe::SuspendAuto() {
             return c->powerFailure("failed-pm-suspend-fence");
         ++d->pmSuspends;
         d->pmSuspendSequence = c->command.completionSequence;
+        d->pmSuspendRequested = true;
     }
-    c->suspendSequence = c->command.completionSequence;
-    if (!c->stopHardware())
-        return c->powerFailure("failed-pm-suspend-controller");
-    c->collectEvents();
+    // R72/M7: revoking this requester's IR/IW and stopping the controller are
+    // both gated on the mapper's own live-mapping count. That is a fact about
+    // the requester, not an assumption about the system's PM callback order.
+    if (c->allDmaQuiesced()) {
+        if (d->active && !fDMAParked) {
+            // Rewrite the DTE without IR/IW and fence it: a requester that keeps
+            // cached translations would otherwise keep using a stale table image
+            // once the controller is enabled again.
+            fDMAParked = true;
+            d->pmParkedBySuspend = true;
+            if (!InvalidateLocked(true, 0, 0, false, nullptr)) {
+                fDMAParked = false;
+                d->pmParkedBySuspend = false;
+                return c->powerFailure("failed-pm-suspend-requester");
+            }
+            ++d->parkCount;
+        }
+        c->suspendSequence = c->command.completionSequence;
+        if (!c->stopHardware())
+            return c->powerFailure("failed-pm-suspend-controller");
+        c->collectEvents();
+        c->state = "suspended";
+    } else {
+        // Retained: the requester still owns mappings, so the image is left
+        // programmed. Entering S3 resets it anyway and the wake path reprograms
+        // it from scratch, so nothing is lost by not stopping it here.
+        c->suspendSequence = c->command.completionSequence;
+        ++c->retainedSuspends;
+        c->pmReason = "suspend-retained-live-mappings";
+        c->state = "suspended-retained";
+    }
     c->ready = false;
     c->suspended = true;
     c->suspendTime = mach_absolute_time();
     ++c->suspendCount;
-    c->state = "suspended";
     return true;
 }
 
-// TODO(R47-PM-HARDWARE): D0 readiness and retained BAR/MMIO across real system
-// sleep need hardware validation; normal interface down/up is not this test.
-bool org_maz1_AMDMapperProbe::ResumeAuto() {
-    // The PCI parent and Lucy's D0 transition are complete, but its normal
-    // enable has not run. All tables, DMA objects and mapping records survive.
+// R72: reinstall the controller's register image. The hardware decides: when the
+// image is still present nothing is rewritten, so a spurious restore can never
+// clear IOMMU_EN underneath a requester that is still using its translations.
+bool org_maz1_AMDMapperProbe::RestoreHardwareAfterWake(MapperState *state) {
+    Controller *c = fController;
+    if (!c || !state || !c->configured) return false;
+    if (c->signatureOK()) {
+        // Retained suspend, or a transition that kept the image intact: only
+        // readiness has to be re-established.
+        c->observedControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
+        c->resumeRegistersRestored = true;
+        c->ready = true;
+        return true;
+    }
+    // A device left in D3 answers all-ones. Nothing can be restored there, and
+    // submitting into that ring would never complete.
+    if (!c->responding()) {
+        c->pmReason = "failed-wake-controller-unresponsive";
+        return false;
+    }
+    if (c->hardware.pciEfrSupported && c->startupEfr && c->startupEfr != ~0ULL &&
+        mmioRead64(c->base, M21_OFF_EXT_FEAT) != c->startupEfr) {
+        c->pmReason = "failed-wake-identity";
+        return false;
+    }
+    // The image is known to be gone from here on, so stopping cannot make
+    // anything worse: both engines already lost their program.
+    if (!c->stopHardware()) {
+        c->pmReason = "failed-wake-stop";
+        return false;
+    }
+    // Linux v6.6 init.c early_enable_iommu() reloads the device table and the
+    // stopped command/event rings, then enables and invalidates. Only the ring
+    // position restarts: sequence numbers and evidence counters stay monotonic,
+    // so an old semaphore value can never complete a new completion wait.
+    bzero(c->commands->getBytesNoCopy(), M23_CMD_BUF_SIZE);
+    bzero(c->events->getBytesNoCopy(), M2B2_EVT_BUFFER_SIZE);
+    c->headCache.valid = false; // no cached position survives a hardware ring reset
+    c->command.idx = 0;
+    c->command.tail = 0;
+    c->command.domid = 0;
+    c->command.devid = 0;
+    c->command.rootPA = 0;
+    OSSynchronizeIO();
+    const UInt64 dt = c->devicePA | ((M22B_TABLE_SIZE_FULL >> 12) - 1);
+    const UInt64 commands = c->commandPA | M23_CMD_SIZE_CODE;
+    const UInt64 events = c->eventPA | M2B2_EVT_LEN_MASK;
+    mmioWrite64(c->base, M2B2_OFF_DEV_TABLE, dt);
+    mmioWrite64(c->base, M2B2_OFF_CMD_BUF, commands);
+    mmioWrite64(c->base, M2B2_OFF_EVT_BUF, events);
+    mmioWrite64(c->base, M2B2_OFF_CMD_HEAD, 0);
+    mmioWrite64(c->base, M2B2_OFF_CMD_TAIL, 0);
+    mmioWrite64(c->base, M2B2_OFF_EVT_HEAD, 0);
+    mmioWrite64(c->base, M2B2_OFF_EVT_TAIL, 0);
+    mmioWrite32(c->base, M2B2_OFF_STATUS, M2B2_STATUS_EVT_OVERFLOW);
+    // sleepControl is captured while the controller is enabled; originalControl
+    // is the firmware value the first enable sequence started from. Without a
+    // suspend record the second one is the only correct baseline.
+    const UInt64 baseline = c->sleepControl ? c->sleepControl : c->originalControl;
+    UInt64 control = baseline & ~kEnabled;
+    mmioWrite64(c->base, M2B2_OFF_CONTROL, control | M2B2_CTRL_CMDBUF_EN);
+    control |= M2B2_CTRL_CMDBUF_EN | M2B2_CTRL_EVT_LOG_EN;
+    mmioWrite64(c->base, M2B2_OFF_CONTROL, control);
+    control |= M2B2_CTRL_IOMMU_EN;
+    mmioWrite64(c->base, M2B2_OFF_CONTROL, control);
+    OSSynchronizeIO();
+    c->observedControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
+    c->resumeRegistersRestored =
+        mmioRead64(c->base, M2B2_OFF_DEV_TABLE) == dt &&
+        mmioRead64(c->base, M2B2_OFF_CMD_BUF) == commands &&
+        mmioRead64(c->base, M2B2_OFF_EVT_BUF) == events &&
+        (c->observedControl & kEnabled) == kEnabled;
+    if (!c->resumeRegistersRestored) {
+        c->pmReason = "failed-wake-registers";
+        return false;
+    }
+    UInt32 status = 0;
+    const UInt32 running = M2B2_STATUS_CMDBUF_RUN | M2B2_STATUS_EVT_RUN;
+    for (UInt32 i = 0; i < M2B1_LOOP_TIMEOUT; ++i) {
+        status = mmioRead32(c->base, M2B2_OFF_STATUS);
+        if ((status & running) == running) break;
+    }
+    if ((status & running) != running) {
+        c->pmReason = "failed-wake-engines";
+        return false;
+    }
+    // Only now, with the image written back and both engines proven running, may
+    // a ring abandoned mid-transition be reused. HEAD is never moved and the ring
+    // is never grown: the consumer was reset by the power transition itself.
+    if (c->command.failed) {
+        c->command.failed = false;
+        c->command.failReason = nullptr;
+        ++c->commandRecoveries;
+    }
+    c->ready = true;
+    return true;
+}
+
+// Both locks are held. Returns true with the controller ready and completely
+// flushed, or false with pmReason naming the step that failed.
+bool org_maz1_AMDMapperProbe::ReconcileControllerLocked(MapperState *state) {
     Controller *c = fController;
     Domain *d = fDomain;
-    if (!c || !d) return false;
+    if (!c || !d || !state || !c->configured) return false;
+    if (!RestoreHardwareAfterWake(state)) return false;
+    if (!c->ready) return false;
+    // The device and PDE caches did not survive, and the DTE write also restores
+    // this requester's IR/IW when the suspend side revoked them.
+    if (!InvalidateLocked(true, 0, 0, false, nullptr)) {
+        c->pmReason = "failed-wake-invalidation";
+        return false;
+    }
+    c->suspended = false;
+    c->resumeTime = mach_absolute_time();
+    c->resumeDevSequence = d->lastInvDevSequence;
+    c->resumePagesSequence = d->lastInvPagesSequence;
+    d->recordPMResume();
+    d->pmResumeReady = true;
+    d->pmSuspendRequested = false;
+    d->state = "pm-resume-ready";
+    return true;
+}
+
+// Every DMA entry point calls this with the mapper lock held. A wake that
+// delivered no suspend notification is repaired here, before any PTE changes.
+bool org_maz1_AMDMapperProbe::EnsureControllerOperationalLocked(
+    MapperState *state, const char *where) {
+    Controller *c = fController;
+    if (!c || !state || !c->configured) return false;
+    if (c->ready && c->signatureOK()) return true;
+    LockGuard guard(c->lock);
+    if (c->ready && c->signatureOK()) return true;
+    if (!ReconcileControllerLocked(state)) {
+        ++c->resumeFailures;
+        if (!c->pmReason) c->pmReason = where;
+        return false;
+    }
+    ++c->lazyRestores;
+    return true;
+}
+
+// R72: D0 readiness and the retained BAR/MMIO image are read back from the
+// hardware, so this path no longer depends on a suspend having been observed.
+bool org_maz1_AMDMapperProbe::ResumeAuto() {
+    Controller *c = fController;
+    Domain *d = fDomain;
+    MapperState *state = fMapper;
+    if (!c || !d || !state) return false;
     LockGuard guard(c->lock);
     if ((c->domainCount != 1 && c->domainCount != 2) ||
         !c->suspended || c->powerFailed) {
@@ -1176,6 +1393,16 @@ bool org_maz1_AMDMapperProbe::ResumeAuto() {
             }
             return true;
         }
+        // R72: already awake. A lazy reconcile ran before this notification, or
+        // the suspend was retained; neither is a failure as long as the image is
+        // still the one this driver installed.
+        if (c->ready && !c->suspended && !c->powerFailed) {
+            if (c->signatureOK()) {
+                d->pmSuspendRequested = false;
+                return true;
+            }
+            return c->powerFailure("failed-pm-resume-state");
+        }
         if (c->domainCount == 2 && !c->powerFailed)
             return c->powerFailure("failed-pm-resume-before-controller-restore");
         return false;
@@ -1185,66 +1412,15 @@ bool org_maz1_AMDMapperProbe::ResumeAuto() {
             if (c->domains[i] && !c->domains[i]->pmSuspendReady)
                 return c->powerFailure("failed-pm-resume-incomplete-suspend-barrier");
     }
-    if (c->hardware.pciEfrSupported &&
-        mmioRead64(c->base, M21_OFF_EXT_FEAT) != c->startupEfr)
-        return c->powerFailure("failed-pm-resume-identity");
-    if (!c->stopHardware())
-        return c->powerFailure("failed-pm-resume-stop");
-
-    // Linux v6.6 init.c early_enable_iommu() reloads the device table and
-    // stopped command/event rings on resume, then enables and invalidates.
-    // Only the ring position restarts: sequence numbers and evidence counters
-    // must remain monotonic, so an old semaphore value cannot complete a new CW.
-    bzero(c->commands->getBytesNoCopy(), M23_CMD_BUF_SIZE);
-    bzero(c->events->getBytesNoCopy(), M2B2_EVT_BUFFER_SIZE);
-    c->headCache.valid = false; // no cached position survives a hardware ring reset
-    c->command.idx = 0;
-    c->command.tail = 0;
-    OSSynchronizeIO();
-    const UInt64 dt = c->devicePA | ((M22B_TABLE_SIZE_FULL >> 12) - 1);
-    const UInt64 commands = c->commandPA | M23_CMD_SIZE_CODE;
-    const UInt64 events = c->eventPA | M2B2_EVT_LEN_MASK;
-    mmioWrite64(c->base, M2B2_OFF_DEV_TABLE, dt);
-    mmioWrite64(c->base, M2B2_OFF_CMD_BUF, commands);
-    mmioWrite64(c->base, M2B2_OFF_EVT_BUF, events);
-    mmioWrite64(c->base, M2B2_OFF_CMD_HEAD, 0);
-    mmioWrite64(c->base, M2B2_OFF_CMD_TAIL, 0);
-    mmioWrite64(c->base, M2B2_OFF_EVT_HEAD, 0);
-    mmioWrite64(c->base, M2B2_OFF_EVT_TAIL, 0);
-    mmioWrite32(c->base, M2B2_OFF_STATUS, M2B2_STATUS_EVT_OVERFLOW);
-    UInt64 control = c->sleepControl & ~kEnabled;
-    mmioWrite64(c->base, M2B2_OFF_CONTROL, control | M2B2_CTRL_CMDBUF_EN);
-    control |= M2B2_CTRL_CMDBUF_EN | M2B2_CTRL_EVT_LOG_EN;
-    mmioWrite64(c->base, M2B2_OFF_CONTROL, control);
-    control |= M2B2_CTRL_IOMMU_EN;
-    mmioWrite64(c->base, M2B2_OFF_CONTROL, control);
-    OSSynchronizeIO();
-    c->observedControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
-    c->resumeRegistersRestored =
-        mmioRead64(c->base, M2B2_OFF_DEV_TABLE) == dt &&
-        mmioRead64(c->base, M2B2_OFF_CMD_BUF) == commands &&
-        mmioRead64(c->base, M2B2_OFF_EVT_BUF) == events &&
-        c->observedControl == c->sleepControl;
-    if (!c->resumeRegistersRestored)
-        return c->powerFailure("failed-pm-resume-registers");
-    UInt32 status = 0;
-    const UInt32 running = M2B2_STATUS_CMDBUF_RUN | M2B2_STATUS_EVT_RUN;
-    for (UInt32 i = 0; i < M2B1_LOOP_TIMEOUT; ++i) {
-        status = mmioRead32(c->base, M2B2_OFF_STATUS);
-        if ((status & running) == running) break;
+    // Undo the suspend side's own revocation before the reconciliation writes the
+    // DTE again, so the restored image carries this requester's permissions.
+    if (d->pmParkedBySuspend) {
+        fDMAParked = false;
+        d->pmParkedBySuspend = false;
+        ++d->restoreCount;
     }
-    if ((status & running) != running)
-        return c->powerFailure("failed-pm-resume-engines");
-
-    c->ready = true;
-    // Force the device-cache invalidation even though the DTE remains active
-    // in retained memory. Do not overwrite the original startup timestamps.
-    if (!InvalidateLocked(true, 0, 0, false, nullptr))
-        return c->powerFailure("failed-pm-resume-invalidation");
-    d->recordPMResume();
-    c->resumeDevSequence = d->lastInvDevSequence;
-    c->resumePagesSequence = d->lastInvPagesSequence;
-    c->suspended = false;
+    if (!ReconcileControllerLocked(state))
+        return c->powerFailure(c->pmReason ? c->pmReason : "failed-pm-resume");
     if (c->domainCount == 2) {
         d->pmResumeReady = true;
         d->state = "pm-resume-ready";
@@ -1266,6 +1442,167 @@ bool org_maz1_AMDMapperProbe::ResumeAuto() {
         c->state = "ready-shared-controller";
     }
     return true;
+}
+
+// R72: the sleep side. Runs on the PM thread, so allocation for the boundary
+// snapshots is allowed here and deliberately kept out of the DMA path. The body
+// lives in AMDMapperProbeMapper.cpp because MapperState is private to it; this
+// translation unit only sequences the controller transitions.
+
+// R72: the DMA path lives in AMDMapperProbeMapper.cpp, which cannot see Domain.
+bool org_maz1_AMDMapperProbe::SuspendRequested() const {
+    Domain *d = fDomain;
+    return d && d->pmSuspendRequested;
+}
+
+void org_maz1_AMDMapperProbe::SetSuspendRequested(bool value) {
+    Domain *d = fDomain;
+    if (d) d->pmSuspendRequested = value;
+}
+
+void org_maz1_AMDMapperProbe::NoteLiveMapping(bool live) {
+    Domain *d = fDomain;
+    if (!d) return;
+    if (live) ++d->pmLiveMaps;
+    else if (d->pmLiveMaps) --d->pmLiveMaps;
+}
+
+bool org_maz1_AMDMapperProbe::ControllerReady() const {
+    Controller *c = fController;
+    return c && c->ready;
+}
+
+// The notifier lives on the controller instance; a device mapper reports the
+// state of the instance that actually registered.
+bool org_maz1_AMDMapperProbe::PMNotifierRegistered() const {
+    if (fOwner) return fOwner->fSystemPMNotifier != nullptr;
+    return fSystemPMNotifier != nullptr;
+}
+
+// R72: PM state is published at the transition, not only when a snapshot is
+// requested, so a wake can be judged from the registry immediately.
+void org_maz1_AMDMapperProbe::PublishPMNow(const char *reason) {
+    Controller *c = fController;
+    if (!c) return;
+    UInt64 suspendCount, resumeCount, failures, lazy, retained, recoveries, resumes;
+    bool ready, suspended, restored, failed;
+    const char *state;
+    {
+        LockGuard guard(c->lock);
+        suspendCount = c->suspendCount; resumeCount = c->resumeCount;
+        failures = c->powerFailures; lazy = c->lazyRestores;
+        retained = c->retainedSuspends; recoveries = c->commandRecoveries;
+        resumes = c->resumeFailures;
+        ready = c->ready; suspended = c->suspended;
+        restored = c->resumeRegistersRestored; failed = c->powerFailed;
+        state = c->state;
+    }
+    // The register reads above were taken under the controller lock; the property
+    // writes may allocate and therefore happen outside it.
+    setProperty("pm-controller-state", failed ? "failed" :
+                (suspended ? "suspended" : "awake"));
+    setProperty("iommu-controller-ready", ready ? "yes" : "no");
+    setProperty("iommu-state", state ? state : "unknown");
+    setProperty("pm-resume-registers-restored", restored ? "yes" : "no");
+    setProperty("pm-controller-suspend-count", (unsigned long long)suspendCount, 64);
+    setProperty("pm-controller-resume-count", (unsigned long long)resumeCount, 64);
+    setProperty("pm-controller-failures", (unsigned long long)failures, 64);
+    setProperty("pm-lazy-restores", (unsigned long long)lazy, 64);
+    setProperty("pm-suspend-retained", (unsigned long long)retained, 64);
+    setProperty("pm-command-recoveries", (unsigned long long)recoveries, 64);
+    setProperty("pm-resume-failures", (unsigned long long)resumes, 64);
+    if (reason) setProperty("pm-last-transition", reason);
+}
+
+bool org_maz1_AMDMapperProbe::RegisterSystemPM() {
+    if (fSystemPMNotifier) return true;
+    char mode[16] = {};
+    if (PE_parse_boot_argn("amdiommu_pm", mode, sizeof(mode) - 1) &&
+        strcmp(mode, "off") == 0) {
+        setProperty("pm-self-driven", "disabled-by-boot-arg");
+        return false;
+    }
+    // registerSleepWakeInterest() registers a kIOGeneralInterest client with the
+    // root domain. Delivering kIOMessageSystemWillSleep through that path requires
+    // a response within the sleep timeout, so the handler returns success and
+    // leaves the notification's returnValue at zero, which acknowledges at once.
+    fSystemPMNotifier = registerSleepWakeInterest(sleepWakeHandler, this, nullptr);
+    if (!fSystemPMNotifier) {
+        setProperty("pm-self-driven", "failed-register");
+        return false;
+    }
+    setProperty("pm-self-driven", "registered");
+    return true;
+}
+
+void org_maz1_AMDMapperProbe::UnregisterSystemPM() {
+    if (!fSystemPMNotifier) return;
+    fSystemPMNotifier->disable();
+    fSystemPMNotifier->release();
+    fSystemPMNotifier = nullptr;
+    setProperty("pm-self-driven", "unregistered");
+}
+
+IOReturn org_maz1_AMDMapperProbe::sleepWakeHandler(
+    void *target, void *refCon, UInt32 messageType, IOService *provider,
+    void *messageArgument, vm_size_t argSize) {
+    (void)refCon; (void)provider; (void)messageArgument; (void)argSize;
+    auto *self = static_cast<org_maz1_AMDMapperProbe *>(target);
+    if (!self) return kIOReturnSuccess;
+    switch (messageType) {
+    case kIOMessageSystemWillSleep:
+        self->SystemWillSleep();
+        break;
+    case kIOMessageSystemHasPoweredOn:
+        self->SystemHasPoweredOn();
+        break;
+    default:
+        break;
+    }
+    return kIOReturnSuccess;
+}
+
+void org_maz1_AMDMapperProbe::SystemWillSleep() {
+    if (fOwner || !fAttachLock) return;
+    uint32_t suspended = 0, failed = 0;
+    {
+        LockGuard attachment(fAttachLock);
+        for (UInt32 i = 0; i < kMaxDomains; ++i) {
+            auto *mapper = fMappers[i];
+            if (!mapper || !mapper->fDomain) continue;
+            if (mapper->SuspendDomain()) ++suspended; else ++failed;
+        }
+    }
+    ++fSleepNotifications;
+    setProperty("pm-sleep-notifications",
+                (unsigned long long)fSleepNotifications, 64);
+    setProperty("pm-last-suspend-domains", (unsigned long long)suspended, 32);
+    setProperty("pm-last-suspend-failures", (unsigned long long)failed, 32);
+    for (UInt32 i = 0; i < kMaxDomains; ++i) {
+        auto *mapper = fMappers[i];
+        if (mapper && mapper->fDomain) mapper->PublishPMNow("system-will-sleep");
+    }
+}
+
+void org_maz1_AMDMapperProbe::SystemHasPoweredOn() {
+    if (fOwner || !fAttachLock) return;
+    uint32_t resumed = 0, failed = 0;
+    {
+        LockGuard attachment(fAttachLock);
+        for (UInt32 i = 0; i < kMaxDomains; ++i) {
+            auto *mapper = fMappers[i];
+            if (!mapper || !mapper->fDomain) continue;
+            if (mapper->ResumeDomain()) ++resumed; else ++failed;
+        }
+    }
+    ++fWakeNotifications;
+    setProperty("pm-wake-notifications", (unsigned long long)fWakeNotifications, 64);
+    setProperty("pm-last-resume-domains", (unsigned long long)resumed, 32);
+    setProperty("pm-last-resume-failures", (unsigned long long)failed, 32);
+    for (UInt32 i = 0; i < kMaxDomains; ++i) {
+        auto *mapper = fMappers[i];
+        if (mapper && mapper->fDomain) mapper->PublishPMNow("system-has-powered-on");
+    }
 }
 
 void org_maz1_AMDMapperProbe::PublishAuto() {
@@ -1317,7 +1654,20 @@ void org_maz1_AMDMapperProbe::PublishAuto() {
     number("pm-controller-resume-device-invalidation-sequence", c->resumeDevSequence);
     number("pm-controller-resume-pages-invalidation-sequence", c->resumePagesSequence);
     setProperty("command-counters-scope", "controller");
-    setProperty("pm-support-scope", c->domainCount > 1 ? "unsupported-shared" : "single-device");
+    // R72: a single requester is a legal PM scope, and a two-requester controller
+    // reports whether it is armed instead of declaring itself unsupported.
+    setProperty("pm-support-scope", c->domainCount > 1
+        ? (c->coordinatedPMArmed ? "coordinated-armed" : "coordinated-unarmed")
+        : "single-device");
+    setProperty("pm-self-driven", PMNotifierRegistered() ? "yes" : "no");
+    setProperty("pm-last-reason", c->pmReason ? c->pmReason : "none");
+    setProperty("pm-domain-suspend-requested", d->pmSuspendRequested ? "yes" : "no");
+    setProperty("pm-domain-parked-by-suspend", d->pmParkedBySuspend ? "yes" : "no");
+    number("pm-domain-live-mappings", d->pmLiveMaps);
+    number("pm-lazy-restores", c->lazyRestores);
+    number("pm-suspend-retained", c->retainedSuspends);
+    number("pm-command-recoveries", c->commandRecoveries);
+    number("pm-resume-failures", c->resumeFailures);
     number("invalidation-completed-total", d->invDevCompleted + d->invPagesCompleted);
     number("iommu-device-id", d->deviceID);
     number("iommu-domain-id", d->domainID);
@@ -1457,6 +1807,9 @@ bool org_maz1_AMDMapperProbe::StopAuto() {
         return true;
     }
     if (!fAttachLock) return !fController;
+    // R72: detach from the root domain before taking the attach lock. disable()
+    // waits for an in-flight handler, and those handlers take that same lock.
+    UnregisterSystemPM();
     {
         LockGuard attachment(fAttachLock);
         Controller *c = fController;

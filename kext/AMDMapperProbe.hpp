@@ -148,6 +148,8 @@ private:
     UInt32 fRejectedLength = 0, fRejectedOptions = 0,
            fRejectedLayout = 0, fRejectedRecords = 0,
            fRejectedNoRange = 0, fRejectedBits = 0;
+    // R72: refused because the controller could not be restored after a wake.
+    UInt32 fRejectedUnavailable = 0;
     void PublishCapacity();
     // S1 capacity profile (docs/m2-3az-round69-capacity-model.md). The legacy
     // entry is the default and reproduces the accepted ABI3 arena exactly; a
@@ -186,6 +188,32 @@ private:
     Controller *fController = nullptr;
     struct MapperState;
     MapperState *fMapper = nullptr;
+    // R72: the mapper hears about a real system sleep/wake itself instead of
+    // waiting for the private R47PowerTransition RPC, and repairs a controller
+    // that lost its register image even when no notification arrived at all.
+    IONotifier *fSystemPMNotifier = nullptr;
+    UInt64 fSleepNotifications = 0, fWakeNotifications = 0;
+    bool RegisterSystemPM();
+    void UnregisterSystemPM();
+    static IOReturn sleepWakeHandler(void *, void *, UInt32, IOService *,
+                                        void *, vm_size_t);
+    void SystemWillSleep();
+    void SystemHasPoweredOn();
+    bool SuspendDomain();
+    bool ResumeDomain();
+    // R72: Domain is defined in AMDMapperProbeAuto.cpp, so the DMA path reaches
+    // the suspend bookkeeping through these accessors instead.
+    bool SuspendRequested() const;
+    void SetSuspendRequested(bool value);
+    void NoteLiveMapping(bool live);
+    bool ControllerReady() const;
+    bool PMNotifierRegistered() const;
+    // Caller holds the per-device mapper lock; takes the controller lock itself.
+    bool EnsureControllerOperationalLocked(MapperState *, const char *);
+    // Both locks are held. Reprograms a controller whose image was lost.
+    bool ReconcileControllerLocked(MapperState *);
+    bool RestoreHardwareAfterWake(MapperState *);
+    void PublishPMNow(const char *);
     bool StartAuto();
     bool AttachAuto(IOService *, bool claim = false);
     bool StopAuto();
@@ -193,10 +221,11 @@ private:
         UInt64 address = 0, UInt64 bytes = 0,
         bool newMapping = false, bool *skipped = nullptr);
     void PublishAuto();
-    // TODO(R47-PM-HARDWARE): validate real system sleep/resume when the
-    // platform supports it. Normal network operation does not invoke PM.
-    // Called synchronously by Lucy's existing gated PM actions. The normal
-    // network-family disable has retired TX and rebuilt RX before suspend.
+    // Compatibility entry point for a client that still drives PM through the
+    // private R47PowerTransition RPC. Called synchronously by the client's gated
+    // PM actions after its network-family disable retired TX and rebuilt RX.
+    // R72 adds a self-driven path (see RegisterSystemPM) so this call is no
+    // longer the only way a real S3 reaches the mapper.
     IOReturn PowerTransition(UInt32);
     bool SuspendAuto();
     bool ResumeAuto();
