@@ -14,7 +14,7 @@
 //   C. a range beyond the export budget was skipped with no record at all, so
 //      "only exported part of it" looked identical to "all of it passed".
 //
-// The walker now lives in kext/amd_iommu_bizwalk_core.hpp and BOTH the kext and
+// The walker now lives in probe/amd_iommu_bizwalk_core.hpp and BOTH the kext and
 // this test compile it. A test that re-implemented the walk would prove nothing
 // about the kext -- round 4's history is exactly three implementations agreeing
 // with each other and all three wrong.
@@ -22,7 +22,7 @@
 // The page table here is a real 4-level AMD-Vi table built with
 // amd_iommu_pte_core.hpp (the same encoder the kext uses), not a mock.
 
-#include "../kext/amd_iommu_bizwalk_core.hpp"
+#include "../probe/amd_iommu_bizwalk_core.hpp"
 
 #include <cstdio>
 #include <cstring>

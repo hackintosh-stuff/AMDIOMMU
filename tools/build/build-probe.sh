@@ -4,8 +4,8 @@
 # 用法： sh build-m1a.sh
 # 输出： build-m1a/AMDMapperProbe.kext（路径写入 latest-m1a-build.txt）
 #
-# 探针由多个源文件组成（见 kext/AMDMapperProbe*.cpp）。它们共用
-# kext/AMDMapperProbeInternal.hpp 里的 static 辅助函数，所以每个文件都是
+# 探针由多个源文件组成（见 probe/AMDMapperProbe*.cpp）。它们共用
+# probe/AMDMapperProbeInternal.hpp 里的 static 辅助函数，所以每个文件都是
 # 独立的编译单元，最后一起链接进同一个 kext。
 
 set -eu
@@ -16,7 +16,7 @@ SDK=$(xcrun --sdk macosx --show-sdk-path)
 SDKVER=$(xcrun --sdk macosx --show-sdk-version)
 HEADERS="$SDK/System/Library/Frameworks/Kernel.framework/Versions/A/Headers"
 # PROBE_DEBUG=1 selects the Debug variant: the retired M2 experiment
-# subsystem (kext/*Debug.cpp) is compiled back in, restoring the historical
+# subsystem (probe/*Debug.cpp) is compiled back in, restoring the historical
 # amdiommu=arm/mmio/write/table/enable/cmd/pgt* modes. The default production
 # build accepts only amdiommu=passive / auto-attach.
 PROBE_DEBUG=${PROBE_DEBUG:-0}
@@ -36,16 +36,16 @@ KEXT="$W/AMDMapperProbe.kext"
 BIN="$KEXT/Contents/MacOS/AMDMapperProbe"
 mkdir -p "$KEXT/Contents/MacOS"
 
-cp kext/AMDMapperProbe-Info.plist "$KEXT/Contents/Info.plist"
+cp probe/AMDMapperProbe-Info.plist "$KEXT/Contents/Info.plist"
 plutil -lint "$KEXT/Contents/Info.plist"
 
 # 探针的所有编译单元。新增模块必须同时出现在这里和 split-probe.py 的
 # MEMBERS 表中，否则链接时会缺少符号。
-SRCS="kext/AMDMapperProbe.cpp \
-      kext/AMDMapperProbeNic.cpp \
-      kext/AMDMapperProbeAuto.cpp \
-      kext/AMDMapperProbeDiscovery.cpp \
-      kext/AMDMapperProbeMapper.cpp \
+SRCS="probe/AMDMapperProbe.cpp \
+      probe/AMDMapperProbeNic.cpp \
+      probe/AMDMapperProbeAuto.cpp \
+      probe/AMDMapperProbeDiscovery.cpp \
+      probe/AMDMapperProbeMapper.cpp \
       src/Ivrs.cpp \
       src/IvrsTopology.cpp"
 
@@ -53,19 +53,19 @@ SRCS="kext/AMDMapperProbe.cpp \
 # start/stop/iovm* implementations (mutually exclusive with the production
 # versions via AMD_MAPPER_PROBE_DEBUG); the other modules implement the
 # retired M2 experiment stages.
-DEBUG_SRCS="kext/AMDMapperProbeDebug.cpp \
-      kext/AMDMapperProbeNicDebug.cpp \
-      kext/AMDMapperProbeMapperBindingDebug.cpp \
-      kext/AMDMapperProbeDmaContractDebug.cpp \
-      kext/AMDMapperProbeContigMapDebug.cpp \
-      kext/AMDMapperProbeMapTableDebug.cpp
-      kext/AMDMapperProbeMmioDebug.cpp \
-      kext/AMDMapperProbeTableDebug.cpp \
-      kext/AMDMapperProbeDmaDebug.cpp \
-      kext/AMDMapperProbeObsDebug.cpp \
-      kext/AMDMapperProbeRxSetDebug.cpp \
-      kext/AMDMapperProbeTxDebug.cpp \
-      kext/AMDMapperProbePgtDebug.cpp"
+DEBUG_SRCS="probe/AMDMapperProbeDebug.cpp \
+      probe/AMDMapperProbeNicDebug.cpp \
+      probe/AMDMapperProbeMapperBindingDebug.cpp \
+      probe/AMDMapperProbeDmaContractDebug.cpp \
+      probe/AMDMapperProbeContigMapDebug.cpp \
+      probe/AMDMapperProbeMapTableDebug.cpp
+      probe/AMDMapperProbeMmioDebug.cpp \
+      probe/AMDMapperProbeTableDebug.cpp \
+      probe/AMDMapperProbeDmaDebug.cpp \
+      probe/AMDMapperProbeObsDebug.cpp \
+      probe/AMDMapperProbeRxSetDebug.cpp \
+      probe/AMDMapperProbeTxDebug.cpp \
+      probe/AMDMapperProbePgtDebug.cpp"
 
 if [ "$PROBE_DEBUG" = "1" ]; then
     SRCS="$SRCS $DEBUG_SRCS"
@@ -74,8 +74,8 @@ fi
 for f in $SRCS; do
     [ -f "$f" ] || { echo "missing source: $f"; exit 1; }
 done
-[ -f kext/AMDMapperProbeInternal.hpp ] || {
-    echo "missing kext/AMDMapperProbeInternal.hpp"; exit 1; }
+[ -f probe/AMDMapperProbeInternal.hpp ] || {
+    echo "missing probe/AMDMapperProbeInternal.hpp"; exit 1; }
 
 echo "== 编译（$(echo "$SRCS" | wc -w | tr -d ' ') 个编译单元）=="
 # 注意：不定义 IOKIT_ENABLE_SHARED_PTR。SDK 默认未定义，此时 OSPtr<T> 就是 T*。

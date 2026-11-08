@@ -5,8 +5,8 @@
 # ---------------
 # Round 12's `build-record.sh` recorded a HAND-WRITTEN list of source files:
 #
-#     MODULES="kext/AMDMapperProbe.cpp ... kext/AMDMapperProbeInternal.hpp"
-#     HEADERS="kext/AMDMapperProbe.hpp kext/amd_iommu_dma_observe.hpp ..."
+#     MODULES="probe/AMDMapperProbe.cpp ... probe/AMDMapperProbeInternal.hpp"
+#     HEADERS="probe/AMDMapperProbe.hpp probe/amd_iommu_dma_observe.hpp ..."
 #
 # That list was a claim about the build, not a record of it. It omitted, among
 # other things:
@@ -58,7 +58,7 @@ DRV="$SRC/RTL812xLucy"
 # THE DRIVER'S SDK HAS ITS OWN NAME HERE.
 #
 # tools/build/lucy.sh calls the MacKernelSDK directory `SDK`, and
-# tools/build/probe.sh calls the macOS SDK directory `SDK`. Both names are right
+# tools/build/build-probe.sh calls the macOS SDK directory `SDK`. Both names are right
 # in their own script; in one script they would collide. So the two are named
 # SYS_SDK (macOS SDK, used by the probe) and MSDK (MacKernelSDK, used by the
 # driver), and tools/verify/build-inputs.py resolves each script's own
@@ -67,7 +67,7 @@ DRV="$SRC/RTL812xLucy"
 SYS_SDK="$SDK"
 MSDK="$SRC/MacKernelSDK"
 
-# ---- the probe's flags, copied from tools/build/probe.sh -------------------
+# ---- the probe's flags, copied from tools/build/build-probe.sh -------------------
 #
 # COPIED, not sourced: build-m1a.sh is a build script, not a library, and
 # sourcing it would run the build. The duplication is checked by
@@ -81,17 +81,17 @@ PROBE_CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
     -fno-builtin -fno-common -fno-exceptions -fno-rtti \
     -fno-stack-protector -Wall -Wextra -Werror -O0 -g"
 
-PROBE_SRCS="kext/AMDMapperProbe.cpp \
-      kext/AMDMapperProbeNic.cpp \
-      kext/AMDMapperProbeMapperBindingDebug.cpp \
-      kext/AMDMapperProbeDmaContractDebug.cpp \
-      kext/AMDMapperProbeContigMapDebug.cpp \
-      kext/AMDMapperProbeMapTableDebug.cpp
-      kext/AMDMapperProbeMmioDebug.cpp \
-      kext/AMDMapperProbeTableDebug.cpp \
-      kext/AMDMapperProbeDmaDebug.cpp \
-      kext/AMDMapperProbeObsDebug.cpp \
-      kext/AMDMapperProbePgtDebug.cpp"
+PROBE_SRCS="probe/AMDMapperProbe.cpp \
+      probe/AMDMapperProbeNic.cpp \
+      probe/AMDMapperProbeMapperBindingDebug.cpp \
+      probe/AMDMapperProbeDmaContractDebug.cpp \
+      probe/AMDMapperProbeContigMapDebug.cpp \
+      probe/AMDMapperProbeMapTableDebug.cpp
+      probe/AMDMapperProbeMmioDebug.cpp \
+      probe/AMDMapperProbeTableDebug.cpp \
+      probe/AMDMapperProbeDmaDebug.cpp \
+      probe/AMDMapperProbeObsDebug.cpp \
+      probe/AMDMapperProbePgtDebug.cpp"
 
 # ---- the driver's flags, copied from tools/build/lucy.sh -----------------
 LUCY_CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
@@ -264,7 +264,7 @@ def sha(p):
 
 def classify(p):
     rp = os.path.abspath(p)
-    if rp.startswith(os.path.join(root, 'kext')):
+    if rp.startswith(os.path.join(root, 'probe')):
         return 'project-kext'
     if rp.startswith(os.path.join(root, 'tools')):
         return 'project-tools'

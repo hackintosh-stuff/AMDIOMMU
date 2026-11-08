@@ -16,5 +16,5 @@ python3 -B tools/build/patch-lucy-obs.py "$SRC" --tx21 --rx34
 # Round50 retains R49 ABI2 and its 64-page decoder/layout contract.
 python3 -B tools/abi/abi.py --check-r49
 sh tools/build/lucy.sh "$SRC"
-sh tools/build/probe.sh
+sh tools/build/build-probe.sh
 printf '%s\n' 'Round50 built: RTL812xLucy 1.1.235; IPv4 TSO on / IPv6 TSO on; AMDMapperProbe 0.57.0; ordinary DMA32 / low IOVA pool / range invalidation; 16 RX groups of 64 pages; IVRS/PCI discovery; per-device IOMapper ABI2; finite TCP6 before/after normal down/up'

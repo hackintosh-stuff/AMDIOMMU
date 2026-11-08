@@ -1,4 +1,4 @@
-// Host regression tests for kext/amd_iommu_dma_observe.hpp.
+// Host regression tests for probe/amd_iommu_dma_observe.hpp.
 //
 // This compiles and runs the SAME header the kext includes, so a pass here
 // exercises production logic rather than a Python restatement of it.
@@ -52,7 +52,7 @@
 //      "A register named this address" is not "this PA is the driver's ring
 //      object". A fingerprint that can fail is the minimum honest check.
 
-#include "../kext/amd_iommu_dma_observe.hpp"
+#include "../probe/amd_iommu_dma_observe.hpp"
 
 #include <cstdio>
 #include <cstring>

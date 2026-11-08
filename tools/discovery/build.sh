@@ -16,5 +16,5 @@ python3 -B tools/build/patch-lucy-obs.py "$SRC" --tx21 --rx34
 # Round47 discovers the controller from IVRS/PCI; ordinary mapper ABI1 is unchanged.
 python3 -B tools/abi/abi.py --check-r44
 sh tools/build/lucy.sh "$SRC"
-sh tools/build/probe.sh
+sh tools/build/build-probe.sh
 printf '%s\n' 'Round47 built: RTL812xLucy 1.1.232; IPv4 TSO on / IPv6 TSO on; AMDMapperProbe 0.54.0; IVRS/PCI controller discovery; ordinary per-device IOMapper ABI1; finite TCP6 before/after normal down/up'

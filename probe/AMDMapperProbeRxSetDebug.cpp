@@ -2,7 +2,7 @@
 //
 // Part of the AMDMapperProbe kext. Added as its own translation unit rather
 // than appended to AMDMapperProbePgt.cpp so that "did this round's code run?"
-// is answerable from the binary (tools/build/probe.sh names its entry points).
+// is answerable from the binary (tools/build/build-probe.sh names its entry points).
 //
 // ===========================================================================
 // WHAT THIS MODULE ANSWERS, AND WHY THE OLD ANSWER WAS NOT ENOUGH
@@ -30,7 +30,7 @@
 //
 // The set is CONSERVATIVE: it is a superset of what the device can reach at any
 // instant in [t_baseline, t_end], so a proof over S is a proof over the window.
-// The argument is written out in kext/amd_iommu_rxset_core.hpp and the three
+// The argument is written out in probe/amd_iommu_rxset_core.hpp and the three
 // conditions it depends on (no gap, no loss, no ring rebuild) are checked here
 // rather than assumed.
 //

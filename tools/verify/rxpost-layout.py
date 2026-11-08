@@ -7,7 +7,7 @@ The same 160-byte header and two record types are declared in three places, for
 three different reasons:
 
   tools/lucy-obs/RTL812xRxPost.hpp   the DRIVER writes them (C++ structs)
-  kext/amd_iommu_rxset_core.hpp      the PROBE reads them (byte offsets)
+  probe/amd_iommu_rxset_core.hpp      the PROBE reads them (byte offsets)
   tests/rxpost-test.cpp              the HOST TEST drives both
 
 The driver's header cannot be included by the probe (it lives in the patched
@@ -30,7 +30,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 DRV = os.path.join(ROOT, 'tools', 'lucy-obs', 'RTL812xRxPost.hpp')
-CORE = os.path.join(ROOT, 'kext', 'amd_iommu_rxset_core.hpp')
+CORE = os.path.join(ROOT, 'probe', 'amd_iommu_rxset_core.hpp')
 TEST = os.path.join(ROOT, 'tests', 'rxpost-test.cpp')
 # A fourth declaration (the round-12 analyser) was checked here until that file
 # was retired; the three files above are the whole contract now.

@@ -13,16 +13,16 @@ if readme.exists():
     count += 1
     if b"\r" in readme.read_bytes():
         errors.append("CR byte: README.md")
-for folder in ("include", "src", "tests", "kext", "tools", "docs"):
+for folder in ("include", "src", "tests", "probe", "tools", "docs"):
     for path in (ROOT / folder).rglob("*"):
         if path.is_file() and path.suffix in (".hpp", ".h", ".cpp", ".py", ".sh", ".md", ".plist"):
             count += 1
             if b"\r" in path.read_bytes():
                 errors.append(f"CR byte: {path.relative_to(ROOT)}")
-plist = plistlib.loads((ROOT / "kext/Info.plist").read_bytes())
+plist = plistlib.loads((ROOT / "probe/Info.plist").read_bytes())
 if plist.get("IOKitPersonalities") != {}:
     errors.append("Scaffold must have empty IOKitPersonalities")
-source = (ROOT / "kext/AMDIdentityMapper.cpp").read_text(encoding="utf-8")
+source = (ROOT / "probe/AMDIdentityMapper.cpp").read_text(encoding="utf-8")
 # Strip comments before guard checks (not a complete C++ parser).
 source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.S)
 if not re.search(r"::start\(IOService\s*\*\)\s*\{\s*return false;\s*\}", source):

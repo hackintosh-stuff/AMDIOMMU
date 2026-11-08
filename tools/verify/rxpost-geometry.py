@@ -28,7 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 HDR = os.path.join(ROOT, 'tools', 'lucy-obs', 'RTL812xRxPost.hpp')
 TEST = os.path.join(ROOT, 'tests', 'rxpost-test.cpp')
-KEXT = os.path.join(ROOT, 'kext')
+KEXT = os.path.join(ROOT, 'probe')
 
 FAILS = []
 

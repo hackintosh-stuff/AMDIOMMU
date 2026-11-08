@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""split-probe.py -- split kext/AMDMapperProbe.cpp into functional modules.
+"""split-probe.py -- split probe/AMDMapperProbe.cpp into functional modules.
 
 WHY
 ---
@@ -35,9 +35,9 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SRC = os.path.join(ROOT, 'kext', 'AMDMapperProbe.cpp')
+SRC = os.path.join(ROOT, 'probe', 'AMDMapperProbe.cpp')
 INTERNAL_NAME = 'AMDMapperProbeInternal.hpp'
-INTERNAL = os.path.join(ROOT, 'kext', INTERNAL_NAME)
+INTERNAL = os.path.join(ROOT, 'probe', INTERNAL_NAME)
 GUARD = 'AMDMapperProbeInternal_hpp'
 
 
@@ -880,7 +880,7 @@ def main():
         return 0
 
     for fn, text in produced.items():
-        path = os.path.join(ROOT, 'kext', fn)
+        path = os.path.join(ROOT, 'probe', fn)
         with open(path, 'w', encoding='utf-8', newline='\n') as f:
             f.write(text)
         print('wrote %-34s %7d bytes' % (fn, len(text.encode('utf-8'))))

@@ -33,7 +33,7 @@
 // term's reason. If a term could be broken without the gate noticing, the
 // property is decorative, which is precisely the round-11 defect.
 
-#include "../kext/amd_iommu_dma_observe.hpp"
+#include "../probe/amd_iommu_dma_observe.hpp"
 
 #include <cstdio>
 #include <cstring>

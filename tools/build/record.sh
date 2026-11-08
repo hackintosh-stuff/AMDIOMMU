@@ -100,21 +100,21 @@ echo "== 1. source inventory =="
 # preprocessor opened, classified and hashed. The explicit list is kept below
 # as a NAMED SUBSET -- the files a reader is most likely to want to check by
 # hand -- and the record says which is which.
-MODULES="kext/AMDMapperProbe.cpp \
-         kext/AMDMapperProbeNic.cpp \
-         kext/AMDMapperProbeMapperBindingDebug.cpp \
-         kext/AMDMapperProbeDmaContractDebug.cpp \
-         kext/AMDMapperProbeContigMapDebug.cpp \
-         kext/AMDMapperProbeMapTableDebug.cpp
-         kext/AMDMapperProbeMmioDebug.cpp \
-         kext/AMDMapperProbeTableDebug.cpp \
-         kext/AMDMapperProbeDmaDebug.cpp \
-         kext/AMDMapperProbeObsDebug.cpp \
-         kext/AMDMapperProbePgtDebug.cpp \
-         kext/AMDMapperProbeInternal.hpp"
-HEADERS="kext/AMDMapperProbe.hpp kext/amd_iommu_dma_observe.hpp \
-         kext/amd_iommu_pte_core.hpp kext/amd_iommu_bizwalk_core.hpp \
-         kext/AMDMapperProbe-Info.plist kext/Info.plist"
+MODULES="probe/AMDMapperProbe.cpp \
+         probe/AMDMapperProbeNic.cpp \
+         probe/AMDMapperProbeMapperBindingDebug.cpp \
+         probe/AMDMapperProbeDmaContractDebug.cpp \
+         probe/AMDMapperProbeContigMapDebug.cpp \
+         probe/AMDMapperProbeMapTableDebug.cpp
+         probe/AMDMapperProbeMmioDebug.cpp \
+         probe/AMDMapperProbeTableDebug.cpp \
+         probe/AMDMapperProbeDmaDebug.cpp \
+         probe/AMDMapperProbeObsDebug.cpp \
+         probe/AMDMapperProbePgtDebug.cpp \
+         probe/AMDMapperProbeInternal.hpp"
+HEADERS="probe/AMDMapperProbe.hpp probe/amd_iommu_dma_observe.hpp \
+         probe/amd_iommu_pte_core.hpp probe/amd_iommu_bizwalk_core.hpp \
+         probe/AMDMapperProbe-Info.plist probe/Info.plist"
 # The OTHER artefact: the driver patch and the headers it installs.
 DRIVER_PATCH="tools/build/patch-lucy-obs.py"
 DRIVER_HEADERS="tools/lucy-obs/RTL812xObsLog.hpp \
@@ -231,7 +231,7 @@ echo "== 2. toolchain =="
 # ---- 3. build the probe -------------------------------------------------
 echo
 echo "== 3. build the probe (clean, in its own directory) =="
-if ! sh tools/build/probe.sh > "$OUT/probe-build.log" 2>&1; then
+if ! sh tools/build/build-probe.sh > "$OUT/probe-build.log" 2>&1; then
     echo "BUILD FAILED -- see $OUT/probe-build.log" >&2
     tail -30 "$OUT/probe-build.log" >&2
     exit 1

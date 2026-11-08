@@ -236,7 +236,7 @@ printf 'CORE_OK=%s %s %s %s %s %s %s\n' "$WORK/dma-observe-test" \
        "$WORK/bizwalk-core-test" "$WORK/evidence-gate-test" \
        "$WORK/rxpost-test" "$WORK/r70-capacity-test"
 (cd "$ROOT" && shasum -a 256 include/amd_iommu/*.hpp src/*.cpp \
-    kext/amd_iommu_*.hpp kext/AMDMapperProbe*.cpp kext/AMDMapperProbe*.hpp \
+    probe/amd_iommu_*.hpp probe/AMDMapperProbe*.cpp probe/AMDMapperProbe*.hpp \
     tools/lucy-obs/*.hpp \
     tests/*.cpp tests/InspectorSmoke.py tools/test.sh tools/dev/ivrs-inspect.cpp \
     tools/verify/*.py) \

@@ -16,8 +16,8 @@
 #include <utility>
 #include <vector>
 
-#include "../kext/amd_iommu_mapper_abi.hpp"
-#include "../kext/amd_iommu_tx_core.hpp"
+#include "../probe/amd_iommu_mapper_abi.hpp"
+#include "../probe/amd_iommu_tx_core.hpp"
 
 namespace {
 

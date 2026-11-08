@@ -40,7 +40,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-KEXT = os.path.join(ROOT, 'kext')
+KEXT = os.path.join(ROOT, 'probe')
 
 # Names that are LEGITIMATELY published twice with the same class -- i.e. the
 # same string value re-published on a different path. Listing them here is a

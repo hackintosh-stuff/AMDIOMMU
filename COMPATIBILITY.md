@@ -25,7 +25,7 @@ The most informative next test is the **another vendor's X570 with the same PCIe
 
 ## Sources
 
-- **Controller discovery and device policy** — `kext/AMDMapperProbeDiscovery.cpp` (lines 108–165), `kext/AMDMapperProbeAuto.cpp` (lines 625–689), `kext/AMDMapperProbe.hpp` (line 105), and `kext/AMDMapperProbe-Info.plist` (lines 175–188).
+- **Controller discovery and device policy** — `probe/AMDMapperProbeDiscovery.cpp` (lines 108–165), `probe/AMDMapperProbeAuto.cpp` (lines 625–689), `probe/AMDMapperProbe.hpp` (line 105), and `probe/AMDMapperProbe-Info.plist` (lines 175–188).
 - **Firmware parsing and the MSI sample** — `src/Ivrs.cpp`, `include/amd_iommu/Ivrs.hpp`, and `tests/InspectorSmoke.py`.
 - **Hardware test records** — the parent project's `amd-iommu/docs/` directory.
 - **AMD platform specifications** — [Socket AM4 chipsets](https://www.amd.com/en/products/processors/chipsets/am4.html) and [Socket AM5 chipsets](https://www.amd.com/en/products/processors/chipsets/am5.html).

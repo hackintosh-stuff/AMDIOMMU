@@ -7,7 +7,9 @@ IVRS table and PCI configuration, takes the controller over once its state and
 feature registers agree, and gives the selected PCIe requesters a translation
 domain. It then publishes itself, so a driver either claims it explicitly
 (`amdiommu=passive`) or Apple's own Ethernet kexts find it through
-`IOMapper::copyMapperForDevice()` (`amdiommu=auto-attach`).
+`IOMapper::copyMapperForDevice()` (`amdiommu=auto-attach`). An optional companion,
+[AMDMapperHook](#amdmapperhook-optional-companion), covers drivers that do
+neither.
 
 Status: experimental, 0.98.0. Verified board/CPU/device combinations are listed
 in [COMPATIBILITY.md](COMPATIBILITY.md); building, deploying into OpenCore and
@@ -17,11 +19,14 @@ setting boot-args are covered below.
 
 Two build variants exist and accept different boot-args:
 
-- **Production** (default): `sh tools/build/probe.sh` → `build-m1a/AMDMapperProbe.kext`.
+- **Production** (default): `sh tools/build/build-probe.sh` → `build-m1a/AMDMapperProbe.kext`.
   Compiles the six production translation units only.
-- **Debug**: `sh tools/build/probe-debug.sh` → `build-m1a-debug/AMDMapperProbe.kext`.
-  Adds `kext/*Debug.cpp` and `-DAMD_MAPPER_PROBE_DEBUG=1`, restoring the retired
+- **Debug**: `sh tools/build/build-probe-debug.sh` → `build-m1a-debug/AMDMapperProbe.kext`.
+  Adds `probe/*Debug.cpp` and `-DAMD_MAPPER_PROBE_DEBUG=1`, restoring the retired
   M2 experiment modes. See "Retired M2 experiment modes" below.
+- **Hook plugin**: `sh tools/build/build-hook.sh` → `build-hook/AMDMapperHook.kext`.
+  The optional Lilu companion described below; needs the Lilu source tree and
+  MacKernelSDK.
 
 ### Production build
 
@@ -109,18 +114,17 @@ The checked-in list is the verified adapter set:
 - Realtek range driven by Apple's Ethernet Realtek driver:
   `0x812410ec 0x812510ec 0x812610ec 0x812710ec`
 
-Everything outside this list keeps physical (pass-through) DMA. Identity
-matching does not define offer slots, so `claim` is only honoured for
-boot-arg-selected requesters; a plist-matched device attaches at first publish
-in `auto-attach` mode and gets no offer in `passive` mode, exactly like the
-former hardcoded RTL8127 default. For boot-arg-selected requesters the offer is
-published in both modes, so a claim is answered whether auto-attach has already
-attached the device or not.
+Everything outside this list keeps physical (pass-through) DMA. The two sources
+are never merged: when `amdiommu_devices` is present it is the only selection and
+this table is ignored; when it is absent this table is the selection. A device
+chosen either way is attached at first publish in both modes and also publishes
+an offer, so a client that runs the claim handshake gets a definite answer even
+when the mapper was already in place.
 
 ### Retired M2 experiment modes (Debug build only)
 
 Available only with `AMD_MAPPER_PROBE_DEBUG=1`. The parsers live in
-`kext/AMDMapperProbeDebug.hpp`; the implementations live in `kext/*Debug.cpp`.
+`probe/AMDMapperProbeDebug.hpp`; the implementations live in `probe/*Debug.cpp`.
 
 | Argument | Values | Meaning |
 |---|---|---|
@@ -151,15 +155,42 @@ lists only combinations verified on hardware, and only where the endpoint is
 driven by a driver shipped with macOS; unverified boards and third-party driver
 stacks are out of scope.
 
+## AMDMapperHook (optional companion)
+
+The probe is enough for most setups. A few drivers, however, neither run its
+claim handshake nor get a mapper from `auto-attach`; those devices would stay on
+plain physical DMA even though they were selected. `AMDMapperHook.kext` is a
+small optional add-on that closes that gap: it makes the mapper available to the
+device before its driver starts, without changing the driver. It relies on Lilu,
+so add both to OpenCore with Lilu first.
+
+You only need the hook when the probe waits for a claim (`amdiommu=passive` with
+an optional `amdiommu_devices` list). In `auto-attach` the mapper is already
+published at boot, and the hook simply stands by. There is no boot argument to
+turn it on: if the kext is loaded, it is active. To turn it off, disable its
+`Kernel > Add` entry in OpenCore, or add `-amdmhoff`.
+
+The hook does **not** widen the device list. Only requesters named by
+`amdiommu_devices`, or by `AMDMapperProbeDevices` when that boot argument is
+absent, are ever mapped; everything else is left on its physical path. In
+IORegistry the `AMDMapperHook` node shows `hook-state=installed` when it is
+ready, and the `hook-*` counters show whether it ever had to step in.
+
+Build it with `sh tools/build/build-hook.sh`. The bundle is written to
+`build-hook/AMDMapperHook.kext` and must be copied to the ESP (below) before a
+reboot; building alone changes nothing on the machine.
+
 ## Install location (target machine)
 
 The kext that actually runs is NOT installed in `/Library/Extensions` and is not
 part of the auxiliary kernel collection. It is deployed into the **OpenCore
 directory on the target machine's EFI system partition** and injected at boot:
 
-- Bundle: `<EFI system partition>/EFI/OC/Kexts/AMDMapperProbe.kext`
-- Enabled via `Kernel > Add` (`BundlePath = AMDMapperProbe.kext`) in the OC
-  `config.plist` on the same partition.
+- Bundles: `<EFI system partition>/EFI/OC/Kexts/AMDMapperProbe.kext` and, when
+  the hook is used, `AMDMapperHook.kext` (plus `Lilu.kext`).
+- Enabled via `Kernel > Add` (`BundlePath = AMDMapperProbe.kext`, then
+  `AMDMapperHook.kext`) in the OC `config.plist` on the same partition. Lilu
+  must appear before the hook.
 
 Deploying a new build therefore means copying `build-m1a/AMDMapperProbe.kext`
 (or the debug variant) over that bundle and rebooting; the partition number of

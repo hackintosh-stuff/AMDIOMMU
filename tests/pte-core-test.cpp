@@ -1,6 +1,6 @@
 // Host regression tests for the AMD-Vi page-table encoding core.
 //
-// These tests include kext/amd_iommu_pte_core.hpp -- THE SAME FILE the
+// These tests include probe/amd_iommu_pte_core.hpp -- THE SAME FILE the
 // production kext includes -- and call its real functions. They are not a
 // Python restatement of the logic: if a test here passes, the code that runs
 // on the machine took the same branch.
@@ -15,7 +15,7 @@
 //   * Linux v6.6 drivers/iommu/amd/amd_iommu_types.h PAGE_SIZE_* macros
 // and are written out literally here, not computed by the code under test.
 
-#include "../kext/amd_iommu_pte_core.hpp"
+#include "../probe/amd_iommu_pte_core.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -460,7 +460,7 @@ static void test8_spec_level_table() {
 int main() {
     std::printf("AMD-Vi page-table encoding core -- host regression\n");
     std::printf("==================================================\n");
-    std::printf("Testing kext/amd_iommu_pte_core.hpp (production code)\n");
+    std::printf("Testing probe/amd_iommu_pte_core.hpp (production code)\n");
 
     test1_round4_leaf_rejected();
     test2_corrected_leaf_accepted();

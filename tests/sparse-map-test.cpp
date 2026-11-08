@@ -3,8 +3,8 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
-#include "../kext/amd_iommu_sparse_core.hpp"
-#include "../kext/amd_iommu_bizwalk_core.hpp"
+#include "../probe/amd_iommu_sparse_core.hpp"
+#include "../probe/amd_iommu_bizwalk_core.hpp"
 using amdsparse::u64;
 static u64 mem[64 * 512];
 static unsigned checks;

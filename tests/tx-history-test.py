@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TX = (ROOT/'kext/AMDMapperProbeTxDebug.cpp').read_text(encoding='utf-8')
+TX = (ROOT/'probe/AMDMapperProbeTxDebug.cpp').read_text(encoding='utf-8')
 HEADER = (ROOT/'tools/lucy-obs/AMDAliveTxDomainNative.hpp').read_text(encoding='utf-8')
 
 def contracts():

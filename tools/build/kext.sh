@@ -11,10 +11,10 @@ WORK=$(mktemp -d "$ROOT/build-work.XXXXXX")
 KEXT="$WORK/AMDIdentityMapper.kext"
 BIN="$KEXT/Contents/MacOS/AMDIdentityMapper"
 mkdir -p "$KEXT/Contents/MacOS"
-cp "$ROOT/kext/Info.plist" "$KEXT/Contents/Info.plist"
+cp "$ROOT/probe/Info.plist" "$KEXT/Contents/Info.plist"
 plutil -lint "$KEXT/Contents/Info.plist"
 # Compile the standalone validator too; it remains UNWIRED to IOMapper methods.
-for UNIT in kext/AMDIdentityMapper src/IdentityMap; do
+for UNIT in probe/AMDIdentityMapper src/IdentityMap; do
     NAME=$(basename "$UNIT")
     xcrun clang++ -arch x86_64 -mkernel -fapple-kext -mno-red-zone \
         -isysroot "$SDK" -mmacosx-version-min="$SDK_VERSION" \
@@ -45,8 +45,8 @@ xcrun dwarfdump --uuid "$BIN"
     uname -a
 } > "$WORK/toolchain.txt"
 (cd "$ROOT" && shasum -a 256 include/amd_iommu/IdentityMap.hpp \
-    src/IdentityMap.cpp kext/AMDIdentityMapper.hpp kext/AMDIdentityMapper.cpp \
-    kext/Info.plist tools/build/kext.sh tools/verify/source.py) \
+    src/IdentityMap.cpp probe/AMDIdentityMapper.hpp probe/AMDIdentityMapper.cpp \
+    probe/Info.plist tools/build/kext.sh tools/verify/source.py) \
     > "$WORK/source-manifest.sha256"
 shasum -a 256 "$HEADERS/IOKit/IOMapper.h" \
     "$HEADERS/IOKit/IOMemoryDescriptor.h" "$HEADERS/IOKit/IODMACommand.h" \

@@ -146,7 +146,7 @@ bool org_maz1_AMDMapperProbe::initHardware(IOService *provider) {
 // The main switch now accepts only amdiommu=passive and amdiommu=auto-attach.
 // The retired M2 experiment modes (arm/mmio/write/table/enable/cmd/pgt*)
 // and their entry points live in AMDMapperProbeDebug.cpp, compiled by
-// tools/build/probe-debug.sh with AMD_MAPPER_PROBE_DEBUG=1.
+// tools/build/build-probe-debug.sh with AMD_MAPPER_PROBE_DEBUG=1.
 #if !AMD_MAPPER_PROBE_DEBUG
 
 bool org_maz1_AMDMapperProbe::start(IOService *provider) {

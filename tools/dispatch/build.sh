@@ -19,6 +19,6 @@ PY
 python3 -B tools/build/patch-lucy-obs.py "$LUCY_SRC" --tx21 --rx34
 python3 -B tools/abi/abi.py --check-r49
 sh tools/build/lucy.sh "$LUCY_SRC"
-sh tools/build/probe.sh
+sh tools/build/build-probe.sh
 sh tools/dual/build-rtl8111.sh "$RTL_SRC" "$LUCY_SRC"
 printf '%s\n' 'Round54 built: RTL812xLucy 1.1.239; RealtekRTL8111 3.0.54; AMDMapperProbe 0.61.0; explicit pre-open requester claims'

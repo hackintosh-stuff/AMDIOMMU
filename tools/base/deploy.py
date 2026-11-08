@@ -133,7 +133,7 @@ def source_identity():
     subprocess.run(['git', 'merge-base', '--is-ancestor', BASE_COMMIT, commit],
                    cwd=str(ROOT), check=True)
     dirty = output('git', 'status', '--porcelain=v1', '--untracked-files=normal',
-                   '--', 'kext', 'tools', 'include', 'src', 'tests', 'fixtures', 'reference')
+                   '--', 'probe', 'tools', 'include', 'src', 'tests', 'fixtures', 'reference')
     if dirty.strip():
         raise ValueError('uncommitted source differs from the deployment commit: ' + dirty.strip())
     return {'repository': 'repos/AMDIOMMU', 'base_commit': BASE_COMMIT,

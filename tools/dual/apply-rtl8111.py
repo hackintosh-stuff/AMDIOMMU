@@ -536,7 +536,7 @@ def main():
     driver = source / "RealtekRTL8111"
     pin_path = HERE / "rtl8111-source-pin.json"
     pin = json.loads(pin_path.read_text(encoding="utf-8"))
-    policy = (ROOT / "kext/amd_iommu_device_policy.hpp").read_bytes()
+    policy = (ROOT / "probe/amd_iommu_device_policy.hpp").read_bytes()
     fingerprint = digest(Path(__file__).read_bytes() + pin_path.read_bytes() + policy)
     stamp_path = source / ".r53-generated.json"
     if stamp_path.exists():

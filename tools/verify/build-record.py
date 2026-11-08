@@ -93,10 +93,10 @@ def make_stubs(tmp):
     # A fake workspace with the two build entry points and their outputs.
     ws = os.path.join(tmp, 'ws')
     os.makedirs(os.path.join(ws, 'tools', 'build'), exist_ok=True)
-    os.makedirs(os.path.join(ws, 'kext'), exist_ok=True)
+    os.makedirs(os.path.join(ws, 'probe'), exist_ok=True)
 
     # build-m1a.sh: create a bundle and record its path.
-    open(os.path.join(ws, 'tools', 'build', 'probe.sh'), 'w').write(
+    open(os.path.join(ws, 'tools', 'build', 'build-probe.sh'), 'w').write(
         '#!/bin/sh\n'
         'K="$PWD/build-m1a/AMDMapperProbe.kext"\n'
         'mkdir -p "$K/Contents/MacOS"\n'
@@ -121,7 +121,7 @@ def make_stubs(tmp):
         '</dict></plist>\n'
         'EOF\n'
         'printf "%s\\n" "$K" > latest-lucy-build.txt\n')
-    for f in ('build/probe.sh', 'build/lucy.sh'):
+    for f in ('build/build-probe.sh', 'build/lucy.sh'):
         os.chmod(os.path.join(ws, 'tools', f), 0o755)
 
     # The source files the manifests hash.
@@ -136,7 +136,7 @@ def make_stubs(tmp):
                  'amd_iommu_dma_observe.hpp', 'amd_iommu_pte_core.hpp',
                  'amd_iommu_bizwalk_core.hpp', 'AMDMapperProbe-Info.plist',
                  'Info.plist'):
-        open(os.path.join(ws, 'kext', name), 'w').write('// %s\n' % name)
+        open(os.path.join(ws, 'probe', name), 'w').write('// %s\n' % name)
     os.makedirs(os.path.join(ws, 'tools', 'lucy-obs'), exist_ok=True)
     for name in ('RTL812xObsLog.hpp', 'RTL812xObsWrite.hpp'):
         open(os.path.join(ws, 'tools', 'lucy-obs', name), 'w').write('// x\n')
@@ -167,12 +167,12 @@ def make_stubs(tmp):
         'echo "xcrun clang++ <flags> -c <src>" > "$OUT/build-commands.txt"\n'
         'echo "### stub" > "$OUT/probe-deps.raw.txt"\n'
         'echo "### stub" > "$OUT/lucy-deps.raw.txt"\n'
-        'printf "kext/AMDMapperProbe.cpp\\nkext/AMDMapperProbe.hpp\\n"'
+        'printf "probe/AMDMapperProbe.cpp\\nkext/AMDMapperProbe.hpp\\n"'
         ' > "$OUT/probe-inputs.list"\n'
         'printf "tools/build/lucy-kmod-info.cpp\\nRTL812xLucy-1.1.2/RTL812xLucy/'
         'RTL812xLucy.cpp\\n" > "$OUT/lucy-inputs.list"\n'
         'printf "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-        'aaaaaaaaaaaaaaaa  1  project-kext  kext/AMDMapperProbe.cpp\\n"'
+        'aaaaaaaaaaaaaaaa  1  project-kext  probe/AMDMapperProbe.cpp\\n"'
         ' > "$OUT/probe-inputs.sha256"\n'
         'printf "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
         'bbbbbbbbbbbbbbbb  1  project-tools  tools/build/lucy-kmod-info.cpp\\n"'

@@ -192,7 +192,7 @@ def abi():
                 raise RuntimeError('C++ compiler required (CXX, clang++ or g++)')
             compiler = [found]
         subprocess.run(compiler + ['-std=c++17', '-Wno-enum-compare', '-I', str(ROOT / 'tools/lucy-obs'),
-                        '-I', str(ROOT / 'kext'),
+                        '-I', str(ROOT / 'probe'),
                         str(src), '-o', str(exe)], check=True)
         out = subprocess.check_output([str(exe)], text=True)
     return json.loads(out)

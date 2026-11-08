@@ -2236,7 +2236,7 @@ def sync_headers(drv):
     pairs += [(os.path.join(HERE, 'lucy-obs', name), name)
               for name in TXMAP_NAMES + RXMAP_NAMES]
     if TX_SELECT == '21' and RX_SELECT == '34':
-        pairs.append((os.path.join(HERE, '..', 'kext',
+        pairs.append((os.path.join(HERE, '..', 'probe',
                                    'amd_iommu_device_policy.hpp'),
                       'amd_iommu_device_policy.hpp'))
     for src, name in pairs:
@@ -2561,7 +2561,7 @@ def main():
     if TX_SELECT == '21' and RX_SELECT == '34':
         name = 'amd_iommu_device_policy.hpp'
         write(os.path.join(drv, name),
-              read(os.path.join(HERE, '..', 'kext', name)))
+              read(os.path.join(HERE, '..', 'probe', name)))
 
     # 2. the class
     hpp_text = replace_once(hpp_text, HPP_INCLUDE_OLD, HPP_INCLUDE_NEW,

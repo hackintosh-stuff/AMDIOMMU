@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'kext/AMDMapperProbeInternal.hpp').read_text(encoding='utf-8')
+SOURCE = (ROOT / 'probe/AMDMapperProbeInternal.hpp').read_text(encoding='utf-8')
 
 def extract(start, end):
     return SOURCE[SOURCE.index(start):SOURCE.index(end, SOURCE.index(start))]

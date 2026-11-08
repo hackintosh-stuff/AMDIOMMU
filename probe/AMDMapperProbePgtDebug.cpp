@@ -3252,7 +3252,7 @@ recover:
 //      downgrade -- making "only partly walked" and "all qualified"
 //      indistinguishable in the output.
 //
-// The walk logic now lives in kext/amd_iommu_bizwalk_core.hpp, compiled by the
+// The walk logic now lives in probe/amd_iommu_bizwalk_core.hpp, compiled by the
 // probe and the host regression from **the same** code. This site only: fetch
 // the DTE, bound readEntry, publish the results, and account separately for
 // expected/count/ok/fail/capped.

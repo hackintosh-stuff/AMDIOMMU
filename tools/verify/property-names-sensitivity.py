@@ -25,7 +25,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-SRC = os.path.join(ROOT, 'kext', 'AMDMapperProbeRxSetDebug.cpp')
+SRC = os.path.join(ROOT, 'probe', 'AMDMapperProbeRxSetDebug.cpp')
 CHECKER = os.path.join(HERE, 'property-names.py')
 
 FAILS = []
@@ -85,8 +85,8 @@ def main():
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work, exist_ok=True)
     try:
-        dst_kext = os.path.join(work, 'kext')
-        shutil.copytree(os.path.join(ROOT, 'kext'), dst_kext)
+        dst_kext = os.path.join(work, 'probe')
+        shutil.copytree(os.path.join(ROOT, 'probe'), dst_kext)
         p = os.path.join(dst_kext, 'AMDMapperProbeRxSetDebug.cpp')
         text = open(p, encoding='utf-8').read()
 

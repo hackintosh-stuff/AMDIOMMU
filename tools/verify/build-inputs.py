@@ -264,7 +264,7 @@ def main():
     # normalisation: a flag added to a build script without a matching change in
     # deps.sh means the dependency list describes a DIFFERENT build.
     pairs = [
-        ('tools/build/probe.sh', 'CFLAGS', 'tools/verify/deps.sh', 'PROBE_CFLAGS'),
+        ('tools/build/build-probe.sh', 'CFLAGS', 'tools/verify/deps.sh', 'PROBE_CFLAGS'),
         ('tools/build/lucy.sh', 'CFLAGS', 'tools/verify/deps.sh', 'LUCY_CFLAGS'),
         ('tools/build/lucy.sh', 'CFLAGS_C', 'tools/verify/deps.sh',
          'LUCY_CFLAGS_C'),

@@ -16,5 +16,5 @@ PY
 python3 -B tools/build/patch-lucy-obs.py "$SRC" --tx21 --rx34 --r59
 python3 -B tools/abi/abi.py --check-r59
 sh tools/build/lucy.sh --r59 "$SRC"
-sh tools/build/probe.sh
+sh tools/build/build-probe.sh
 printf '%s\n' 'Round59 built: Probe 0.66.0 and Lucy 1.1.240 with 8 x 128-page RX groups; retain RealtekRTL8111 3.0.54'

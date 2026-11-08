@@ -31,7 +31,7 @@ round.
 
 ## Source and evidence policy
 
-- `kext/`, `tools/` are canonical implementation and generator inputs. `include/`, `src/`, `tests/` contain existing modules, tests and reference inputs.
+- `probe/`, `tools/` are canonical implementation and generator inputs. `include/`, `src/`, `tests/` contain existing modules, tests and reference inputs.
 - `reference/` holds the Apple xnu/IOPCIFamily and Linux v6.6 sources used to cross-check the implementation. They are kept locally but are not committed; the source comments cite them by file and line.
 - `fixtures/` holds captured firmware tables used by the offline tests. It is also local-only: `tests/InspectorSmoke.py` runs its synthetic cases when the real IVRS blob is absent, so a fresh clone passes without it.
 - Runtime evidence, kext binaries, SDKs, upstream tarballs and full patch-package before/after snapshots are not committed.
@@ -57,8 +57,8 @@ archived captures. They are not directory or file names any more.
 ```sh
 sh tools/test.sh                       # offline gate; needs clang + SDK
 python3 tools/run.py --help            # run-chain entry
-sh tools/build/probe.sh                # production kext
-sh tools/build/probe-debug.sh          # Debug variant, retired M2 modes
+sh tools/build/build-probe.sh                # production kext
+sh tools/build/build-probe-debug.sh          # Debug variant, retired M2 modes
 python3 tools/verify/source.py         # hygiene (LF, empty personalities, disabled start)
 python3 tools/verify/rxpost-layout.py  # RX wire-format declarations must agree
 ```

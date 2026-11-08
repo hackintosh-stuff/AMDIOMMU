@@ -1203,12 +1203,12 @@ public:
     //      client requests.
     void m2b2ReadDriverObs();
 
-    // ---- Debug-only declarations: used only by kext/*Debug.cpp ----
+    // ---- Debug-only declarations: used only by probe/*Debug.cpp ----
 public:
 
 
     // Round17: native-mbuf TX mapping. One live owner, evidence and command
-    // budget bounded separately (see kext/AMDMapperProbeTx.cpp).
+    // budget bounded separately (see probe/AMDMapperProbeTx.cpp).
     struct R17Domain;
     R17Domain *fR17 = nullptr;
     bool r17Prepare(volatile UInt64 *, UInt64, UInt32);

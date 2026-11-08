@@ -16,5 +16,5 @@ python3 -B tools/build/patch-lucy-obs.py "$SRC" --tx21 --rx34
 # Round45 changes the Lucy TSO path; the accepted Round44 mapper ABI is unchanged.
 python3 -B tools/abi/abi.py --check-r44
 sh tools/build/lucy.sh "$SRC"
-sh tools/build/probe.sh
+sh tools/build/build-probe.sh
 printf '%s\n' 'Round45 built: RTL812xLucy 1.1.230; IPv4 TSO on / IPv6 TSO off; AMDMapperProbe 0.53.0 unchanged; ordinary per-device IOMapper ABI1; finite TCP4 before/after normal down/up'
