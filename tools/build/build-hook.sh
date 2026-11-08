@@ -5,9 +5,9 @@
 # Usage (run on macOS, from anywhere):
 #   sh tools/build/build-hook.sh [hook-source-dir] [lilu-source-root] [MacKernelSDK-root]
 #
-# Defaults: hook source is <repo>/hook/AMDMapperHook, Lilu source is
-# $LILU_SRC or ~/lilu-src, MacKernelSDK is $MACKERNELSDK or one of the usual
-# locations. Output is <repo>/build-hook/AMDMapperHook.kext; set
+# Defaults: hook source is <repo>/hook (AMDMapperHook.cpp and Info.plist), Lilu
+# source is $LILU_SRC or ~/lilu-src, MacKernelSDK is $MACKERNELSDK or one of the
+# usual locations. Output is <repo>/build-hook/AMDMapperHook.kext; set
 # HOOK_BUILD_DIR to put it elsewhere. Build only: nothing is deployed and
 # no kernel collection or ESP is touched.
 #
@@ -21,7 +21,7 @@ set -eu
 [ "$(uname -s)" = "Darwin" ] || { echo "This script can only run on macOS" >&2; exit 1; }
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-SRC=${1:-$ROOT/hook/AMDMapperHook}
+SRC=${1:-$ROOT/hook}
 LILU=${2:-${LILU_SRC:-$HOME/lilu-src}}
 NAME=AMDMapperHook
 MODULE_NAME=org.maz1.AMDMapperHook

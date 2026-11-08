@@ -554,6 +554,12 @@ kext. Record the source commit and the SHA-256 of
 build output must match. The optimization level does not change capacity
 mechanics, snapshot ABI5, device selection, the ceiling or the auto-attach path.
 
+The optional Lilu plugin has its own entry, `tools/build/build-hook.sh`. Its
+sources are `hook/AMDMapperHook.cpp` and `hook/Info.plist`, read from
+`<repo>/hook` by default; the optional first argument still selects another
+source directory. The output path `build-hook/AMDMapperHook.kext` and the
+OpenCore installation steps in [README.md](README.md#build) are unchanged.
+
 ### Release validation and observations
 
 Validate an optimized binary with the existing entries (`tools/test.sh`,

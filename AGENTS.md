@@ -37,7 +37,7 @@ round.
 
 ## Source and evidence policy
 
-- `probe/`, `tools/` are canonical implementation and generator inputs. `include/`, `src/`, `tests/` contain existing modules, tests and reference inputs.
+- `probe/`, `hook/`, `tools/` are canonical implementation and generator inputs; the Lilu plugin sources live directly in `hook/`. `include/`, `src/`, `tests/` contain existing modules, tests and reference inputs.
 - `reference/` holds the Apple xnu/IOPCIFamily and Linux v6.6 sources used to cross-check the implementation. They are kept locally but are not committed; the source comments cite them by file and line.
 - `fixtures/` holds captured firmware tables used by the offline tests. It is also local-only: `tests/InspectorSmoke.py` runs its synthetic cases when the real IVRS blob is absent, so a fresh clone passes without it.
 - Runtime evidence, kext binaries, SDKs, upstream tarballs and full patch-package before/after snapshots are not committed.
