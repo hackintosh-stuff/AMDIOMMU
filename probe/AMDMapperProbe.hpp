@@ -10,6 +10,7 @@ class IOPCIDevice;
 class IOBufferMemoryDescriptor;
 
 #include "amd_iommu_mapper_abi.hpp"
+#include "AMDMapperProbeDbg.hpp"
 
 // Pure-logic core for device DMA observation (range sets, fault
 // classification, descriptor decoding). Included by the host regression tests
@@ -132,6 +133,11 @@ private:
     // its iommu-parent at first publish instead of at claim. Off by default so
     // the R54..R67 claim protocol and its analysis stay the default behaviour.
     bool fAutoAttach = false;
+    // 8-bit IORegistry publication mask; amdiommu_dbg=0xNN. Default keeps the
+    // pre-mask surface so diagnostics are never lost by upgrading the kext.
+    UInt32 fDbgMask = amdiommu_dbg::kDefault;
+    bool ReadDbgMask();
+    bool DbgOn(UInt32 group) const { return amdiommu_dbg::On(fDbgMask, group); }
     // Capacity evidence for third-party clients; published only on change.
     UInt64 fMaxLength = 0, fMaxPages = 0, fMaxRuns = 0;
     UInt64 fPublishedMaxLength = 0, fPublishedMaxPages = 0,

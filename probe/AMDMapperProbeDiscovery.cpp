@@ -1,5 +1,6 @@
 // The normal IOMapper path obtains its controller from firmware and PCI.
 #include "AMDMapperProbeDiscovery.hpp"
+#include "AMDMapperProbeDbg.hpp"
 #include "amd_iommu/IvrsTopology.hpp"
 #include <IOKit/IOLib.h>
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
@@ -62,17 +63,21 @@ IOACPIPlatformDevice *FindAcpiDevice() {
 }
 
 bool DiscoverHardware(IOService *probe, IOPCIDevice *nic,
-                         HardwareInfo &info) {
+                         HardwareInfo &info, UInt32 dbgMask) {
     info = {};
-    auto failure = [probe](const char *reason) {
-        probe->setProperty("discovery-state", reason);
+    const bool dbg = amdiommu_dbg::On(dbgMask, amdiommu_dbg::kDiscovery);
+    const bool dbgRaw = dbg && amdiommu_dbg::On(dbgMask, amdiommu_dbg::kRaw);
+    auto failure = [probe, dbg](const char *reason) {
+        if (dbg) probe->setProperty("discovery-state", reason);
         return false;
     };
-    auto number = [probe](const char *key, UInt64 value) {
-        probe->setProperty(key, (unsigned long long)value, 64);
+    auto number = [probe, dbg](const char *key, UInt64 value) {
+        if (dbg) probe->setProperty(key, (unsigned long long)value, 64);
     };
-    probe->setProperty("discovery-source", "acpi-ivrs+pci");
-    probe->setProperty("discovery-state", "reading-ivrs");
+    if (dbg) {
+        probe->setProperty("discovery-source", "acpi-ivrs+pci");
+        probe->setProperty("discovery-state", "reading-ivrs");
+    }
     IOACPIPlatformDevice *acpi = FindAcpiDevice();
     if (!acpi) return failure("failed-acpi-device");
     // getACPITableData returns a borrowed const OSData. Retain a separate copy
@@ -82,7 +87,7 @@ bool DiscoverHardware(IOService *probe, IOPCIDevice *nic,
     if (!table) return failure("failed-ivrs-missing");
     OSData *raw = OSData::withData(table);
     if (!raw) return failure("failed-ivrs-copy");
-    probe->setProperty("discovery-ivrs-raw", raw);
+    if (dbgRaw) probe->setProperty("discovery-ivrs-raw", raw);
     number("discovery-ivrs-bytes", raw->getLength());
     auto *units = (amd_iommu::IvhdUnitTable *)
         IOMalloc(sizeof(amd_iommu::IvhdUnitTable));
@@ -92,16 +97,16 @@ bool DiscoverHardware(IOService *probe, IOPCIDevice *nic,
     }
     // Keep the bounded topology inventory off the kernel stack. The scalar
     // result survives its release; no unit/block pointer escapes this scope.
-    auto finish = [units, raw, probe](const char *state, bool ok) {
+    auto finish = [units, raw, probe, dbg](const char *state, bool ok) {
         IOFree(units, sizeof(*units));
         raw->release();
-        probe->setProperty("discovery-state", state);
+        if (dbg) probe->setProperty("discovery-state", state);
         return ok;
     };
     const UInt8 *bytes = (const UInt8 *)raw->getBytesNoCopy();
     const auto topology = amd_iommu::buildTopology(bytes, raw->getLength(), *units);
     if (!topology) {
-        probe->setProperty("discovery-detail",
+        if (dbg) probe->setProperty("discovery-detail",
                           amd_iommu::topologyErrorString(topology.error));
         return finish("failed-ivrs-topology", false);
     }
@@ -111,7 +116,7 @@ bool DiscoverHardware(IOService *probe, IOPCIDevice *nic,
     number("discovery-pci-segment", kPciSegment);
     number("discovery-requester-id", requester.deviceId);
     if (!requester) {
-        probe->setProperty("discovery-detail",
+        if (dbg) probe->setProperty("discovery-detail",
                           amd_iommu::requesterStatusString(requester.status));
         return finish("failed-ivrs-requester", false);
     }

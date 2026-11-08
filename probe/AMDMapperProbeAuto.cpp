@@ -387,34 +387,30 @@ bool org_maz1_AMDMapperProbe::ReadDeviceSelection() {
     // kernel converts an all-digit boot-arg value into a 32-bit integer
     // inside the caller's buffer (observed: "3400" arrived as 0x0D48).
     // So: skip every non-hex byte before each ID, then parse four hex digits.
+    const bool base = DbgOn(amdiommu_dbg::kBase);
+    const bool select = DbgOn(amdiommu_dbg::kSelect);
+    auto failure = [this, base]() {
+        if (base) setProperty("iommu-state", "failed-device-selection");
+        return false;
+    };
     const char *cursor = selection;
     while (true) {
         while (*cursor && !IsHexDigit(*cursor)) ++cursor;
         if (!*cursor) break;
-        if (fRequesterCount == kMaxDomains) {
-            setProperty("iommu-state", "failed-device-selection");
-            return false;
-        }
+        if (fRequesterCount == kMaxDomains) return failure();
         UInt32 id = 0;
-        if (!ParseRequester(cursor, id)) {
-            setProperty("iommu-state", "failed-device-selection");
-            return false;
-        }
+        if (!ParseRequester(cursor, id)) return failure();
         for (UInt32 i = 0; i < fRequesterCount; ++i) {
-            if (fRequesters[i] == id) {
-                setProperty("iommu-state", "failed-device-selection");
-                return false;
-            }
+            if (fRequesters[i] == id) return failure();
         }
         fRequesters[fRequesterCount++] = id;
         cursor += 4;
     }
-    if (!fRequesterCount) {
-        setProperty("iommu-state", "failed-device-selection");
-        return false;
+    if (!fRequesterCount) return failure();
+    if (select) {
+        setProperty("device-selection", selection);
+        setProperty("device-selection-count", fRequesterCount, 32);
     }
-    setProperty("device-selection", selection);
-    setProperty("device-selection-count", fRequesterCount, 32);
     return true;
 }
 
@@ -427,25 +423,24 @@ bool org_maz1_AMDMapperProbe::ReadDeviceSelection() {
 // getProperty() -- no OSKext API needed.
 bool org_maz1_AMDMapperProbe::ReadDefaultDevices() {
     fDefaultDeviceCount = 0;
+    const bool select = DbgOn(amdiommu_dbg::kSelect);
+    auto failure = [this, select](const char *state) {
+        if (select) setProperty("device-selection", state);
+        fDefaultDeviceCount = 0;
+        return true;
+    };
     OSString *value = OSDynamicCast(OSString, getProperty("AMDMapperProbeDevices"));
     if (!value || !value->getCStringNoCopy()) {
-        setProperty("device-selection", "plist-missing");
-        return true;  // no default devices: every later publish is rejected
+        return failure("plist-missing");  // no default devices: later publishes are rejected
     }
     const char *cursor = value->getCStringNoCopy();
     while (*cursor) {
         while (*cursor == ' ' || *cursor == '\t') ++cursor;
         if (!*cursor) break;
-        if (fDefaultDeviceCount == kMaxDefaultDevices) {
-            setProperty("device-selection", "plist-too-many-entries");
-            fDefaultDeviceCount = 0;
-            return true;
-        }
-        if (cursor[0] != '0' || (cursor[1] != 'x' && cursor[1] != 'X')) {
-            setProperty("device-selection", "plist-parse-failed");
-            fDefaultDeviceCount = 0;
-            return true;
-        }
+        if (fDefaultDeviceCount == kMaxDefaultDevices)
+            return failure("plist-too-many-entries");
+        if (cursor[0] != '0' || (cursor[1] != 'x' && cursor[1] != 'X'))
+            return failure("plist-parse-failed");
         cursor += 2;
         UInt64 id = 0;
         UInt32 digits = 0;
@@ -456,19 +451,12 @@ bool org_maz1_AMDMapperProbe::ReadDefaultDevices() {
             id = (id << 4) | nibble;
             ++digits;
         }
-        if (!digits) {
-            setProperty("device-selection", "plist-parse-failed");
-            fDefaultDeviceCount = 0;
-            return true;
-        }
+        if (!digits) return failure("plist-parse-failed");
         UInt32 mask = 0xffffffffU;
         if (*cursor == '&') {
             ++cursor;
-            if (cursor[0] != '0' || (cursor[1] != 'x' && cursor[1] != 'X')) {
-                setProperty("device-selection", "plist-parse-failed");
-                fDefaultDeviceCount = 0;
-                return true;
-            }
+            if (cursor[0] != '0' || (cursor[1] != 'x' && cursor[1] != 'X'))
+                return failure("plist-parse-failed");
             cursor += 2;
             UInt64 parsed = 0;
             digits = 0;
@@ -479,25 +467,20 @@ bool org_maz1_AMDMapperProbe::ReadDefaultDevices() {
                 parsed = (parsed << 4) | nibble;
                 ++digits;
             }
-            if (!digits) {
-                setProperty("device-selection", "plist-parse-failed");
-                fDefaultDeviceCount = 0;
-                return true;
-            }
+            if (!digits) return failure("plist-parse-failed");
             mask = (UInt32)(parsed & 0xffffffffU);
         }
-        if (*cursor && *cursor != ' ' && *cursor != '\t') {
-            setProperty("device-selection", "plist-parse-failed");
-            fDefaultDeviceCount = 0;
-            return true;
-        }
+        if (*cursor && *cursor != ' ' && *cursor != '\t')
+            return failure("plist-parse-failed");
         fDefaultDevices[fDefaultDeviceCount].idMasked =
             (UInt32)(id & 0xffffffffU) & mask;
         fDefaultDevices[fDefaultDeviceCount].mask = mask;
         ++fDefaultDeviceCount;
     }
-    setProperty("device-selection", value->getCStringNoCopy());
-    setProperty("device-selection-count", fDefaultDeviceCount, 32);
+    if (select) {
+        setProperty("device-selection", value->getCStringNoCopy());
+        setProperty("device-selection-count", fDefaultDeviceCount, 32);
+    }
     return true;
 }
 
@@ -520,13 +503,15 @@ bool org_maz1_AMDMapperProbe::SelectProfile() {
     const mapper_abi::Profile *ceiling = Ceiling(forced);
     fProfile = *ceiling;
     fProfileForced = forced;
-    if (named) setProperty("iommu-profile-request", requested);
-    setProperty("iommu-profile-mode", forced ? "forced" : "capacity-demand");
-    setProperty("iommu-profile", ceiling->name);
-    setProperty("iommu-profile-ceiling", ceiling->name);
-    setProperty("iommu-profile-records", ceiling->records, 32);
-    setProperty("iommu-profile-pages", ceiling->pages, 32);
-    setProperty("iommu-profile-table-pages", ceiling->tablePages, 32);
+    if (DbgOn(amdiommu_dbg::kSelect)) {
+        if (named) setProperty("iommu-profile-request", requested);
+        setProperty("iommu-profile-mode", forced ? "forced" : "capacity-demand");
+        setProperty("iommu-profile", ceiling->name);
+        setProperty("iommu-profile-ceiling", ceiling->name);
+        setProperty("iommu-profile-records", ceiling->records, 32);
+        setProperty("iommu-profile-pages", ceiling->pages, 32);
+        setProperty("iommu-profile-table-pages", ceiling->tablePages, 32);
+    }
     // An unknown name must never widen the pool. It is reported as refused and
     // leaves the legacy ceiling in place, which also disables growth.
     return !named || mapper_abi::profileForName(requested) != nullptr;
@@ -590,15 +575,18 @@ const mapper_abi::Profile *org_maz1_AMDMapperProbe::ProfileForDevice(
 
 bool org_maz1_AMDMapperProbe::StartAuto() {
     IOLog("AMDMapperProbe: auto-start enter\n");
-    setProperty("iommu-mode", "passive");
-    setProperty("iommu-role", "controller");
-    setProperty("snapshot-consistency", "per-domain");
-    setProperty("iommu-max-domains", kMaxDomains, 32);
-    setProperty("iommu-domain-count", 0ULL, 64);
-    setProperty("iommu-state", "waiting-for-pci-publication");
-    setProperty("iommu-controller-ready", "no");
-    setProperty("iommu-system-mapper", "no");
-    setProperty("iomapper-gsystem", IOMapper::gSystem ? "NONNULL" : "NULL-as-expected");
+    const bool base = DbgOn(amdiommu_dbg::kBase);
+    if (base) {
+        setProperty("iommu-mode", "passive");
+        setProperty("iommu-role", "controller");
+        setProperty("snapshot-consistency", "per-domain");
+        setProperty("iommu-max-domains", kMaxDomains, 32);
+        setProperty("iommu-domain-count", 0ULL, 64);
+        setProperty("iommu-state", "waiting-for-pci-publication");
+        setProperty("iommu-controller-ready", "no");
+        setProperty("iommu-system-mapper", "no");
+        setProperty("iomapper-gsystem", IOMapper::gSystem ? "NONNULL" : "NULL-as-expected");
+    }
     if (!ReadDeviceSelection()) {
         return false;
     }
@@ -607,13 +595,13 @@ bool org_maz1_AMDMapperProbe::StartAuto() {
     // the only switch: it publishes iommu-parent at first publish (before their
     // probe) for the selected requesters only. Plain amdiommu=passive keeps
     // the offer/claim protocol intact.
-    setProperty("auto-attach", fAutoAttach ? "yes" : "no");
+    if (base) setProperty("auto-attach", fAutoAttach ? "yes" : "no");
     SelectProfile();
     fAttachLock = IOLockAlloc();
     if (!fAttachLock) return false;
     installPublishNotifier();
     if (!fPublishNotifier) {
-        setProperty("iommu-state", "failed-publish-notifier");
+        if (base) setProperty("iommu-state", "failed-publish-notifier");
         IOLockFree(fAttachLock); fAttachLock = nullptr;
         return false;
     }
@@ -635,6 +623,10 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim,
     if (!fAuto || fOwner || !fAttachLock) return false;
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
     if (!nic) return false;
+    const bool attachDbg = DbgOn(amdiommu_dbg::kAttach);
+    auto attachFailure = [this, attachDbg](const char *state) {
+        if (attachDbg) setProperty("attach-failure", state);
+    };
     // A config-space cycle on this device can stall the notification thread,
     // so take the identity from the registry properties instead.
     UInt32 vendorId = 0, deviceId = 0;
@@ -676,8 +668,10 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim,
             IOService *&offered = fOffers[match];
             if (offered) return offered == nic;  // first publish or replay
             if (nic->isOpen() || nic->getProperty("iommu-parent")) {
-                setProperty("attach-failure", "already-open-or-bound");
-                setProperty("attach-rejected-requester", requester, 32);
+                if (attachDbg) {
+                    setProperty("attach-failure", "already-open-or-bound");
+                    setProperty("attach-rejected-requester", requester, 32);
+                }
                 nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
                 return false;
             }
@@ -759,19 +753,19 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim,
     }
     AttachPolicy policy(nic);
     ++fPublishHits;
-    setProperty("publish-hits", (unsigned long long)fPublishHits, 64);
+    if (attachDbg) setProperty("publish-hits", (unsigned long long)fPublishHits, 64);
     UInt32 slot = kMaxDomains;
     for (UInt32 i = 0; i < kMaxDomains; ++i) {
         auto *mapper = fMappers[i];
         if (!mapper) { if (slot == kMaxDomains) slot = i; continue; }
         if (mapper->fNicDevice == nic) { policy.mapped = true; return true; }
         if (mapper->fDomain && mapper->fDomain->deviceID == requester) {
-            setProperty("attach-failure", "duplicate-requester");
+            attachFailure("duplicate-requester");
             return false;
         }
     }
     if (slot == kMaxDomains) {
-        setProperty("attach-failure", "domain-capacity");
+        attachFailure("domain-capacity");
         return false;
     }
     // allowOpen: the copyMapperForDevice() hook calls us from inside the
@@ -780,8 +774,10 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim,
     // device that already resolves DMA somewhere else.
     if ((!allowOpen && nic->isOpen()) ||
         (claim && nic->getProperty("iommu-parent"))) {
-        setProperty("attach-failure", "already-open-or-bound");
-        setProperty("attach-rejected-requester", requester, 32);
+        if (attachDbg) {
+            setProperty("attach-failure", "already-open-or-bound");
+            setProperty("attach-rejected-requester", requester, 32);
+        }
         return false;
     }
     auto *mapper = new org_maz1_AMDMapperProbe;
@@ -794,8 +790,10 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim,
         mapper->detach(this); mapper->release(); return false;
     }
     if (!mapper->PrepareDomain(nic, slot, deviceProfile, profileSource, allowOpen)) {
-        setProperty("attach-failure", "device-prepare");
-        setProperty("attach-rejected-requester", requester, 32);
+        if (attachDbg) {
+            setProperty("attach-failure", "device-prepare");
+            setProperty("attach-rejected-requester", requester, 32);
+        }
         mapper->ReleaseDomain();
         mapper->stop(this);
         mapper->detach(this); mapper->release();
@@ -809,6 +807,8 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim,
 #pragma clang diagnostic pop
 
 bool org_maz1_AMDMapperProbe::PrepareController(const HardwareInfo &hardware) {
+    const bool baseDbg = DbgOn(amdiommu_dbg::kBase);
+    const bool discoveryDbg = DbgOn(amdiommu_dbg::kDiscovery);
     if (fController) {
         LockGuard guard(fController->lock);
         const auto &found = fController->hardware;
@@ -850,7 +850,8 @@ bool org_maz1_AMDMapperProbe::PrepareController(const HardwareInfo &hardware) {
             c->base = (volatile UInt8 *)c->mmioMap->getVirtualAddress();
             if (c->hardware.pciEfrSupported)
                 c->startupEfr = mmioRead64(c->base, M21_OFF_EXT_FEAT);
-            setProperty("iommu-mmio-efr", (unsigned long long)c->startupEfr, 64);
+            if (discoveryDbg)
+                setProperty("iommu-mmio-efr", (unsigned long long)c->startupEfr, 64);
             // Host four-level translation, INV_DEV/INV_PAGES and CW are the
             // basic path. Guest/PASID/performance EFR bits are not requirements.
             // If firmware supplies an EFR image, verify the same unit's actual
@@ -859,15 +860,17 @@ bool org_maz1_AMDMapperProbe::PrepareController(const HardwareInfo &hardware) {
                 (c->hardware.firmwareEfrPresent &&
                  (!c->hardware.pciEfrSupported ||
                   c->startupEfr != c->hardware.firmwareEfr))) {
-                setProperty("iommu-efr-match", "no");
+                if (discoveryDbg) setProperty("iommu-efr-match", "no");
                 failure = "failed-iommu-efr";
             } else {
-                setProperty("iommu-efr-match", !c->hardware.pciEfrSupported ?
-                    "not-reported" : (c->hardware.firmwareEfrPresent ?
-                    "yes" : "firmware-absent"));
+                if (discoveryDbg)
+                    setProperty("iommu-efr-match", !c->hardware.pciEfrSupported ?
+                        "not-reported" : (c->hardware.firmwareEfrPresent ?
+                        "yes" : "firmware-absent"));
             }
         }
-        setProperty("discovery-state", failure ? failure : "ready");
+        if (discoveryDbg)
+            setProperty("discovery-state", failure ? failure : "ready");
     }
     if (!failure) {
         c->originalDT = mmioRead64(c->base, M2B2_OFF_DEV_TABLE);
@@ -878,7 +881,7 @@ bool org_maz1_AMDMapperProbe::PrepareController(const HardwareInfo &hardware) {
             failure = "failed-iommu-already-enabled";
     }
     if (failure) {
-        setProperty("iommu-state", failure);
+        if (baseDbg) setProperty("iommu-state", failure);
         c->releaseBuffers();
         fController = nullptr;
         IOFree(c, sizeof(*c));
@@ -919,7 +922,7 @@ bool org_maz1_AMDMapperProbe::PrepareController(const HardwareInfo &hardware) {
     mmioWrite64(c->base, M2B2_OFF_CONTROL, control);
     if ((mmioRead64(c->base, M2B2_OFF_CONTROL) & kEnabled) != kEnabled) {
         c->state = "failed-controller-enable";
-        setProperty("iommu-failure", c->state);
+        if (baseDbg) setProperty("iommu-failure", c->state);
         if (c->restore()) {
             c->releaseBuffers();
             fController = nullptr;
@@ -944,9 +947,12 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
     mapper_abi::ProfileSource sourceIn, bool allowOpen) {
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
     if (!fOwner || !nic || slot >= kMaxDomains) return false;
+    const bool selectDbg = DbgOn(amdiommu_dbg::kSelect);
+    const bool attachDbg = DbgOn(amdiommu_dbg::kAttach);
+    const bool discoveryDbg = DbgOn(amdiommu_dbg::kDiscovery);
     const mapper_abi::Profile *requested = requestedIn;
     HardwareInfo hardware{};
-    if (!DiscoverHardware(this, nic, hardware)) return false;
+    if (!DiscoverHardware(this, nic, hardware, fDbgMask)) return false;
     auto *d = (Domain *)IOMalloc(sizeof(Domain));
     if (!d) return false;
     bzero(d, sizeof(*d));
@@ -974,24 +980,26 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
         prepared->pages < ceiling->pages;
     // Per-instance admission evidence: the device mapper is its own instance,
     // so record whether this instance saw the boot-arg override at all.
-    nic->setProperty("iommu-attach-forced", ForcedProfile() ? "yes" : "no");
-    nic->setProperty("iommu-attach-instance", getRegistryEntryID(), 64);
-    nic->setProperty("iommu-profile-source",
-        source == mapper_abi::ProfileSource::bootArg ? "boot-arg"
-        : (source == mapper_abi::ProfileSource::idTable ? "id-table"
-        : (source == mapper_abi::ProfileSource::classTable ? "class-table"
-                                                          : "legacy-fallback")));
-    // Record the identity-based suggestion separately from the actual ceiling
-    // and current usable capacity.
-    nic->setProperty("iommu-profile-suggested", requested->name);
-    nic->setProperty("iommu-profile-prepared", prepared->name);
-    nic->setProperty("iommu-profile-ceiling-source",
-                     forcedCeiling ? "boot-arg" : "default");
-    nic->setProperty("iommu-profile-ceiling",
-                     unsupported ? "unsupported-name" : ceiling->name);
-    nic->setProperty("iommu-growth-policy", growth ? "capacity-demand" : "disabled");
-    nic->setProperty("iommu-capacity-grown", "no");
-    nic->setProperty("iommu-profile", prepared->name);
+    if (selectDbg) {
+        nic->setProperty("iommu-attach-forced", ForcedProfile() ? "yes" : "no");
+        nic->setProperty("iommu-attach-instance", getRegistryEntryID(), 64);
+        nic->setProperty("iommu-profile-source",
+            source == mapper_abi::ProfileSource::bootArg ? "boot-arg"
+            : (source == mapper_abi::ProfileSource::idTable ? "id-table"
+            : (source == mapper_abi::ProfileSource::classTable ? "class-table"
+                                                              : "legacy-fallback")));
+        // Record the identity-based suggestion separately from the actual ceiling
+        // and current usable capacity.
+        nic->setProperty("iommu-profile-suggested", requested->name);
+        nic->setProperty("iommu-profile-prepared", prepared->name);
+        nic->setProperty("iommu-profile-ceiling-source",
+                         forcedCeiling ? "boot-arg" : "default");
+        nic->setProperty("iommu-profile-ceiling",
+                         unsupported ? "unsupported-name" : ceiling->name);
+        nic->setProperty("iommu-growth-policy", growth ? "capacity-demand" : "disabled");
+        nic->setProperty("iommu-capacity-grown", "no");
+        nic->setProperty("iommu-profile", prepared->name);
+    }
     const UInt64 preparedBytes = mapper_abi::metadataBytesFor(*prepared);
     const bool preparedOK = preparedBytes &&
         preparedBytes <= mapper_abi::kMaxMetadataBytes &&
@@ -1017,7 +1025,7 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
                : (ceiling == &mapper_abi::kProfileRl10gMax
                       ? "granted-rl-10g-max-on-demand" : "granted-rl-10g-on-demand"))
         : "granted-native-legacy";
-    nic->setProperty("admission", admission);
+    if (attachDbg) nic->setProperty("admission", admission);
     IOLog("AMDMapperProbe: domain %u prepared %s, ceiling %s (growth %s)\n",
           slot, prepared->name, unsupported ? "unsupported-name" : ceiling->name,
           growth ? "capacity-demand" : "disabled");
@@ -1031,13 +1039,17 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
         d->state = "ready-passthrough";
     }
     nic->retain(); fNicDevice = nic;
-    setProperty("attach-requester-id", d->deviceID, 32);
-    setProperty("mapper-entry-id", getRegistryEntryID(), 64);
-    setProperty("owner-entry-id", fOwner->getRegistryEntryID(), 64);
-    setProperty("device-entry-id", nic->getRegistryEntryID(), 64);
-    setProperty("iommu-mmio-efr", c->startupEfr, 64);
-    setProperty("iommu-efr-match", c->hardware.pciEfrSupported ?
-        (c->hardware.firmwareEfrPresent ? "yes" : "firmware-absent") : "not-reported");
+    if (attachDbg) {
+        setProperty("attach-requester-id", d->deviceID, 32);
+        setProperty("mapper-entry-id", getRegistryEntryID(), 64);
+        setProperty("owner-entry-id", fOwner->getRegistryEntryID(), 64);
+        setProperty("device-entry-id", nic->getRegistryEntryID(), 64);
+    }
+    if (discoveryDbg) {
+        setProperty("iommu-mmio-efr", c->startupEfr, 64);
+        setProperty("iommu-efr-match", c->hardware.pciEfrSupported ?
+            (c->hardware.firmwareEfrPresent ? "yes" : "firmware-absent") : "not-reported");
+    }
     // Identity and a complete domain snapshot precede copyMapperForDevice().
     // Only first map activates this endpoint's DTE, after the endpoint driver's reset.
     PublishCapacity(true);
@@ -1046,10 +1058,12 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
     // The selection source no longer determines who attached the mapper: in
     // passive mode it is always a claim, either before PCI open or from the
     // hook's copyMapperForDevice() fallback after it.
-    setProperty("iommu-parent-policy", fOwner->fAutoAttach
-        ? "set-at-first-publish-autoattach"
-        : (allowOpen ? "set-on-hook-attach-after-pci-open"
-                     : "set-on-client-claim-before-pci-open"));
+    if (attachDbg) {
+        setProperty("iommu-parent-policy", fOwner->fAutoAttach
+            ? "set-at-first-publish-autoattach"
+            : (allowOpen ? "set-on-hook-attach-after-pci-open"
+                         : "set-on-client-claim-before-pci-open"));
+    }
     return true;
 }
 #pragma clang diagnostic pop
@@ -1684,6 +1698,7 @@ bool org_maz1_AMDMapperProbe::PMNotifierRegistered() const {
 // their prepare-time zeros and the transition's own completion waits would be
 // invisible.
 void org_maz1_AMDMapperProbe::PublishPMNow(const char *reason) {
+    if (!DbgOn(amdiommu_dbg::kPM)) return;
     Controller *c = fController;
     Domain *d = fDomain;
     if (!c) return;
@@ -1757,8 +1772,8 @@ void org_maz1_AMDMapperProbe::PublishPMNow(const char *reason) {
     setProperty("pm-command-recoveries", (unsigned long long)recoveries, 64);
     setProperty("pm-resume-failures", (unsigned long long)resumes, 64);
     // Cross-boundary evidence: lives in AMDMapperProbeMapper.cpp because it has
-    // to retain the blobs under the mapper lock.
-    PublishPMBoundary();
+    // to retain the blobs under the mapper lock. RAW is a second gate.
+    if (DbgOn(amdiommu_dbg::kRaw)) PublishPMBoundary();
     if (reason) setProperty("pm-last-transition", reason);
 }
 
@@ -1767,7 +1782,7 @@ bool org_maz1_AMDMapperProbe::RegisterSystemPM() {
     char mode[16] = {};
     if (PE_parse_boot_argn("amdiommu_pm", mode, sizeof(mode) - 1) &&
         strcmp(mode, "off") == 0) {
-        setProperty("pm-self-driven", "disabled-by-boot-arg");
+        if (DbgOn(amdiommu_dbg::kPM)) setProperty("pm-self-driven", "disabled-by-boot-arg");
         return false;
     }
     // registerSleepWakeInterest() registers a kIOGeneralInterest client with the
@@ -1776,10 +1791,10 @@ bool org_maz1_AMDMapperProbe::RegisterSystemPM() {
     // leaves the notification's returnValue at zero, which acknowledges at once.
     fSystemPMNotifier = registerSleepWakeInterest(sleepWakeHandler, this, nullptr);
     if (!fSystemPMNotifier) {
-        setProperty("pm-self-driven", "failed-register");
+        if (DbgOn(amdiommu_dbg::kPM)) setProperty("pm-self-driven", "failed-register");
         return false;
     }
-    setProperty("pm-self-driven", "registered");
+    if (DbgOn(amdiommu_dbg::kPM)) setProperty("pm-self-driven", "registered");
     return true;
 }
 
@@ -1788,7 +1803,7 @@ void org_maz1_AMDMapperProbe::UnregisterSystemPM() {
     fSystemPMNotifier->disable();
     fSystemPMNotifier->release();
     fSystemPMNotifier = nullptr;
-    setProperty("pm-self-driven", "unregistered");
+    if (DbgOn(amdiommu_dbg::kPM)) setProperty("pm-self-driven", "unregistered");
 }
 
 IOReturn org_maz1_AMDMapperProbe::sleepWakeHandler(
@@ -1836,10 +1851,12 @@ void org_maz1_AMDMapperProbe::SystemWillSleep() {
         }
     }
     ++fSleepNotifications;
-    setProperty("pm-sleep-notifications",
-                (unsigned long long)fSleepNotifications, 64);
-    setProperty("pm-last-suspend-domains", (unsigned long long)suspended, 32);
-    setProperty("pm-last-suspend-failures", (unsigned long long)failed, 32);
+    if (DbgOn(amdiommu_dbg::kPM)) {
+        setProperty("pm-sleep-notifications",
+                    (unsigned long long)fSleepNotifications, 64);
+        setProperty("pm-last-suspend-domains", (unsigned long long)suspended, 32);
+        setProperty("pm-last-suspend-failures", (unsigned long long)failed, 32);
+    }
 #if AMD_MAPPER_PM_TRACE
     // What the transition itself produced, before the requesters tear down.
     if (fController && fController->configured && fController->traceRing) {
@@ -1876,9 +1893,11 @@ void org_maz1_AMDMapperProbe::SystemHasPoweredOn() {
         }
     }
     ++fWakeNotifications;
-    setProperty("pm-wake-notifications", (unsigned long long)fWakeNotifications, 64);
-    setProperty("pm-last-resume-domains", (unsigned long long)resumed, 32);
-    setProperty("pm-last-resume-failures", (unsigned long long)failed, 32);
+    if (DbgOn(amdiommu_dbg::kPM)) {
+        setProperty("pm-wake-notifications", (unsigned long long)fWakeNotifications, 64);
+        setProperty("pm-last-resume-domains", (unsigned long long)resumed, 32);
+        setProperty("pm-last-resume-failures", (unsigned long long)failed, 32);
+    }
 #if AMD_MAPPER_PM_TRACE
     // Anything the restored engines logged between enable and this point.
     if (fController && fController->configured && fController->traceRing) {
@@ -1907,16 +1926,23 @@ void org_maz1_AMDMapperProbe::PublishAuto() {
         c->collectEvents();
         c->observedControl = mmioRead64(c->base, M2B2_OFF_CONTROL);
     }
+    const bool base = DbgOn(amdiommu_dbg::kBase);
+    const bool pm = DbgOn(amdiommu_dbg::kPM);
+    const bool mapping = DbgOn(amdiommu_dbg::kMapping);
+    if (!base && !pm && !mapping) return;
     auto number = [this](const char *key, UInt64 value) {
         setProperty(key, (unsigned long long)value, 64);
     };
-    setProperty("iommu-state", d->state ? d->state : "preparing");
-    setProperty("iommu-controller-ready", c->ready ? "yes" : "no");
-    setProperty("iommu-dte-active", d->active && c->configured ? "yes" : "no");
-    setProperty("iommu-registers-restored", c->restored ? "yes" : "no");
-    setProperty("iommu-event-overflow", c->eventOverflow ? "yes" : "no");
-    setProperty("iommu-event-valid", c->eventInvalid ? "no" : "yes");
-    setProperty("iommu-command-failed", c->command.failed ? "yes" : "no");
+    if (base) {
+        setProperty("iommu-state", d->state ? d->state : "preparing");
+        setProperty("iommu-controller-ready", c->ready ? "yes" : "no");
+        setProperty("iommu-dte-active", d->active && c->configured ? "yes" : "no");
+        setProperty("iommu-registers-restored", c->restored ? "yes" : "no");
+        setProperty("iommu-event-overflow", c->eventOverflow ? "yes" : "no");
+        setProperty("iommu-event-valid", c->eventInvalid ? "no" : "yes");
+        setProperty("iommu-command-failed", c->command.failed ? "yes" : "no");
+    }
+    if (pm) {
     setProperty("pm-controller-state", c->powerFailed ? "failed" :
                 (c->suspended ? "suspended" : "awake"));
     UInt32 pmSuspendReady = 0, pmResumeReady = 0;
@@ -1959,6 +1985,8 @@ void org_maz1_AMDMapperProbe::PublishAuto() {
     number("pm-suspend-retained", c->retainedSuspends);
     number("pm-command-recoveries", c->commandRecoveries);
     number("pm-resume-failures", c->resumeFailures);
+    }
+    if (mapping) {
     number("invalidation-completed-total", d->invDevCompleted + d->invPagesCompleted);
     number("iommu-device-id", d->deviceID);
     number("iommu-domain-id", d->domainID);
@@ -2035,11 +2063,13 @@ void org_maz1_AMDMapperProbe::PublishAuto() {
         number("iommu-dte0", dte[d->deviceID * 4]);
         number("iommu-dte1", dte[d->deviceID * 4 + 1]);
     }
+    }
 }
 
 
 void org_maz1_AMDMapperProbe::PublishDomains() {
     if (fOwner || !fAttachLock) return;
+    if (!DbgOn(amdiommu_dbg::kMapping)) return;
     LockGuard attachment(fAttachLock);
     OSArray *domains = OSArray::withCapacity(kMaxDomains);
     if (!domains) return;
@@ -2068,7 +2098,7 @@ void org_maz1_AMDMapperProbe::PublishDomains() {
         }
         properties->release();
     }
-    setProperty("snapshot-domains", domains);
+    if (DbgOn(amdiommu_dbg::kRaw)) setProperty("snapshot-domains", domains);
     setProperty("iommu-domain-count", domains->getCount(), 32);
     setProperty("snapshot-sequence", ++fSnapshotSequence, 64);
     setProperty("snapshot-time", mach_absolute_time(), 64);

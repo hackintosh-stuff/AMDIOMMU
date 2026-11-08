@@ -28,6 +28,7 @@ registers agree, then prepares a translation domain for each selected requester.
 | `amdiommu_devices=<ids>` | Four hexadecimal requester-ID digits prefixed with `n`, for example `n2200,n2201` or `n2300,n2301` | Selects segment-zero requesters. If omitted, selection comes from `AMDMapperProbeDevices` in the kext's `Info.plist`. |
 | `amdiommu_ceiling=<name>` | See [Profile ceilings](#profile-ceilings) | Selects the independent record and IOVA-page growth limits. |
 | `amdiommu_pm=off` | `off` | Disables registration for self-driven sleep/wake notifications. DMA-path repair of a controller that lost its register image remains available. With the argument absent, notifications are registered. |
+| `amdiommu_dbg=<mask>` | `0x00`–`0xFF`, hexadecimal with the `0x` prefix | Selects which IORegistry evidence groups are published. The mask never changes the DMA, attach or power state machine. Absent or invalid values use `0xFF` (the historical full surface). |
 
 ### Device selection
 
@@ -153,10 +154,32 @@ on the machine and does not require a reboot.
 - Acceptance checks in tests and design notes that say
   "`iommu-dte-active=yes`" always mean **after a snapshot has been pulled**.
 
-### Property families
+### Debug publication mask
+
+`amdiommu_dbg` is an eight-bit mask. It controls only `setProperty()` calls:
+the controller, DMA path, claim handshake and PM transitions run unchanged.
+Use the `0x` prefix; an all-digit value would be converted by
+`PE_parse_boot_argn` before the parser sees it.
+
+| Bit | Group | Covers |
+|---:|---|---|
+| `0x01` | Base | `probe-stage`, mode/role, controller and domain skeleton |
+| `0x02` | Select | `device-selection-*`, profile/admission evidence |
+| `0x04` | Attach | `attach-*`, `publish-hits`, attach identity and policy |
+| `0x08` | Discovery | `discovery-*`, IVRS/PCI capability facts |
+| `0x10` | Mapping | `mapper-*`, `iommu-domain-*`, capacity, growth and snapshots |
+| `0x20` | PM | `pm-*` transitions and counters |
+| `0x40` | Raw | `*-raw`, `snapshot-domains`, IVRS raw; requires the owning group |
+| `0x80` | Debug | Debug-build-only M1-B entry evidence; M2 modules stay compile-time gated |
+
+Useful values: `0x00` keeps only contract properties; `0x0F` is the everyday
+base/select/attach/discovery set; `0x1F` adds mapping; `0x3F` adds PM; `0x7F`
+adds raw blobs; `0xFF` is the default. `tools/dev/inspect-mapper-snapshot.py`
+needs at least `0x50` (mapping + raw); the PM tools need `0x20`.
 
 Property names are grouped by meaning; no release property carries a round
-prefix.
+prefix. The debug groups above are suppressed by the mask, so a reader must
+enable the owning bit before treating a missing key as a state failure.
 
 | Family | Covers |
 |---|---|

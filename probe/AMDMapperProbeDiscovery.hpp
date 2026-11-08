@@ -23,5 +23,5 @@ struct HardwareInfo {
 // Read-only discovery for the current segment-0, per-device normal mode.
 // MMIO is mapped and checked by AttachAuto before its first register write.
 bool DiscoverHardware(IOService *probe, IOPCIDevice *nic,
-                         HardwareInfo &info);
+                         HardwareInfo &info, UInt32 dbgMask);
 #pragma clang diagnostic pop

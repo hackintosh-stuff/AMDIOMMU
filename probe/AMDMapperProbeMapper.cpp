@@ -821,6 +821,7 @@ IOReturn org_maz1_AMDMapperProbe::MapMemory(
 // Capacity evidence for third-party clients. Called without the mapper lock so
 // a property publication can never sit inside the DMA path's critical section.
 void org_maz1_AMDMapperProbe::PublishCapacity(bool capacityChanged) {
+    if (!DbgOn(amdiommu_dbg::kMapping)) return;
     if (capacityChanged && fMapper) {
         auto *d = fMapper;
         IOLockLock(d->lock);
@@ -1011,12 +1012,14 @@ bool org_maz1_AMDMapperProbe::Translate(uint64_t address, uint64_t *physical) co
 
 void org_maz1_AMDMapperProbe::PublishMappings(OSDictionary **copy) {
     if (copy) *copy = nullptr;
+    if (!DbgOn(amdiommu_dbg::kMapping)) return;
     auto *d = fMapper;
     if (!d) {
         PublishAuto();
         if (copy) *copy = dictionaryWithProperties();
         return;
     }
+    const bool raw = DbgOn(amdiommu_dbg::kRaw);
     IOLockLock(d->lock);
     auto &s = d->snapshot;
     s.livePages = d->allocator.livePages; s.peakPages = d->allocator.peakPages;
@@ -1027,10 +1030,12 @@ void org_maz1_AMDMapperProbe::PublishMappings(OSDictionary **copy) {
     OSData *tables = nullptr, *segments = nullptr;
     d->copyPageTables(tables, segments);
     if (summary && active && tables && segments) {
-        setProperty("mapper-state-raw", summary);
-        setProperty("mapper-live-raw", active);
-        setProperty("mapper-page-table-raw", tables);
-        setProperty("mapper-page-table-segments-raw", segments);
+        if (raw) {
+            setProperty("mapper-state-raw", summary);
+            setProperty("mapper-live-raw", active);
+            setProperty("mapper-page-table-raw", tables);
+            setProperty("mapper-page-table-segments-raw", segments);
+        }
         setProperty("mapper-abi-version", mapper_abi::kVersion, 32);
         setProperty("mapper-live-maps", s.liveCount, 32);
         setProperty("mapper-live-pages", s.livePages, 32);
@@ -1063,19 +1068,21 @@ void org_maz1_AMDMapperProbe::PublishMappings(OSDictionary **copy) {
     if (active) active->release();
     if (tables) tables->release();
     if (segments) segments->release();
-    auto boundary = [this](const char *key, OSData *data) {
-        if (data) setProperty(key, data);
-        else removeProperty(key);
-    };
-    boundary("pm-suspend-live-raw", d->suspendLive);
-    boundary("pm-suspend-pt-raw", d->suspendPT);
-    boundary("pm-suspend-pt-segments-raw", d->suspendPTSegments);
-    boundary("pm-resume-live-raw", d->resumeLive);
-    boundary("pm-resume-pt-raw", d->resumePT);
-    boundary("pm-resume-pt-segments-raw", d->resumePTSegments);
-    setProperty("pm-snapshots-valid",
-        d->suspendLive && d->suspendPT && d->suspendPTSegments &&
-        d->resumeLive && d->resumePT && d->resumePTSegments ? "yes" : "no");
+    if (raw) {
+        auto boundary = [this](const char *key, OSData *data) {
+            if (data) setProperty(key, data);
+            else removeProperty(key);
+        };
+        boundary("pm-suspend-live-raw", d->suspendLive);
+        boundary("pm-suspend-pt-raw", d->suspendPT);
+        boundary("pm-suspend-pt-segments-raw", d->suspendPTSegments);
+        boundary("pm-resume-live-raw", d->resumeLive);
+        boundary("pm-resume-pt-raw", d->resumePT);
+        boundary("pm-resume-pt-segments-raw", d->resumePTSegments);
+        setProperty("pm-snapshots-valid",
+            d->suspendLive && d->suspendPT && d->suspendPTSegments &&
+            d->resumeLive && d->resumePT && d->resumePTSegments ? "yes" : "no");
+    }
     // Keep this domain's raw state, PTE bytes and hardware counters in one
     // snapshot. Hardware export takes only the controller lock after this lock.
     PublishAuto();

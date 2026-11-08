@@ -73,6 +73,7 @@ than installation in `/Library/Extensions` or the auxiliary kernel collection.
 | `amdiommu_devices=<ids>` | Override the default device selection. |
 | `amdiommu_ceiling=<name>` | Choose a capacity ceiling; normally omit it and use the default. |
 | `amdiommu_pm=off` | Disable automatic sleep/wake notifications. |
+| `amdiommu_dbg=0xNN` | Select the IORegistry evidence groups to publish; omit for the full surface. |
 
 With no explicit device list, the kext uses the adapter identities configured in
 its `Info.plist`. To select particular requesters, supply their IDs with the `n`

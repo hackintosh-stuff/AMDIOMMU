@@ -61,9 +61,26 @@
 
 #if AMD_MAPPER_PROBE_DEBUG
 
+bool org_maz1_AMDMapperProbe::ReadDbgMask() {
+    fDbgMask = amdiommu_dbg::kDefault;
+    char text[16] = {};
+    if (!PE_parse_boot_argn("amdiommu_dbg", text, sizeof(text) - 1)) return true;
+    UInt32 parsed = 0;
+    if (!amdiommu_dbg::Parse(text, &parsed)) {
+        IOLog("AMDMapperProbe: invalid amdiommu_dbg=%s, using 0x%02x\n",
+              text, (unsigned)fDbgMask);
+        return false;
+    }
+    fDbgMask = parsed;
+    return true;
+}
+
 // ===== AMDMapperProbe.cpp (original lines 7584..7713) =====
 bool org_maz1_AMDMapperProbe::start(IOService *provider) {
-    setProperty("probe-stage", "0-entered-start");
+    ReadDbgMask();
+    if (DbgOn(amdiommu_dbg::kBase)) {
+        setProperty("probe-stage", "0-entered-start");
+    }
 
     // Safety gate: must happen before super::start().
     // When fIsSystem is true, IOMapper::start() sets gSystem = this -- a global
@@ -71,17 +88,23 @@ bool org_maz1_AMDMapperProbe::start(IOService *provider) {
     fIsSystem = false;
 
     if (!super::start(provider)) {
-        setProperty("probe-stage", "1-super-start-FAILED");
+        if (DbgOn(amdiommu_dbg::kBase)) {
+            setProperty("probe-stage", "1-super-start-FAILED");
+        }
         return false;
     }
-    setProperty("probe-stage", "2-super-start-ok");
+    if (DbgOn(amdiommu_dbg::kBase)) {
+        setProperty("probe-stage", "2-super-start-ok");
+    }
     if (fOwner) {
         // This instance is attached to the controller service, not matched to
         // PCI. The owner prepares its domain before publishing iommu-parent.
         fAuto = true;
-        setProperty("iommu-mode", "passive");
-        setProperty("iommu-role", "device");
-        setProperty("iommu-system-mapper", "no");
+        if (DbgOn(amdiommu_dbg::kBase)) {
+            setProperty("iommu-mode", "passive");
+            setProperty("iommu-role", "device");
+            setProperty("iommu-system-mapper", "no");
+        }
         return true;
     }
 
@@ -102,7 +125,8 @@ bool org_maz1_AMDMapperProbe::start(IOService *provider) {
 
     // ---- B2-b: first decide whether real devices are let through ----
     fArmed = parseArmBootArg();
-    setProperty("m1bb-armed", fArmed ? "yes" : "no");
+    if (DbgOn(amdiommu_dbg::kDebug))
+        setProperty("m1bb-armed", fArmed ? "yes" : "no");
 
     // ---- B2-b: install the publish notification, attaching iommu-parent
     //      before Lucy probes ----
@@ -127,13 +151,16 @@ bool org_maz1_AMDMapperProbe::start(IOService *provider) {
             if (findNic()) {
                 armNic(fNicDevice);
                 fLateAttach = true;
-                setProperty("m1bb-late-attach", "yes");
+                if (DbgOn(amdiommu_dbg::kDebug))
+                    setProperty("m1bb-late-attach", "yes");
             } else {
-                setProperty("m1bb-late-attach", "no-nic-yet");
+                if (DbgOn(amdiommu_dbg::kDebug))
+                    setProperty("m1bb-late-attach", "no-nic-yet");
             }
         }
     } else {
-        setProperty("m1bb-parent", "not-armed");
+        if (DbgOn(amdiommu_dbg::kDebug))
+            setProperty("m1bb-parent", "not-armed");
     }
 
     // ---- B1: the real device obtains the mapper ----
