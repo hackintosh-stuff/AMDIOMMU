@@ -10,6 +10,7 @@ configuration internals, capacity accounting and diagnostic evidence.
 - [IORegistry snapshots](#reading-ioregistry-properties)
 - [Segmented page-table snapshots](#segmented-page-table-snapshots)
 - [Production integration validation](#production-integration-validation)
+- [Release build configuration](#release-build-configuration)
 - [Power management](#power-management) and [hook diagnostics](#hook-diagnostics)
 - [Debug build experiment modes](#debug-build-experiment-modes)
 
@@ -528,6 +529,50 @@ The `hook-*` counters indicate whether it intervened. `hook-open`,
 directly, separately from the probe's on-demand snapshots. Loading and disabling
 the companion are described in [README.md](README.md#amdmapperhook-optional-companion).
 
+## Release build configuration
+
+`tools/build/build-probe.sh` builds the deployable kext from the six production
+translation units at `-O2 -g`, with `-Wall -Wextra -Werror`.
+`tools/build/build-probe-debug.sh` sets `PROBE_DEBUG=1`: it keeps `-O0 -g` and
+adds the retired `probe/*Debug.cpp` experiment modules plus
+`-DAMD_MAPPER_PROBE_DEBUG=1`. Debug symbols stay in both variants so panic
+traces and postmortem inspection remain usable; stripping them is a separate
+decision.
+
+`PROBE_OPT_LEVEL` overrides the optimization level for either variant, for
+example `PROBE_OPT_LEVEL=-O0 sh tools/build/build-probe.sh`. It changes only the
+compiler flag: the source list, feature set, bundle path and build record are
+unchanged. This produces a production-feature `-O0` binary for a like-for-like
+comparison with the optimized build. The Debug kext is not a valid
+optimization-only control, because it adds experiment translation units and
+accepts historical `amdiommu=` modes.
+
+The build prints its optimization level, writes the bundle path to
+`latest-m1a-build.txt` (or `latest-m1a-debug-build.txt`) and ad-hoc signs the
+kext. Record the source commit and the SHA-256 of
+`Contents/MacOS/AMDMapperProbe` for every deployed binary; the ESP copy and the
+build output must match. The optimization level does not change capacity
+mechanics, snapshot ABI5, device selection, the ceiling or the auto-attach path.
+
+### Release validation and observations
+
+Validate an optimized binary with the existing entries (`tools/test.sh`,
+`tools/build/build-probe.sh`, `tools/verify/source.py`) and one full
+[production integration batch](#production-integration-validation): one deploy,
+one reboot, the same per-link single/multi-flow, concurrent, file-integrity,
+start/stop, link-recovery and final short-traffic phases, with grouped
+`R44Snapshot` captures read by the current ABI5 inspector. Fresh baseline and
+final counters must show no new target faults, capacity rejections or
+invalidation failures.
+
+For an optimization comparison, keep the same links, directions, stream counts,
+durations, tool and peer, and compare completed bytes, throughput and CPU
+observations against the deployed `-O0` build of the same source. Report measured
+values only and do not promise a speedup. The traffic tool or the peer can be the
+bottleneck, and unchanged throughput does not by itself show an optimization was
+ineffective. CPU samples are comparable only when both sides were collected
+under the same conditions.
+
 ## Debug build experiment modes
 
 The production build compiles the six production translation units. The Debug
@@ -535,6 +580,8 @@ build adds `probe/*Debug.cpp` and `-DAMD_MAPPER_PROBE_DEBUG=1`, restoring the
 retired M2 experiment modes below. The parsers are in
 `probe/AMDMapperProbeDebug.hpp`; implementations are in `probe/*Debug.cpp`.
 Build commands and bundle paths are listed in [README.md](README.md#build).
+Optimization levels are described in
+[Release build configuration](#release-build-configuration).
 
 | Argument | Values | Meaning |
 |---|---|---|

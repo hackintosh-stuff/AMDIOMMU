@@ -20,8 +20,10 @@ board, CPU and device combinations.
 | Debug | `sh tools/build/build-probe-debug.sh` | `build-m1a-debug/AMDMapperProbe.kext` |
 | Optional hook | `sh tools/build/build-hook.sh` | `build-hook/AMDMapperHook.kext` |
 
-The hook build needs the Lilu source tree and MacKernelSDK. The Debug build's
-experiment modes are documented in
+The production build is optimized; the Debug build keeps the retired experiment
+modes at its own optimization level. The hook build needs the Lilu source tree
+and MacKernelSDK. Build configuration and the Debug experiment modes are in
+[DEBUG.md](DEBUG.md#release-build-configuration) and
 [DEBUG.md](DEBUG.md#debug-build-experiment-modes).
 
 ## Configure

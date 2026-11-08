@@ -4,6 +4,10 @@
 # 用法： sh build-m1a.sh
 # 输出： build-m1a/AMDMapperProbe.kext（路径写入 latest-m1a-build.txt）
 #
+# 生产构建使用 -O2 -g；PROBE_DEBUG=1 的 Debug 变体保持 -O0 -g 并额外编入
+# 退休实验模块。PROBE_OPT_LEVEL 可覆盖优化级别，用于同一源码、同一功能集合
+# 的对照构建（例如 PROBE_OPT_LEVEL=-O0 sh tools/build/build-probe.sh）。
+#
 # 探针由多个源文件组成（见 probe/AMDMapperProbe*.cpp）。它们共用
 # probe/AMDMapperProbeInternal.hpp 里的 static 辅助函数，所以每个文件都是
 # 独立的编译单元，最后一起链接进同一个 kext。
@@ -24,11 +28,20 @@ if [ "$PROBE_DEBUG" = "1" ]; then
     W="$ROOT/build-m1a-debug"
     BUILD_RECORD="$ROOT/latest-m1a-debug-build.txt"
     DEBUG_DEFINE="-DAMD_MAPPER_PROBE_DEBUG=1"
+    DEFAULT_OPT_LEVEL="-O0"
 else
     W="$ROOT/build-m1a"
     BUILD_RECORD="$ROOT/latest-m1a-build.txt"
     DEBUG_DEFINE=""
+    DEFAULT_OPT_LEVEL="-O2"
 fi
+# A single override rebuilds the same source and feature set at another
+# optimization level; the Debug variant is not an optimization-only control.
+OPT_LEVEL=${PROBE_OPT_LEVEL:-$DEFAULT_OPT_LEVEL}
+case "$OPT_LEVEL" in
+    -O0|-O1|-O2|-O3|-Os) ;;
+    *) echo "unsupported PROBE_OPT_LEVEL: $OPT_LEVEL" >&2; exit 1 ;;
+esac
 
 rm -rf "$W"
 mkdir -p "$W"
@@ -77,7 +90,7 @@ done
 [ -f probe/AMDMapperProbeInternal.hpp ] || {
     echo "missing probe/AMDMapperProbeInternal.hpp"; exit 1; }
 
-echo "== 编译（$(echo "$SRCS" | wc -w | tr -d ' ') 个编译单元）=="
+echo "== 编译（$(echo "$SRCS" | wc -w | tr -d ' ') 个编译单元，优化级别 $OPT_LEVEL）=="
 # 注意：不定义 IOKIT_ENABLE_SHARED_PTR。SDK 默认未定义，此时 OSPtr<T> 就是 T*。
 # 打开它会让 IOKit 直接 #error（要求额外定义 EXPERIMENTAL 宏，且声明 API 不稳定）。
 # PROBE_TRACE_DEFINE adds one extra -D to the production build without changing
@@ -89,7 +102,7 @@ CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
     -I $HEADERS -I $ROOT/include -nostdinc++ -std=c++17 \
     -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE \
     -fno-builtin -fno-common -fno-exceptions -fno-rtti \
-    -fno-stack-protector -Wall -Wextra -Werror -O0 -g $DEBUG_DEFINE $TRACE_DEFINE"
+    -fno-stack-protector -Wall -Wextra -Werror $OPT_LEVEL -g $DEBUG_DEFINE $TRACE_DEFINE"
 
 OBJS=""
 for f in $SRCS; do
