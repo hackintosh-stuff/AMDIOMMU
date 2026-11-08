@@ -36,7 +36,10 @@
                  key with getProperty().
                  Verified adapter set: Mellanox CX4 Lx family driven by Apple's
                  MLX5 client, and the Realtek range driven by Apple's Ethernet
-                 Realtek driver. -->
+                 Realtek driver. ConnectX-6 Dx (15b3:101d) is selected by
+                 0x101d15b3 in the list below; its AppleEthernetMLX5 client
+                 runs with the mapper attached, no target faults, and clean
+                 sleep/wake. -->
             <key>AMDMapperProbeDevices</key>
             <string>0x101515b3 0x101715b3 0x101915b3 0x101b15b3 0x101d15b3 0x812410ec 0x812510ec 0x812610ec 0x812710ec 0x816810ec</string>
         </dict>
