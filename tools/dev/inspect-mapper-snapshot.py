@@ -85,6 +85,7 @@ def inspect_mapper(entry):
         'metadata_bytes': entry.get('mapper-arena-bytes'),
         'record_storage_bytes': entry.get('mapper-record-storage-bytes'),
         'page_storage_bytes': entry.get('mapper-page-storage-bytes'),
+        'page_storage_chunks': entry.get('mapper-page-storage-chunks'),
         'verified_iova_pages': len(actual),
     }
 

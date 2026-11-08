@@ -49,9 +49,9 @@ allocates only `native-legacy` storage: 1024 records, a 16 MiB IOVA window and
 65536 bytes: **245760 bytes, or about 0.234 MiB per prepared domain**. A higher
 ceiling does not reserve its full storage at startup.
 
-These totals cover both metadata allocations and the page-table allocations.
-Fixed mapper state is separate, including a 66-entry table-allocation descriptor
-array (2112 bytes).
+These totals cover record storage, page-metadata chunks and the page-table
+allocations. Fixed mapper state is separate, including eight metadata-chunk
+descriptors and a 66-entry table-allocation descriptor array (2112 bytes).
 
 Record slots and IOVA pages grow independently. When a mapping runs out of
 record slots, the mapper doubles only the record capacity. When it cannot
@@ -60,23 +60,36 @@ at that resource's configured ceiling, then retries the same request under the
 mapper lock. The first mapping does not itself trigger growth. Existing mappings
 can remain live throughout growth.
 
-Metadata has separate storage for records and IOVA pages. Record growth replaces
-only the mapping records and their liveness bitmap. Page growth replaces only
-the physical-page index, start-page owner index, leaf pointers and allocator
-bitmaps, preserving the allocator's live, peak and reuse counts. The other
-resource keeps its existing allocation and pointers. Only the growing resource
-temporarily needs both old and new storage while its data is copied.
+Metadata has separate storage for records and IOVA pages. Record growth copies
+the mapping records and their liveness bitmap into a larger record allocation,
+then releases the old one after committing the replacement. Page metadata stays
+in place throughout record growth.
 
-Each metadata allocation is rounded independently to 4 KiB. The properties
-`mapper-record-storage-bytes` and `mapper-page-storage-bytes` report their sizes;
-`mapper-arena-bytes` reports the sum. A page-capacity increase also allocates new
-leaf tables and, when extending beyond the first 1 GiB directory, a second L2
-table. Each new table block contains at most
-16 pages (64 KiB) of physically contiguous storage. The blocks may be placed
-independently, and every block needed for an increase is allocated before any
-new PDE is attached. A record-capacity increase leaves the page tables
-untouched. The root and all existing page-table pages remain at their original
-physical addresses, so existing IOVAs keep the same translations.
+IOVA-page metadata grows by appending a chunk for the added range. The initial
+chunk covers 4096 IOVA pages; successive increases add chunks covering 4096,
+8192, 16384, 32768, 65536, 131072 and 262144 pages. Each chunk owns its
+physical-page index, start-page owner index, leaf pointers and allocator
+bitmaps. Existing chunks and their pointers stay in place until the mapper is
+released. One allocator manages the entire IOVA window across all chunks,
+including ranges that cross a chunk boundary, and retains its live, peak and
+reuse counts. Page growth allocates only the added chunk and copies no existing
+page metadata; record storage also stays in place.
+
+The record allocation and every page-metadata chunk are rounded independently
+to 4 KiB. `mapper-record-storage-bytes` reports the record allocation size;
+`mapper-page-storage-bytes` sums the page chunks, and `mapper-arena-bytes`
+reports the combined metadata total. `mapper-page-storage-chunks` reports the
+number of metadata chunks, from one initially to eight at the full window.
+
+A page-capacity increase also allocates new leaf tables and, when extending
+beyond the first 1 GiB directory, a second L2 table. Each new page-table block
+contains at most 16 pages (64 KiB) of physically contiguous storage. The blocks
+may be placed independently, and every block needed for an increase is allocated
+before any new PDE is attached. The new metadata chunk is staged with these
+tables and becomes part of the usable page storage after capacity growth
+commits. A record-capacity increase leaves the page tables untouched. The root
+and all existing page-table pages remain at their original physical addresses,
+so existing IOVAs keep the same translations.
 
 When page capacity grows, an active domain completes a full domain invalidation
 including the PDE cache after attaching all new blocks and before the added
@@ -131,12 +144,15 @@ change.
 
 For example, a domain whose record capacity remains at 1024 and whose IOVA
 capacity grows to 64 MiB keeps its 126976-byte record allocation and uses
-204800 bytes for IOVA-page metadata. With 163840 table bytes, the total is
-**495616 bytes, or about 0.473 MiB**. The complete `dma32-max` capacity uses
-15745024 record-storage bytes, 6430720 page-storage bytes and 4231168 table
-bytes. The two metadata allocations total 22175744 bytes. The actual capacity
-follows allocation pressure over the domain's lifetime; a later live-page count
-does not determine how far it has already grown.
+208896 bytes across three IOVA-page metadata chunks. With 163840 table bytes,
+the total is **499712 bytes, or about 0.477 MiB**. Extending that domain from
+32 to 64 MiB allocates only the added chunk's 102400 metadata bytes. The complete
+`dma32-max` capacity uses 15745024 record-storage bytes, 6451200 page-storage
+bytes across eight chunks and 4231168 table bytes. Its metadata total is
+22196224 bytes. Metadata-chunk counts describe software storage; page-table
+segment counts describe the separate hardware-table allocations. The actual
+capacity follows allocation pressure over the domain's lifetime; a later
+live-page count does not determine how far it has already grown.
 
 The named profiles describe ceilings. `iommu-profile` and
 `iommu-profile-allocated` are display labels: they show a known profile only

@@ -1,4 +1,4 @@
-// Independently owned metadata stores shared by the live mapper and host test.
+// Independent record storage and retained IOVA-page metadata chunks.
 // Allocation and lifetime stay with the caller; hardware page tables are separate.
 #pragma once
 #include <stddef.h>
@@ -21,15 +21,65 @@ struct RecordStorage {
     amdtx::u64 *liveSlots;
     uint32_t records;
 };
-struct IovaPageStorage {
-    void *pageMemory;
-    size_t pageBytes;
+// Initial legacy chunk plus seven IOVA-capacity doublings to the DMA32 ceiling.
+static constexpr uint32_t kMaxIovaPageChunks = 8;
+
+struct IovaPageStorage;
+struct PageBitmap {
+    const IovaPageStorage *storage;
+    bool ever;
+    explicit operator bool() const { return storage != nullptr; }
+    amdtx::u64 &operator[](unsigned word) const;
+};
+
+struct IovaPageChunk {
+    void *memory;
+    size_t bytes;
+    uint32_t firstPage, pages;
     amdtx::u64 *physicalByPage;
     uint32_t *slotByStartPage; // slot + 1; zero means no mapping starts here
     volatile amdtx::u64 **leaves;
-    amdtx::RuntimeAllocator allocator;
-    uint32_t pages;
+    amdtx::u64 *used, *ever;
 };
+
+struct IovaPageStorage {
+    IovaPageChunk chunks[kMaxIovaPageChunks];
+    size_t pageBytes;
+    amdtx::RuntimeAllocatorState<PageBitmap> allocator;
+    uint32_t pages, pageChunkCount;
+
+    // The caller supplies an index inside the allocated capacity. Chunks are
+    // appended in IOVA order; at most eight descriptors need to be examined.
+    const IovaPageChunk &chunkAtPage(uint32_t page) const {
+        for (uint32_t i = pageChunkCount; i > 1; --i)
+            if (page >= chunks[i - 1].firstPage) return chunks[i - 1];
+        return chunks[0];
+    }
+    amdtx::u64 &physicalPage(uint32_t page) const {
+        const auto &chunk = chunkAtPage(page);
+        return chunk.physicalByPage[page - chunk.firstPage];
+    }
+    uint32_t &startPageOwner(uint32_t page) const {
+        const auto &chunk = chunkAtPage(page);
+        return chunk.slotByStartPage[page - chunk.firstPage];
+    }
+    volatile amdtx::u64 *&leafTable(uint32_t leafIndex) const {
+        const auto &chunk = chunkAtPage(leafIndex * 512);
+        return chunk.leaves[leafIndex - chunk.firstPage / 512];
+    }
+    // A mapping may cross metadata chunks even though its IOVA range is linear.
+    void copyPhysicalPages(uint32_t firstPage, uint32_t count,
+                           uint64_t *destination) const {
+        for (uint32_t i = 0; i < count; ++i)
+            destination[i] = physicalPage(firstPage + i);
+    }
+};
+
+inline amdtx::u64 &PageBitmap::operator[](unsigned word) const {
+    const auto &chunk = storage->chunkAtPage(word * 64);
+    return (ever ? chunk.ever : chunk.used)[word - chunk.firstPage / 64];
+}
+
 struct MappingStorage : RecordStorage, IovaPageStorage {
     size_t metadataBytes() const { return recordBytes + pageBytes; }
 };
@@ -49,13 +99,23 @@ inline void bindRecordStorage(RecordStorage &target, void *zeroedStorage,
     target.liveSlots = reinterpret_cast<amdtx::u64 *>(cursor);
 }
 
-inline void bindIovaPageStorage(IovaPageStorage &target, void *zeroedStorage,
-                                uint32_t pages,
-                                uint32_t maxMapPages = mapper_abi::kMapPages) {
+// Bind the bitmap views once to the stable owning store. After initialization,
+// append descriptors in place; copying this store would leave views bound to
+// the previous owner. Record-storage replacement does not move this object.
+inline void initializeIovaPageStorage(IovaPageStorage &target,
+                                     uint32_t maxMapPages = mapper_abi::kMapPages) {
+    target = {};
+    target.allocator = amdtx::RuntimeAllocatorState<PageBitmap>{
+        {&target, false}, {&target, true}, 0, maxMapPages, 0, 0, 0};
+}
+
+inline void bindIovaPageChunk(IovaPageChunk &target, void *zeroedStorage,
+                             uint32_t firstPage, uint32_t pages) {
     const size_t pageWords = (pages + 63) / 64;
     const size_t leafCount = pages / 512;
-    target.pageMemory = zeroedStorage;
-    target.pageBytes = static_cast<size_t>(mapper_abi::iovaPageStorageBytesFor(pages));
+    target.memory = zeroedStorage;
+    target.bytes = static_cast<size_t>(mapper_abi::iovaPageChunkBytesFor(pages));
+    target.firstPage = firstPage;
     target.pages = pages;
     auto *cursor = static_cast<uint8_t *>(zeroedStorage);
     target.physicalByPage = reinterpret_cast<amdtx::u64 *>(cursor);
@@ -64,16 +124,23 @@ inline void bindIovaPageStorage(IovaPageStorage &target, void *zeroedStorage,
     cursor += static_cast<size_t>(pages) * sizeof(uint32_t);
     target.leaves = reinterpret_cast<volatile amdtx::u64 **>(cursor);
     cursor += leafCount * sizeof(volatile amdtx::u64 *);
-    auto *used = reinterpret_cast<amdtx::u64 *>(cursor);
+    target.used = reinterpret_cast<amdtx::u64 *>(cursor);
     cursor += pageWords * sizeof(amdtx::u64);
-    auto *ever = reinterpret_cast<amdtx::u64 *>(cursor);
-    target.allocator = amdtx::RuntimeAllocator{
-        used, ever, pages, maxMapPages, 0, 0, 0};
+    target.ever = reinterpret_cast<amdtx::u64 *>(cursor);
 }
 
-// Both stores are bound, and target is at least as large as source. The caller
-// holds the mapper lock until the replacement store is adopted. New capacity
-// stays zeroed; growth of either resource preserves the other allocation.
+// The caller owns a prepared chunk starting at target.pages and has checked the
+// descriptor limit. Append only after any hardware growth fence has completed.
+// Existing chunks and all allocator accounting remain in place.
+inline void appendIovaPageChunk(IovaPageStorage &target, const IovaPageChunk &chunk) {
+    target.chunks[target.pageChunkCount++] = chunk;
+    target.pageBytes += chunk.bytes;
+    target.pages += chunk.pages;
+    target.allocator.poolPages = target.pages;
+}
+
+// Both record stores are bound, and target is at least as large as source.
+// The caller holds the mapper lock until the replacement store is adopted.
 inline void copyRecordStorage(RecordStorage &target, const RecordStorage &source) {
     for (uint32_t i = 0; i < source.records; ++i)
         target.mappings[i] = source.mappings[i];
@@ -81,20 +148,4 @@ inline void copyRecordStorage(RecordStorage &target, const RecordStorage &source
         target.liveSlots[i] = source.liveSlots[i];
 }
 
-inline void copyIovaPageStorage(IovaPageStorage &target, const IovaPageStorage &source) {
-    for (uint32_t i = 0; i < source.pages; ++i) {
-        target.physicalByPage[i] = source.physicalByPage[i];
-        target.slotByStartPage[i] = source.slotByStartPage[i];
-    }
-    for (uint32_t i = 0; i < source.pages / 512; ++i)
-        target.leaves[i] = source.leaves[i];
-    for (uint32_t i = 0; i < (source.pages + 63) / 64; ++i) {
-        target.allocator.used[i] = source.allocator.used[i];
-        target.allocator.ever[i] = source.allocator.ever[i];
-    }
-    target.allocator.maxMapPages = source.allocator.maxMapPages;
-    target.allocator.livePages = source.allocator.livePages;
-    target.allocator.peakPages = source.allocator.peakPages;
-    target.allocator.reusedAllocations = source.allocator.reusedAllocations;
-}
 } // namespace amdmapper

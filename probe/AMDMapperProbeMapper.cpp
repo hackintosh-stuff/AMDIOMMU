@@ -58,7 +58,7 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingStorage {
     const char *growthResource;
     UInt32 growthFromRecords, growthFromPages;
 
-    volatile UInt64 &leaf(unsigned page) { return leaves[page / 512][page % 512]; }
+    volatile UInt64 &leaf(unsigned page) { return leafTable(page / 512)[page % 512]; }
 
     // A naturally placed span fits the smallest AMD range command for its
     // length. Reserve only the requested pages. A failed first-fit search
@@ -87,7 +87,7 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingStorage {
     void exportRecord(const mapper_abi::RecordHeader &header, mapper_abi::Record &out) const {
         out.header = header;
         const size_t used = header.pages * sizeof(out.physical[0]);
-        memcpy(out.physical, physicalByPage + header.basePage, used);
+        copyPhysicalPages(header.basePage, header.pages, out.physical);
         bzero(out.physical + header.pages, sizeof(out.physical) - used);
     }
 
@@ -148,8 +148,8 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingStorage {
     }
 };
 
-// Each metadata resource owns its allocation. The shared layout/copy helpers
-// are exercised by the host capacity test; the kernel manages their lifetime.
+// The kernel owns record storage and each retained page-metadata chunk. Shared
+// layout and access helpers are also exercised by the host capacity test.
 static bool AllocateRecordStorage(amdmapper::RecordStorage &storage, UInt32 records) {
     const UInt64 bytes = mapper_abi::recordStorageBytesFor(records);
     void *memory = IOMalloc((vm_size_t)bytes);
@@ -159,13 +159,13 @@ static bool AllocateRecordStorage(amdmapper::RecordStorage &storage, UInt32 reco
     return true;
 }
 
-static bool AllocateIovaPageStorage(amdmapper::IovaPageStorage &storage,
-                                    UInt32 pages, UInt32 maxMapPages) {
-    const UInt64 bytes = mapper_abi::iovaPageStorageBytesFor(pages);
+static bool AllocateIovaPageChunk(amdmapper::IovaPageChunk &chunk,
+                                  UInt32 firstPage, UInt32 pages) {
+    const UInt64 bytes = mapper_abi::iovaPageChunkBytesFor(pages);
     void *memory = IOMalloc((vm_size_t)bytes);
     if (!memory) return false;
     bzero(memory, (size_t)bytes);
-    amdmapper::bindIovaPageStorage(storage, memory, pages, maxMapPages);
+    amdmapper::bindIovaPageChunk(chunk, memory, firstPage, pages);
     return true;
 }
 
@@ -174,9 +174,32 @@ static void ReleaseRecordStorage(amdmapper::RecordStorage &storage) {
     storage = {};
 }
 
+static void ReleaseIovaPageChunk(amdmapper::IovaPageChunk &chunk) {
+    if (chunk.memory) IOFree(chunk.memory, chunk.bytes);
+    chunk = {};
+}
+
 static void ReleaseIovaPageStorage(amdmapper::IovaPageStorage &storage) {
-    if (storage.pageMemory) IOFree(storage.pageMemory, storage.pageBytes);
+    for (UInt32 i = 0; i < storage.pageChunkCount; ++i)
+        ReleaseIovaPageChunk(storage.chunks[i]);
     storage = {};
+}
+
+static bool AllocateIovaPageStorage(amdmapper::IovaPageStorage &storage,
+                                    UInt32 pages, UInt32 maxMapPages) {
+    amdmapper::initializeIovaPageStorage(storage, maxMapPages);
+    while (storage.pages < pages) {
+        UInt32 addedPages = storage.pages ? storage.pages : mapper_abi::kPages;
+        if (addedPages > pages - storage.pages) addedPages = pages - storage.pages;
+        amdmapper::IovaPageChunk chunk{};
+        if (storage.pageChunkCount == amdmapper::kMaxIovaPageChunks ||
+            !AllocateIovaPageChunk(chunk, storage.pages, addedPages)) {
+            ReleaseIovaPageStorage(storage);
+            return false;
+        }
+        amdmapper::appendIovaPageChunk(storage, chunk);
+    }
+    return true;
 }
 
 static void ReleaseMapperStorage(amdmapper::MappingStorage &storage) {
@@ -218,9 +241,9 @@ bool org_maz1_AMDMapperProbe::PrepareMappings(
     amdsparse::Arena rootArena = {d->tables, tablePA, profile.tablePages, 1,
                                   rootLevel, tablePA, 0, 0, nullptr};
     for (UInt32 i = 0; i < profile.pages / 512; ++i) {
-        d->leaves[i] = amdtx::prepareAt(rootArena,
+        d->leafTable(i) = amdtx::prepareAt(rootArena,
             mapper_abi::kBase + (UInt64)i * 0x200000ULL, 512);
-        if (!d->leaves[i]) {
+        if (!d->leafTable(i)) {
             ReleaseMapperStorage(*d);
             IOLockFree(d->lock);
             IOFree(d, sizeof(*d));
@@ -255,9 +278,9 @@ bool org_maz1_AMDMapperProbe::PrepareMappings(
     return true;
 }
 
-// Replace only the exhausted resource's metadata. The mapper lock keeps live
-// state stable while copying and committing that store; the other allocation
-// and every existing hardware table remain in place throughout growth.
+// Record growth replaces only record storage. Page growth appends metadata for
+// the added IOVA range; existing chunks and allocator state remain in place.
+// The mapper lock covers preparation, hardware synchronization and publication.
 bool org_maz1_AMDMapperProbe::TryGrowCapacity(
     MapperState *d, mapper_abi::CapacityResource resource) {
     const mapper_abi::Capacity current{d->records, d->pages};
@@ -273,7 +296,7 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
     }
     const bool growRecords = resource == mapper_abi::CapacityResource::recordSlots;
     amdmapper::RecordStorage grownRecords{};
-    amdmapper::IovaPageStorage grownPages{};
+    amdmapper::IovaPageChunk addedPageChunk{};
     if (growRecords) {
         if (!AllocateRecordStorage(grownRecords, target.records)) {
             d->growthState = "failed-record-storage";
@@ -281,15 +304,14 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
         }
         amdmapper::copyRecordStorage(grownRecords, *d);
     } else {
-        if (!AllocateIovaPageStorage(grownPages, target.pages, d->allocator.maxMapPages)) {
+        if (d->pageChunkCount == amdmapper::kMaxIovaPageChunks ||
+            !AllocateIovaPageChunk(addedPageChunk, current.pages, target.pages - current.pages)) {
             d->growthState = "failed-page-storage";
             return false;
         }
-        amdmapper::copyIovaPageStorage(grownPages, *d);
     }
     // Page-pool pressure additionally extends the fixed-root hardware tree.
     if (target.pages > current.pages) {
-        const UInt32 firstLeaf = current.pages / 512;
         const UInt32 leafCount = (target.pages - current.pages) / 512;
         amdsparse::Arena rootArena = {d->tables, d->tablePA,
             (UInt32)(d->tableAllocations[0].segment.bytes / 4096), 1,
@@ -300,7 +322,7 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
                 leafCount, tableGrowth) ||
             d->tableAllocationCount + amdtable::pageTableBlockCount(tableGrowth.tablePages) >
                 MapperState::kMaxTableAllocations) {
-            ReleaseIovaPageStorage(grownPages);
+            ReleaseIovaPageChunk(addedPageChunk);
             d->growthState = "failed-page-tables";
             d->accepting = false;
             d->snapshot.flags |= mapper_abi::kFailed;
@@ -318,7 +340,7 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
             UInt64 newTablePA = 0;
             if (!AllocateTableArea(newTables, blockBytes, newTablePA)) {
                 d->releaseStagedTables(i);
-                ReleaseIovaPageStorage(grownPages);
+                ReleaseIovaPageChunk(addedPageChunk);
                 d->growthState = "failed-tables";
                 return false;
             }
@@ -329,10 +351,10 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
             segmentOffset += blockBytes;
         }
         if (!amdtable::attachPageTables(tableGrowth, blocks, blockCount,
-                grownPages.leaves + firstLeaf)) {
+                addedPageChunk.leaves)) {
             // The helper performs every check before the first PDE write.
             d->releaseStagedTables(blockCount);
-            ReleaseIovaPageStorage(grownPages);
+            ReleaseIovaPageChunk(addedPageChunk);
             d->growthState = "failed-page-tables";
             d->accepting = false;
             d->snapshot.flags |= mapper_abi::kFailed;
@@ -351,7 +373,7 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
     if (invalidated) ++d->snapshot.invalidates;
     if (!committed) {
         ReleaseRecordStorage(grownRecords);
-        ReleaseIovaPageStorage(grownPages);
+        ReleaseIovaPageChunk(addedPageChunk);
         if (invalidated) ++d->snapshot.invalidateFailures;
         d->growthState = "failed-synchronization";
         d->accepting = false;
@@ -364,9 +386,7 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
         static_cast<amdmapper::RecordStorage &>(*d) = grownRecords;
         ReleaseRecordStorage(previous);
     } else {
-        amdmapper::IovaPageStorage previous = *d;
-        static_cast<amdmapper::IovaPageStorage &>(*d) = grownPages;
-        ReleaseIovaPageStorage(previous);
+        amdmapper::appendIovaPageChunk(*d, addedPageChunk);
     }
     d->snapshot.capacityMaps = target.records;
     d->snapshot.capacityPages = target.pages;
@@ -690,7 +710,7 @@ IOReturn org_maz1_AMDMapperProbe::MapMemory(
                          returnedLength > (1ULL << bits) - address)) {
             amdtx::release(d->allocator, basePage, layout.pages); break;
         }
-        bool empty = d->slotByStartPage[basePage] == 0;
+        bool empty = d->startPageOwner(basePage) == 0;
         for (unsigned i = 0; i < layout.pages; ++i)
             if (d->leaf(basePage + i)) empty = false;
         if (!empty) {
@@ -709,7 +729,7 @@ IOReturn org_maz1_AMDMapperProbe::MapMemory(
         record.mapAddress = address; record.mapLength = returnedLength;
         record.descriptorOffset = descriptorOffset; record.length = length;
         record.recordIndex = slot; record.basePage = basePage;
-        d->slotByStartPage[basePage] = static_cast<UInt32>(slot + 1);
+        d->startPageOwner(basePage) = static_cast<UInt32>(slot + 1);
         record.pages = layout.pages; record.runs = layout.runs; record.options = mapOptions;
         UInt32 highPages = 0;
         for (unsigned i = 0; i < layout.runs; ++i) {
@@ -717,7 +737,7 @@ IOReturn org_maz1_AMDMapperProbe::MapMemory(
             for (unsigned j = 0; j < run.pageBytes / 4096U; ++j) {
                 const unsigned localPage = (unsigned)(run.slot / 4096ULL) + j;
                 const UInt64 physical = (run.pa & ~4095ULL) + j * 4096ULL;
-                d->physicalByPage[basePage + localPage] = physical;
+                d->physicalPage(basePage + localPage) = physical;
                 if (physical >= (1ULL << 32)) ++highPages;
                 d->leaf(basePage + localPage) = amdpte::makeDefaultLeaf(1, physical, permissions);
             }
@@ -798,6 +818,7 @@ void org_maz1_AMDMapperProbe::PublishCapacity(bool capacityChanged) {
         const UInt32 tablePages = d->snapshot.tablePages;
         const UInt64 recordBytes = d->recordBytes;
         const UInt64 pageBytes = d->pageBytes;
+        const UInt32 pageStorageChunks = d->pageChunkCount;
         const UInt64 metadataBytes = d->metadataBytes();
         IOLockUnlock(d->lock);
         // Registry writes can block, so publish the captured decision only after
@@ -811,6 +832,7 @@ void org_maz1_AMDMapperProbe::PublishCapacity(bool capacityChanged) {
             entry->setProperty("iommu-table-bytes", tableBytes, 64);
             entry->setProperty("mapper-record-storage-bytes", recordBytes, 64);
             entry->setProperty("mapper-page-storage-bytes", pageBytes, 64);
+            entry->setProperty("mapper-page-storage-chunks", pageStorageChunks, 32);
             entry->setProperty("mapper-arena-bytes", metadataBytes, 64);
             entry->setProperty("mapper-map-window-bytes", current.pages * 4096ULL, 64);
             entry->setProperty("iommu-capacity-grown", growthCount ? "yes" : "no");
@@ -891,7 +913,7 @@ IOReturn org_maz1_AMDMapperProbe::UnmapMemory(
         if (mapAddress < mapper_abi::kBase) break;
         const UInt64 page = (mapAddress - mapper_abi::kBase) / 4096;
         if (page >= d->pages) break;
-        const UInt32 owner = d->slotByStartPage[page];
+        const UInt32 owner = d->startPageOwner((UInt32)page);
         if (!owner || owner > d->records) break;
         const unsigned slot = owner - 1U;
         auto &mapping = d->mappings[slot];
@@ -936,7 +958,7 @@ IOReturn org_maz1_AMDMapperProbe::UnmapMemory(
             s.flags &= ~mapper_abi::kAccepting;
             result = kIOReturnInternalError; break;
         }
-        d->slotByStartPage[page] = 0;
+        d->startPageOwner((UInt32)page) = 0;
         NoteLiveMapping(false);
         --s.liveCount; ++s.unmapOk;
         fUnmapOk = s.unmapOk;

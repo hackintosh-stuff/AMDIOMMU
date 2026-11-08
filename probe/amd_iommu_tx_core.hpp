@@ -21,7 +21,8 @@ struct BoundedAllocator {
 using Allocator = BoundedAllocator<kPages, kMapPages>;
 
 // Find the first page of the requested kind in [from, limit); limit means none.
-inline unsigned findNextBitmapPage(const u64 *used, unsigned from,
+template<class Bitmap>
+inline unsigned findNextBitmapPage(const Bitmap &used, unsigned from,
                                    unsigned limit, bool occupied) {
     while (from < limit) {
         const unsigned wordBase = from & ~63U;
@@ -90,17 +91,19 @@ inline bool release(BoundedAllocator<PoolPages, MaxMapPages> &a,
     return true;
 }
 
-// Runtime-sized sibling of BoundedAllocator. The ordinary per-device mapper
-// cannot fix its pool at compile time any more (capacity profiles are chosen
-// at start), so the bitmap storage comes from the domain arena and poolPages
-// is a member. The first-fit semantics are identical to the template above,
-// which keeps the legacy profile byte-for-byte compatible with R67-2.
-struct RuntimeAllocator {
-    u64 *used, *ever;
+// Runtime-sized sibling of BoundedAllocator. A bitmap can be a flat pointer
+// or an indexed view of retained metadata chunks. Both use the same first-fit
+// search, accounting and release rules; poolPages controls the usable window.
+template<class Bitmap>
+struct RuntimeAllocatorState {
+    Bitmap used, ever;
     unsigned poolPages, maxMapPages;
     unsigned livePages, peakPages, reusedAllocations;
 };
-inline bool allocate(RuntimeAllocator &a, unsigned pages, unsigned &basePage,
+using RuntimeAllocator = RuntimeAllocatorState<u64 *>;
+
+template<class Bitmap>
+inline bool allocate(RuntimeAllocatorState<Bitmap> &a, unsigned pages, unsigned &basePage,
                      unsigned alignmentPages = 1) {
     if (!a.used || !a.ever || !pages || pages > a.maxMapPages || !alignmentPages ||
         (alignmentPages & (alignmentPages - 1)) || pages > a.poolPages) return false;
@@ -134,7 +137,8 @@ inline bool allocate(RuntimeAllocator &a, unsigned pages, unsigned &basePage,
     }
     return false;
 }
-inline bool release(RuntimeAllocator &a, unsigned basePage, unsigned pages) {
+template<class Bitmap>
+inline bool release(RuntimeAllocatorState<Bitmap> &a, unsigned basePage, unsigned pages) {
     if (!a.used || !pages || pages > a.maxMapPages || basePage > a.poolPages - pages ||
         a.livePages < pages) return false;
     for (unsigned j = 0; j < pages; ++j) {

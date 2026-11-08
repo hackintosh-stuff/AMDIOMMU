@@ -116,8 +116,9 @@ inline bool sameProfileName(const char *a, const char *b) {
     return *a == *b;
 }
 
-// Record slots and IOVA-page metadata have separate allocations. Each store
-// is rounded to a page; the combined guard excludes hardware page tables.
+// Record slots and IOVA-page metadata have separate allocations. The record
+// store and each appended page chunk are rounded to a page. The combined guard
+// excludes hardware page tables and fixed storage descriptors.
 // Keep the arithmetic shared with the host capacity test.
 static constexpr uint32_t kMappingBytes = 16 + sizeof(RecordHeader); // 2 pointers + header
 static_assert(kMappingBytes == 120, "one record slot is two pointers plus the ABI3 header");
@@ -130,13 +131,28 @@ inline uint64_t recordStorageBytesFor(uint32_t records) {
     return (bytes + 4095ULL) & ~4095ULL;
 }
 
-inline uint64_t iovaPageStorageBytesFor(uint32_t pages) {
+inline uint64_t iovaPageChunkBytesFor(uint32_t pages) {
     const uint64_t pageWords = ((uint64_t)pages + 63) / 64;
     uint64_t bytes = (uint64_t)pages * sizeof(uint64_t);   // physicalByPage
     bytes += (uint64_t)pages * sizeof(uint32_t);           // slotByStartPage
     bytes += ((uint64_t)pages / 512) * sizeof(uint64_t *); // leaves
     bytes += 2 * pageWords * sizeof(uint64_t);       // allocator used/ever
     return (bytes + 4095ULL) & ~4095ULL;
+}
+
+// Preparation and growth use the same legacy-first geometric chunk sequence.
+// Sum retained chunks rather than treating all IOVA metadata as one allocation.
+inline uint64_t iovaPageStorageBytesFor(uint32_t pages) {
+    uint64_t bytes = 0;
+    uint32_t covered = 0;
+    while (covered < pages) {
+        const uint32_t requested = covered ? covered : kPages;
+        const uint32_t remaining = pages - covered;
+        const uint32_t chunkPages = requested < remaining ? requested : remaining;
+        bytes += iovaPageChunkBytesFor(chunkPages);
+        covered += chunkPages;
+    }
+    return bytes;
 }
 
 inline uint64_t metadataBytesFor(const Capacity &capacity) {
