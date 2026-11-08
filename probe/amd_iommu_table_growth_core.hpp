@@ -6,6 +6,26 @@
 namespace amdtable {
 typedef amdpte::u64 u64;
 
+// Growth storage is physically contiguous within each block, not across the
+// whole capacity increase. Bound each allocation to 64 KiB.
+static constexpr unsigned kTableBlockPages = 16;
+
+constexpr unsigned pageTableBlockCount(unsigned tablePages) {
+    return (tablePages + kTableBlockPages - 1) / kTableBlockPages;
+}
+
+constexpr unsigned pageTableBlockPages(unsigned tablePages, unsigned blockIndex) {
+    const unsigned firstPage = blockIndex * kTableBlockPages;
+    const unsigned remaining = firstPage < tablePages ? tablePages - firstPage : 0;
+    return remaining < kTableBlockPages ? remaining : kTableBlockPages;
+}
+
+struct PageTableBlock {
+    volatile u64 *tables;
+    u64 physicalBase;
+    unsigned tablePages;
+};
+
 // The root and L3 remain in the initial buffer. The 2 GiB mapper window uses
 // two adjacent L3 entries, so locating their parent needs no page-bank lookup.
 inline volatile u64 *leafDirectoryParent(amdsparse::Arena &rootArena, u64 iova) {
@@ -31,7 +51,7 @@ struct PageTableGrowthPlan {
 };
 
 // Each geometric increase stays within one L2 directory. The initial directory
-// is in rootArena; the final increase adds a complete directory in a new block.
+// is in rootArena; the final increase adds a complete directory and its leaves.
 // Hold the mapper lock from planning through attachment and capacity commit.
 inline bool planPageTableGrowth(amdsparse::Arena &rootArena, u64 firstIOVA,
                                unsigned leafCount, PageTableGrowthPlan &growth) {
@@ -59,30 +79,41 @@ inline bool planPageTableGrowth(amdsparse::Arena &rootArena, u64 firstIOVA,
     return true;
 }
 
-// The caller allocates growth.tablePages and passes the first new leaf-pointer
-// slot, not the start of the complete array. A new directory occupies the first
-// page of the block; publish its L3 link only after every child PDE is prepared.
-// After success, retain the block and confirm hardware synchronization before
-// exposing the newly covered IOVA range.
+// Stage all bounded blocks before calling this helper, and pass the first new
+// leaf-pointer slot, not the start of the complete array. A new directory uses
+// logical page zero; its leaves may reside in any of the following blocks.
+// Publish the L3 link only after every child PDE is prepared. After success,
+// retain all blocks and confirm hardware synchronization before exposing the
+// newly covered IOVA range. Every validation precedes the first PDE write.
 inline bool attachPageTables(const PageTableGrowthPlan &growth,
-                            volatile u64 *newTables, u64 newTablePA,
+                            const PageTableBlock *blocks, unsigned blockCount,
                             volatile u64 **newLeafPointers) {
     const unsigned directoryPages = growth.directory ? 0U : 1U;
-    if (!growth.parentEntry || !newTables || !newLeafPointers || !newTablePA ||
-            (newTablePA & 4095ULL) || !growth.leafCount || growth.firstEntry >= 512 ||
+    if (!growth.parentEntry || !blocks || !newLeafPointers ||
+            !growth.leafCount || growth.firstEntry >= 512 ||
             growth.leafCount > 512 - growth.firstEntry ||
-            growth.tablePages != growth.leafCount + directoryPages) return false;
-    for (unsigned i = 0; i < growth.tablePages * 512; ++i) newTables[i] = 0;
-    volatile u64 *directory = growth.directory ? growth.directory : newTables;
+            growth.tablePages != growth.leafCount + directoryPages ||
+            blockCount != pageTableBlockCount(growth.tablePages)) return false;
+    for (unsigned i = 0; i < blockCount; ++i) {
+        const auto &block = blocks[i];
+        if (!block.tables || !block.physicalBase || (block.physicalBase & 4095ULL) ||
+                block.tablePages != pageTableBlockPages(growth.tablePages, i)) return false;
+    }
+    for (unsigned i = 0; i < blockCount; ++i)
+        for (unsigned entry = 0; entry < blocks[i].tablePages * 512; ++entry)
+            blocks[i].tables[entry] = 0;
+    volatile u64 *directory = growth.directory ? growth.directory : blocks[0].tables;
     const u64 permissions = amdpte::PTE_IR | amdpte::PTE_IW;
     for (unsigned i = 0; i < growth.leafCount; ++i) {
         const unsigned page = directoryPages + i;
-        newLeafPointers[i] = newTables + page * 512;
+        const auto &block = blocks[page / kTableBlockPages];
+        const unsigned localPage = page % kTableBlockPages;
+        newLeafPointers[i] = block.tables + localPage * 512;
         directory[growth.firstEntry + i] = amdpte::makeTablePde(
-            1, newTablePA + (u64)page * 4096, permissions);
+            1, block.physicalBase + (u64)localPage * 4096, permissions);
     }
     if (!growth.directory)
-        *growth.parentEntry = amdpte::makeTablePde(2, newTablePA, permissions);
+        *growth.parentEntry = amdpte::makeTablePde(2, blocks[0].physicalBase, permissions);
     return true;
 }
 }  // namespace amdtable

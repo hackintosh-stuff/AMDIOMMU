@@ -34,6 +34,7 @@ bool growAndTranslate() {
     constexpr unsigned expectedPages[] = {
         4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288};
     constexpr unsigned expectedTablePages[] = {16, 24, 40, 72, 136, 264, 520, 1033};
+    constexpr unsigned expectedSegments[] = {1, 2, 3, 5, 9, 17, 33, 66};
     constexpr u64 tablePhysicalBases[] = {
         0x40000000ULL, 0x70000000ULL, 0x28000000ULL,
         0x54000000ULL, 0x90000000ULL, 0x08000000ULL, 0x06000000ULL};
@@ -106,10 +107,11 @@ bool growAndTranslate() {
             "legacy capacity starts with only 16 allocated table pages") ||
             !translationsMatch()) return false;
 
-    // Keep each host buffer and its physical address stable across later growth.
-    // The final block lies below rootPA, so the walk must resolve each block.
+    // Keep every host buffer stable. Blocks within a growth are separated and
+    // descend in PA; the final growth lies below rootPA. Walking must resolve
+    // each actual segment rather than add an offset to one physical base.
     std::vector<TableBlock> addedBlocks;
-    addedBlocks.reserve(growthSteps);
+    addedBlocks.reserve(expectedSegments[growthSteps] - 1);
     for (unsigned step = 0; step < growthSteps; ++step) {
         mapper_abi::Capacity target{};
         if (!check(mapper_abi::nextCapacity(capacity, ceiling,
@@ -139,23 +141,39 @@ bool growAndTranslate() {
             for (unsigned entry = 0; entry < 512; ++entry)
                 retainedDirectory.push_back(static_cast<u64>(directory[entry]));
         }
-        addedBlocks.emplace_back(tablePhysicalBases[step], growth.tablePages, ~0ULL);
-        TableBlock &newTables = addedBlocks.back();
+        const unsigned blockCount = amdtable::pageTableBlockCount(growth.tablePages);
+        if (!check(blockCount == expectedSegments[step + 1] - expectedSegments[step],
+                "block count follows the 64 KiB allocation bound")) return false;
+        std::vector<amdtable::PageTableBlock> staged;
+        staged.reserve(blockCount);
+        for (unsigned i = 0; i < blockCount; ++i) {
+            const unsigned pages = amdtable::pageTableBlockPages(growth.tablePages, i);
+            if (!check(pages > 0 && pages <= 16,
+                    "each table allocation is at most 16 pages")) return false;
+            addedBlocks.emplace_back(tablePhysicalBases[step] - (u64)i * 0x20000ULL,
+                                     pages, ~0ULL);
+            TableBlock &block = addedBlocks.back();
+            staged.push_back({block.words.data(), block.physicalBase, pages});
+            blocks.push_back(&block);
+        }
         leaves.resize(target.pages / 512);
-        if (!check(amdtable::attachPageTables(growth, newTables.words.data(),
-                newTables.physicalBase, leaves.data() + firstLeaf),
-                "attach the next non-contiguous table block") ||
+        if (!check(amdtable::attachPageTables(growth, staged.data(), blockCount,
+                leaves.data() + firstLeaf),
+                "attach all staged table blocks for one capacity increase") ||
                 !check(newLeavesEmpty(firstLeaf, addedLeaves), "growth clears every new leaf"))
             return false;
-        blocks.push_back(&newTables);
         if (addsDirectory) {
+            const u64 newDirectoryPA = staged.front().physicalBase;
+            const auto &lastBlock = staged.back();
+            const u64 lastLeafPA = lastBlock.physicalBase +
+                (u64)(lastBlock.tablePages - 1) * 4096;
             if (!check(readEntry(upperPA, 3) ==
-                    amdpte::makeTablePde(2, newTables.physicalBase, permissions) &&
-                    readEntry(newTables.physicalBase, 0) ==
-                    amdpte::makeTablePde(1, newTables.physicalBase + 4096, permissions) &&
-                    readEntry(newTables.physicalBase, 511) ==
-                    amdpte::makeTablePde(1, newTables.physicalBase + 512 * 4096ULL, permissions),
-                    "L3[3] points to the new L2 and its first and last leaf tables"))
+                    amdpte::makeTablePde(2, newDirectoryPA, permissions) &&
+                    readEntry(newDirectoryPA, 0) ==
+                    amdpte::makeTablePde(1, newDirectoryPA + 4096, permissions) &&
+                    readEntry(newDirectoryPA, 511) ==
+                    amdpte::makeTablePde(1, lastLeafPA, permissions),
+                    "L3[3] reaches the new L2 and leaves in different physical blocks"))
                 return false;
             for (unsigned entry = 0; entry < 512; ++entry)
                 if (!check(directory[entry] == retainedDirectory[entry],
@@ -163,12 +181,23 @@ bool growAndTranslate() {
                     return false;
         }
         tablePages += growth.tablePages;
-        mapPage(capacity.pages);
         mapPage((capacity.pages + target.pages) / 2);
-        mapPage(target.pages - 1);
+        // Map both sides of every physical-block boundary. The first block
+        // loses one leaf position when it also owns the new L2 directory.
+        unsigned mappedLeaves = 0;
+        for (unsigned i = 0; i < blockCount; ++i) {
+            const unsigned blockLeaves = staged[i].tablePages -
+                ((addsDirectory && i == 0) ? 1U : 0U);
+            mapPage((firstLeaf + mappedLeaves) * 512);
+            mappedLeaves += blockLeaves;
+            mapPage((firstLeaf + mappedLeaves) * 512 - 1);
+        }
+        if (!check(mappedLeaves == addedLeaves,
+                "boundary mappings span every new leaf block")) return false;
         capacity = target;
-        if (!check(tablePages == expectedTablePages[step + 1],
-                "allocated table pages follow the incremental growth sequence") ||
+        if (!check(tablePages == expectedTablePages[step + 1] &&
+                blocks.size() == expectedSegments[step + 1],
+                "table pages and physical segments follow their separate sequences") ||
                 !hierarchyUnchanged() || !translationsMatch()) return false;
     }
     if (!check(mapper_abi::kBase + (u64)(capacity.pages - 1) * 4096 == 0xfffff000ULL &&
@@ -192,6 +221,7 @@ bool growAndTranslate() {
 
 int main() {
     if (!growAndTranslate()) return 1;
-    std::printf("TABLE_GROWTH_OK table_pages=16,24,40,72,136,264,520,1033\n");
+    std::printf("TABLE_GROWTH_OK table_pages=16,24,40,72,136,264,520,1033 "
+                "segments=1,2,3,5,9,17,33,66 max_block_pages=16\n");
     return 0;
 }

@@ -49,6 +49,10 @@ allocates only `native-legacy` storage: 1024 records, a 16 MiB IOVA window and
 65536 bytes: **241664 bytes, or about 0.230 MiB per prepared domain**. A higher
 ceiling does not reserve its full storage at startup.
 
+These totals cover the metadata arena and page-table allocations. Fixed mapper
+state is separate, including a 66-entry table-allocation descriptor array
+(2112 bytes).
+
 Record slots and IOVA pages grow independently. When a mapping runs out of
 record slots, the mapper doubles only the record capacity. When it cannot
 allocate an IOVA range, it doubles only the page capacity. Each increase stops
@@ -59,17 +63,19 @@ can remain live throughout growth.
 Growth copies the allocation records, physical-page index and allocation bitmaps
 into a larger metadata arena. Existing leaf pointers are copied. A page-capacity
 increase also allocates new leaf tables and, when extending beyond the first
-1 GiB directory, a second L2 table. The new tables are linked through unused
-PDEs; a record-capacity increase leaves the page tables untouched. The root and
-all existing page-table pages remain at their original physical addresses, so
-existing IOVAs keep the same translations. New table blocks need not be
-physically adjacent to the original block.
+1 GiB directory, a second L2 table. Each new table block contains at most
+16 pages (64 KiB) of physically contiguous storage. The blocks may be placed
+independently, and every block needed for an increase is allocated before any
+new PDE is attached. A record-capacity increase leaves the page tables
+untouched. The root and all existing page-table pages remain at their original
+physical addresses, so existing IOVAs keep the same translations.
 
 When page capacity grows, an active domain completes a full domain invalidation
-including the PDE cache before the added range becomes usable. This growth fence
-is required even when the controller has no NP cache. Growing only the record
-capacity needs no hardware invalidation. Ordinary maps keep their existing
-NP-cache optimization when filling an already prepared leaf.
+including the PDE cache after attaching all new blocks and before the added
+range becomes usable. There is one growth fence per page-capacity increase,
+even when it needs several blocks or the controller has no NP cache. Growing
+only the record capacity needs no hardware invalidation. Ordinary maps keep
+their existing NP-cache optimization when filling an already prepared leaf.
 
 At the exhausted resource's ceiling, an allocation that cannot fit returns
 `kIOReturnNoResources`.
@@ -90,18 +96,20 @@ follows its own sequence:
 | 16 MiB | 4096 | 16 | 65536 | 1 |
 | 32 MiB | 8192 | 24 | 98304 | 2 |
 | 64 MiB | 16384 | 40 | 163840 | 3 |
-| 128 MiB | 32768 | 72 | 294912 | 4 |
-| 256 MiB | 65536 | 136 | 557056 | 5 |
-| 512 MiB | 131072 | 264 | 1081344 | 6 |
-| 1 GiB | 262144 | 520 | 2129920 | 7 |
-| 2 GiB | 524288 | 1033 | 4231168 | 8 |
+| 128 MiB | 32768 | 72 | 294912 | 5 |
+| 256 MiB | 65536 | 136 | 557056 | 9 |
+| 512 MiB | 131072 | 264 | 1081344 | 17 |
+| 1 GiB | 262144 | 520 | 2129920 | 33 |
+| 2 GiB | 524288 | 1033 | 4231168 | 66 |
 
-The 1 GiB to 2 GiB increase adds one L2 table and 512 leaf tables in a single
-513-page block. The existing L3 table links this second directory through its
-unused entry 3; entry 2 continues to serve the original 1 GiB range. The root
-and DTE stay in place. The initial block retains five spare pages, so the
-fully grown tree owns 1033 table pages with 1028 reachable pages. A
-record-capacity increase adds no table segment. `rootPA` remains stable;
+The 1 GiB to 2 GiB increase adds one L2 table and 512 leaf tables across
+33 blocks, with a largest individual allocation of 64 KiB. After the child
+tables are prepared, the existing L3 table links this second directory through
+its unused entry 3; entry 2 continues to serve the original 1 GiB range. The
+root and DTE stay in place. The initial block retains five spare pages, so the
+fully grown tree owns 1033 table pages with 1028 reachable pages. Segment
+counts describe allocated blocks; a page-capacity increase may add several
+segments, while a record-capacity increase adds none. `rootPA` remains stable;
 `ptBytes` and `tablePages` grow only with IOVA capacity. Snapshot ABI5 and its
 physical segment descriptors remain unchanged.
 [DEBUG.md](DEBUG.md) documents the format and a saved-snapshot inspector that

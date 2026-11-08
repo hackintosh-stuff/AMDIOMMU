@@ -142,7 +142,7 @@ mapping that fits does not grow the domain.
 | `iommu-profile-ceiling-source` | `boot-arg` \| `default` |
 | `iommu-profile-records`, `iommu-profile-pages` | Current usable limits |
 | `iommu-profile-table-pages`, `iommu-table-bytes` | Actual allocated page-table size; includes added leaf tables and the second L2 directory |
-| `mapper-arena-bytes` | Current metadata arena size; grows when either capacity increases |
+| `mapper-arena-bytes` | Current metadata arena size; grows when either capacity increases; excludes fixed mapper state and its table-allocation descriptors |
 | `iommu-growth-policy` | `capacity-demand` \| `disabled` |
 | `iommu-capacity-grown` | Whether at least one capacity increase succeeded |
 | `iommu-growth-count` | Total successful increases; the sum of record and page growth counts |
@@ -169,14 +169,18 @@ fixed, while `ptBytes` / `tablePages` describe the current total of allocated ta
 blocks. Record-only growth keeps these table values and the segment count
 unchanged, and requires no hardware invalidation. IOVA capacity grows from
 16 to 32, 64, 128, 256, 512, 1024 and 2048 MiB; the corresponding allocated
-table-page counts are 16, 24, 40, 72, 136, 264, 520 and 1033. Each successful
-page increase adds one segment, so the segment count is one plus
-`iommu-page-growth-count`, rather than one plus the total growth count.
+table-page counts are 16, 24, 40, 72, 136, 264, 520 and 1033. The corresponding
+segment counts are 1, 2, 3, 5, 9, 17, 33 and 66. Each growth allocation is
+limited to 16 pages (64 KiB), so one capacity increase can add multiple
+segments. `iommu-page-growth-count` counts capacity increases; the segment
+count describes the number of allocated blocks.
 
-The last page-capacity increase adds a 513-page block: one L2 directory and
-512 leaf tables. It links the new directory through the original L3 entry 3;
-the original L3 entry 2, its existing subtree and the root PA stay intact.
-At the 2 GiB ceiling there are eight segments, 4231168 allocated table bytes
+The last page-capacity increase adds 513 pages across 33 blocks: one L2
+directory and 512 leaf tables. All blocks are allocated before any new PDE is
+attached. Once the child tables are prepared, the new directory is linked
+through the original L3 entry 3; the original L3 entry 2, its existing subtree
+and the root PA stay intact.
+At the 2 GiB ceiling there are 66 segments, 4231168 allocated table bytes
 and 1028 reachable table pages. The `dma32-max` profile's 1028-page budget
 describes construction in one contiguous block; incremental allocation owns
 1033 pages because it retains the initial block's five spare pages. Registry
@@ -190,11 +194,13 @@ occupies 22175744 bytes. Exported `recordIndex` and capacity fields are 32-bit
 as well; ABI5 and the Snapshot/Record byte layouts are unchanged.
 
 New PDEs always require a full invalidation including the PDE cache on an active
-domain, even when `iommu-np-cache` is zero. Read `invalidation-full-completed`
-with the page-growth count when checking this path; record growth does not add
-a full invalidation. Capacity is retained after mappings are released, so use
-the growth counters and published capacity instead of inferring the growth
-history from the current live-map or live-page count.
+domain, even when `iommu-np-cache` is zero. A page-capacity increase performs
+this once, after attaching all its blocks and before exposing the added range.
+Read `invalidation-full-completed` with the page-growth count when checking
+this path; record growth does not add a full invalidation. Capacity is retained
+after mappings are released, so use the growth counters and published capacity
+instead of inferring the growth history from the current live-map or live-page
+count.
 
 ## Segmented page-table snapshots
 
@@ -214,6 +220,9 @@ only valid for the older contiguous ABI4 export. The four ABI5 blobs are capture
 under the same mapper lock and belong to one `mapper-snapshot-sequence`.
 An added segment can contain an L2 directory as well as leaf tables, so resolve
 physical addresses through the segment descriptors at every level of the walk.
+Blocks are listed in allocation order; their physical addresses need not be
+adjacent or increasing. The descriptor's byte size gives each block's actual
+allocation size, including a shorter final block when needed.
 
 PM boundaries also retain their own `pm-suspend-pt-segments-raw` and
 `pm-resume-pt-segments-raw` alongside the existing table/live blobs.

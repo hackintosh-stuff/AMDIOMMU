@@ -28,9 +28,13 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingArena {
         IOBufferMemoryDescriptor *memory;
         mapper_abi::TableSegment segment;
     };
-    // Initial 4096-page window plus seven doublings to the 524288-page ceiling.
+    // The DMA32 window needs 1024 leaves. Allow two extra allocation slots
+    // for the initial layout and added L2 beyond the full leaf-block count.
     // Record-slot growth does not allocate a page-table segment.
-    static constexpr UInt32 kMaxTableAllocations = 8;
+    static constexpr UInt32 kMaxTableAllocations =
+        mapper_abi::kProfileDma32Max.pages / (512 * amdtable::kTableBlockPages) + 2;
+    // One complete L2 directory and its 512 leaf tables is the largest growth.
+    static constexpr UInt32 kMaxGrowthBlocks = amdtable::pageTableBlockCount(512 + 1);
     IOLock *lock;
     volatile UInt64 *tables;
     UInt64 tablePA;
@@ -123,6 +127,16 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingArena {
         if (data) { data->release(); data = nullptr; }
         if (segments) { segments->release(); segments = nullptr; }
         return false;
+    }
+
+    // Staged allocations occupy the unused tail until every block is ready.
+    // Their count is not published, so cleanup never touches retained tables.
+    void releaseStagedTables(UInt32 count) {
+        for (UInt32 i = 0; i < count; ++i) {
+            auto &allocation = tableAllocations[tableAllocationCount + i];
+            allocation.memory->release();
+            allocation = {};
+        }
     }
 
     void capturePowerBoundary(OSData *&live, OSData *&pt, OSData *&segments) {
@@ -235,7 +249,9 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
         amdtable::PageTableGrowthPlan tableGrowth{};
         if (!amdtable::planPageTableGrowth(rootArena,
                 mapper_abi::kBase + (UInt64)current.pages * 4096ULL,
-                leafCount, tableGrowth)) {
+                leafCount, tableGrowth) ||
+            d->tableAllocationCount + amdtable::pageTableBlockCount(tableGrowth.tablePages) >
+                MapperState::kMaxTableAllocations) {
             IOFree(grown.arena, grown.arenaBytes);
             d->growthState = "failed-page-tables";
             d->accepting = false;
@@ -244,18 +260,30 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
             return false;
         }
         const UInt64 addedTableBytes = (UInt64)tableGrowth.tablePages * 4096ULL;
-        IOBufferMemoryDescriptor *newTables = nullptr;
-        UInt64 newTablePA = 0;
-        if (!AllocateTableArea(newTables, addedTableBytes, newTablePA)) {
-            IOFree(grown.arena, grown.arenaBytes);
-            d->growthState = "failed-tables";
-            return false;
+        const UInt32 blockCount = amdtable::pageTableBlockCount(tableGrowth.tablePages);
+        amdtable::PageTableBlock blocks[MapperState::kMaxGrowthBlocks]{};
+        UInt64 segmentOffset = d->snapshot.ptBytes;
+        for (UInt32 i = 0; i < blockCount; ++i) {
+            const UInt32 blockPages = amdtable::pageTableBlockPages(tableGrowth.tablePages, i);
+            const UInt64 blockBytes = (UInt64)blockPages * 4096ULL;
+            IOBufferMemoryDescriptor *newTables = nullptr;
+            UInt64 newTablePA = 0;
+            if (!AllocateTableArea(newTables, blockBytes, newTablePA)) {
+                d->releaseStagedTables(i);
+                IOFree(grown.arena, grown.arenaBytes);
+                d->growthState = "failed-tables";
+                return false;
+            }
+            d->tableAllocations[d->tableAllocationCount + i] = {newTables,
+                {newTablePA, segmentOffset, blockBytes}};
+            blocks[i] = {(volatile UInt64 *)newTables->getBytesNoCopy(),
+                         newTablePA, blockPages};
+            segmentOffset += blockBytes;
         }
-        if (!amdtable::attachPageTables(tableGrowth,
-                (volatile UInt64 *)newTables->getBytesNoCopy(), newTablePA,
+        if (!amdtable::attachPageTables(tableGrowth, blocks, blockCount,
                 grown.leaves + firstLeaf)) {
             // The helper performs every check before the first PDE write.
-            newTables->release();
+            d->releaseStagedTables(blockCount);
             IOFree(grown.arena, grown.arenaBytes);
             d->growthState = "failed-page-tables";
             d->accepting = false;
@@ -263,10 +291,9 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
             d->snapshot.flags &= ~mapper_abi::kAccepting;
             return false;
         }
-        // From this point hardware can reference the new allocation. Retain it
+        // From this point hardware can reference every staged block. Retain all
         // even if completion cannot be confirmed; no new IOVA is returned on failure.
-        d->tableAllocations[d->tableAllocationCount++] = {newTables,
-            {newTablePA, d->snapshot.ptBytes, addedTableBytes}};
+        d->tableAllocationCount += blockCount;
         d->snapshot.ptBytes += addedTableBytes;
         d->snapshot.tablePages += tableGrowth.tablePages;
         OSSynchronizeIO();
