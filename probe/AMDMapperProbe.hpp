@@ -150,15 +150,9 @@ private:
            fRejectedNoRange = 0, fRejectedBits = 0;
     // R72: refused because the controller could not be restored after a wake.
     UInt32 fRejectedUnavailable = 0;
-    void PublishCapacity();
-    // S1 capacity profile (docs/m2-3az-round69-capacity-model.md). The legacy
-    // entry is the default and reproduces the accepted ABI3 arena exactly; a
-    // domain may only be prepared after the profile's page-table area exists.
-    // R71-B: capacity is no longer chosen per device at admission. Every domain
-    // is prepared at the legacy arena and may grow once, at its first mapping,
-    // to the ceiling in kProfileCeiling (see GrowBeforeFirstMap). The boot
-    // argument now names that ceiling; a device's identity table entry only
-    // decides how far a third-party client may grow.
+    void PublishCapacity(bool capacityChanged = false);
+    // The ceiling sizes reserved storage. Usable capacity starts at legacy
+    // and grows on allocation pressure without moving existing mappings.
     mapper_abi::Profile fProfile = mapper_abi::kProfileLegacy;
     bool fProfileForced = false;
     bool SelectProfile();
@@ -237,26 +231,22 @@ private:
     bool SuspendAuto();
     bool ResumeAuto();
     bool PrepareMappings(volatile UInt64 *, UInt64, UInt32, UInt32,
-                            const mapper_abi::Profile &);
-    // R71-B: shared by prepare and growth so the arena carve order exists once.
+                            const mapper_abi::Profile &prepared,
+                            const mapper_abi::Profile &reserved);
+    // Reserve all ceiling storage once, but expose only prepared capacity.
     // `d` is zeroed and owns nothing; on failure it still owns nothing.
     static bool BuildArena(MapperState *d, volatile UInt64 *tables,
                               UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel,
-                              const mapper_abi::Profile &profile);
-    // R71-B: called with the domain lock held, from the first admissible map.
-    // Rebuilds the arena and page-table area at the admission ceiling while the
-    // DTE still names a passthrough root, then adopts them in one step.
-    bool GrowBeforeFirstMap(MapperState *d);
-    // Domain is defined in AMDMapperProbeAuto.cpp, so the growth code (which
-    // owns MapperState) asks the platform side through these accessors
-    // instead of reaching into a type it cannot see.
-    bool GrowthOpen() const;
-    const mapper_abi::Profile *PreparedProfile() const;
+                              const mapper_abi::Profile &prepared,
+                              const mapper_abi::Profile &reserved);
+    // Called with the mapper lock held after a slot or range allocation fails.
+    bool TryGrowCapacity(MapperState *d);
+    // Synchronize the NP cache and publish domain limits under the controller
+    // lock. Existing roots and table pages stay in place.
+    const mapper_abi::Profile *CurrentProfile() const;
     const mapper_abi::Profile *CeilingProfile() const;
-    void AdoptGrownTables(IOBufferMemoryDescriptor *tables, UInt64 tablePA,
-                             UInt32 tablePages, const mapper_abi::Profile &target);
-    // Same allocation the controller buffers use, so admission and growth cannot
-    // diverge on alignment or contiguity requirements.
+    bool CommitCapacityGrowth(const mapper_abi::Profile &target, bool &invalidated);
+    // Page-table storage has the controller buffers' alignment and contiguity.
     bool AllocateTableArea(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa);
     bool QuiesceMappings();
     bool ReleaseMappings();

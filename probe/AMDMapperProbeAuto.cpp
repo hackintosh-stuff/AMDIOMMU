@@ -97,9 +97,8 @@ bool Allocate(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
 }
 }
 
-// R71-B: growth allocates a domain's page-table area through the same helper the
-// controller buffers use, so admission and growth cannot diverge on the 4 KiB
-// alignment or on the physical-contiguity requirement.
+// Reserve page-table storage with the controller buffers' alignment and
+// physical-contiguity requirements.
 bool org_maz1_AMDMapperProbe::AllocateTableArea(
     IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa) {
     return Allocate(md, bytes, pa);
@@ -150,8 +149,8 @@ struct org_maz1_AMDMapperProbe::Domain {
     // or legacy domain cannot be mistaken for a pool-sized one.
     const char *profileName;
     UInt32 profileRecords, profilePages, tablePages;
-    // R71-B: the arena is prepared at profileName and may grow once, at the first
-    // mapping, to this ceiling (nullptr before prepare finishes).
+    // Storage is reserved at this ceiling; profileName describes usable limits.
+    // Capacity growth never replaces tables, tablePA or tablePages.
     const mapper_abi::Profile *ceilingProfile;
     const char *state;
     bool active;
@@ -510,9 +509,8 @@ bool org_maz1_AMDMapperProbe::DefaultDeviceMatches(
     return false;
 }
 
-// S1/R71-B: this selects the *ceiling* a domain may grow to, not the arena it is
-// prepared with. Growth happens at the first mapping (GrowBeforeFirstMap), so
-// the value published here says how far that growth may go.
+// Select the reserved ceiling. Each domain initially exposes legacy capacity
+// and opens the next profile when a mapping exhausts records or IOVA pages.
 bool org_maz1_AMDMapperProbe::SelectProfile() {
     char requested[24] = {};
     const bool named = PE_parse_boot_argn("amdiommu_profile", requested,
@@ -522,7 +520,7 @@ bool org_maz1_AMDMapperProbe::SelectProfile() {
     fProfile = *ceiling;
     fProfileForced = forced;
     if (named) setProperty("iommu-profile-request", requested);
-    setProperty("iommu-profile-mode", forced ? "forced" : "first-map-growth");
+    setProperty("iommu-profile-mode", forced ? "forced" : "capacity-demand");
     setProperty("iommu-profile", ceiling->name);
     setProperty("iommu-profile-ceiling", ceiling->name);
     setProperty("iommu-profile-records", ceiling->records, 32);
@@ -942,13 +940,8 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
     d->deviceID = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
     d->state = "preparing";
-    // R71-B: capacity is no longer guessed from identity before the client has
-    // ever mapped. R70-S3 proved that refusing is NOT a safe passthrough for
-    // Apple's client: with no iommu-parent its kMapped IODMACommand gets NULL and
-    // IOSkywalk panics on 0xe00002be exactly like capacity exhaustion. So every
-    // domain is prepared - at the legacy arena, the smallest one and the only one
-    // that cannot fail for size - and may grow at its first mapping to the
-    // ceiling this device is admitted for.
+    // Reserve the selected ceiling before publishing iommu-parent. The initial
+    // usable profile remains legacy; later growth only exposes reserved space.
     mapper_abi::ProfileSource source = sourceIn;
     if (!requested) requested = &mapper_abi::kProfileLegacy;
     char requestedName[24] = {};
@@ -964,7 +957,7 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
         ceiling = &mapper_abi::kProfileLegacy;
     const mapper_abi::Profile *prepared = &mapper_abi::kProfileLegacy;
     const bool growth =
-        mapper_abi::profileForFirstMapGrowth(prepared, ceiling) != nullptr;
+        mapper_abi::nextCapacityProfile(prepared, ceiling) != nullptr;
     // Per-instance admission evidence: the device mapper is its own instance,
     // so record whether this instance saw the boot-arg override at all.
     nic->setProperty("iommu-attach-forced", ForcedProfile() ? "yes" : "no");
@@ -974,39 +967,39 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
         : (source == mapper_abi::ProfileSource::idTable ? "id-table"
         : (source == mapper_abi::ProfileSource::classTable ? "class-table"
                                                           : "legacy-fallback")));
-    // The identity table is advisory now: it sets the admission ceiling and
-    // records what identity-based sizing would have picked. It cannot cost a real
-    // client its arena any more, because the arena starts at legacy and grows
-    // from demand.
+    // Record the identity-based suggestion separately from the actual ceiling
+    // and current usable capacity.
     nic->setProperty("iommu-profile-suggested", requested->name);
     nic->setProperty("iommu-profile-prepared", prepared->name);
     nic->setProperty("iommu-profile-ceiling-source",
                      forcedCeiling ? "boot-arg" : "default");
     nic->setProperty("iommu-profile-ceiling",
                      unsupported ? "unsupported-name" : ceiling->name);
-    nic->setProperty("iommu-growth-policy", growth ? "first-map" : "disabled");
+    nic->setProperty("iommu-growth-policy", growth ? "capacity-demand" : "disabled");
     nic->setProperty("iommu-capacity-grown", "no");
     nic->setProperty("iommu-profile", prepared->name);
-    const UInt64 preparedBytes = mapper_abi::arenaBytesFor(*prepared);
-    const bool preparedOK = preparedBytes &&
-        preparedBytes <= mapper_abi::kMaxArenaBytes &&
-        prepared->tablePages >= prepared->pages / 512 + 2 &&
+    const UInt64 reservedBytes = mapper_abi::arenaBytesFor(*ceiling);
+    const bool preparedOK = reservedBytes &&
+        reservedBytes <= mapper_abi::kMaxArenaBytes &&
+        ceiling->tablePages >= ceiling->pages / 512 + 2 &&
         AllocateTableArea(d->tables,
-            (UInt64)prepared->tablePages * M2B2_PAGE_SIZE, d->tablePA) &&
+            (UInt64)ceiling->tablePages * M2B2_PAGE_SIZE, d->tablePA) &&
         PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
-            d->tablePA, prepared->tablePages, M2B2_PAGE_MODE_4_LEVEL, *prepared);
+            d->tablePA, ceiling->tablePages, M2B2_PAGE_MODE_4_LEVEL,
+            *prepared, *ceiling);
     if (!preparedOK) {
         nic->setProperty("admission", "refused-no-arena");
-        IOLog("AMDMapperProbe: admission refused, the legacy arena did not prepare\n");
+        IOLog("AMDMapperProbe: admission refused, reserved capacity %s did not prepare\n",
+              ceiling->name);
         if (fAutoAttach)
-            panic("AMDMapperProbe: admission-refused: legacy arena did not prepare");
+            panic("AMDMapperProbe: admission-refused: reserved capacity did not prepare");
         if (d->tables) { d->tables->release(); d->tables = nullptr; }
         return false;
     }
     d->profileName = prepared->name;
     d->profileRecords = prepared->records;
     d->profilePages = prepared->pages;
-    d->tablePages = prepared->tablePages;
+    d->tablePages = ceiling->tablePages;
     d->ceilingProfile = ceiling;
     const char *admission = growth
         ? (ceiling == &mapper_abi::kProfileRl10gMax
@@ -1015,7 +1008,7 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
     nic->setProperty("admission", admission);
     IOLog("AMDMapperProbe: domain %u prepared %s, ceiling %s (growth %s)\n",
           slot, prepared->name, unsupported ? "unsupported-name" : ceiling->name,
-          growth ? "first-map" : "disabled");
+          growth ? "capacity-demand" : "disabled");
     if (!fOwner->PrepareController(hardware)) return false;
     Controller *c = fOwner->fController;
     fController = c;
@@ -1035,6 +1028,7 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
         (c->hardware.firmwareEfrPresent ? "yes" : "firmware-absent") : "not-reported");
     // Identity and a complete domain snapshot precede copyMapperForDevice().
     // Only first map activates this endpoint's DTE, after the endpoint driver's reset.
+    PublishCapacity(true);
     PublishMappings();
     if (!nic->setProperty("iommu-parent", this)) return false;
     setProperty("iommu-parent-policy", fOwner->fAutoAttach
@@ -1045,15 +1039,9 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
 }
 #pragma clang diagnostic pop
 
-// R71-B: growth reads and updates the domain through these four calls. The
-// domain struct is private to this file while the rebuild itself lives with
-// MapperState, so neither translation unit needs the other's type.
-bool org_maz1_AMDMapperProbe::GrowthOpen() const {
-    Domain *d = fDomain;
-    return d && !d->active;
-}
-
-const mapper_abi::Profile *org_maz1_AMDMapperProbe::PreparedProfile() const {
+// MapperState is private to the mapper translation unit. These accessors expose
+// capacity without sharing either implementation structure.
+const mapper_abi::Profile *org_maz1_AMDMapperProbe::CurrentProfile() const {
     Domain *d = fDomain;
     return d ? mapper_abi::profileForName(d->profileName) : nullptr;
 }
@@ -1063,21 +1051,25 @@ const mapper_abi::Profile *org_maz1_AMDMapperProbe::CeilingProfile() const {
     return d ? d->ceilingProfile : nullptr;
 }
 
-void org_maz1_AMDMapperProbe::AdoptGrownTables(
-    IOBufferMemoryDescriptor *tables, UInt64 tablePA, UInt32 tablePages,
-    const mapper_abi::Profile &target) {
+bool org_maz1_AMDMapperProbe::CommitCapacityGrowth(
+    const mapper_abi::Profile &target, bool &invalidated) {
+    invalidated = false;
+    Controller *c = fController;
     Domain *d = fDomain;
-    if (!d) return;
-    // The DTE is written from tablePA at first activation, which is still ahead:
-    // nothing in the hardware refers to the area this call replaces.
-    IOBufferMemoryDescriptor *old = d->tables;
-    d->tables = tables;
-    d->tablePA = tablePA;
-    d->tablePages = tablePages;
+    if (!c || !d) return false;
+    // Caller holds the mapper lock; retain the existing mapper -> controller order.
+    LockGuard guard(c->lock);
+    if (!c->ready || c->command.failed) return false;
+    if (d->active && (c->hardware.capabilityHeader & kNpCache)) {
+        invalidated = true;
+        // bytes==0 includes the PDE cache. An active DTE is left untouched.
+        // Confirm completion before exposing any of the newly available range.
+        if (!InvalidateLocked(false, 0, 0, false, nullptr)) return false;
+    }
     d->profileName = target.name;
     d->profileRecords = target.records;
     d->profilePages = target.pages;
-    if (old) old->release();
+    return true;
 }
 
 bool org_maz1_AMDMapperProbe::ReleaseDomain() {

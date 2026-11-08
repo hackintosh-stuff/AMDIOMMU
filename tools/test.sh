@@ -42,33 +42,26 @@ python3 "$ROOT/tests/InspectorSmoke.py" "$WORK/ivrs-inspect" "$WORK" "$ROOT/fixt
 # now part of this script.
 printf '\n== kext core regressions ==\n'
 "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g $SAN_FLAGS \
-    -I "$ROOT/include" -I "$ROOT/kext" \
+    -I "$ROOT/include" -I "$ROOT/probe" \
     "$ROOT/src/IdentityMap.cpp" "$ROOT/src/Ivrs.cpp" \
     "$ROOT/src/IvrsTopology.cpp" "$ROOT/tests/dma-observe-test.cpp" \
     -o "$WORK/dma-observe-test"
 "$WORK/dma-observe-test"
 
 "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g $SAN_FLAGS \
-    -I "$ROOT/include" -I "$ROOT/kext" "$ROOT/tests/pte-core-test.cpp" \
+    -I "$ROOT/include" -I "$ROOT/probe" "$ROOT/tests/pte-core-test.cpp" \
     -o "$WORK/pte-core-test"
 "$WORK/pte-core-test"
 
-# ---- R70 S1: the capacity model ------------------------------------------
-#
-# The ordinary mapper's arena is now sized by a profile instead of compile-time
-# constants. Two things must therefore hold, and both are checked here rather
-# than trusted:
-#
-#   1. the runtime-sized allocator is indistinguishable from the compile-time
-#      one it replaced (the legacy profile has to stay byte-compatible with
-#      R67-2), and
-#   2. the profile table and the arena arithmetic match the documented values,
-#      so a widened window is a reviewed number, not an accident.
-printf '\n== R70 capacity model ==\n'
+# ---- capacity profiles and live growth ----------------------------------
+# Check allocator compatibility, profile limits and arena arithmetic, then
+# exhaust records and pages in one live mapping set. Opening the next capacity
+# must preserve existing allocations and translations in the reserved tables.
+printf '\n== capacity model and live growth ==\n'
 "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g $SAN_FLAGS \
-    -I "$ROOT/kext" "$ROOT/tests/r70-capacity-test.cpp" \
-    -o "$WORK/r70-capacity-test"
-"$WORK/r70-capacity-test"
+    -I "$ROOT/probe" "$ROOT/tests/capacity-test.cpp" \
+    -o "$WORK/capacity-test"
+"$WORK/capacity-test"
 
 # ---- round 12: the two cores that decide the verdict --------------------
 #
@@ -87,12 +80,12 @@ printf '\n== R70 capacity model ==\n'
 # logic rather than a restatement of it.
 printf '\n== round-12 cores ==\n'
 "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g $SAN_FLAGS \
-    -I "$ROOT/kext" "$ROOT/tests/bizwalk-core-test.cpp" \
+    -I "$ROOT/probe" "$ROOT/tests/bizwalk-core-test.cpp" \
     -o "$WORK/bizwalk-core-test"
 "$WORK/bizwalk-core-test"
 
 "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g $SAN_FLAGS \
-    -I "$ROOT/kext" "$ROOT/tests/evidence-gate-test.cpp" \
+    -I "$ROOT/probe" "$ROOT/tests/evidence-gate-test.cpp" \
     -o "$WORK/evidence-gate-test"
 "$WORK/evidence-gate-test"
 
@@ -108,7 +101,7 @@ python3 "$ROOT/tools/verify/gate-wiring.py"
 # watchdog publishes, and that pair is what has to be race-free.
 printf '\n== round-14 RX set ==\n'
 "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g -pthread \
-    -fsanitize=thread -I "$ROOT/kext" -I "$ROOT/tools/lucy-obs" \
+    -fsanitize=thread -I "$ROOT/probe" -I "$ROOT/tools/lucy-obs" \
     "$ROOT/tests/rxpost-test.cpp" -o "$WORK/rxpost-test"
 "$WORK/rxpost-test"
 
@@ -151,7 +144,7 @@ python3 "$ROOT/tools/verify/region-size.py"
 # tools/verify/write-protocol.py, and a relative include would silently
 # resolve to the shipped header in every build, making the substitution a no-op.
 "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g -pthread \
-    -fsanitize=thread -I "$ROOT/kext" -I "$ROOT/tests" \
+    -fsanitize=thread -I "$ROOT/probe" -I "$ROOT/tests" \
     -I "$ROOT/tools/lucy-obs" \
     "$ROOT/tests/obs-write-test.cpp" -o "$WORK/obs-write-test"
 "$WORK/obs-write-test"
@@ -234,7 +227,7 @@ printf 'TEST_OK=%s\nINSPECTOR=%s\n' "$WORK/offline-tests" "$WORK/ivrs-inspect"
 printf 'CORE_OK=%s %s %s %s %s %s %s\n' "$WORK/dma-observe-test" \
        "$WORK/pte-core-test" "$WORK/obs-write-test" \
        "$WORK/bizwalk-core-test" "$WORK/evidence-gate-test" \
-       "$WORK/rxpost-test" "$WORK/r70-capacity-test"
+       "$WORK/rxpost-test" "$WORK/capacity-test"
 (cd "$ROOT" && shasum -a 256 include/amd_iommu/*.hpp src/*.cpp \
     probe/amd_iommu_*.hpp probe/AMDMapperProbe*.cpp probe/AMDMapperProbe*.hpp \
     tools/lucy-obs/*.hpp \

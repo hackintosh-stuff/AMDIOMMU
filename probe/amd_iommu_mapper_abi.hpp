@@ -7,7 +7,7 @@ namespace mapper_abi {
 static constexpr uint32_t kVersion = 4;
 // Ordinary DMA addresses must satisfy a 32-bit IODMACommand as well as 64-bit
 // clients. Keep this independent of the legacy experiment's 64 GiB window.
-static constexpr uint64_t kBase = 0x80000000ULL; // 2 GiB, 16 MiB pool below 4 GiB
+static constexpr uint64_t kBase = 0x80000000ULL; // 2 GiB; every profile stays below 4 GiB
 static constexpr uint32_t kPages = 4096, kRecords = 1024;
 // ABI4 doubles the per-map bound so a 25/100 GbE client (MLX5 rings) is not
 // rejected at 512 KiB. kMaxParts=16 still covers a 1 MiB invalidation range
@@ -52,18 +52,10 @@ static_assert(sizeof(Record) == 2152, "R70 ordinary mapper record ABI4");
 static_assert(sizeof(Snapshot) == 4544, "R70 ordinary mapper snapshot ABI4");
 
 // ---------------------------------------------------------------------------
-// Capacity profiles (S1 of docs/m2-3az-round69-capacity-model.md).
-//
-// A profile decides the arena a domain reserves *before* any client maps:
-// record slots, IOVA pages and the page-table area. The ABI3 record/snapshot
-// layouts are unchanged in S1, so mapPages/runs stay at their ABI3 values and
-// the legacy profile reproduces the accepted behaviour exactly. Raising the
-// per-map bound is a separate step because it changes Record.physical[].
-//
-// The default is the legacy profile: a domain that never selects one behaves
-// byte-for-byte like R67-2. "rl-10g" is the conservative starting point for
-// Apple's Skywalk packet pools (one segment per iovmMapMemory call); its final
-// numbers come from the S3 measurement, not from this table.
+// Capacity profiles. The ceiling sizes the arena and page-table storage before
+// any client maps. Usable records and IOVA pages start at the legacy profile
+// and advance through these profiles when allocation exhausts either limit.
+// Every profile uses the same per-map bounds and the same snapshot ABI.
 // ---------------------------------------------------------------------------
 struct Profile {
     const char *name;
@@ -140,46 +132,27 @@ inline const Profile *profileForName(const char *name) {
 // back to the PCI class code so an unlisted device still gets a usable arena
 // instead of the 16 MiB ABI3 window.
 //
-// R71-B changed what this table decides. It no longer sizes the arena a domain
-// is prepared with (that is always the legacy one now); it is the *admission
-// ceiling* a domain may grow to at its first mapping, and the record of what
-// identity-based sizing would have chosen. The arena the client actually gets
-// comes from profileForFirstMapGrowth(), not from this table, so a missing or
-// wrong entry can no longer leave a real client with 16 MiB.
+// This table records an identity-based capacity suggestion. The configured
+// ceiling determines reserved storage; nextCapacityProfile() determines the
+// next usable capacity when the current record or page limit is exhausted.
 enum class ProfileSource { bootArg, idTable, classTable, legacy };
 
 // ---------------------------------------------------------------------------
-// R71-B: demand-driven growth (amends the R69 §6.1 "arena is fixed at
-// admission" contract; see docs/m2-3bd-round71-first-map-growth.md).
-//
-// S2 sized the arena from device identity before any client had mapped, which
-// can only ever be a guess: an unlisted device got 16 MiB, and a listed one
-// could still outgrow its table entry. Demand is only observable from a real
-// mapping request, and the only moment a rebuild is safe is just before the
-// first PTE is published: the DTE still names a passthrough root, the
-// controller has never walked these tables, so nothing has to be invalidated
-// and there is no live translation to preserve.
-//
-// A domain is therefore prepared at the smallest arena and may grow exactly
-// once, at its first admissible mapping, to the ceiling it was admitted for.
-// The decision is a pure comparison so tests/ can check it without a kext.
-//
-// Invariants:
-//   * growth never shrinks - a ceiling that is not strictly larger in both
-//     dimensions is not a growth target, it is a policy error;
-//   * the ceiling must cover its own leaf tables, or growth would install a
-//     table area that cannot describe the IOVA window it advertises;
-//   * after the first activation capacity is frozen for the reason R69 §6 gave
-//     for forbidding a runtime resize: a live domain must never change the
-//     meaning of an address the client is already using.
+// Advance usable capacity without replacing its backing storage. Prefer the
+// intermediate profile when it fits under the reserved ceiling. The caller
+// synchronizes the hardware before publishing the returned limits.
 // ---------------------------------------------------------------------------
-inline const Profile *profileForFirstMapGrowth(const Profile *prepared,
-                                              const Profile *ceiling) {
-    if (!prepared || !ceiling) return nullptr;
-    if (ceiling == prepared) return nullptr;
-    if (ceiling->pages <= prepared->pages) return nullptr;
-    if (ceiling->records <= prepared->records) return nullptr;
+inline const Profile *nextCapacityProfile(const Profile *current,
+                                          const Profile *ceiling) {
+    if (!current || !ceiling) return nullptr;
+    if (ceiling->pages <= current->pages) return nullptr;
+    if (ceiling->records <= current->records) return nullptr;
     if (ceiling->tablePages < ceiling->pages / 512 + 2) return nullptr;
+    if (current->pages < kProfileRl10g.pages &&
+        current->records < kProfileRl10g.records &&
+        ceiling->pages >= kProfileRl10g.pages &&
+        ceiling->records >= kProfileRl10g.records)
+        return &kProfileRl10g;
     return ceiling;
 }
 

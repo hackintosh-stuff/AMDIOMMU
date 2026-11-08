@@ -1,14 +1,16 @@
-// R70 S1 host regression for the capacity model.
+// Host regression for capacity profiles and live allocator growth.
 //
-// Three properties are required, and all three are checked against the same
+// These properties are checked against the same
 // headers the kext compiles:
 //
 //   1. The runtime-sized allocator behaves EXACTLY like the compile-time one
-//      it replaces, so the legacy profile is byte-compatible with R67-2.
+//      it replaces, preserving the accepted legacy allocation behaviour.
 //   2. The profile table exposes the documented capacities and unknown names
 //      are refused instead of silently widening the arena.
 //   3. The arena arithmetic in amd_iommu_mapper_abi.hpp matches the carve
 //      order in AMDMapperProbeMapper.cpp.
+//   4. Opening preallocated capacity preserves live allocations and PTEs.
+// This host test does not execute the kext's MapMemory or hardware commands.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -43,8 +45,8 @@ struct Rng {
 
 void allocationEquivalence() {
     amdtx::BoundedAllocator<4096, 128> fixed{};
-    std::uint64_t used[4096 / 64] = {};
-    std::uint64_t ever[4096 / 64] = {};
+    amdtx::u64 used[4096 / 64] = {};
+    amdtx::u64 ever[4096 / 64] = {};
     amdtx::RuntimeAllocator runtime{used, ever, 4096, 128, 0, 0, 0};
 
     const std::uint32_t alignments[4] = {1, 1, 2, 8};
@@ -202,8 +204,8 @@ void devicePolicy() {
 void capacitySemantics() {
     // The allocator must grant exactly poolPages 1-page spans and then refuse:
     // that is the difference between a ring-sized arena and a pool-sized one.
-    std::uint64_t used[512 / 64] = {};
-    std::uint64_t ever[512 / 64] = {};
+    amdtx::u64 used[512 / 64] = {};
+    amdtx::u64 ever[512 / 64] = {};
     amdtx::RuntimeAllocator runtime{used, ever, 512, 1, 0, 0, 0};
     unsigned granted = 0;
     unsigned base = 0;
@@ -218,40 +220,186 @@ void capacitySemantics() {
 }
 
 void growthPolicy() {
-    // R71-B: every domain is prepared at the legacy arena and may grow exactly
-    // once, at its first mapping, to the ceiling it was admitted for. The policy
-    // is a pure comparison, so the cases that matter are checked here.
+    // Open the next usable capacity profile without exceeding the reservation.
     const auto &legacy = mapper_abi::kProfileLegacy;
     const auto &rl10g = mapper_abi::kProfileRl10g;
     const auto &ceiling = mapper_abi::kProfileRl10gMax;
-    check(mapper_abi::profileForFirstMapGrowth(&legacy, &ceiling) == &ceiling,
-          "the first mapping must be able to grow the legacy arena");
-    check(mapper_abi::profileForFirstMapGrowth(&legacy, &rl10g) == &rl10g,
+    check(mapper_abi::nextCapacityProfile(&legacy, &ceiling) == &rl10g,
+          "legacy capacity must open the intermediate profile first");
+    check(mapper_abi::nextCapacityProfile(&legacy, &rl10g) == &rl10g,
           "a 512 MiB ceiling must still be reachable from the legacy arena");
-    check(mapper_abi::profileForFirstMapGrowth(&rl10g, &ceiling) == &ceiling,
+    check(mapper_abi::nextCapacityProfile(&rl10g, &ceiling) == &ceiling,
           "a domain below its ceiling must still be able to grow");
-    check(mapper_abi::profileForFirstMapGrowth(&ceiling, &ceiling) == nullptr,
+    check(mapper_abi::nextCapacityProfile(&ceiling, &ceiling) == nullptr,
           "a domain already at its ceiling must not grow");
-    check(mapper_abi::profileForFirstMapGrowth(&ceiling, &rl10g) == nullptr,
+    check(mapper_abi::nextCapacityProfile(&ceiling, &rl10g) == nullptr,
           "growth must never shrink the arena");
-    check(mapper_abi::profileForFirstMapGrowth(&legacy, &legacy) == nullptr,
+    check(mapper_abi::nextCapacityProfile(&legacy, &legacy) == nullptr,
           "a forced legacy ceiling must disable growth entirely");
-    check(mapper_abi::profileForFirstMapGrowth(nullptr, &ceiling) == nullptr,
+    check(mapper_abi::nextCapacityProfile(nullptr, &ceiling) == nullptr,
           "a missing prepared profile must not grow");
-    check(mapper_abi::profileForFirstMapGrowth(&legacy, nullptr) == nullptr,
+    check(mapper_abi::nextCapacityProfile(&legacy, nullptr) == nullptr,
           "a missing ceiling must not grow");
     // A ceiling that cannot describe its own window must be refused: growth would
     // otherwise install a table area smaller than the IOVA range it advertises.
     mapper_abi::Profile shortTables = ceiling;
     shortTables.tablePages = ceiling.pages / 512;
-    check(mapper_abi::profileForFirstMapGrowth(&legacy, &shortTables) == nullptr,
+    check(mapper_abi::nextCapacityProfile(&legacy, &shortTables) == nullptr,
           "a ceiling that does not cover its own leaf tables must be refused");
-    // The grown window must keep the R70 measured peak (52,227 pages) covered
+    // The grown window must keep the measured peak (52,227 pages) covered
     // with headroom, and the grown arena must stay inside the wired-memory guard.
     check(ceiling.pages >= 4 * 52227,
           "the growth ceiling no longer covers the measured 10 GbE peak");
     check(mapper_abi::arenaBytesFor(ceiling) <= mapper_abi::kMaxArenaBytes,
           "the growth ceiling exceeds the wired-memory guard");
+}
+
+void liveCapacityGrowth() {
+    const auto &ceiling = mapper_abi::kProfileRl10gMax;
+    const mapper_abi::Profile *current = &mapper_abi::kProfileLegacy;
+    std::vector<amdtx::u64> used(ceiling.pages / 64), ever(ceiling.pages / 64);
+    std::vector<amdtx::u64> liveSlots((ceiling.records + 63) / 64);
+    std::vector<mapper_abi::RecordHeader> records(ceiling.records);
+    std::vector<amdtx::u64> tableWords(ceiling.tablePages * 512);
+    std::vector<volatile amdtx::u64 *> leaves(ceiling.pages / 512);
+    amdtx::RuntimeAllocator allocator{used.data(), ever.data(), current->pages,
+                                      current->mapPages, 0, 0, 0};
+    const amdtx::u64 tablePA = 0x1000000ULL;
+    amdsparse::Arena pageTables{tableWords.data(), tablePA, ceiling.tablePages,
+                                1, 4, tablePA, 0, 0, nullptr};
+    for (unsigned i = 0; i < leaves.size(); ++i) {
+        leaves[i] = amdtx::prepareAt(pageTables,
+            mapper_abi::kBase + static_cast<amdtx::u64>(i) * 0x200000ULL, 512);
+        check(leaves[i] != nullptr, "ceiling page-table reservation is too small");
+        if (!leaves[i]) return;
+    }
+
+    enum class AllocationResult { mapped, recordsFull, pagesFull };
+    unsigned liveCount = 0;
+    const auto allocateMapping = [&](unsigned pages) {
+        const unsigned slot = amdtx::findNextBitmapPage(
+            liveSlots.data(), 0, current->records, false);
+        if (slot == current->records) return AllocationResult::recordsFull;
+        unsigned base = 0;
+        if (!amdtx::allocate(allocator, pages, base)) return AllocationResult::pagesFull;
+        auto &record = records[slot];
+        record.handle = slot + 1;
+        record.recordIndex = slot;
+        record.basePage = base;
+        record.pages = pages;
+        record.mapAddress = mapper_abi::kBase + base * 4096ULL;
+        record.firstPA = 0x400000000ULL + base * 4096ULL;
+        record.mapLength = record.length = pages * 4096ULL;
+        record.runs = 1;
+        for (unsigned i = 0; i < pages; ++i) {
+            const unsigned page = base + i;
+            leaves[page / 512][page % 512] = amdpte::makeDefaultLeaf(
+                1, record.firstPA + i * 4096ULL, amdpte::PTE_IR | amdpte::PTE_IW);
+        }
+        liveSlots[slot / 64] |= 1ULL << (slot % 64);
+        ++liveCount;
+        return AllocationResult::mapped;
+    };
+    const auto verifyLiveTranslations = [&]() {
+        bool valid = true;
+        const auto readEntry = [&](amdtx::u64 pa, unsigned index) -> amdtx::u64 {
+            const auto *table = amdsparse::table(pageTables, pa);
+            return table ? table[index] : 0;
+        };
+        for (unsigned slot = 0; slot < liveCount && valid; ++slot) {
+            const auto &record = records[slot];
+            for (unsigned i = 0; i < record.pages; ++i) {
+                const auto walk = amdpte::walkPageTable(readEntry, pageTables.rootLevel,
+                    pageTables.rootPA, record.mapAddress + i * 4096ULL);
+                if (!walk.ok || walk.outPA != record.firstPA + i * 4096ULL) {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        check(valid, "capacity growth changed an existing IOVA translation");
+        return valid;
+    };
+    const auto openNextCapacity = [&](const mapper_abi::Profile &expected) {
+        const auto *next = mapper_abi::nextCapacityProfile(current, &ceiling);
+        check(next == &expected, "capacity exhaustion selected the wrong next profile");
+        if (next != &expected) return false;
+        const auto retainedTables = tableWords;
+        const auto retainedUsed = used;
+        const auto retainedEver = ever;
+        const auto retainedSlots = liveSlots;
+        const std::vector<mapper_abi::RecordHeader> retainedRecords(
+            records.begin(), records.begin() + liveCount);
+        const auto retainedAllocator = allocator;
+        const auto retainedLeaves = leaves;
+        const auto retainedRoot = pageTables.rootPA;
+        const auto retainedTablePages = pageTables.pages;
+
+        // Storage and page-table geometry are already reserved at the ceiling.
+        current = next;
+        allocator.poolPages = current->pages;
+
+        check(tableWords == retainedTables && leaves == retainedLeaves &&
+                  pageTables.rootPA == retainedRoot && pageTables.pages == retainedTablePages,
+              "opening capacity changed the reserved page-table layout or PTEs");
+        check(used == retainedUsed && ever == retainedEver && liveSlots == retainedSlots,
+              "opening capacity changed the live allocation bitmaps");
+        check(allocator.used == retainedAllocator.used && allocator.ever == retainedAllocator.ever &&
+                  allocator.livePages == retainedAllocator.livePages &&
+                  allocator.peakPages == retainedAllocator.peakPages &&
+                  allocator.reusedAllocations == retainedAllocator.reusedAllocations,
+              "opening capacity moved bitmap storage or reset live accounting");
+        check(std::memcmp(records.data(), retainedRecords.data(),
+                          liveCount * sizeof(records[0])) == 0,
+              "opening capacity changed an existing mapping record");
+        return verifyLiveTranslations();
+    };
+
+    // Fill record capacity while keeping free pages, then retry the same map.
+    for (unsigned i = 0; i < current->records; ++i) {
+        const auto result = allocateMapping(1);
+        check(result == AllocationResult::mapped, "legacy record fill failed early");
+        if (result != AllocationResult::mapped) return;
+    }
+    check(allocateMapping(1) == AllocationResult::recordsFull,
+          "legacy record exhaustion was not detected");
+    if (!openNextCapacity(mapper_abi::kProfileRl10g)) return;
+    check(allocateMapping(1) == AllocationResult::mapped,
+          "record-limited mapping did not succeed after capacity growth");
+
+    // Fill the page window with larger maps, leaving record slots available.
+    while (allocator.livePages < allocator.poolPages) {
+        const unsigned remaining = allocator.poolPages - allocator.livePages;
+        const unsigned pages = remaining < current->mapPages ? remaining : current->mapPages;
+        const auto result = allocateMapping(pages);
+        check(result == AllocationResult::mapped, "intermediate page fill failed early");
+        if (result != AllocationResult::mapped) return;
+    }
+    check(liveCount < current->records, "page fill unexpectedly exhausted record slots");
+    check(allocateMapping(1) == AllocationResult::pagesFull,
+          "intermediate page exhaustion was not detected");
+    if (!openNextCapacity(ceiling)) return;
+    check(allocateMapping(1) == AllocationResult::mapped,
+          "page-limited mapping did not succeed after capacity growth");
+    if (!verifyLiveTranslations()) return;
+    check(mapper_abi::nextCapacityProfile(current, &ceiling) == nullptr,
+          "capacity growth exceeded the reserved ceiling");
+
+    // Every mapping made before and after both growth steps remains releasable.
+    for (unsigned slot = 0; slot < liveCount; ++slot) {
+        const auto &record = records[slot];
+        check(amdtx::release(allocator, record.basePage, record.pages),
+              "a live mapping could not be released after capacity growth");
+        for (unsigned i = 0; i < record.pages; ++i) {
+            const unsigned page = record.basePage + i;
+            leaves[page / 512][page % 512] = 0;
+        }
+        liveSlots[slot / 64] &= ~(1ULL << (slot % 64));
+    }
+    check(allocator.livePages == 0 &&
+              amdtx::findNextBitmapPage(used.data(), 0, current->pages, true) == current->pages &&
+              amdtx::findNextBitmapPage(liveSlots.data(), 0, current->records, true) == current->records,
+          "capacity growth left live allocations after the final release");
 }
 
 } // namespace
@@ -263,10 +411,11 @@ int main() {
     devicePolicy();
     growthPolicy();
     capacitySemantics();
+    liveCapacityGrowth();
     if (failures) {
-        std::printf("R70_CAPACITY_FAILURES=%d\n", failures);
+        std::printf("CAPACITY_FAILURES=%d\n", failures);
         return 1;
     }
-    std::printf("R70_CAPACITY_OK\n");
+    std::printf("CAPACITY_OK\n");
     return 0;
 }

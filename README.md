@@ -42,23 +42,35 @@ Two build variants exist and accept different boot-args:
 | | unknown name | Widen nothing: growth is disabled and `iommu-profile-ceiling` records `unsupported-name`. |
 | `amdiommu_pm=off` | `off` | Do not register the self-driven sleep/wake interest. The DMA path still repairs a controller that lost its register image; the mapper simply learns about the loss later. Absent means registered. |
 
-`amdiommu_profile` names the **ceiling**, not the arena a domain is prepared
-with. Every domain is prepared at `native-legacy` and may grow **exactly once**,
-at its first mapping, to that ceiling:
+`amdiommu_profile` selects the **reserved ceiling**. Each domain allocates its
+metadata arena and complete page-table area at that size before publishing its
+mapper. Initial usable capacity is `native-legacy` (1024 records / 16 MiB).
 
-- the growth point is the first `iovmMapMemory` call that passes validation —
-  before any PTE is published and while the DTE is still a passthrough entry, so
-  nothing live has to be preserved or invalidated;
-- after the first activation capacity is frozen for the reason R69 §6.3 gave for
-  forbidding a runtime resize: a live domain must never change the meaning of an
-  address a client is already using;
-- a failed growth keeps the prepared arena and publishes `iommu-growth-state`; it
-  never fails the mapping.
+When a mapping runs out of record slots or an IOVA range, the mapper opens the
+next profile and retries that allocation under the same mapper lock:
+`native-legacy` → `rl-10g` → `rl-10g-max`, stopping at the selected ceiling.
+The first mapping does not itself trigger growth. Existing mappings can remain
+live throughout both growth steps.
 
-The per-device identity table did not go away, but it is advisory now: it is the
-admission ceiling and the record of what identity-based sizing *would* have
-chosen. A missing entry can no longer leave a real client with 16 MiB, because
-the arena starts there and grows from actual demand.
+Growth changes only usable limits. Array addresses, the root physical address,
+page-table size and existing PTEs stay unchanged. On an active domain whose
+controller caches non-present translations, a full domain invalidation including
+the PDE cache must complete before new capacity becomes usable. The ordinary
+map path still synchronizes each newly published mapping as required.
+
+At the ceiling, an allocation that cannot fit returns `kIOReturnNoResources`.
+If growth synchronization fails, capacity stays unchanged, the mapping returns
+`kIOReturnIOError`, and new mapping admission closes through the existing failed
+domain state. Successful growth does not count as a capacity rejection.
+
+The default ceiling remains `rl-10g-max`: 65535 records and 1 GiB of IOVA space.
+Its metadata and page tables reserve about **12.09 MiB per prepared domain**,
+even while usable capacity is still small. A claim-based client keeps the
+`native-legacy` ceiling unless explicitly overridden. Snapshot ABI4 is unchanged;
+`ptBytes` and `tablePages` describe the full reserved table area from preparation.
+
+The identity table records what device-based sizing would have suggested.
+The configured ceiling controls the actual reservation and growth limit.
 
 | Derived from | Matches | Suggested ceiling |
 |---|---|---|
@@ -72,7 +84,7 @@ property surface — including why most properties are snapshots rather than liv
 counters — are documented in [DEBUG.md](DEBUG.md).
 
 Current example (ConnectX-4 Lx). No profile argument is needed because
-the arena now follows demand:
+usable capacity now follows demand:
 
 ```
 amdiommu=auto-attach amdiommu_devices=n2300,n2301

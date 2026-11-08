@@ -110,33 +110,49 @@ per-domain dictionaries produced by a controller-level publication.
 
 ## Profile and growth evidence
 
-`amdiommu_profile` selects the growth ceiling (see README for the values and the
-one-shot growth rule). The decision and its outcome are published per device:
+`amdiommu_profile` selects the reserved ceiling (see README for the values).
+Usable capacity starts at `native-legacy` and opens the next profile only when a
+record-slot or IOVA allocation is exhausted. A first mapping that fits does not
+grow the domain.
 
-- `iommu-profile-suggested` carries the suggested ceiling; `iommu-profile-source`
-  says where it came from: `boot-arg`, `id-table`, `class-table` or
-  `legacy-fallback`. The vendor/device identity table is advisory — it is the
-  admission ceiling and the record of what identity-based sizing would have
-  chosen. A missing entry cannot leave a real client at 16 MiB, because every
-  arena starts at `native-legacy` and grows from actual demand.
-- A claim-based client (Lucy, the board RTL8111) keeps the accepted ABI3 arena:
-  its ceiling stays `native-legacy` unless an operator raises it explicitly.
-- `amdiommu_autoattach` no longer exists; `amdiommu=auto-attach` is the only
-  switch for publishing `iommu-parent` at first publish.
+- `iommu-profile-suggested` records the device-based suggestion;
+  `iommu-profile-source` says where it came from: `boot-arg`, `id-table`,
+  `class-table` or `legacy-fallback`. The configured ceiling controls actual
+  storage and the growth limit.
+- A claim-based client (Lucy, the board RTL8111) keeps the `native-legacy`
+  ceiling unless an operator raises it explicitly.
+- `amdiommu_autoattach` no longer exists; `amdiommu=auto-attach` is the switch
+  for publishing `iommu-parent` at first publish.
 
 | Growth evidence key | Values / meaning |
 |---|---|
-| `iommu-profile-prepared` | `native-legacy`, the arena every domain is prepared with |
-| `iommu-profile-ceiling` | The selected ceiling |
+| `iommu-profile` | Current usable capacity profile on the device mapper / PCI device |
+| `iommu-profile-prepared` | `native-legacy`, the initial usable capacity |
+| `iommu-profile-reserved` | Profile used to allocate all metadata and table storage |
+| `iommu-profile-ceiling` | Selected ceiling, or `unsupported-name` for an invalid request |
 | `iommu-profile-ceiling-source` | `boot-arg` \| `default` |
-| `iommu-growth-policy` | `first-map` \| `disabled` |
-| `iommu-capacity-grown` | `no` \| `yes` — written at attach, at the capacity swap and in the mapper snapshot |
-| `iommu-profile-grown-from` | The profile the domain grew from |
-| `mapper-map-window-bytes` | Size of the mapping window in bytes |
-| `iommu-growth-state`, `iommu-growth-time` | Published with the mapper snapshot. State is `prepared`, `grown`, `not-needed`, `closed-live`, `failed-tables`, `failed-state`, `failed-arena` or `unknown` |
+| `iommu-profile-records`, `iommu-profile-pages` | Current usable limits |
+| `iommu-profile-table-pages`, `iommu-table-bytes` | Reserved page-table size; unchanged by growth |
+| `mapper-arena-bytes` | Reserved metadata arena size; unchanged by growth |
+| `iommu-growth-policy` | `capacity-demand` \| `disabled` |
+| `iommu-capacity-grown` | Whether at least one capacity increase succeeded |
+| `iommu-growth-count` | Number of successful increases; normally 0, 1 or 2 |
+| `iommu-profile-grown-from` | Source profile of the most recent successful increase |
+| `mapper-map-window-bytes` | Current usable IOVA window in bytes |
+| `iommu-growth-state` | `prepared`, `grown`, `at-ceiling` or `failed-synchronization` |
+| `iommu-growth-time` | Time of the most recent successful increase, or zero |
 
-Capacity growth also writes `iommu-capacity-grown` and `iommu-growth-state`
-directly at the swap, so those two do not depend on a snapshot request.
+Capacity decisions are published on the mapper and PCI device after releasing
+the mapper lock, so growth count, state and limits do not require a snapshot
+request. The mapper snapshot also includes count, state and time. `at-ceiling`
+means an allocation needed more capacity after the configured ceiling was
+reached; a freed range may still satisfy a later mapping.
+
+`mapper-rejects-records` and `mapper-rejects-no-range` count requests that still
+failed after growth/retry, not allocation pressure that growth resolved. Raw
+snapshot `capacityMaps` / `capacityPages` describe usable limits, while
+`rootPA`, `ptBytes` and `tablePages` describe the fixed reserved table area.
+ABI4 and the PM boundary blob layout remain unchanged.
 
 ## Key reference
 
