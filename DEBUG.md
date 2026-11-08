@@ -142,7 +142,9 @@ mapping that fits does not grow the domain.
 | `iommu-profile-ceiling-source` | `boot-arg` \| `default` |
 | `iommu-profile-records`, `iommu-profile-pages` | Current usable limits |
 | `iommu-profile-table-pages`, `iommu-table-bytes` | Actual allocated page-table size; includes added leaf tables and the second L2 directory |
-| `mapper-arena-bytes` | Current metadata arena size; grows when either capacity increases; excludes fixed mapper state and its table-allocation descriptors |
+| `mapper-record-storage-bytes` | Allocated bytes for mapping records and their liveness bitmap; changes only with record capacity |
+| `mapper-page-storage-bytes` | Allocated bytes for the physical-page index, start-page owner index, leaf pointers and allocator bitmaps; changes only with IOVA-page capacity |
+| `mapper-arena-bytes` | Sum of the two metadata allocations, each rounded to 4 KiB; excludes page tables, fixed mapper state and its table-allocation descriptors |
 | `iommu-growth-policy` | `capacity-demand` \| `disabled` |
 | `iommu-capacity-grown` | Whether at least one capacity increase succeeded |
 | `iommu-growth-count` | Total successful increases; the sum of record and page growth counts |
@@ -152,7 +154,7 @@ mapping that fits does not grow the domain.
 | `iommu-growth-from-records`, `iommu-growth-from-pages` | Numeric capacities before the most recent successful increase; zero before growth |
 | `iommu-profile-grown-from` | Display label before the most recent successful increase; use the numeric growth-from fields to distinguish `dynamic` capacities |
 | `mapper-map-window-bytes` | Current usable IOVA window in bytes |
-| `iommu-growth-state` | `prepared`, `grown`, `at-ceiling`, `failed-arena`, `failed-tables`, `failed-page-tables` or `failed-synchronization` |
+| `iommu-growth-state` | `prepared`, `grown`, `at-ceiling`, `metadata-limit`, `failed-record-storage`, `failed-page-storage`, `failed-tables`, `failed-page-tables` or `failed-synchronization` |
 | `iommu-growth-time` | Time of the most recent successful increase, or zero |
 
 Capacity decisions are published on the mapper and PCI device after releasing
@@ -160,7 +162,9 @@ the mapper lock, so growth count, state and limits do not require a snapshot
 request. The mapper snapshot also includes count, state and time. `at-ceiling`
 means the resource needed by an allocation has reached its configured ceiling;
 the other resource may still have room to grow. A freed slot or range may still
-satisfy a later mapping.
+satisfy a later mapping. `metadata-limit` identifies the combined 64 MiB
+metadata guard; `failed-record-storage` and `failed-page-storage` identify
+which allocation could not be obtained.
 
 `mapper-rejects-records` and `mapper-rejects-no-range` count requests that still
 failed after growth/retry, not allocation pressure that growth resolved. Raw
@@ -186,12 +190,25 @@ describes construction in one contiguous block; incremental allocation owns
 1033 pages because it retains the initial block's five spare pages. Registry
 and snapshot table sizes report the actual 1033-page allocation.
 
+The record and IOVA-page metadata allocations grow separately. Record growth
+copies only records and their liveness bitmap; the page allocation, allocator
+and leaf pointers stay in place. Page growth copies only page metadata and
+allocator state, retaining the record allocation and its pointers. The growing
+resource's old allocation is released after the replacement is committed.
+Both allocations are independently rounded to 4 KiB, so use their sum when
+checking `mapper-arena-bytes`:
+
+| Records / IOVA pages | Record storage bytes | Page storage bytes | Total metadata bytes |
+|---|---:|---:|---:|
+| 1024 / 4096 | 126976 | 53248 | 180224 |
+| 1024 / 8192 | 126976 | 102400 | 229376 |
+| 1024 / 16384 | 126976 | 204800 | 331776 |
+| 131072 / 524288 | 15745024 | 6430720 | 22175744 |
+
 The internal start-page owner index is 32-bit, so the record capacity can pass
 65535 without truncating an owner. It accounts for four bytes per IOVA page in
-`mapper-arena-bytes`. Initial metadata is 176128 bytes; 1024 records and a
-64 MiB window use 327680 metadata bytes. At both `dma32-max` limits, metadata
-occupies 22175744 bytes. Exported `recordIndex` and capacity fields are 32-bit
-as well; ABI5 and the Snapshot/Record byte layouts are unchanged.
+the page-storage allocation. Exported `recordIndex` and capacity fields are
+32-bit as well; ABI5 and the Snapshot/Record byte layouts are unchanged.
 
 New PDEs always require a full invalidation including the PDE cache on an active
 domain, even when `iommu-np-cache` is zero. A page-capacity increase performs
@@ -242,8 +259,9 @@ The inspector reads ABI4 and ABI5, follows every reachable table through the
 appropriate physical-address map and compares all present PTEs with the complete
 live mapping set. Its JSON report gives each mapper's sequence, numeric
 capacities, allocated bytes, segment count and verified IOVA pages. It also
-reports `record_growth_count`, `page_growth_count`, `growth_resource`,
-`grown_from_records` and `grown_from_pages`; these are `null` for older captures
+reports `record_storage_bytes`, `page_storage_bytes`, `record_growth_count`,
+`page_growth_count`, `growth_resource`, `grown_from_records` and
+`grown_from_pages`; these are `null` for older captures
 that do not publish the corresponding properties. Use this snapshot check
 alongside the normal traffic check. The old claim analyzer's fixed 16 MiB
 capacity assertions remain scoped to its archived workload.

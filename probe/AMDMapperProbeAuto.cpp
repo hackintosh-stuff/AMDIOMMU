@@ -979,9 +979,9 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
     nic->setProperty("iommu-growth-policy", growth ? "capacity-demand" : "disabled");
     nic->setProperty("iommu-capacity-grown", "no");
     nic->setProperty("iommu-profile", prepared->name);
-    const UInt64 preparedBytes = mapper_abi::arenaBytesFor(*prepared);
+    const UInt64 preparedBytes = mapper_abi::metadataBytesFor(*prepared);
     const bool preparedOK = preparedBytes &&
-        preparedBytes <= mapper_abi::kMaxArenaBytes &&
+        preparedBytes <= mapper_abi::kMaxMetadataBytes &&
         prepared->tablePages >= prepared->pages / 512 + 2 &&
         AllocateTableArea(d->tables,
             (UInt64)prepared->tablePages * M2B2_PAGE_SIZE, d->tablePA) &&

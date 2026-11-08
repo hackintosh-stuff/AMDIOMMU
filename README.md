@@ -45,13 +45,13 @@ Two build variants exist and accept different boot-args:
 
 `amdiommu_profile` selects the **growth ceiling**. Each domain initially
 allocates only `native-legacy` storage: 1024 records, a 16 MiB IOVA window and
-16 page-table pages. Metadata occupies 176128 bytes and page tables occupy
-65536 bytes: **241664 bytes, or about 0.230 MiB per prepared domain**. A higher
+16 page-table pages. Metadata occupies 180224 bytes and page tables occupy
+65536 bytes: **245760 bytes, or about 0.234 MiB per prepared domain**. A higher
 ceiling does not reserve its full storage at startup.
 
-These totals cover the metadata arena and page-table allocations. Fixed mapper
-state is separate, including a 66-entry table-allocation descriptor array
-(2112 bytes).
+These totals cover both metadata allocations and the page-table allocations.
+Fixed mapper state is separate, including a 66-entry table-allocation descriptor
+array (2112 bytes).
 
 Record slots and IOVA pages grow independently. When a mapping runs out of
 record slots, the mapper doubles only the record capacity. When it cannot
@@ -60,10 +60,18 @@ at that resource's configured ceiling, then retries the same request under the
 mapper lock. The first mapping does not itself trigger growth. Existing mappings
 can remain live throughout growth.
 
-Growth copies the allocation records, physical-page index and allocation bitmaps
-into a larger metadata arena. Existing leaf pointers are copied. A page-capacity
-increase also allocates new leaf tables and, when extending beyond the first
-1 GiB directory, a second L2 table. Each new table block contains at most
+Metadata has separate storage for records and IOVA pages. Record growth replaces
+only the mapping records and their liveness bitmap. Page growth replaces only
+the physical-page index, start-page owner index, leaf pointers and allocator
+bitmaps, preserving the allocator's live, peak and reuse counts. The other
+resource keeps its existing allocation and pointers. Only the growing resource
+temporarily needs both old and new storage while its data is copied.
+
+Each metadata allocation is rounded independently to 4 KiB. The properties
+`mapper-record-storage-bytes` and `mapper-page-storage-bytes` report their sizes;
+`mapper-arena-bytes` reports the sum. A page-capacity increase also allocates new
+leaf tables and, when extending beyond the first 1 GiB directory, a second L2
+table. Each new table block contains at most
 16 pages (64 KiB) of physically contiguous storage. The blocks may be placed
 independently, and every block needed for an increase is allocated before any
 new PDE is attached. A record-capacity increase leaves the page tables
@@ -122,11 +130,13 @@ fields are also 32-bit, so this capacity increase needs no snapshot layout
 change.
 
 For example, a domain whose record capacity remains at 1024 and whose IOVA
-capacity grows to 64 MiB uses 327680 metadata bytes and 163840 table bytes:
-**491520 bytes, or 0.46875 MiB** in total. The complete `dma32-max` capacity uses
-22175744 metadata bytes and 4231168 table bytes. The actual capacity follows
-allocation pressure over the domain's lifetime; a later live-page count does
-not determine how far it has already grown.
+capacity grows to 64 MiB keeps its 126976-byte record allocation and uses
+204800 bytes for IOVA-page metadata. With 163840 table bytes, the total is
+**495616 bytes, or about 0.473 MiB**. The complete `dma32-max` capacity uses
+15745024 record-storage bytes, 6430720 page-storage bytes and 4231168 table
+bytes. The two metadata allocations total 22175744 bytes. The actual capacity
+follows allocation pressure over the domain's lifetime; a later live-page count
+does not determine how far it has already grown.
 
 The named profiles describe ceilings. `iommu-profile` and
 `iommu-profile-allocated` are display labels: they show a known profile only

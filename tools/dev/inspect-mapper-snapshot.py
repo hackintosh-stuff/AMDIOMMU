@@ -83,6 +83,8 @@ def inspect_mapper(entry):
         'table_segments': len(value['pt_segments']) if version >= 5 else 1,
         'reachable_table_pages': reachable_tables,
         'metadata_bytes': entry.get('mapper-arena-bytes'),
+        'record_storage_bytes': entry.get('mapper-record-storage-bytes'),
+        'page_storage_bytes': entry.get('mapper-page-storage-bytes'),
         'verified_iova_pages': len(actual),
     }
 

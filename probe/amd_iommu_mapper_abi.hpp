@@ -116,31 +116,38 @@ inline bool sameProfileName(const char *a, const char *b) {
     return *a == *b;
 }
 
-// Bytes a domain allocates for the capacity-dependent arrays: record slots,
-// physical-by-page index, per-start-page slot map, liveness bitmap, leaf
-// pointers and the allocator's two bitmaps. Page tables are separate. Kept
-// here so tests/ can check the arithmetic without compiling the kext.
+// Record slots and IOVA-page metadata have separate allocations. Each store
+// is rounded to a page; the combined guard excludes hardware page tables.
+// Keep the arithmetic shared with the host capacity test.
 static constexpr uint32_t kMappingBytes = 16 + sizeof(RecordHeader); // 2 pointers + header
 static_assert(kMappingBytes == 120, "one record slot is two pointers plus the ABI3 header");
-static constexpr uint64_t kMaxArenaBytes = 64ULL << 20;
+static constexpr uint64_t kMaxMetadataBytes = 64ULL << 20;
 
-inline uint64_t arenaBytesFor(const Capacity &capacity) {
-    const uint64_t recordWords = ((uint64_t)capacity.records + 63) / 64;
-    const uint64_t pageWords = ((uint64_t)capacity.pages + 63) / 64;
-    uint64_t bytes = (uint64_t)capacity.records * kMappingBytes;
-    bytes += (uint64_t)capacity.pages * sizeof(uint64_t);   // physicalByPage
-    bytes += (uint64_t)capacity.pages * sizeof(uint32_t);   // slotByStartPage
-    bytes += recordWords * sizeof(uint64_t);        // liveSlots
-    bytes += ((uint64_t)capacity.pages / 512) * sizeof(uint64_t *); // leaves
+inline uint64_t recordStorageBytesFor(uint32_t records) {
+    const uint64_t recordWords = ((uint64_t)records + 63) / 64;
+    const uint64_t bytes = (uint64_t)records * kMappingBytes +
+        recordWords * sizeof(uint64_t);              // liveSlots
+    return (bytes + 4095ULL) & ~4095ULL;
+}
+
+inline uint64_t iovaPageStorageBytesFor(uint32_t pages) {
+    const uint64_t pageWords = ((uint64_t)pages + 63) / 64;
+    uint64_t bytes = (uint64_t)pages * sizeof(uint64_t);   // physicalByPage
+    bytes += (uint64_t)pages * sizeof(uint32_t);           // slotByStartPage
+    bytes += ((uint64_t)pages / 512) * sizeof(uint64_t *); // leaves
     bytes += 2 * pageWords * sizeof(uint64_t);       // allocator used/ever
     return (bytes + 4095ULL) & ~4095ULL;
 }
 
-inline uint64_t arenaBytesFor(const Profile &profile) {
-    return arenaBytesFor(capacityForProfile(profile));
+inline uint64_t metadataBytesFor(const Capacity &capacity) {
+    return recordStorageBytesFor(capacity.records) + iovaPageStorageBytesFor(capacity.pages);
+}
+
+inline uint64_t metadataBytesFor(const Profile &profile) {
+    return metadataBytesFor(capacityForProfile(profile));
 }
 // Unknown names must not silently fall back: the caller publishes the request
-// and keeps the legacy arena, so a typo can never widen the pool.
+// and keeps legacy storage, so a typo can never widen the pool.
 inline const Profile *profileForName(const char *name) {
     if (!name || !*name) return &kProfileLegacy;
     if (sameProfileName(name, kProfileLegacy.name)) return &kProfileLegacy;
@@ -151,7 +158,7 @@ inline const Profile *profileForName(const char *name) {
 }
 
 // A display label must not round a mixed capacity up to a configured profile.
-// Numeric record/page limits remain authoritative for dynamically sized arenas.
+// Numeric record/page limits remain authoritative for dynamically sized storage.
 inline const char *profileNameForCapacity(const Capacity &capacity) {
     const Profile *profiles[] = {
         &kProfileLegacy, &kProfileRl10g, &kProfileRl10gMax, &kProfileDma32Max};
