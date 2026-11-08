@@ -170,7 +170,7 @@ private:
     void AttachExistingDevices();
     bool PrepareController(const HardwareInfo &);
     bool PrepareDomain(IOService *, UInt32, const mapper_abi::Profile *,
-                          mapper_abi::ProfileSource);
+                          mapper_abi::ProfileSource, bool allowOpen);
     bool ReleaseDomain();
     void PublishDomains();
     bool PowerSupported() const;

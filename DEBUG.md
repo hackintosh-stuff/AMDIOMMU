@@ -55,6 +55,9 @@ value is the sole selection; otherwise the identity list is used. Devices
 outside the selected set retain physical pass-through DMA. Selected devices
 publish an offer in both production modes, allowing a claim-based client to
 receive a definite answer even when auto-attach has already supplied its mapper.
+In `passive`, publishing the offer creates no per-device mapper: the attach is
+completed only by `AMDMapperHook` or an explicit client through the claim
+handshake. The selection source does not change this behaviour.
 
 ## Reading IORegistry properties
 
@@ -610,7 +613,7 @@ The keys most often needed when diagnosing:
 | `iommu-mode`, `iommu-role` | Which variant and which object (`controller` / `device`) |
 | `iommu-state` | `ready-passthrough` → `active` → `pm-resume-ready` |
 | `iommu-dte-active`, `iommu-dte-active-time` | Whether the first map activated the DTE, and when |
-| `iommu-parent-policy` | `set-at-first-publish-autoattach`, `set-on-client-claim-before-pci-open`, or `set-before-driver-start` — which path put the mapper in place |
+| `iommu-parent-policy` | `set-at-first-publish-autoattach`, `set-on-client-claim-before-pci-open`, or `set-on-hook-attach-after-pci-open` — which path put the mapper in place |
 | `device-selection`, `device-selection-count` | Which list is in force. `plist-missing`, `plist-parse-failed` and `plist-too-many-entries` all mean the selection is empty |
 | `amdiommu-dma-policy` | `mapped` / `selected` / `passthrough` / `failed` on the PCI device |
 | `mapper-map-ok`, `mapper-unmap-ok`, `mapper-map-rejected`, `mapper-unmap-rejected` | Aggregate mapping outcomes |

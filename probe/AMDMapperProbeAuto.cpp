@@ -667,28 +667,43 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim,
         ProfileForDevice(vendor16, device16, classCode, &profileSource);
     LockGuard attachment(fAttachLock);
     if (fStopping) return false;
+    // In passive mode first publish never creates a per-device mapper. The
+    // device selection (amdiommu_devices or the Info.plist identity table)
+    // decides only WHICH requesters get an offer; the mapper is created
+    // exclusively by a claim from AMDMapperHook or an explicit client.
+    if (!fAutoAttach && !claim) {
+        if (fSelectionExplicit) {
+            IOService *&offered = fOffers[match];
+            if (offered) return offered == nic;  // first publish or replay
+            if (nic->isOpen() || nic->getProperty("iommu-parent")) {
+                setProperty("attach-failure", "already-open-or-bound");
+                setProperty("attach-rejected-requester", requester, 32);
+                nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
+                return false;
+            }
+            if (!nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kSelected) ||
+                !nic->setProperty(amd_iommu_policy::kOffer, this)) {
+                nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
+                return false;
+            }
+            nic->retain();
+            offered = nic;
+        } else if (!nic->getProperty(amd_iommu_policy::kOffer)) {
+            // With the default table the property itself is the offer record:
+            // fOffers[] is indexed by the empty boot-argument list here.
+            if (!nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kSelected) ||
+                !nic->setProperty(amd_iommu_policy::kOffer, this)) {
+                nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
+                return false;
+            }
+        }
+        return true;  // no mapper, page table or translated DTE yet
+    }
     if (fSelectionExplicit) {
         IOService *&offered = fOffers[match];
         // A client that claims keeps the R54 ordering guarantees: the offer was
         // published before its PCI open and this call must match that record.
         if (!fAutoAttach) {
-            if (!claim) {
-                if (offered) return offered == nic;  // first publish or replay
-                if (nic->isOpen() || nic->getProperty("iommu-parent")) {
-                    setProperty("attach-failure", "already-open-or-bound");
-                    setProperty("attach-rejected-requester", requester, 32);
-                    nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
-                    return false;
-                }
-                if (!nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kSelected) ||
-                    !nic->setProperty(amd_iommu_policy::kOffer, this)) {
-                    nic->setProperty(amd_iommu_policy::kProperty, amd_iommu_policy::kFailed);
-                    return false;
-                }
-                nic->retain();
-                offered = nic;
-                return true;  // no mapper, page table or translated DTE yet
-            }
             if (offered != nic || nic->getProperty(amd_iommu_policy::kOffer) != this)
                 return false;
             nic->removeProperty(amd_iommu_policy::kOffer);
@@ -728,12 +743,10 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim,
             nic->removeProperty(amd_iommu_policy::kOffer);
         }
     } else {
-        // Default selection (no amdiommu_devices). The device is still attached
-        // eagerly below, so this path keeps working without Lilu; the offer is
-        // published on top of that so the copyMapperForDevice hook can reach the
-        // controller through the device, and so a pre-open claim has a record to
-        // validate against. fOffers[] is indexed by the boot-argument list, which
-        // is empty here, so the property itself is the record.
+        // Default selection (no amdiommu_devices): the device property itself is
+        // the offer record, because fOffers[] is indexed by the empty
+        // boot-argument list. In passive mode only a claim reaches this point;
+        // in auto-attach the first publish both offers and attaches below.
         if (!claim) {
             if (!nic->getProperty(amd_iommu_policy::kOffer) &&
                 !nic->setProperty(amd_iommu_policy::kOffer, this))
@@ -780,7 +793,7 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim,
     if (!mapper->start(this)) {
         mapper->detach(this); mapper->release(); return false;
     }
-    if (!mapper->PrepareDomain(nic, slot, deviceProfile, profileSource)) {
+    if (!mapper->PrepareDomain(nic, slot, deviceProfile, profileSource, allowOpen)) {
         setProperty("attach-failure", "device-prepare");
         setProperty("attach-rejected-requester", requester, 32);
         mapper->ReleaseDomain();
@@ -928,7 +941,7 @@ bool org_maz1_AMDMapperProbe::PrepareController(const HardwareInfo &hardware) {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 bool org_maz1_AMDMapperProbe::PrepareDomain(
     IOService *service, UInt32 slot, const mapper_abi::Profile *requestedIn,
-    mapper_abi::ProfileSource sourceIn) {
+    mapper_abi::ProfileSource sourceIn, bool allowOpen) {
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
     if (!fOwner || !nic || slot >= kMaxDomains) return false;
     const mapper_abi::Profile *requested = requestedIn;
@@ -1030,10 +1043,13 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
     PublishCapacity(true);
     PublishMappings();
     if (!nic->setProperty("iommu-parent", this)) return false;
+    // The selection source no longer determines who attached the mapper: in
+    // passive mode it is always a claim, either before PCI open or from the
+    // hook's copyMapperForDevice() fallback after it.
     setProperty("iommu-parent-policy", fOwner->fAutoAttach
         ? "set-at-first-publish-autoattach"
-        : (fOwner->fSelectionExplicit
-            ? "set-on-client-claim-before-pci-open" : "set-before-driver-start"));
+        : (allowOpen ? "set-on-hook-attach-after-pci-open"
+                     : "set-on-client-claim-before-pci-open"));
     return true;
 }
 #pragma clang diagnostic pop
