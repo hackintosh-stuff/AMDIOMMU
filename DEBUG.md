@@ -104,7 +104,7 @@ does not call it, so `-live` keys are not a substitute for a snapshot.
 | Trigger | What is refreshed |
 |---|---|
 | A device is attached (`AttachAuto`, before `iommu-parent` is set) | That domain. `d->active` is still false, so `iommu-dte-active=no` and all map counters are zero |
-| `setProperties({"R44Snapshot": true})` | Per-device instances publish their own snapshot; the controller publishes every domain |
+| `setProperties({"RefreshSnapshot": true})` | Per-device instances publish their own snapshot; the controller publishes every domain |
 | `setProperties({"R44All": true})` | Controller-level `PublishDomains()` |
 | Sleep/wake transitions | `PublishPMNow()` and `PublishPMBoundary()`; without these, PM sequences and timestamps would keep their prepare-time zeros while a wake is being judged |
 | Device quiesce / stop | A final snapshot |
@@ -116,7 +116,7 @@ been doing translated DMA for a long time while `ioreg` still shows
 
 ### Refresh and read
 
-`tools/dev/probe-snapshot.c` sends `R44Snapshot` to every instance:
+`tools/dev/probe-snapshot.c` sends `RefreshSnapshot` to every instance:
 
 ```sh
 clang -framework IOKit -framework CoreFoundation \
@@ -482,7 +482,7 @@ or a file transfer with source/destination hashes is sufficient. Record a missin
 peer or disconnected link as unavailable and continue the other phases. A ping
 is a reachability check, not a substitute for sustained send/receive work.
 
-Request `R44Snapshot` at phase boundaries and inspect each capture with
+Request `RefreshSnapshot` at phase boundaries and inspect each capture with
 `tools/dev/inspect-mapper-snapshot.py`. Compare fresh baseline and final counters
 for each requester, including mapping rejections, invalidation failures and
 target IOMMU events. Check the independent live-record/PTE comparison for every
@@ -567,7 +567,7 @@ Validate an optimized binary with the existing entries (`tools/test.sh`,
 [production integration batch](#production-integration-validation): one deploy,
 one reboot, the same per-link single/multi-flow, concurrent, file-integrity,
 start/stop, link-recovery and final short-traffic phases, with grouped
-`R44Snapshot` captures read by the current ABI5 inspector. Fresh baseline and
+`RefreshSnapshot` captures read by the current ABI5 inspector. Fresh baseline and
 final counters must show no new target faults, capacity rejections or
 invalidation failures.
 

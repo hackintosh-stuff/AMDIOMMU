@@ -1663,7 +1663,7 @@ bool org_maz1_AMDMapperProbe::PMNotifierRegistered() const {
 
 // R72: PM state is published at the transition, not only when a snapshot is
 // requested, so a wake can be judged from the registry immediately. That includes
-// the sequences and timestamps: R44Snapshot is the only other publisher, and
+// the sequences and timestamps: RefreshSnapshot is the only other publisher, and
 // nobody asks for one while judging a wake, so those keys would otherwise keep
 // their prepare-time zeros and the transition's own completion waits would be
 // invisible.

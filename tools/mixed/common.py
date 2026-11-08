@@ -232,7 +232,7 @@ def snapshot(parent, label, config, mode):
         if len(owners) != 1:
             raise ValueError('expected exactly one shared R52 controller')
         owner_id = owners[0]['IORegistryEntryID']
-        set_boolean(owner_id, 'R52Snapshot')
+        set_boolean(owner_id, 'PublishAllDomains')  # Formerly R52Snapshot.
         tree = registry()
         owner = next(node for node, _ in nodes(tree) if node.get('IORegistryEntryID') == owner_id)
         controller = scalars(owner, ('r52-',))

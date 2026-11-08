@@ -26,7 +26,7 @@ def read_state(config):
     owner_id = owners[0]['IORegistryEntryID']
     entries = {v['binding']['driver_registry_id']: C.PROFILES[v['binding']['driver_class']]['snapshot']
                for v in selected.values()}
-    entries[owner_id] = 'R52Snapshot'
+    entries[owner_id] = 'PublishAllDomains'  # Formerly R52Snapshot.
     C.set_booleans(entries)
     tree = C.registry()
     owner = next(n for n, _ in C.nodes(tree) if n.get('IORegistryEntryID') == owner_id)
@@ -182,9 +182,9 @@ def main():
     _, state, owner_id = read_state(config)
     if args.action == 'arm':
         require_participants(state)
-        C.set_boolean(owner_id, 'R66ArmSystemPM')
+        C.set_boolean(owner_id, 'SetSystemPMArmed')  # Formerly R66ArmSystemPM.
     else:
-        SESSION['set_boolean_property']('R66ArmSystemPM', value=False)
+        SESSION['set_boolean_property']('SetSystemPMArmed', value=False)
     _, after, _ = read_state(config)
     expected = 'yes' if args.action == 'arm' else 'no'
     # The release surface publishes `pm-coordinated-armed`; the archived R66-2

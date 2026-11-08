@@ -1,5 +1,6 @@
 // probe-snapshot.c - Ask every org_maz1_AMDMapperProbe instance to republish its
-// snapshot (setProperties {"R44Snapshot": true}).
+// snapshot (setProperties {"RefreshSnapshot": true}).
+// Formerly R44Snapshot.
 //
 // The probe publishes mapper-map-ok / iommu-dte-active / invalidation counters
 // only when someone asks: PublishMappings() runs from setProperties, from attach
@@ -34,7 +35,7 @@ int main(void) {
             &kCFTypeDictionaryValueCallBacks);
         if (!properties)
             break;
-        CFDictionarySetValue(properties, CFSTR("R44Snapshot"), kCFBooleanTrue);
+        CFDictionarySetValue(properties, CFSTR("RefreshSnapshot"), kCFBooleanTrue);
 
         kr = IORegistryEntrySetCFProperties(service, properties);
         char name[128] = {0};

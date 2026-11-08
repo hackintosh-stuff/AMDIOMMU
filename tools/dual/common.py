@@ -268,7 +268,7 @@ def snapshot(parent, label, config, mode):
             entries = {value['binding']['driver_registry_id']:
                        PROFILES[value['binding']['driver_class']]['snapshot']
                        for value in drivers.values()}
-            entries[owner_id] = 'R52Snapshot'
+            entries[owner_id] = 'PublishAllDomains'  # Formerly R52Snapshot.
             set_booleans(entries)
             tree = registry()
             drivers = selected_drivers(tree, config)

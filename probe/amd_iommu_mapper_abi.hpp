@@ -1,5 +1,6 @@
-// Ordinary per-device IOMapper evidence. Published only by R44Snapshot=true;
+// Ordinary per-device IOMapper evidence. Published only by RefreshSnapshot=true;
 // it does not own the mappings and never limits normal DMA traffic.
+// Formerly R44Snapshot.
 #pragma once
 #include <stdint.h>
 

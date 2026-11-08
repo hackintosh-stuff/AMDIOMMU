@@ -114,7 +114,7 @@ def snapshot(parent, label, driver_prefixes=('rtl812x-r44-',),
     """One explicit read-only export; production mapping has no capture limit."""
     out = parent / label
     out.mkdir(parents=True, exist_ok=False)
-    session.set_boolean_property('R44Snapshot')
+    session.set_boolean_property('RefreshSnapshot')  # Formerly R44Snapshot.
     probe = registry('org_maz1_AMDMapperProbe', 'r44-mode')
     driver = registry('RTL8125', 'rtl812x-r44-mapper-found')
     exports = {}

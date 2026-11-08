@@ -540,7 +540,7 @@ bool org_maz1_AMDMapperProbe::ResumeDomain() {
     return ok;
 }
 
-// R72: the boundary blobs are otherwise published only by R44Snapshot, so the
+// R72: the boundary blobs are otherwise published only by RefreshSnapshot, so the
 // cross-boundary hash comparison would need a snapshot nobody asks for while
 // judging a wake. The pointers are swapped by capturePowerBoundary under the
 // mapper lock, so they are retained here before the property writes can block.

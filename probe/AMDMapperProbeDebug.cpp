@@ -281,20 +281,23 @@ IOReturn org_maz1_AMDMapperProbe::callPlatformFunction(
 
 IOReturn org_maz1_AMDMapperProbe::setProperties(OSObject *properties) {
     OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
-    OSObject *pmArm = dict ? dict->getObject("R66ArmSystemPM") : nullptr;
+    // Formerly R66ArmSystemPM.
+    OSObject *pmArm = dict ? dict->getObject("SetSystemPMArmed") : nullptr;
     if (pmArm) {
         if (pmArm != kOSBooleanTrue && pmArm != kOSBooleanFalse)
             return kIOReturnBadArgument;
         return SetSystemPM(pmArm == kOSBooleanTrue);
     }
-    OSObject *all = dict ? dict->getObject("R52Snapshot") : nullptr;
+    // Formerly R52Snapshot.
+    OSObject *all = dict ? dict->getObject("PublishAllDomains") : nullptr;
     if (fAuto && all) {
         if (all != kOSBooleanTrue) return kIOReturnBadArgument;
         if (fOwner) return kIOReturnUnsupported;
         PublishDomains();
         return kIOReturnSuccess;
     }
-    OSObject *snapshot = dict ? dict->getObject("R44Snapshot") : nullptr;
+    // Formerly R44Snapshot.
+    OSObject *snapshot = dict ? dict->getObject("RefreshSnapshot") : nullptr;
     if (fAuto && snapshot) {
         if (snapshot != kOSBooleanTrue) return kIOReturnBadArgument;
         if (fOwner) PublishMappings();
