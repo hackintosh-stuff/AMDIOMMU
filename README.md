@@ -39,7 +39,7 @@ Two build variants exist and accept different boot-args:
 | `amdiommu_profile=<name>` | `rl-10g-max` | Growth ceiling, and the default: 65535 records / 262144 pages (1 GiB), 516 table pages. |
 | | `rl-10g` | Ceiling at 16384 records / 131072 pages (512 MiB), 260 table pages. |
 | | `native-legacy` | Ceiling at the accepted ABI3 window (1024 records / 16 MiB): growth is disabled. |
-| | unknown name | Widen nothing: growth is disabled and `r44-profile-ceiling=unsupported-name` is recorded. |
+| | unknown name | Widen nothing: growth is disabled and `iommu-profile-ceiling` records `unsupported-name`. |
 | `amdiommu_pm=off` | `off` | Do not register the self-driven sleep/wake interest. The DMA path still repairs a controller that lost its register image; the mapper simply learns about the loss later. Absent means registered. |
 
 `amdiommu_profile` names the **ceiling**, not the arena a domain is prepared
@@ -67,28 +67,9 @@ the arena starts there and grows from actual demand.
 | PCI class fallback | base class `0x01` (storage) | `rl-10g` |
 | otherwise | — | `native-legacy` |
 
-The suggestion is published per device as `iommu-profile-suggested` with
-`iommu-profile-source` = `boot-arg` \| `id-table` \| `class-table` \|
-`legacy-fallback`. A claim-based client (Lucy, the board RTL8111) keeps the
-accepted ABI3 arena: its ceiling stays `native-legacy` unless an operator raises
-it explicitly. `amdiommu_autoattach` was removed — `amdiommu=auto-attach` is the
-only switch.
-
-Growth evidence, per device: `iommu-profile-prepared` (`native-legacy`),
-`iommu-profile-ceiling`, `iommu-profile-ceiling-source` (`boot-arg` | `default`),
-`iommu-growth-policy` (`first-map` | `disabled`), `iommu-capacity-grown`
-(`no` | `yes` | `no-growth-failed`), `iommu-profile-grown-from`,
-`mapper-map-window-bytes`, plus `iommu-growth-state`/`iommu-growth-time` in the mapper
-snapshot (`iommu-growth-state` is `grown`, `not-needed`, `closed-live` or one of
-the `failed-*` reasons).
-
-Published properties no longer carry round prefixes. The release surface uses
-semantic families: `iommu-*` (mode, state, controller/domain hardware evidence,
-profile and growth), `discovery-*` (IVRS/PCI discovery facts), `mapper-*`
-(per-device mapper statistics and raw dumps), `invalidation-*` (invalidation
-counters), `pm-*` (suspend/resume), `dma-*` (DMA park gate), plus standalone
-keys such as `probe-stage`, `publish-notifier`, `device-selection`,
-`snapshot-domains` and `admission`.
+The per-device profile suggestions, growth evidence and the full IORegistry
+property surface — including why most properties are snapshots rather than live
+counters — are documented in [DEBUG.md](DEBUG.md).
 
 Current example (ConnectX-4 Lx). No profile argument is needed because
 the arena now follows demand:
