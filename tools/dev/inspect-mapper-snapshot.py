@@ -9,6 +9,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools/ordinary'))
+sys.path.insert(0, str(ROOT / 'tools'))
+import dbgmask
 from common import ABI_LAYOUTS, decode, decode_table_segments, record
 from analyze import leaves, need
 
@@ -96,6 +98,15 @@ def main():
     parser.add_argument('capture', type=Path, help='ioreg -a -l -w0 plist file')
     args = parser.parse_args()
     tree = plistlib.loads(args.capture.read_bytes())
+    mask = dbgmask.current(tree)
+    needed = dbgmask.MAPPING | dbgmask.RAW
+    if mask & needed != needed:
+        print(json.dumps({
+            'ok': False,
+            'error': 'amdiommu_dbg=0x%02x hides mapper/raw evidence; '
+                     'capture with 0x50 or higher' % mask,
+        }, indent=2, sort_keys=True))
+        return 1
     results, seen = [], set()
     for entry in mapper_entries(tree):
         entry_id = entry.get('IORegistryEntryID')
@@ -106,10 +117,19 @@ def main():
         try:
             results.append(inspect_mapper(entry))
         except (KeyError, ValueError, TypeError, struct.error) as error:
-            results.append({'ok': False, 'registry_entry_id': entry_id,
-                            'requester_id': entry.get('iommu-device-id'),
-                            'error': str(error)})
-    need(results, 'no mapper-state-raw entries in the supplied registry capture')
+            value = {'ok': False, 'registry_entry_id': entry_id,
+                     'requester_id': entry.get('iommu-device-id'),
+                     'error': str(error)}
+            if isinstance(error, KeyError):
+                value['hint'] = 'mapper/raw keys need amdiommu_dbg=0x50 or higher'
+            results.append(value)
+    if not results:
+        print(json.dumps({
+            'ok': False,
+            'error': 'no mapper-state-raw entries in the supplied capture; '
+                     'capture with amdiommu_dbg=0x50 or higher',
+        }, indent=2, sort_keys=True))
+        return 1
     ok = all(value['ok'] for value in results)
     print(json.dumps({'ok': ok, 'mappers': results}, indent=2, sort_keys=True))
     return 0 if ok else 1

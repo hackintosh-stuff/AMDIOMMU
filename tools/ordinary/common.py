@@ -28,6 +28,7 @@ def module(name, relative):
 
 
 sys.path.insert(0, str(ROOT / 'tools/base'))
+DBG = module('_amdiommu_dbgmask', 'tools/dbgmask.py')
 protocol = module('_r44_protocol', 'tools/base/protocol.py')
 load_helpers = module('_r44_load_helpers', 'tools/base/load.py')
 session = module('_r44_registry_rpc', 'tools/session/session.py')
@@ -92,6 +93,7 @@ def decode_table_segments(data):
 
 def registry(class_name, marker):
     data = plistlib.loads(subprocess.check_output(['ioreg', '-a', '-l', '-w0', '-r', '-c', class_name]))
+    DBG.require(DBG.BASE, 'ioreg %s' % class_name, data)
     found = []
 
     def walk(node):
@@ -116,6 +118,7 @@ def snapshot(parent, label, driver_prefixes=('rtl812x-r44-',),
     out.mkdir(parents=True, exist_ok=False)
     session.set_boolean_property('RefreshSnapshot')  # Formerly R44Snapshot.
     probe = registry('org_maz1_AMDMapperProbe', 'r44-mode')
+    DBG.require(DBG.MAPPING | DBG.RAW, 'ordinary mapper snapshot', probe)
     driver = registry('RTL8125', 'rtl812x-r44-mapper-found')
     exports = {}
     requested = dict(EXPORTS)

@@ -152,14 +152,18 @@ bool org_maz1_AMDMapperProbe::initHardware(IOService *provider) {
 bool org_maz1_AMDMapperProbe::ReadDbgMask() {
     fDbgMask = amdiommu_dbg::kDefault;
     char text[16] = {};
-    if (!PE_parse_boot_argn("amdiommu_dbg", text, sizeof(text) - 1)) return true;
-    UInt32 parsed = 0;
-    if (!amdiommu_dbg::Parse(text, &parsed)) {
-        IOLog("AMDMapperProbe: invalid amdiommu_dbg=%s, using 0x%02x\n",
-              text, (unsigned)fDbgMask);
-        return false;
+    if (PE_parse_boot_argn("amdiommu_dbg", text, sizeof(text) - 1)) {
+        UInt32 parsed = 0;
+        if (amdiommu_dbg::Parse(text, &parsed)) {
+            fDbgMask = parsed;
+        } else {
+            IOLog("AMDMapperProbe: invalid amdiommu_dbg=%s, using 0x%02x\n",
+                  text, (unsigned)fDbgMask);
+        }
     }
-    fDbgMask = parsed;
+    char maskText[8] = {};
+    snprintf(maskText, sizeof(maskText), "0x%02x", (unsigned)fDbgMask);
+    setProperty("amdiommu-dbg", maskText);
     return true;
 }
 

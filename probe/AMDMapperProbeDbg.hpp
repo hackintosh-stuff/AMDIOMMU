@@ -18,9 +18,10 @@ enum : UInt32 {
     kAll = 0xFFu,
 };
 
-// Keep the historical surface when the boot argument is absent. A later round
-// can change this default once the tools request the bits they consume.
-static constexpr UInt32 kDefault = kAll;
+// The default is intentionally quiet: tools must opt in to the evidence group
+// they consume. The one always-published key is amdiommu-dbg, so a reader can
+// tell a masked key from a genuinely missing one.
+static constexpr UInt32 kDefault = 0x00;
 
 inline bool On(UInt32 mask, UInt32 group) {
     return (mask & group) != 0;

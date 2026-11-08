@@ -28,7 +28,7 @@ registers agree, then prepares a translation domain for each selected requester.
 | `amdiommu_devices=<ids>` | Four hexadecimal requester-ID digits prefixed with `n`, for example `n2200,n2201` or `n2300,n2301` | Selects segment-zero requesters. If omitted, selection comes from `AMDMapperProbeDevices` in the kext's `Info.plist`. |
 | `amdiommu_ceiling=<name>` | See [Profile ceilings](#profile-ceilings) | Selects the independent record and IOVA-page growth limits. |
 | `amdiommu_pm=off` | `off` | Disables registration for self-driven sleep/wake notifications. DMA-path repair of a controller that lost its register image remains available. With the argument absent, notifications are registered. |
-| `amdiommu_dbg=<mask>` | `0x00`–`0xFF`, hexadecimal with the `0x` prefix | Selects which IORegistry evidence groups are published. The mask never changes the DMA, attach or power state machine. Absent or invalid values use `0xFF` (the historical full surface). |
+| `amdiommu_dbg=<mask>` | `0x00`–`0xFF`, hexadecimal with the `0x` prefix | Selects which IORegistry evidence groups are published. The mask never changes the DMA, attach or power state machine. Absent or invalid values use `0x00`; set `0xFF` for the historical full surface. The effective value is always published as `amdiommu-dbg`. |
 
 ### Device selection
 
@@ -172,10 +172,12 @@ Use the `0x` prefix; an all-digit value would be converted by
 | `0x40` | Raw | `*-raw`, `snapshot-domains`, IVRS raw; requires the owning group |
 | `0x80` | Debug | Debug-build-only M1-B entry evidence; M2 modules stay compile-time gated |
 
-Useful values: `0x00` keeps only contract properties; `0x0F` is the everyday
+Useful values: `0x00` is the default and keeps only contract properties plus
+the `amdiommu-dbg` metadata; `0x0F` is the everyday
 base/select/attach/discovery set; `0x1F` adds mapping; `0x3F` adds PM; `0x7F`
-adds raw blobs; `0xFF` is the default. `tools/dev/inspect-mapper-snapshot.py`
-needs at least `0x50` (mapping + raw); the PM tools need `0x20`.
+adds raw blobs; `0xFF` adds Debug evidence. `tools/dev/inspect-mapper-snapshot.py`
+needs at least `0x50` (mapping + raw); the PM tools need `0x20`. The tools read
+`amdiommu-dbg` and report a masked group instead of treating the key as absent.
 
 Property names are grouped by meaning; no release property carries a round
 prefix. The debug groups above are suppressed by the mask, so a reader must
@@ -191,8 +193,10 @@ enable the owning bit before treating a missing key as a state failure.
 | `dma-*` | DMA park gate |
 
 Standalone keys include `probe-stage`, `publish-notifier`, `device-selection`,
-`snapshot-domains` and `admission`. `snapshot-domains` is the array of
-per-domain dictionaries produced by a controller-level publication.
+`snapshot-domains`, `admission` and `amdiommu-dbg`. `amdiommu-dbg` is always
+published, even at `0x00`, and is the authoritative record of which groups the
+running kext is exposing. `snapshot-domains` is the array of per-domain
+dictionaries produced by a controller-level publication.
 
 ## Profile and growth evidence
 

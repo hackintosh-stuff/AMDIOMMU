@@ -19,6 +19,7 @@ SESSION = runpy.run_path(str(HERE.parents[1] / 'session/session.py'))
 
 def read_state(config):
     tree = C.registry()
+    C.DBG.require(C.DBG.MAPPING | C.DBG.PM, 'PM state', tree)
     selected = C.selected_drivers(tree, config)
     owners = [n for n, _ in C.nodes(tree) if n.get('r52-role') == 'controller']
     if len(owners) != 1:

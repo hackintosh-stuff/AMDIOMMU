@@ -27,6 +27,7 @@ def module(name, relative):
 
 
 C = module('_r52_abi2_helpers', 'tools/ordinary/common.py')
+DBG = module('_amdiommu_dbgmask', 'tools/dbgmask.py')
 protocol = module('_r52_tcp_protocol', 'tools/mixed/protocol.py')
 project_path, sha, write_json = C.project_path, C.sha, C.write_json
 # These exports also let the existing R44 page-table walker import normally.
@@ -90,8 +91,10 @@ def nodes(tree, parents=()):
 
 
 def registry():
-    return plistlib.loads(subprocess.check_output(
+    tree = plistlib.loads(subprocess.check_output(
         ['ioreg', '-a', '-l', '-w0', '-p', 'IOService']))
+    DBG.require(DBG.BASE, 'ioreg registry', tree)
+    return tree
 
 
 def bsd_name(node):
@@ -211,6 +214,7 @@ def snapshot(parent, label, config, mode):
     out = parent / label
     out.mkdir(parents=True, exist_ok=False)
     tree = registry()
+    DBG.require(DBG.MAPPING | DBG.RAW, 'mapper snapshot', tree)
     drivers = selected_drivers(tree, config)
     if mode == 'auto':
         deadline = time.monotonic() + 5

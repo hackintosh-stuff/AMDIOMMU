@@ -42,6 +42,11 @@ python3 "$ROOT/tests/InspectorSmoke.py" "$WORK/ivrs-inspect" "$WORK" "$ROOT/fixt
 # now part of this script.
 printf '\n== kext core regressions ==\n'
 "$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g $SAN_FLAGS \
+    -I "$ROOT/probe" "$ROOT/tests/dbg-mask-test.cpp" \
+    -o "$WORK/dbg-mask-test"
+"$WORK/dbg-mask-test"
+
+"$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g $SAN_FLAGS \
     -I "$ROOT/include" -I "$ROOT/probe" \
     "$ROOT/src/IdentityMap.cpp" "$ROOT/src/Ivrs.cpp" \
     "$ROOT/src/IvrsTopology.cpp" "$ROOT/tests/dma-observe-test.cpp" \
@@ -231,8 +236,8 @@ python3 "$ROOT/tools/verify/reproducibility.py"
 # data, not for a change in verdict.
 
 printf 'TEST_OK=%s\nINSPECTOR=%s\n' "$WORK/offline-tests" "$WORK/ivrs-inspect"
-printf 'CORE_OK=%s %s %s %s %s %s %s %s\n' "$WORK/dma-observe-test" \
-       "$WORK/pte-core-test" "$WORK/obs-write-test" \
+printf 'CORE_OK=%s %s %s %s %s %s %s %s %s\n' "$WORK/dbg-mask-test" \
+       "$WORK/dma-observe-test" "$WORK/pte-core-test" "$WORK/obs-write-test" \
        "$WORK/bizwalk-core-test" "$WORK/evidence-gate-test" \
        "$WORK/rxpost-test" "$WORK/capacity-test" "$WORK/table-growth-test"
 (cd "$ROOT" && shasum -a 256 include/amd_iommu/*.hpp src/*.cpp \
