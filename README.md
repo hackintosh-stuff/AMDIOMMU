@@ -75,7 +75,7 @@ vary. The bundles in `build-m1a/`, `build-m1a-debug/` and `build-hook/` are buil
 outputs until copied to the ESP. This project uses OpenCore injection rather
 than installation in `/Library/Extensions` or the auxiliary kernel collection.
 
-## AMDMapperHook (optional companion)
+## AMDMapperHook (optional Lilu plugin)
 
 Use `AMDMapperHook.kext` with `amdiommu=passive` when a selected driver needs the
 mapper made available before startup. It relies on Lilu and leaves the driver
