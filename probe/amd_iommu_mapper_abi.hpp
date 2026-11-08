@@ -88,21 +88,27 @@ static constexpr Profile kProfileLegacy = {
     "native-legacy", kRecords, kPages, kMapPages, kRuns, 16};
 static constexpr Profile kProfileRl10g = {
     "rl-10g", 16384, 131072, kMapPages, kRuns, 260};
-// Maximum configured ceiling: 1 GiB and the largest record count the UInt16
-// slot encoding allows. Each resource allocates storage only as it is needed.
+// Preserve the existing named 1 GiB ceiling and its record limit.
 static constexpr Profile kProfileRl10gMax = {
     "rl-10g-max", 65535, 262144, kMapPages, kRuns, 516};
+// Use the complete IOVA window above kBase that 32-bit DMA clients can reach.
+// A contiguous build needs 1024 leaves, two L2 directories, L3 and the root.
+static constexpr Profile kProfileDma32Max = {
+    "dma32-max", 131072, 524288, kMapPages, kRuns, 1028};
 static_assert(kProfileLegacy.records == kRecords && kProfileLegacy.pages == kPages,
               "legacy profile must not change the accepted window");
 static_assert(kProfileRl10g.pages % 512 == 0, "leaf tables cover 2 MiB each");
 static_assert(kProfileRl10g.tablePages >= kProfileRl10g.pages / 512 + 2,
               "profile must cover its own page tables");
-static_assert(kProfileRl10g.records <= 0xffff, "slot + 1 must fit in UInt16");
 static_assert(kProfileRl10g.pages <= 0xffffffffU / 4096U, "IOVA window must fit UInt32 pages");
 static_assert(kProfileRl10gMax.pages % 512 == 0, "leaf tables cover 2 MiB each");
 static_assert(kProfileRl10gMax.tablePages >= kProfileRl10gMax.pages / 512 + 2,
               "profile must cover its own page tables");
-static_assert(kProfileRl10gMax.records <= 0xffff, "slot + 1 must fit in UInt16");
+static_assert(kProfileDma32Max.pages % 512 == 0, "leaf tables cover 2 MiB each");
+static_assert(kProfileDma32Max.tablePages >= kProfileDma32Max.pages / 512 + 4,
+              "dma32 profile must cover both leaf directories and upper levels");
+static_assert(kBase + (uint64_t)kProfileDma32Max.pages * 4096ULL == (1ULL << 32),
+              "dma32 IOVA window must end at the 32-bit address boundary");
 
 inline bool sameProfileName(const char *a, const char *b) {
     if (!a || !b) return false;
@@ -123,7 +129,7 @@ inline uint64_t arenaBytesFor(const Capacity &capacity) {
     const uint64_t pageWords = ((uint64_t)capacity.pages + 63) / 64;
     uint64_t bytes = (uint64_t)capacity.records * kMappingBytes;
     bytes += (uint64_t)capacity.pages * sizeof(uint64_t);   // physicalByPage
-    bytes += (uint64_t)capacity.pages * sizeof(uint16_t);   // slotByStartPage
+    bytes += (uint64_t)capacity.pages * sizeof(uint32_t);   // slotByStartPage
     bytes += recordWords * sizeof(uint64_t);        // liveSlots
     bytes += ((uint64_t)capacity.pages / 512) * sizeof(uint64_t *); // leaves
     bytes += 2 * pageWords * sizeof(uint64_t);       // allocator used/ever
@@ -140,13 +146,15 @@ inline const Profile *profileForName(const char *name) {
     if (sameProfileName(name, kProfileLegacy.name)) return &kProfileLegacy;
     if (sameProfileName(name, kProfileRl10g.name)) return &kProfileRl10g;
     if (sameProfileName(name, kProfileRl10gMax.name)) return &kProfileRl10gMax;
+    if (sameProfileName(name, kProfileDma32Max.name)) return &kProfileDma32Max;
     return nullptr;
 }
 
 // A display label must not round a mixed capacity up to a configured profile.
 // Numeric record/page limits remain authoritative for dynamically sized arenas.
 inline const char *profileNameForCapacity(const Capacity &capacity) {
-    const Profile *profiles[] = {&kProfileLegacy, &kProfileRl10g, &kProfileRl10gMax};
+    const Profile *profiles[] = {
+        &kProfileLegacy, &kProfileRl10g, &kProfileRl10gMax, &kProfileDma32Max};
     for (const Profile *profile : profiles) {
         if (capacity.records == profile->records && capacity.pages == profile->pages)
             return profile->name;

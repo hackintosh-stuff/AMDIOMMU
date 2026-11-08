@@ -28,9 +28,9 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingArena {
         IOBufferMemoryDescriptor *memory;
         mapper_abi::TableSegment segment;
     };
-    // Initial 4096-page window plus six doublings to the 262144-page ceiling.
+    // Initial 4096-page window plus seven doublings to the 524288-page ceiling.
     // Record-slot growth does not allocate a page-table segment.
-    static constexpr UInt32 kMaxTableAllocations = 7;
+    static constexpr UInt32 kMaxTableAllocations = 8;
     IOLock *lock;
     volatile UInt64 *tables;
     UInt64 tablePA;
@@ -138,8 +138,7 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingArena {
 // exercised by the host capacity test; the kernel owns allocation and lifetime.
 static bool AllocateMapperArena(amdmapper::MappingArena &arena,
                                 const mapper_abi::Capacity &capacity) {
-    if (!capacity.records || capacity.records > 0xffffU ||
-        !capacity.pages || (capacity.pages % 512)) return false;
+    if (!capacity.records || !capacity.pages || (capacity.pages % 512)) return false;
     const UInt64 bytes = mapper_abi::arenaBytesFor(capacity);
     if (!bytes || bytes > mapper_abi::kMaxArenaBytes) return false;
     void *memory = IOMalloc((vm_size_t)bytes);
@@ -230,19 +229,31 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
     if (target.pages > current.pages) {
         const UInt32 firstLeaf = current.pages / 512;
         const UInt32 leafCount = (target.pages - current.pages) / 512;
+        amdsparse::Arena rootArena = {d->tables, d->tablePA,
+            (UInt32)(d->tableAllocations[0].segment.bytes / 4096), 1,
+            d->snapshot.rootLevel, d->tablePA, 0, 0, nullptr};
+        amdtable::PageTableGrowthPlan tableGrowth{};
+        if (!amdtable::planPageTableGrowth(rootArena,
+                mapper_abi::kBase + (UInt64)current.pages * 4096ULL,
+                leafCount, tableGrowth)) {
+            IOFree(grown.arena, grown.arenaBytes);
+            d->growthState = "failed-page-tables";
+            d->accepting = false;
+            d->snapshot.flags |= mapper_abi::kFailed;
+            d->snapshot.flags &= ~mapper_abi::kAccepting;
+            return false;
+        }
+        const UInt64 addedTableBytes = (UInt64)tableGrowth.tablePages * 4096ULL;
         IOBufferMemoryDescriptor *newTables = nullptr;
         UInt64 newTablePA = 0;
-        if (!AllocateTableArea(newTables, (UInt64)leafCount * 4096ULL, newTablePA)) {
+        if (!AllocateTableArea(newTables, addedTableBytes, newTablePA)) {
             IOFree(grown.arena, grown.arenaBytes);
             d->growthState = "failed-tables";
             return false;
         }
-        amdsparse::Arena rootArena = {d->tables, d->tablePA,
-            (UInt32)(d->tableAllocations[0].segment.bytes / 4096), 1,
-            d->snapshot.rootLevel, d->tablePA, 0, 0, nullptr};
-        volatile UInt64 *directory = amdtable::leafDirectory(rootArena, mapper_abi::kBase);
-        if (!amdtable::attachLeafTables(directory, firstLeaf, leafCount,
-                (volatile UInt64 *)newTables->getBytesNoCopy(), newTablePA, grown.leaves)) {
+        if (!amdtable::attachPageTables(tableGrowth,
+                (volatile UInt64 *)newTables->getBytesNoCopy(), newTablePA,
+                grown.leaves + firstLeaf)) {
             // The helper performs every check before the first PDE write.
             newTables->release();
             IOFree(grown.arena, grown.arenaBytes);
@@ -255,9 +266,9 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
         // From this point hardware can reference the new allocation. Retain it
         // even if completion cannot be confirmed; no new IOVA is returned on failure.
         d->tableAllocations[d->tableAllocationCount++] = {newTables,
-            {newTablePA, d->snapshot.ptBytes, (UInt64)leafCount * 4096ULL}};
-        d->snapshot.ptBytes += (UInt64)leafCount * 4096ULL;
-        d->snapshot.tablePages += leafCount;
+            {newTablePA, d->snapshot.ptBytes, addedTableBytes}};
+        d->snapshot.ptBytes += addedTableBytes;
+        d->snapshot.tablePages += tableGrowth.tablePages;
         OSSynchronizeIO();
     }
     bool invalidated = false;
@@ -617,7 +628,7 @@ IOReturn org_maz1_AMDMapperProbe::MapMemory(
         record.mapAddress = address; record.mapLength = returnedLength;
         record.descriptorOffset = descriptorOffset; record.length = length;
         record.recordIndex = slot; record.basePage = basePage;
-        d->slotByStartPage[basePage] = static_cast<UInt16>(slot + 1);
+        d->slotByStartPage[basePage] = static_cast<UInt32>(slot + 1);
         record.pages = layout.pages; record.runs = layout.runs; record.options = mapOptions;
         UInt32 highPages = 0;
         for (unsigned i = 0; i < layout.runs; ++i) {
@@ -795,7 +806,7 @@ IOReturn org_maz1_AMDMapperProbe::UnmapMemory(
         if (mapAddress < mapper_abi::kBase) break;
         const UInt64 page = (mapAddress - mapper_abi::kBase) / 4096;
         if (page >= d->pages) break;
-        const UInt16 owner = d->slotByStartPage[page];
+        const UInt32 owner = d->slotByStartPage[page];
         if (!owner || owner > d->records) break;
         const unsigned slot = owner - 1U;
         auto &mapping = d->mappings[slot];

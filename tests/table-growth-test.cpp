@@ -29,14 +29,14 @@ struct Mapping {
 
 bool growAndTranslate() {
     const auto &initial = mapper_abi::kProfileLegacy;
-    const auto &ceiling = mapper_abi::kProfileRl10gMax;
+    const auto &ceiling = mapper_abi::kProfileDma32Max;
     auto capacity = mapper_abi::capacityForProfile(initial);
     constexpr unsigned expectedPages[] = {
-        4096, 8192, 16384, 32768, 65536, 131072, 262144};
-    constexpr unsigned expectedTablePages[] = {16, 24, 40, 72, 136, 264, 520};
+        4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288};
+    constexpr unsigned expectedTablePages[] = {16, 24, 40, 72, 136, 264, 520, 1033};
     constexpr u64 tablePhysicalBases[] = {
         0x40000000ULL, 0x70000000ULL, 0x28000000ULL,
-        0x54000000ULL, 0x90000000ULL, 0x08000000ULL};
+        0x54000000ULL, 0x90000000ULL, 0x08000000ULL, 0x06000000ULL};
     constexpr unsigned growthSteps = sizeof(tablePhysicalBases) / sizeof(tablePhysicalBases[0]);
     const u64 permissions = amdpte::PTE_IR | amdpte::PTE_IW;
     TableBlock root(0x10000000ULL, initial.tablePages);
@@ -48,10 +48,8 @@ bool growAndTranslate() {
             mapper_abi::kBase + (u64)i * 0x200000ULL, 512);
         if (!check(leaves[i] != nullptr, "initial leaf preparation")) return false;
     }
-    volatile u64 *directory = amdtable::leafDirectory(rootArena, mapper_abi::kBase);
-    if (!check(directory != nullptr, "locate the fixed L2 directory")) return false;
-
     std::vector<const TableBlock *> blocks{&root};
+    // Resolve every table PA through its allocation segment, including a new L2.
     auto readEntry = [&blocks](u64 pa, unsigned index) -> u64 {
         for (const TableBlock *block : blocks) {
             if (pa >= block->physicalBase &&
@@ -65,12 +63,15 @@ bool growAndTranslate() {
     const u64 upperPA = amdpte::decodePte(rootEntry, 4).outPA;
     const u64 upperEntry = readEntry(upperPA, amdpte::indexAt(3, mapper_abi::kBase));
     const u64 directoryPA = amdpte::decodePte(upperEntry, 3).outPA;
+    volatile u64 *upper = amdtable::leafDirectoryParent(rootArena, mapper_abi::kBase);
+    volatile u64 *directory = amdsparse::table(rootArena, directoryPA);
+    if (!check(upper && directory, "locate the initial L3 and L2 tables")) return false;
     auto hierarchyUnchanged = [&]() {
         return check(rootArena.rootPA == rootPA &&
             readEntry(rootPA, amdpte::indexAt(4, mapper_abi::kBase)) == rootEntry &&
             readEntry(upperPA, amdpte::indexAt(3, mapper_abi::kBase)) == upperEntry &&
             amdsparse::table(rootArena, directoryPA) == directory &&
-            amdtable::leafDirectory(rootArena, mapper_abi::kBase) == directory,
+            amdtable::leafDirectoryParent(rootArena, mapper_abi::kBase) == upper,
             "root and both upper-level table addresses stay fixed");
     };
     std::vector<Mapping> mappings;
@@ -91,8 +92,10 @@ bool growAndTranslate() {
         }
         return true;
     };
-    auto tablesEmpty = [](const TableBlock &block) {
-        for (u64 word : block.words) if (word) return false;
+    auto newLeavesEmpty = [&](unsigned firstLeaf, unsigned count) {
+        for (unsigned i = 0; i < count; ++i)
+            for (unsigned entry = 0; entry < 512; ++entry)
+                if (leaves[firstLeaf + i][entry]) return false;
         return true;
     };
     unsigned tablePages = initial.tablePages;
@@ -115,16 +118,51 @@ bool growAndTranslate() {
                 !check(target.records == initial.records &&
                     target.pages == expectedPages[step + 1],
                     "IOVA capacity doubles without growing record slots")) return false;
+        const unsigned firstLeaf = capacity.pages / 512;
         const unsigned addedLeaves = (target.pages - capacity.pages) / 512;
-        addedBlocks.emplace_back(tablePhysicalBases[step], addedLeaves, ~0ULL);
+        const u64 firstIOVA = mapper_abi::kBase + (u64)capacity.pages * 4096;
+        const bool addsDirectory = firstIOVA == 0xc0000000ULL;
+        amdtable::PageTableGrowthPlan growth{};
+        if (!check(amdtable::planPageTableGrowth(rootArena, firstIOVA, addedLeaves, growth),
+                "plan leaf storage and a directory when crossing 1 GiB") ||
+                !check(growth.directory == (addsDirectory ? nullptr : directory) &&
+                    growth.parentEntry == upper + amdpte::indexAt(3, firstIOVA) &&
+                    growth.firstEntry == firstLeaf % 512 &&
+                    growth.tablePages == addedLeaves + (addsDirectory ? 1U : 0U),
+                    "growth plan counts the new directory separately from leaf pages"))
+            return false;
+        std::vector<u64> retainedDirectory;
+        if (addsDirectory) {
+            if (!check(growth.tablePages == 513 && *growth.parentEntry == 0,
+                    "the 1 GiB to 2 GiB step prepares 513 pages under an empty L3 entry"))
+                return false;
+            for (unsigned entry = 0; entry < 512; ++entry)
+                retainedDirectory.push_back(static_cast<u64>(directory[entry]));
+        }
+        addedBlocks.emplace_back(tablePhysicalBases[step], growth.tablePages, ~0ULL);
         TableBlock &newTables = addedBlocks.back();
         leaves.resize(target.pages / 512);
-        if (!check(amdtable::attachLeafTables(directory, capacity.pages / 512, addedLeaves,
-                newTables.words.data(), newTables.physicalBase, leaves.data()),
-                "attach the next non-contiguous leaf block") ||
-                !check(tablesEmpty(newTables), "growth clears every new leaf")) return false;
+        if (!check(amdtable::attachPageTables(growth, newTables.words.data(),
+                newTables.physicalBase, leaves.data() + firstLeaf),
+                "attach the next non-contiguous table block") ||
+                !check(newLeavesEmpty(firstLeaf, addedLeaves), "growth clears every new leaf"))
+            return false;
         blocks.push_back(&newTables);
-        tablePages += addedLeaves;
+        if (addsDirectory) {
+            if (!check(readEntry(upperPA, 3) ==
+                    amdpte::makeTablePde(2, newTables.physicalBase, permissions) &&
+                    readEntry(newTables.physicalBase, 0) ==
+                    amdpte::makeTablePde(1, newTables.physicalBase + 4096, permissions) &&
+                    readEntry(newTables.physicalBase, 511) ==
+                    amdpte::makeTablePde(1, newTables.physicalBase + 512 * 4096ULL, permissions),
+                    "L3[3] points to the new L2 and its first and last leaf tables"))
+                return false;
+            for (unsigned entry = 0; entry < 512; ++entry)
+                if (!check(directory[entry] == retainedDirectory[entry],
+                        "adding another directory leaves every old L2 entry untouched"))
+                    return false;
+        }
+        tablePages += growth.tablePages;
         mapPage(capacity.pages);
         mapPage((capacity.pages + target.pages) / 2);
         mapPage(target.pages - 1);
@@ -133,6 +171,9 @@ bool growAndTranslate() {
                 "allocated table pages follow the incremental growth sequence") ||
                 !hierarchyUnchanged() || !translationsMatch()) return false;
     }
+    if (!check(mapper_abi::kBase + (u64)(capacity.pages - 1) * 4096 == 0xfffff000ULL &&
+            mappings.back().page == capacity.pages - 1,
+            "the last mapping covers the final 4 KiB page below 4 GiB")) return false;
 
     for (const Mapping &mapping : mappings)
         leaves[mapping.page / 512][mapping.page % 512] = 0;
@@ -151,6 +192,6 @@ bool growAndTranslate() {
 
 int main() {
     if (!growAndTranslate()) return 1;
-    std::printf("TABLE_GROWTH_OK table_pages=16,24,40,72,136,264,520\n");
+    std::printf("TABLE_GROWTH_OK table_pages=16,24,40,72,136,264,520,1033\n");
     return 0;
 }

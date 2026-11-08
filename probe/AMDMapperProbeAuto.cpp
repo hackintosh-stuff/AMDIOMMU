@@ -511,7 +511,7 @@ bool org_maz1_AMDMapperProbe::DefaultDeviceMatches(
 }
 
 // Select the growth ceiling. Each domain starts with legacy storage and
-// allocates the next profile when a mapping exhausts records or IOVA pages.
+// doubles the exhausted resource while retaining existing mappings.
 bool org_maz1_AMDMapperProbe::SelectProfile() {
     char requested[24] = {};
     const bool named = PE_parse_boot_argn("amdiommu_profile", requested,
@@ -539,7 +539,7 @@ const mapper_abi::Profile *org_maz1_AMDMapperProbe::Ceiling(bool &forced) const 
     forced = false;
     char requested[24] = {};
     if (!PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1))
-        return &mapper_abi::kProfileRl10gMax;
+        return &mapper_abi::kProfileDma32Max;
     forced = true;
     if (const mapper_abi::Profile *picked = mapper_abi::profileForName(requested))
         return picked;
@@ -999,8 +999,10 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
     d->allocatedTablePages = prepared->tablePages;
     d->ceilingProfile = ceiling;
     const char *admission = growth
-        ? (ceiling == &mapper_abi::kProfileRl10gMax
-               ? "granted-rl-10g-max-on-demand" : "granted-rl-10g-on-demand")
+        ? (ceiling == &mapper_abi::kProfileDma32Max
+               ? "granted-dma32-max-on-demand"
+               : (ceiling == &mapper_abi::kProfileRl10gMax
+                      ? "granted-rl-10g-max-on-demand" : "granted-rl-10g-on-demand"))
         : "granted-native-legacy";
     nic->setProperty("admission", admission);
     IOLog("AMDMapperProbe: domain %u prepared %s, ceiling %s (growth %s)\n",

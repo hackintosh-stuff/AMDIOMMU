@@ -19,7 +19,7 @@ struct MappingArena {
     size_t arenaBytes;
     Mapping *mappings;
     amdtx::u64 *physicalByPage;
-    uint16_t *slotByStartPage;
+    uint32_t *slotByStartPage; // slot + 1; zero means no mapping starts here
     amdtx::u64 *liveSlots;
     volatile amdtx::u64 **leaves;
     amdtx::RuntimeAllocator allocator;
@@ -45,8 +45,8 @@ inline void bindArena(MappingArena &target, void *zeroedStorage,
     cursor += static_cast<size_t>(capacity.records) * sizeof(MappingArena::Mapping);
     target.physicalByPage = reinterpret_cast<amdtx::u64 *>(cursor);
     cursor += static_cast<size_t>(capacity.pages) * sizeof(amdtx::u64);
-    target.slotByStartPage = reinterpret_cast<uint16_t *>(cursor);
-    cursor += static_cast<size_t>(capacity.pages) * sizeof(uint16_t);
+    target.slotByStartPage = reinterpret_cast<uint32_t *>(cursor);
+    cursor += static_cast<size_t>(capacity.pages) * sizeof(uint32_t);
     target.liveSlots = reinterpret_cast<amdtx::u64 *>(cursor);
     cursor += recordWords * sizeof(amdtx::u64);
     target.leaves = reinterpret_cast<volatile amdtx::u64 **>(cursor);

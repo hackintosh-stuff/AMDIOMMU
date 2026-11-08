@@ -9,6 +9,7 @@
 //      are refused instead of silently widening the arena.
 //   3. The arena arithmetic matches the shared metadata layout.
 //   4. Growing only the exhausted resource preserves live mappings and accounting.
+//   5. Record owners above 65535 remain addressable across migration and release.
 // Page tables are prebuilt here to isolate metadata migration; incremental
 // page-table allocation is exercised by the separate table-growth test.
 // This host test does not execute the kext's MapMemory or hardware commands.
@@ -117,11 +118,19 @@ void profileTable() {
           "native-legacy lookup failed");
     check(mapper_abi::profileForName("rl-10g-max") == &mapper_abi::kProfileRl10gMax,
           "rl-10g-max lookup failed");
-    check(mapper_abi::kProfileRl10gMax.records == 65535,
-          "measurement ceiling must use the largest UInt16 slot count");
+    check(mapper_abi::kProfileRl10gMax.records == 65535 &&
+              mapper_abi::kProfileRl10gMax.pages == 262144,
+          "the existing rl-10g-max ceiling changed");
+    check(mapper_abi::profileForName("dma32-max") == &mapper_abi::kProfileDma32Max &&
+              mapper_abi::kProfileDma32Max.records == 131072 &&
+              mapper_abi::kProfileDma32Max.pages == 524288,
+          "dma32-max must expose the wider record and IOVA capacity");
+    check(mapper_abi::kBase + mapper_abi::kProfileDma32Max.pages * 4096ULL ==
+              (1ULL << 32),
+          "the dma32 window must end at the 32-bit address boundary");
     const mapper_abi::Profile *profiles[] = {
         &mapper_abi::kProfileLegacy, &mapper_abi::kProfileRl10g,
-        &mapper_abi::kProfileRl10gMax};
+        &mapper_abi::kProfileRl10gMax, &mapper_abi::kProfileDma32Max};
     for (const auto *profile : profiles) {
         const auto capacity = mapper_abi::capacityForProfile(*profile);
         check(capacity.records == profile->records && capacity.pages == profile->pages &&
@@ -133,26 +142,30 @@ void profileTable() {
 
 void arenaArithmetic() {
     // Hand-computed from the carve order in amd_iommu_mapper_arena.hpp:
-    // 1024*120 + 4096*8 + 4096*2 + 128 + 8*8 + 2*64*8 = 165056 -> 167936.
-    check(mapper_abi::arenaBytesFor(mapper_abi::kProfileLegacy) == 167936ULL,
-          "legacy arena size does not match the ABI3 footprint");
-    // 16384*120 + 131072*8 + 131072*2 + 256*8 + 256*8 + 2*2048*8 = 3313664,
+    // 1024*120 + 4096*8 + 4096*4 + 128 + 8*8 + 2*64*8 = 173248 -> 176128.
+    check(mapper_abi::arenaBytesFor(mapper_abi::kProfileLegacy) == 176128ULL,
+          "legacy arena size does not include the 32-bit owner index");
+    // 16384*120 + 131072*8 + 131072*4 + 256*8 + 256*8 + 2*2048*8 = 3575808,
     // already a whole number of pages.
-    check(mapper_abi::arenaBytesFor(mapper_abi::kProfileRl10g) == 3313664ULL,
+    check(mapper_abi::arenaBytesFor(mapper_abi::kProfileRl10g) == 3575808ULL,
           "rl-10g arena size does not match the documented footprint");
     check(mapper_abi::arenaBytesFor(mapper_abi::kProfileRl10g) <
               mapper_abi::kMaxArenaBytes,
           "rl-10g arena exceeds the wired-memory guard");
-    // Ceiling profile: 65535*120 + 262144*8 + 262144*2 + 1024*8 + 512*8 +
-    // 2*4096*8 = 10563464 -> 10563584.
-    check(mapper_abi::arenaBytesFor(mapper_abi::kProfileRl10gMax) == 10563584ULL,
+    // 65535*120 + 262144*8 + 262144*4 + 1024*8 + 512*8 +
+    // 2*4096*8 = 11087752 -> 11087872.
+    check(mapper_abi::arenaBytesFor(mapper_abi::kProfileRl10gMax) == 11087872ULL,
           "rl-10g-max arena size does not match the documented footprint");
     check(mapper_abi::arenaBytesFor(mapper_abi::kProfileRl10gMax) <
               mapper_abi::kMaxArenaBytes,
           "rl-10g-max arena exceeds the wired-memory guard");
-    check(mapper_abi::arenaBytesFor(mapper_abi::Capacity{2048, 4096}) == 290816ULL,
+    check(mapper_abi::arenaBytesFor(mapper_abi::kProfileDma32Max) == 22175744ULL &&
+              mapper_abi::arenaBytesFor(mapper_abi::kProfileDma32Max) <
+              mapper_abi::kMaxArenaBytes,
+          "dma32-max arena footprint is wrong or exceeds the wired-memory guard");
+    check(mapper_abi::arenaBytesFor(mapper_abi::Capacity{2048, 4096}) == 299008ULL,
           "record-only growth allocated more than its actual metadata capacity");
-    check(mapper_abi::arenaBytesFor(mapper_abi::Capacity{1024, 16384}) == 294912ULL,
+    check(mapper_abi::arenaBytesFor(mapper_abi::Capacity{1024, 16384}) == 327680ULL,
           "page-only growth allocated more than its actual metadata capacity");
     check(mapper_abi::kMappingBytes == 120, "record slot size changed");
 }
@@ -237,11 +250,11 @@ void capacitySemantics() {
 
 void growthPolicy() {
     const auto legacy = mapper_abi::capacityForProfile(mapper_abi::kProfileLegacy);
-    const auto &ceiling = mapper_abi::kProfileRl10gMax;
+    const auto &ceiling = mapper_abi::kProfileDma32Max;
     auto current = legacy;
     mapper_abi::Capacity target{};
     using mapper_abi::CapacityResource;
-    const unsigned recordCapacities[] = {2048, 4096, 8192, 16384, 32768, 65535};
+    const unsigned recordCapacities[] = {2048, 4096, 8192, 16384, 32768, 65536, 131072};
     for (unsigned records : recordCapacities) {
         const bool grew = mapper_abi::nextCapacity(
             current, ceiling, CapacityResource::recordSlots, target);
@@ -257,7 +270,7 @@ void growthPolicy() {
           "record capacity grew beyond its ceiling");
 
     // Reaching the record ceiling must not prevent independent page growth.
-    const unsigned pageCapacities[] = {8192, 16384, 32768, 65536, 131072, 262144};
+    const unsigned pageCapacities[] = {8192, 16384, 32768, 65536, 131072, 262144, 524288};
     for (unsigned pages : pageCapacities) {
         const bool grew = mapper_abi::nextCapacity(
             current, ceiling, CapacityResource::iovaPages, target);
@@ -274,6 +287,19 @@ void growthPolicy() {
               !mapper_abi::nextCapacity(legacy, mapper_abi::kProfileLegacy,
               CapacityResource::iovaPages, target),
           "a forced legacy ceiling must disable both growth resources");
+    const auto &previousCeiling = mapper_abi::kProfileRl10gMax;
+    check(mapper_abi::nextCapacity({32768, 131072}, previousCeiling,
+              CapacityResource::recordSlots, target) &&
+              target.records == 65535 && target.pages == 131072,
+          "an explicit rl-10g-max ceiling must still clip record growth to 65535");
+    current = target;
+    check(!mapper_abi::nextCapacity(current, previousCeiling,
+              CapacityResource::recordSlots, target),
+          "an explicit record ceiling was exceeded");
+    check(mapper_abi::nextCapacity(current, previousCeiling,
+              CapacityResource::iovaPages, target) &&
+              target.records == 65535 && target.pages == 262144,
+          "the existing page ceiling must remain independent of its record ceiling");
     // The grown window must keep the measured peak (52,227 pages) covered
     // with headroom, and the grown arena must stay inside the wired-memory guard.
     check(ceiling.pages >= 4 * 52227,
@@ -337,7 +363,7 @@ void liveCapacityGrowth() {
             arena.leaves[page / 512][page % 512] = amdpte::makeDefaultLeaf(
                 1, arena.physicalByPage[page], amdpte::PTE_IR | amdpte::PTE_IW);
         }
-        arena.slotByStartPage[base] = static_cast<uint16_t>(slot + 1);
+        arena.slotByStartPage[base] = static_cast<uint32_t>(slot + 1);
         arena.liveSlots[slot / 64] |= 1ULL << (slot % 64);
         ++liveCount;
         return AllocationResult::mapped;
@@ -499,6 +525,115 @@ void liveCapacityGrowth() {
           "metadata growth left live allocations after the final release");
 }
 
+// A few live records at high slot numbers exercise the widened owner index
+// without filling tens of thousands of mappings just to reach those slots.
+void wideRecordOwners() {
+    const mapper_abi::Capacity initial{65536, 65536};
+    std::vector<amdtx::u64> storage(
+        mapper_abi::arenaBytesFor(initial) / sizeof(amdtx::u64));
+    amdmapper::MappingArena arena{};
+    amdmapper::bindArena(arena, storage.data(), initial);
+    amdtx::u64 leafWords[512] = {};
+    arena.leaves[0] = leafWords;
+    std::vector<std::pair<unsigned, unsigned>> live;
+
+    const auto mapAtSlot = [&](unsigned slot) {
+        unsigned base = 0;
+        const bool allocated = slot < arena.records &&
+            amdtx::allocate(arena.allocator, 1, base);
+        check(allocated, "wide-slot mapping could not allocate an IOVA page");
+        if (!allocated) return false;
+        auto &mapping = arena.mappings[slot];
+        mapping.memory = reinterpret_cast<IOMemoryDescriptor *>(
+            static_cast<std::uintptr_t>(0x100000 + slot * 16));
+        mapping.command = reinterpret_cast<IODMACommand *>(
+            static_cast<std::uintptr_t>(0x200000 + slot * 16));
+        auto &record = mapping.record;
+        record.handle = slot + 1;
+        record.recordIndex = slot;
+        record.basePage = base;
+        record.pages = record.runs = 1;
+        record.mapAddress = mapper_abi::kBase + base * 4096ULL;
+        record.firstPA = 0x500000000ULL + base * 4096ULL;
+        record.mapLength = record.length = 4096;
+        record.options = 3;
+        record.state = mapper_abi::kMapPublished | mapper_abi::kMapConfirmed;
+        arena.physicalByPage[base] = record.firstPA;
+        arena.slotByStartPage[base] = static_cast<uint32_t>(slot + 1);
+        arena.liveSlots[slot / 64] |= 1ULL << (slot % 64);
+        arena.leaves[base / 512][base % 512] = amdpte::makeDefaultLeaf(
+            1, record.firstPA, amdpte::PTE_IR | amdpte::PTE_IW);
+        live.emplace_back(slot, base);
+        return true;
+    };
+    const auto verifyOwners = [&]() {
+        for (const auto &entry : live) {
+            const uint32_t owner = arena.slotByStartPage[entry.second];
+            const bool found = owner == entry.first + 1 && owner <= arena.records;
+            check(found, "wide record owner was truncated or lost during migration");
+            if (!found) return false;
+            const auto &record = arena.mappings[owner - 1].record;
+            const auto translated = amdpte::decodePte(
+                arena.leaves[entry.second / 512][entry.second % 512], 1);
+            const bool matches = record.recordIndex == entry.first &&
+                record.basePage == entry.second &&
+                (arena.liveSlots[entry.first / 64] & (1ULL << (entry.first % 64))) &&
+                translated.kind == amdpte::PTE_LEAF_DEFAULT &&
+                translated.outPA == record.firstPA &&
+                arena.physicalByPage[entry.second] == record.firstPA;
+            check(matches, "owner lookup no longer identifies the retained mapping");
+            if (!matches) return false;
+        }
+        return true;
+    };
+    if (!mapAtSlot(65534) || !mapAtSlot(65535) || !verifyOwners()) return;
+
+    mapper_abi::Capacity target{};
+    const bool planned = mapper_abi::nextCapacity(initial, mapper_abi::kProfileDma32Max,
+        mapper_abi::CapacityResource::recordSlots, target);
+    check(planned && target.records == 131072 && target.pages == initial.pages,
+          "wide record growth did not preserve the independent page capacity");
+    if (!planned) return;
+    {
+        std::vector<amdtx::u64> expandedStorage(
+            mapper_abi::arenaBytesFor(target) / sizeof(amdtx::u64));
+        amdmapper::MappingArena expanded{};
+        amdmapper::bindArena(expanded, expandedStorage.data(), target);
+        amdmapper::copyArena(expanded, arena);
+        arena = expanded;
+        storage.swap(expandedStorage);
+        // expandedStorage releases the old arena before the following lookup.
+    }
+    if (!verifyOwners() || !mapAtSlot(65536) || !mapAtSlot(131071) ||
+            !verifyOwners()) return;
+
+    // Resolve each mapping by the same slot+1 owner index used by unmap.
+    for (const auto &entry : live) {
+        const uint32_t owner = arena.slotByStartPage[entry.second];
+        auto &mapping = arena.mappings[owner - 1];
+        const auto &record = mapping.record;
+        const bool released = amdtx::release(arena.allocator, record.basePage, record.pages);
+        check(released, "a wide-slot mapping could not release its retained IOVA");
+        if (!released) return;
+        arena.leaves[record.basePage / 512][record.basePage % 512] = 0;
+        arena.slotByStartPage[record.basePage] = 0;
+        arena.liveSlots[(owner - 1) / 64] &= ~(1ULL << ((owner - 1) % 64));
+        mapping.memory = nullptr;
+        mapping.command = nullptr;
+    }
+    check(arena.allocator.livePages == 0 &&
+              amdtx::findNextBitmapPage(arena.allocator.used, 0, arena.pages, true) ==
+                  arena.pages &&
+              amdtx::findNextBitmapPage(arena.liveSlots, 0, arena.records, true) ==
+                  arena.records,
+          "wide-slot mappings did not fully retire after metadata migration");
+    for (const auto &entry : live) {
+        check(arena.slotByStartPage[entry.second] == 0 &&
+                  arena.leaves[entry.second / 512][entry.second % 512] == 0,
+              "a retired wide-slot mapping left an owner or PTE behind");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -509,6 +644,7 @@ int main() {
     growthPolicy();
     capacitySemantics();
     liveCapacityGrowth();
+    wideRecordOwners();
     if (failures) {
         std::printf("CAPACITY_FAILURES=%d\n", failures);
         return 1;

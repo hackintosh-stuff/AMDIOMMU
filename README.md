@@ -36,7 +36,8 @@ Two build variants exist and accept different boot-args:
 | | `auto-attach` | Publishes `iommu-parent` at first publish for selected requesters, so Apple's own Ethernet kexts (which only call `IOMapper::copyMapperForDevice()`) get the mapper. The offer is published as well, so a client that does run the claim handshake gets a definite answer instead of `kIOReturnNotReady`. |
 | | absent / any other value (incl. `off`) | Inert: no notifier, no device arm, no MMIO. `off` is not a recognised value — it simply matches no mode. |
 | `amdiommu_devices=<ids>` | decimals prefixed with `n`, e.g. `n2200,n2201` or `n2300,n2301` | Selects PCI requesters (segment zero). **Prefix each ID with a non-hex character (`n`)**: kernel's `PE_parse_boot_argn` rewrites an all-digit value into a 32-bit integer in the caller's buffer (`3400` arrived as `0x0D48`). The parser skips non-hex bytes before reading four hex digits. Omit to fall back to the identity list in the kext's `Info.plist` (`AMDMapperProbeDevices`, see below). |
-| `amdiommu_profile=<name>` | `rl-10g-max` | Growth ceiling, and the default: 65535 records / 262144 pages (1 GiB). |
+| `amdiommu_profile=<name>` | `dma32-max` | Default growth ceiling for auto-attach: 131072 records / 524288 pages (2 GiB), with every IOVA below 4 GiB. |
+| | `rl-10g-max` | Ceiling at 65535 records / 262144 pages (1 GiB). |
 | | `rl-10g` | Ceiling at 16384 records / 131072 pages (512 MiB). |
 | | `native-legacy` | Ceiling at the accepted ABI3 window (1024 records / 16 MiB): growth is disabled. |
 | | unknown name | Widen nothing: growth is disabled and `iommu-profile-ceiling` records `unsupported-name`. |
@@ -44,8 +45,9 @@ Two build variants exist and accept different boot-args:
 
 `amdiommu_profile` selects the **growth ceiling**. Each domain initially
 allocates only `native-legacy` storage: 1024 records, a 16 MiB IOVA window and
-16 page-table pages. Metadata plus page tables occupy about **0.223 MiB per
-prepared domain**; a higher ceiling does not reserve its full storage at startup.
+16 page-table pages. Metadata occupies 176128 bytes and page tables occupy
+65536 bytes: **241664 bytes, or about 0.230 MiB per prepared domain**. A higher
+ceiling does not reserve its full storage at startup.
 
 Record slots and IOVA pages grow independently. When a mapping runs out of
 record slots, the mapper doubles only the record capacity. When it cannot
@@ -56,11 +58,12 @@ can remain live throughout growth.
 
 Growth copies the allocation records, physical-page index and allocation bitmaps
 into a larger metadata arena. Existing leaf pointers are copied. A page-capacity
-increase also allocates a new leaf block and links it through unused PDEs;
-a record-capacity increase leaves the page tables untouched. The root and all
-existing page-table pages remain at their original physical addresses, so
-existing IOVAs keep the same translations. New leaf blocks need not be physically
-adjacent to the original block.
+increase also allocates new leaf tables and, when extending beyond the first
+1 GiB directory, a second L2 table. The new tables are linked through unused
+PDEs; a record-capacity increase leaves the page tables untouched. The root and
+all existing page-table pages remain at their original physical addresses, so
+existing IOVAs keep the same translations. New table blocks need not be
+physically adjacent to the original block.
 
 When page capacity grows, an active domain completes a full domain invalidation
 including the PDE cache before the added range becomes usable. This growth fence
@@ -74,11 +77,13 @@ Allocation failure leaves existing mappings and capacity in place. If hardware
 synchronization fails, new mapping admission closes through the existing failed
 domain state. Successful growth does not count as a capacity rejection.
 
-The default ceiling remains `rl-10g-max`: 65535 records and 1 GiB of IOVA space.
-A claim-based client keeps the `native-legacy` ceiling unless explicitly
-overridden. Record capacity advances from 1024 through 2048, 4096, 8192, 16384
-and 32768 to 65535, capped earlier when configured. IOVA capacity follows its
-own sequence:
+The default auto-attach ceiling is `dma32-max`: 131072 records and 2 GiB of IOVA
+space. Its window is `[0x80000000, 0x100000000)`, so 32-bit DMA clients can use
+the whole window. A claim-based client keeps the `native-legacy` ceiling unless
+explicitly overridden. Record capacity advances from 1024 through 2048, 4096,
+8192, 16384, 32768 and 65536 to 131072. Explicit smaller profiles retain their
+limits; for example, `rl-10g-max` caps the record count at 65535. IOVA capacity
+follows its own sequence:
 
 | IOVA capacity | IOVA pages | Allocated table pages | Table bytes | Table segments |
 |---|---:|---:|---:|---:|
@@ -89,20 +94,31 @@ own sequence:
 | 256 MiB | 65536 | 136 | 557056 | 5 |
 | 512 MiB | 131072 | 264 | 1081344 | 6 |
 | 1 GiB | 262144 | 520 | 2129920 | 7 |
+| 2 GiB | 524288 | 1033 | 4231168 | 8 |
 
-The initial block retains its spare pages. Each page-capacity increase adds only
-the newly needed leaf tables, while a record-capacity increase adds no table
-segment. `rootPA` remains stable; `ptBytes` and `tablePages` grow only with IOVA
-capacity. Snapshot ABI5 and its physical segment descriptors remain unchanged.
+The 1 GiB to 2 GiB increase adds one L2 table and 512 leaf tables in a single
+513-page block. The existing L3 table links this second directory through its
+unused entry 3; entry 2 continues to serve the original 1 GiB range. The root
+and DTE stay in place. The initial block retains five spare pages, so the
+fully grown tree owns 1033 table pages with 1028 reachable pages. A
+record-capacity increase adds no table segment. `rootPA` remains stable;
+`ptBytes` and `tablePages` grow only with IOVA capacity. Snapshot ABI5 and its
+physical segment descriptors remain unchanged.
 [DEBUG.md](DEBUG.md) documents the format and a saved-snapshot inspector that
 also reads ABI4 captures.
 
+The internal start-page owner index uses 32 bits, allowing record counts above
+65535. It occupies four bytes for every page of IOVA capacity; this space is
+included in the reported metadata size. Exported record indexes and capacity
+fields are also 32-bit, so this capacity increase needs no snapshot layout
+change.
+
 For example, a domain whose record capacity remains at 1024 and whose IOVA
-capacity grows to 64 MiB uses 294912 metadata bytes and 163840 table bytes:
-**458752 bytes, or 0.4375 MiB** in total. Allocating 16384 records and a 512 MiB
-window would use about 4.191 MiB. The actual capacity follows allocation pressure
-over the domain's lifetime; a later live-page count does not determine how far
-it has already grown.
+capacity grows to 64 MiB uses 327680 metadata bytes and 163840 table bytes:
+**491520 bytes, or 0.46875 MiB** in total. The complete `dma32-max` capacity uses
+22175744 metadata bytes and 4231168 table bytes. The actual capacity follows
+allocation pressure over the domain's lifetime; a later live-page count does
+not determine how far it has already grown.
 
 The named profiles describe ceilings. `iommu-profile` and
 `iommu-profile-allocated` are display labels: they show a known profile only
@@ -110,8 +126,9 @@ when both current capacities match it exactly, and `dynamic` otherwise. Read
 `iommu-profile-records` and `iommu-profile-pages` for the actual usable limits.
 
 The identity table records what device-based sizing would have suggested.
-The configured ceiling limits growth; each successful step allocates only the
-storage needed for that step.
+These suggestions are separate from the default `dma32-max` ceiling or an
+explicit profile selection. The configured ceiling limits growth; each
+successful step allocates only the storage needed for that step.
 
 | Derived from | Matches | Suggested ceiling |
 |---|---|---|
