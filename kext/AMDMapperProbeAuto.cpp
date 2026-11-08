@@ -630,7 +630,8 @@ bool org_maz1_AMDMapperProbe::StartAuto() {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
+bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim,
+                                        bool allowOpen) {
     if (!fAuto || fOwner || !fAttachLock) return false;
     IOPCIDevice *nic = OSDynamicCast(IOPCIDevice, service);
     if (!nic) return false;
@@ -646,11 +647,13 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
     UInt32 match = 0;
     while (match < fRequesterCount && fRequesters[match] != requester) ++match;
     if (match == fRequesterCount) {
-        // No boot-arg requester match. The default selection is the
-        // IOPCIMatch-style identity list from the Info.plist personality
-        // (AMDMapperProbeDevices); a claim is only defined for a
-        // boot-arg-selected requester, and everything else stays pass-through.
-        if (claim) return false;
+        // Two sources, never mixed: amdiommu_devices is the only input when it
+        // is present, and the Info.plist identity list (AMDMapperProbeDevices)
+        // is consulted only when the boot argument is absent. In default mode
+        // fRequesterCount is 0, so every device lands here and the table alone
+        // decides; a claim (including the hook's attach verb) is accepted for a
+        // table match, because the table is the selection in that mode.
+        if (fSelectionExplicit) return false;
         if (!DefaultDeviceMatches(vendor16, device16)) return false;
     }
     // Registry identity and profile must be resolved before fAttachLock:
@@ -709,7 +712,35 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
             // lookup below turn it into a success. A device that failed to
             // prepare falls through to a second attempt, which is the only way
             // a client can retry without rebooting.
-            if (offered != nic) return false;
+            //
+            // allowOpen covers the remaining case: the hook fires before this
+            // device's first publish notification, so there is no offer record
+            // yet. Publish one now instead of refusing, so a pre-open claim
+            // that runs later still finds the record it must match.
+            if (!offered) {
+                if (!nic->setProperty(amd_iommu_policy::kOffer, this))
+                    return false;
+                nic->retain();
+                offered = nic;
+            } else if (offered != nic) {
+                return false;
+            }
+            nic->removeProperty(amd_iommu_policy::kOffer);
+        }
+    } else {
+        // Default selection (no amdiommu_devices). The device is still attached
+        // eagerly below, so this path keeps working without Lilu; the offer is
+        // published on top of that so the copyMapperForDevice hook can reach the
+        // controller through the device, and so a pre-open claim has a record to
+        // validate against. fOffers[] is indexed by the boot-argument list, which
+        // is empty here, so the property itself is the record.
+        if (!claim) {
+            if (!nic->getProperty(amd_iommu_policy::kOffer) &&
+                !nic->setProperty(amd_iommu_policy::kOffer, this))
+                return false;
+        } else {
+            OSObject *offer = nic->getProperty(amd_iommu_policy::kOffer);
+            if (offer && offer != this) return false;
             nic->removeProperty(amd_iommu_policy::kOffer);
         }
     }
@@ -730,7 +761,12 @@ bool org_maz1_AMDMapperProbe::AttachAuto(IOService *service, bool claim) {
         setProperty("attach-failure", "domain-capacity");
         return false;
     }
-    if (nic->isOpen() || (claim && nic->getProperty("iommu-parent"))) {
+    // allowOpen: the copyMapperForDevice() hook calls us from inside the
+    // client's start(), after its PCI open, so open is expected there. Being
+    // bound to a mapper is still refused - that would be a second domain for a
+    // device that already resolves DMA somewhere else.
+    if ((!allowOpen && nic->isOpen()) ||
+        (claim && nic->getProperty("iommu-parent"))) {
         setProperty("attach-failure", "already-open-or-bound");
         setProperty("attach-rejected-requester", requester, 32);
         return false;

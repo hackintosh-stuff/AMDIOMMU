@@ -7,6 +7,22 @@
 namespace amd_iommu_policy {
 static constexpr const char *kOffer = "amdiommu-requester-offer";
 static constexpr const char *kClaim = "AMDIOMMUClaimRequesterV1";
+// Attach a requester that is already open. This is the verb used by the
+// IOMapper::copyMapperForDevice() hook (AMDMapperHook.kext): that hook runs
+// after pciDevice->open(), where kClaim is refused by design.
+//
+// This verb does not carry its own selection logic and must not gain any: it is
+// reached for arbitrary PCI devices, and the probe applies the single selection
+// rule in one place. Both sources are valid and neither is optional:
+//   - amdiommu_devices present  -> that list is the only input; the Info.plist
+//     AMDMapperProbeDevices table is ignored entirely (no merging);
+//   - amdiommu_devices absent   -> the AMDMapperProbeDevices table is the
+//     selection.
+// There is deliberately no "select everything" mode. The IOMMU implementation is
+// incomplete, so a device outside both lists has no verified translation
+// behaviour and must stay on its physical DMA path; a missing or unparseable
+// table leaves the selection empty, and an empty selection attaches nothing.
+static constexpr const char *kAttach = "AMDIOMMUAttachRequesterV1";
 static constexpr const char *kProperty = "amdiommu-dma-policy";
 static constexpr const char *kSelected = "selected";
 static constexpr const char *kMapped = "mapped";

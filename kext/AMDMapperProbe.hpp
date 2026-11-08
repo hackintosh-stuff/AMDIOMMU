@@ -217,7 +217,12 @@ private:
     // R72: the suspend/resume boundary blobs, published at the transition.
     void PublishPMBoundary();
     bool StartAuto();
-    bool AttachAuto(IOService *, bool claim = false);
+    // claim: this call comes from the pre-open handshake and must match a
+    // published offer. allowOpen: the device has already called open() because
+    // the caller is the copyMapperForDevice() hook, which runs after it. Only
+    // AMDIOMMUAttachRequesterV1 passes allowOpen; every other caller keeps the
+    // pre-open semantics unchanged.
+    bool AttachAuto(IOService *, bool claim = false, bool allowOpen = false);
     bool StopAuto();
     bool Invalidate(bool invalidateDevice = false,
         UInt64 address = 0, UInt64 bytes = 0,

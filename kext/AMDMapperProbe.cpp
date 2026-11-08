@@ -194,6 +194,14 @@ IOReturn org_maz1_AMDMapperProbe::callPlatformFunction(
         return AttachAuto(static_cast<IOService *>(target), true)
             ? kIOReturnSuccess : kIOReturnNotReady;
     }
+    // Hook-driven attach: the caller is already past pciDevice->open(), which
+    // kClaim refuses by design. Everything else - explicit selection, the
+    // offer record, idempotency, rollback - is the same code path.
+    if (name && name->isEqualTo(amd_iommu_policy::kAttach)) {
+        if (!target || operation || unused3 || unused4) return kIOReturnBadArgument;
+        return AttachAuto(static_cast<IOService *>(target), true, true)
+            ? kIOReturnSuccess : kIOReturnNotReady;
+    }
     if (name && name->isEqualTo("R63SetRequesterDMA")) {
         if (!fAuto || !fNicDevice) return kIOReturnNotReady;
         const uintptr_t op = (uintptr_t)operation;
