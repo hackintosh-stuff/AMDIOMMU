@@ -32,7 +32,7 @@ Choose one of two setups. Each has its own set of kexts and `boot-args` value.
 
 | Setup | Kexts in `EFI/OC/Kexts/` | `boot-args` | Use when |
 |---|---|---|---|
-| Probe + Hook | `Lilu.kext`, `AMDMapperHook.kext`, `AMDMapperProbe.kext` | `amdiommu=passive` | A selected driver needs the mapper before it starts and cannot be modified to claim it. |
+| Probe + Hook | `Lilu.kext`, `AMDMapperHook.kext`, `AMDMapperProbe.kext` | `amdiommu=passive` | The driver needs the mapper before it starts and cannot be modified to claim it. |
 | Probe only | `AMDMapperProbe.kext` | `amdiommu=auto-attach` | The driver obtains its mapper through `IOMapper::copyMapperForDevice()`. |
 
 ### Probe + Hook (`amdiommu=passive`)
