@@ -26,7 +26,7 @@ registers agree, then prepares a translation domain for each selected requester.
 | | `auto-attach` | Publishes `iommu-parent` at first publish, so clients using `IOMapper::copyMapperForDevice()` get the mapper. The offer is also published, allowing claim-based clients to receive a definite answer rather than `kIOReturnNotReady`. |
 | | absent / any other value, including `off` | Inert: no notifier, device arm or MMIO. `off` is not a recognised mode; it matches no mode. |
 | `amdiommu_devices=<ids>` | Four hexadecimal requester-ID digits prefixed with `n`, for example `n2200,n2201` or `n2300,n2301` | Selects segment-zero requesters. If omitted, selection comes from `AMDMapperProbeDevices` in the kext's `Info.plist`. |
-| `amdiommu_profile=<name>` | See [Profile ceilings](#profile-ceilings) | Selects the independent record and IOVA-page growth limits. |
+| `amdiommu_ceiling=<name>` | See [Profile ceilings](#profile-ceilings) | Selects the independent record and IOVA-page growth limits. |
 | `amdiommu_pm=off` | `off` | Disables registration for self-driven sleep/wake notifications. DMA-path repair of a controller that lost its register image remains available. With the argument absent, notifications are registered. |
 
 ### Device selection
@@ -172,7 +172,7 @@ per-domain dictionaries produced by a controller-level publication.
 
 ### Profile ceilings
 
-`amdiommu_profile` selects the growth ceiling, not a startup reservation.
+`amdiommu_ceiling` selects the growth ceiling, not a startup reservation.
 
 | Name | Record ceiling | IOVA-page ceiling | IOVA capacity | Selection |
 |---|---:|---:|---|---|

@@ -52,7 +52,7 @@ The default list and selection format are described in
 | `amdiommu=auto-attach` | Attach the mapper automatically to selected devices. |
 | `amdiommu=passive` | Use explicit client integration or the optional hook. |
 | `amdiommu_devices=<ids>` | Override the default device selection. |
-| `amdiommu_profile=<name>` | Choose a capacity ceiling; normally omit it and use the default. |
+| `amdiommu_ceiling=<name>` | Choose a capacity ceiling; normally omit it and use the default. |
 | `amdiommu_pm=off` | Disable automatic sleep/wake notifications. |
 
 Without a recognised `amdiommu` mode, the kext stays inactive. Auto-attach uses

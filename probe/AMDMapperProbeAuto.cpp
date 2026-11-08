@@ -514,7 +514,7 @@ bool org_maz1_AMDMapperProbe::DefaultDeviceMatches(
 // doubles the exhausted resource while retaining existing mappings.
 bool org_maz1_AMDMapperProbe::SelectProfile() {
     char requested[24] = {};
-    const bool named = PE_parse_boot_argn("amdiommu_profile", requested,
+    const bool named = PE_parse_boot_argn("amdiommu_ceiling", requested,
                                           sizeof(requested) - 1) != 0;
     bool forced = false;
     const mapper_abi::Profile *ceiling = Ceiling(forced);
@@ -538,7 +538,7 @@ bool org_maz1_AMDMapperProbe::SelectProfile() {
 const mapper_abi::Profile *org_maz1_AMDMapperProbe::Ceiling(bool &forced) const {
     forced = false;
     char requested[24] = {};
-    if (!PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1))
+    if (!PE_parse_boot_argn("amdiommu_ceiling", requested, sizeof(requested) - 1))
         return &mapper_abi::kProfileDma32Max;
     forced = true;
     if (const mapper_abi::Profile *picked = mapper_abi::profileForName(requested))
@@ -562,7 +562,7 @@ static bool pciIdProperty(IORegistryEntry *entry, const char *key, UInt32 &value
 // reported the forced profile.
 const mapper_abi::Profile *org_maz1_AMDMapperProbe::ForcedProfile() const {
     char requested[24] = {};
-    if (!PE_parse_boot_argn("amdiommu_profile", requested, sizeof(requested) - 1))
+    if (!PE_parse_boot_argn("amdiommu_ceiling", requested, sizeof(requested) - 1))
         return nullptr;
     return mapper_abi::profileForName(requested);
 }
@@ -946,7 +946,7 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
     mapper_abi::ProfileSource source = sourceIn;
     if (!requested) requested = &mapper_abi::kProfileLegacy;
     char requestedName[24] = {};
-    const bool named = PE_parse_boot_argn("amdiommu_profile", requestedName,
+    const bool named = PE_parse_boot_argn("amdiommu_ceiling", requestedName,
                                           sizeof(requestedName) - 1) != 0;
     const bool unsupported =
         named && mapper_abi::profileForName(requestedName) == nullptr;
