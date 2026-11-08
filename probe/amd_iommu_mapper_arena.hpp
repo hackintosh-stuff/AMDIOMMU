@@ -28,24 +28,25 @@ struct MappingArena {
 static_assert(sizeof(MappingArena::Mapping) == mapper_abi::kMappingBytes,
               "mapping metadata must match arena size accounting");
 
-// The caller supplies zeroed, suitably aligned storage of arenaBytesFor(profile)
+// The caller supplies zeroed, suitably aligned storage of arenaBytesFor(capacity)
 // bytes. Bind each array independently because its offset changes with capacity.
 inline void bindArena(MappingArena &target, void *zeroedStorage,
-                      const mapper_abi::Profile &profile) {
-    const size_t recordWords = (profile.records + 63) / 64;
-    const size_t pageWords = (profile.pages + 63) / 64;
-    const size_t leafCount = profile.pages / 512;
+                      const mapper_abi::Capacity &capacity,
+                      uint32_t maxMapPages = mapper_abi::kMapPages) {
+    const size_t recordWords = (capacity.records + 63) / 64;
+    const size_t pageWords = (capacity.pages + 63) / 64;
+    const size_t leafCount = capacity.pages / 512;
     target.arena = zeroedStorage;
-    target.arenaBytes = static_cast<size_t>(mapper_abi::arenaBytesFor(profile));
-    target.records = profile.records;
-    target.pages = profile.pages;
+    target.arenaBytes = static_cast<size_t>(mapper_abi::arenaBytesFor(capacity));
+    target.records = capacity.records;
+    target.pages = capacity.pages;
     auto *cursor = static_cast<uint8_t *>(zeroedStorage);
     target.mappings = reinterpret_cast<MappingArena::Mapping *>(cursor);
-    cursor += static_cast<size_t>(profile.records) * sizeof(MappingArena::Mapping);
+    cursor += static_cast<size_t>(capacity.records) * sizeof(MappingArena::Mapping);
     target.physicalByPage = reinterpret_cast<amdtx::u64 *>(cursor);
-    cursor += static_cast<size_t>(profile.pages) * sizeof(amdtx::u64);
+    cursor += static_cast<size_t>(capacity.pages) * sizeof(amdtx::u64);
     target.slotByStartPage = reinterpret_cast<uint16_t *>(cursor);
-    cursor += static_cast<size_t>(profile.pages) * sizeof(uint16_t);
+    cursor += static_cast<size_t>(capacity.pages) * sizeof(uint16_t);
     target.liveSlots = reinterpret_cast<amdtx::u64 *>(cursor);
     cursor += recordWords * sizeof(amdtx::u64);
     target.leaves = reinterpret_cast<volatile amdtx::u64 **>(cursor);
@@ -54,7 +55,13 @@ inline void bindArena(MappingArena &target, void *zeroedStorage,
     cursor += pageWords * sizeof(amdtx::u64);
     auto *ever = reinterpret_cast<amdtx::u64 *>(cursor);
     target.allocator = amdtx::RuntimeAllocator{
-        used, ever, profile.pages, profile.mapPages, 0, 0, 0};
+        used, ever, capacity.pages, maxMapPages, 0, 0, 0};
+}
+
+inline void bindArena(MappingArena &target, void *zeroedStorage,
+                      const mapper_abi::Profile &profile) {
+    bindArena(target, zeroedStorage, mapper_abi::capacityForProfile(profile),
+              profile.mapPages);
 }
 
 // Both arenas are bound, and target is at least as large as source. The live

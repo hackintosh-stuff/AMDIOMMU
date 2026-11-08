@@ -234,12 +234,11 @@ private:
     bool PrepareMappings(IOBufferMemoryDescriptor *tables, UInt64 tablePA,
                          UInt32 rootLevel, const mapper_abi::Profile &profile);
     // Called with the mapper lock held after a slot or range allocation fails.
-    bool TryGrowCapacity(MapperState *d);
+    bool TryGrowCapacity(MapperState *d, mapper_abi::CapacityResource resource);
     // Synchronize newly linked PDEs and publish domain limits under the
     // controller lock. Existing roots and table pages stay in place.
-    const mapper_abi::Profile *CurrentProfile() const;
     const mapper_abi::Profile *CeilingProfile() const;
-    bool CommitCapacityGrowth(const mapper_abi::Profile &target,
+    bool CommitCapacityGrowth(const mapper_abi::Capacity &target,
                               UInt32 allocatedTablePages, bool &invalidated);
     // Page-table storage has the controller buffers' alignment and contiguity.
     bool AllocateTableArea(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa);

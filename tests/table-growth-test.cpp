@@ -29,8 +29,15 @@ struct Mapping {
 
 bool growAndTranslate() {
     const auto &initial = mapper_abi::kProfileLegacy;
-    const auto &expanded = mapper_abi::kProfileRl10g;
     const auto &ceiling = mapper_abi::kProfileRl10gMax;
+    auto capacity = mapper_abi::capacityForProfile(initial);
+    constexpr unsigned expectedPages[] = {
+        4096, 8192, 16384, 32768, 65536, 131072, 262144};
+    constexpr unsigned expectedTablePages[] = {16, 24, 40, 72, 136, 264, 520};
+    constexpr u64 tablePhysicalBases[] = {
+        0x40000000ULL, 0x70000000ULL, 0x28000000ULL,
+        0x54000000ULL, 0x90000000ULL, 0x08000000ULL};
+    constexpr unsigned growthSteps = sizeof(tablePhysicalBases) / sizeof(tablePhysicalBases[0]);
     const u64 permissions = amdpte::PTE_IR | amdpte::PTE_IW;
     TableBlock root(0x10000000ULL, initial.tablePages);
     amdsparse::Arena rootArena = {root.words.data(), root.physicalBase,
@@ -92,40 +99,40 @@ bool growAndTranslate() {
     mapPage(0);
     mapPage(initial.pages / 2);
     mapPage(initial.pages - 1);
-    if (!check(tablePages == 16, "only 16 table pages are allocated initially") ||
+    if (!check(capacity.pages == expectedPages[0] && tablePages == expectedTablePages[0],
+            "legacy capacity starts with only 16 allocated table pages") ||
             !translationsMatch()) return false;
 
-    const unsigned addedLeaves = (expanded.pages - initial.pages) / 512;
-    TableBlock expandedTables(0x40000000ULL, addedLeaves, ~0ULL);
-    leaves.resize(expanded.pages / 512);
-    if (!check(amdtable::attachLeafTables(directory, initial.pages / 512, addedLeaves,
-            expandedTables.words.data(), expandedTables.physicalBase, leaves.data()),
-            "attach leaf tables for rl-10g") ||
-            !check(tablesEmpty(expandedTables), "first growth clears every new leaf"))
-        return false;
-    blocks.push_back(&expandedTables);
-    tablePages += addedLeaves;
-    mapPage(initial.pages);
-    mapPage(expanded.pages / 2);
-    mapPage(expanded.pages - 1);
-    if (!check(tablePages == 264, "first growth owns 264 table pages") ||
-            !hierarchyUnchanged() || !translationsMatch()) return false;
-
-    const unsigned ceilingLeaves = (ceiling.pages - expanded.pages) / 512;
-    TableBlock ceilingTables(0x70000000ULL, ceilingLeaves, ~0ULL);
-    leaves.resize(ceiling.pages / 512);
-    if (!check(amdtable::attachLeafTables(directory, expanded.pages / 512, ceilingLeaves,
-            ceilingTables.words.data(), ceilingTables.physicalBase, leaves.data()),
-            "attach leaf tables for rl-10g-max") ||
-            !check(tablesEmpty(ceilingTables), "second growth clears every new leaf"))
-        return false;
-    blocks.push_back(&ceilingTables);
-    tablePages += ceilingLeaves;
-    mapPage(expanded.pages);
-    mapPage((expanded.pages + ceiling.pages) / 2);
-    mapPage(ceiling.pages - 1);
-    if (!check(tablePages == 520, "second growth owns 520 table pages") ||
-            !hierarchyUnchanged() || !translationsMatch()) return false;
+    // Keep each host buffer and its physical address stable across later growth.
+    // The final block lies below rootPA, so the walk must resolve each block.
+    std::vector<TableBlock> addedBlocks;
+    addedBlocks.reserve(growthSteps);
+    for (unsigned step = 0; step < growthSteps; ++step) {
+        mapper_abi::Capacity target{};
+        if (!check(mapper_abi::nextCapacity(capacity, ceiling,
+                mapper_abi::CapacityResource::iovaPages, target),
+                "plan the next IOVA capacity increase") ||
+                !check(target.records == initial.records &&
+                    target.pages == expectedPages[step + 1],
+                    "IOVA capacity doubles without growing record slots")) return false;
+        const unsigned addedLeaves = (target.pages - capacity.pages) / 512;
+        addedBlocks.emplace_back(tablePhysicalBases[step], addedLeaves, ~0ULL);
+        TableBlock &newTables = addedBlocks.back();
+        leaves.resize(target.pages / 512);
+        if (!check(amdtable::attachLeafTables(directory, capacity.pages / 512, addedLeaves,
+                newTables.words.data(), newTables.physicalBase, leaves.data()),
+                "attach the next non-contiguous leaf block") ||
+                !check(tablesEmpty(newTables), "growth clears every new leaf")) return false;
+        blocks.push_back(&newTables);
+        tablePages += addedLeaves;
+        mapPage(capacity.pages);
+        mapPage((capacity.pages + target.pages) / 2);
+        mapPage(target.pages - 1);
+        capacity = target;
+        if (!check(tablePages == expectedTablePages[step + 1],
+                "allocated table pages follow the incremental growth sequence") ||
+                !hierarchyUnchanged() || !translationsMatch()) return false;
+    }
 
     for (const Mapping &mapping : mappings)
         leaves[mapping.page / 512][mapping.page % 512] = 0;
@@ -144,6 +151,6 @@ bool growAndTranslate() {
 
 int main() {
     if (!growAndTranslate()) return 1;
-    std::printf("TABLE_GROWTH_OK table_pages=16,264,520\n");
+    std::printf("TABLE_GROWTH_OK table_pages=16,24,40,72,136,264,520\n");
     return 0;
 }

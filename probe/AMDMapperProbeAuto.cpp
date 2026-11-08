@@ -148,9 +148,9 @@ struct org_maz1_AMDMapperProbe::Domain {
     bool pmParkedBySuspend;
     // S2: the admission record for this domain. Shown per device so a refused
     // or legacy domain cannot be mistaken for a pool-sized one.
-    const char *profileName;
-    UInt32 profileRecords, profilePages, allocatedTablePages;
-    // The ceiling limits growth; profileName describes allocated usable capacity.
+    mapper_abi::Capacity capacity;
+    UInt32 allocatedTablePages;
+    // The profile limits growth; records and IOVA pages grow independently.
     // Growth appends leaf pages while retaining tables and tablePA as the root.
     const mapper_abi::Profile *ceilingProfile;
     const char *state;
@@ -957,8 +957,8 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
     if (!forcedCeiling && !(fOwner && fOwner->fAutoAttach))
         ceiling = &mapper_abi::kProfileLegacy;
     const mapper_abi::Profile *prepared = &mapper_abi::kProfileLegacy;
-    const bool growth =
-        mapper_abi::nextCapacityProfile(prepared, ceiling) != nullptr;
+    const bool growth = prepared->records < ceiling->records ||
+        prepared->pages < ceiling->pages;
     // Per-instance admission evidence: the device mapper is its own instance,
     // so record whether this instance saw the boot-arg override at all.
     nic->setProperty("iommu-attach-forced", ForcedProfile() ? "yes" : "no");
@@ -995,9 +995,7 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
         if (d->tables) { d->tables->release(); d->tables = nullptr; }
         return false;
     }
-    d->profileName = prepared->name;
-    d->profileRecords = prepared->records;
-    d->profilePages = prepared->pages;
+    d->capacity = mapper_abi::capacityForProfile(*prepared);
     d->allocatedTablePages = prepared->tablePages;
     d->ceilingProfile = ceiling;
     const char *admission = growth
@@ -1038,20 +1036,15 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
 }
 #pragma clang diagnostic pop
 
-// MapperState is private to the mapper translation unit. These accessors expose
-// capacity without sharing either implementation structure.
-const mapper_abi::Profile *org_maz1_AMDMapperProbe::CurrentProfile() const {
-    Domain *d = fDomain;
-    return d ? mapper_abi::profileForName(d->profileName) : nullptr;
-}
-
+// MapperState is private to the mapper translation unit. The configured
+// ceiling is shared without exposing either implementation structure.
 const mapper_abi::Profile *org_maz1_AMDMapperProbe::CeilingProfile() const {
     Domain *d = fDomain;
     return d ? d->ceilingProfile : nullptr;
 }
 
 bool org_maz1_AMDMapperProbe::CommitCapacityGrowth(
-    const mapper_abi::Profile &target, UInt32 allocatedTablePages, bool &invalidated) {
+    const mapper_abi::Capacity &target, UInt32 allocatedTablePages, bool &invalidated) {
     invalidated = false;
     Controller *c = fController;
     Domain *d = fDomain;
@@ -1059,17 +1052,16 @@ bool org_maz1_AMDMapperProbe::CommitCapacityGrowth(
     // Caller holds the mapper lock; retain the existing mapper -> controller order.
     LockGuard guard(c->lock);
     // Linked table memory remains owned even when synchronization fails.
+    // A record-only increase leaves this count and the hardware tree unchanged.
     d->allocatedTablePages = allocatedTablePages;
     if (!c->ready || c->command.failed) return false;
-    if (d->active) {
+    if (d->active && target.pages > d->capacity.pages) {
         invalidated = true;
         // New upper-level entries require a PDE-cache fence regardless of the
         // non-present leaf-cache capability. An active DTE stays untouched.
         if (!InvalidateLocked(false, 0, 0, false, nullptr)) return false;
     }
-    d->profileName = target.name;
-    d->profileRecords = target.records;
-    d->profilePages = target.pages;
+    d->capacity = target;
     return true;
 }
 
@@ -1114,7 +1106,7 @@ bool org_maz1_AMDMapperProbe::InvalidateLocked(
     Domain *d = fDomain;
     if (!c || !d || !c->ready || c->command.failed) return false;
     const bool full = !d->active || invalidateDevice || !bytes;
-    const UInt64 windowBytes = (UInt64)d->profilePages * 4096ULL;
+    const UInt64 windowBytes = (UInt64)d->capacity.pages * 4096ULL;
     if (!full && (((address | bytes) & 4095ULL) ||
         address < mapper_abi::kBase ||
         address - mapper_abi::kBase >= windowBytes ||
@@ -1955,9 +1947,9 @@ void org_maz1_AMDMapperProbe::PublishAuto() {
     number("iommu-root-pa", d->tablePA);
     number("iommu-table-pa", d->tablePA);
     number("iommu-table-bytes", (UInt64)d->allocatedTablePages * M2B2_PAGE_SIZE);
-    setProperty("iommu-domain-profile", d->profileName ? d->profileName : "unknown");
-    number("iommu-domain-profile-records", d->profileRecords);
-    number("iommu-domain-profile-pages", d->profilePages);
+    setProperty("iommu-domain-profile", mapper_abi::profileNameForCapacity(d->capacity));
+    number("iommu-domain-profile-records", d->capacity.records);
+    number("iommu-domain-profile-pages", d->capacity.pages);
     number("iommu-device-table-pa", c->devicePA);
     number("iommu-command-pa", c->commandPA);
     number("iommu-event-pa", c->eventPA);

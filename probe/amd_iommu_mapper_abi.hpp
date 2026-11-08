@@ -60,9 +60,9 @@ static_assert(sizeof(Record) == 2152, "ordinary mapper record layout");
 static_assert(sizeof(Snapshot) == 4544, "ordinary mapper snapshot layout");
 
 // ---------------------------------------------------------------------------
-// Capacity profiles. Metadata starts at the legacy size and is replaced on
-// demand. Page-table growth appends leaf allocations while retaining the root
-// and all earlier table pages. Every profile uses the same per-map bounds.
+// Profiles select a growth ceiling. Actual record and IOVA capacities grow
+// independently from the legacy size; every profile uses the same per-map
+// bounds. Page-table growth retains the root and all earlier table pages.
 // ---------------------------------------------------------------------------
 struct Profile {
     const char *name;
@@ -74,13 +74,22 @@ struct Profile {
     // growth retains earlier allocations and publishes its actual page count.
     uint32_t tablePages;
 };
+struct Capacity {
+    uint32_t records;
+    uint32_t pages;
+};
+enum class CapacityResource { recordSlots, iovaPages };
+
+inline Capacity capacityForProfile(const Profile &profile) {
+    return {profile.records, profile.pages};
+}
+
 static constexpr Profile kProfileLegacy = {
     "native-legacy", kRecords, kPages, kMapPages, kRuns, 16};
 static constexpr Profile kProfileRl10g = {
     "rl-10g", 16384, 131072, kMapPages, kRuns, 260};
-// Measurement ceiling: 1 GiB / the largest record count the UInt16 slot
-// encoding allows. The S3 boot runs on this profile so a first measurement
-// cannot repeat R69's exhaustion; the final rl-10g numbers come from it.
+// Maximum configured ceiling: 1 GiB and the largest record count the UInt16
+// slot encoding allows. Each resource allocates storage only as it is needed.
 static constexpr Profile kProfileRl10gMax = {
     "rl-10g-max", 65535, 262144, kMapPages, kRuns, 516};
 static_assert(kProfileLegacy.records == kRecords && kProfileLegacy.pages == kPages,
@@ -101,25 +110,28 @@ inline bool sameProfileName(const char *a, const char *b) {
     return *a == *b;
 }
 
-// Bytes a domain reserves for the capacity-dependent arrays: record slots,
+// Bytes a domain allocates for the capacity-dependent arrays: record slots,
 // physical-by-page index, per-start-page slot map, liveness bitmap, leaf
-// pointers and the allocator's two bitmaps. Page tables are separate
-// (Profile::tablePages). Kept here so tests/ can check the arithmetic without
-// compiling the kext.
+// pointers and the allocator's two bitmaps. Page tables are separate. Kept
+// here so tests/ can check the arithmetic without compiling the kext.
 static constexpr uint32_t kMappingBytes = 16 + sizeof(RecordHeader); // 2 pointers + header
 static_assert(kMappingBytes == 120, "one record slot is two pointers plus the ABI3 header");
 static constexpr uint64_t kMaxArenaBytes = 64ULL << 20;
 
-inline uint64_t arenaBytesFor(const Profile &p) {
-    const uint64_t words = ((uint64_t)p.records + 63) / 64;
-    const uint64_t pageWords = ((uint64_t)p.pages + 63) / 64;
-    uint64_t bytes = (uint64_t)p.records * kMappingBytes;
-    bytes += (uint64_t)p.pages * sizeof(uint64_t);   // physicalByPage
-    bytes += (uint64_t)p.pages * sizeof(uint16_t);   // slotByStartPage
-    bytes += words * sizeof(uint64_t);               // liveSlots
-    bytes += ((uint64_t)p.pages / 512) * sizeof(uint64_t *); // leaves
+inline uint64_t arenaBytesFor(const Capacity &capacity) {
+    const uint64_t recordWords = ((uint64_t)capacity.records + 63) / 64;
+    const uint64_t pageWords = ((uint64_t)capacity.pages + 63) / 64;
+    uint64_t bytes = (uint64_t)capacity.records * kMappingBytes;
+    bytes += (uint64_t)capacity.pages * sizeof(uint64_t);   // physicalByPage
+    bytes += (uint64_t)capacity.pages * sizeof(uint16_t);   // slotByStartPage
+    bytes += recordWords * sizeof(uint64_t);        // liveSlots
+    bytes += ((uint64_t)capacity.pages / 512) * sizeof(uint64_t *); // leaves
     bytes += 2 * pageWords * sizeof(uint64_t);       // allocator used/ever
     return (bytes + 4095ULL) & ~4095ULL;
+}
+
+inline uint64_t arenaBytesFor(const Profile &profile) {
+    return arenaBytesFor(capacityForProfile(profile));
 }
 // Unknown names must not silently fall back: the caller publishes the request
 // and keeps the legacy arena, so a typo can never widen the pool.
@@ -129,6 +141,17 @@ inline const Profile *profileForName(const char *name) {
     if (sameProfileName(name, kProfileRl10g.name)) return &kProfileRl10g;
     if (sameProfileName(name, kProfileRl10gMax.name)) return &kProfileRl10gMax;
     return nullptr;
+}
+
+// A display label must not round a mixed capacity up to a configured profile.
+// Numeric record/page limits remain authoritative for dynamically sized arenas.
+inline const char *profileNameForCapacity(const Capacity &capacity) {
+    const Profile *profiles[] = {&kProfileLegacy, &kProfileRl10g, &kProfileRl10gMax};
+    for (const Profile *profile : profiles) {
+        if (capacity.records == profile->records && capacity.pages == profile->pages)
+            return profile->name;
+    }
+    return "dynamic";
 }
 
 // S2 admission: the vendor/device policy. Only Apple's own Ethernet client
@@ -142,26 +165,26 @@ inline const Profile *profileForName(const char *name) {
 // instead of the 16 MiB ABI3 window.
 //
 // This table records an identity-based capacity suggestion. The configured
-// ceiling limits growth; nextCapacityProfile() determines the next allocation
+// ceiling limits growth; nextCapacity() determines the next allocation
 // size when the current record or page limit is exhausted.
 enum class ProfileSource { bootArg, idTable, classTable, legacy };
 
 // ---------------------------------------------------------------------------
-// Choose the next allocation profile up to the configured ceiling. The caller
-// allocates storage and synchronizes new PDEs before publishing these limits.
+// Double only the exhausted resource, stopping at its configured ceiling.
+// The caller migrates metadata and synchronizes any newly added page tables
+// before publishing the resulting capacity.
 // ---------------------------------------------------------------------------
-inline const Profile *nextCapacityProfile(const Profile *current,
-                                          const Profile *ceiling) {
-    if (!current || !ceiling) return nullptr;
-    if (ceiling->pages <= current->pages) return nullptr;
-    if (ceiling->records <= current->records) return nullptr;
-    if (ceiling->tablePages < ceiling->pages / 512 + 2) return nullptr;
-    if (current->pages < kProfileRl10g.pages &&
-        current->records < kProfileRl10g.records &&
-        ceiling->pages >= kProfileRl10g.pages &&
-        ceiling->records >= kProfileRl10g.records)
-        return &kProfileRl10g;
-    return ceiling;
+inline bool nextCapacity(const Capacity &current, const Profile &ceiling,
+                         CapacityResource resource, Capacity &target) {
+    target = current;
+    uint32_t &count = resource == CapacityResource::recordSlots
+        ? target.records : target.pages;
+    const uint32_t maximum = resource == CapacityResource::recordSlots
+        ? ceiling.records : ceiling.pages;
+    if (!count || count >= maximum) return false;
+    const uint64_t doubled = (uint64_t)count * 2;
+    count = doubled < maximum ? (uint32_t)doubled : maximum;
+    return true;
 }
 
 inline const Profile *profileForClass(uint32_t classCode) {
@@ -191,9 +214,9 @@ inline const Profile *profileForDevice(uint32_t vendor, uint32_t device,
         return &kProfileRl10gMax;
     }
     if (!appleClientPath) return &kProfileLegacy;
-    // R70 measured 52,227 IOVA pages on a saturated 10 GbE flow, so the
-    // 512 MiB profile would leave only 2.5x headroom. The 1 GiB profile keeps
-    // 5x on pages and 20x on records for the same 10.5 MB of wired memory.
+    // The measured peak of 52,227 IOVA pages on a saturated 10 GbE flow has
+    // about 5x headroom under this ceiling. It does not set the actual arena
+    // size: records and pages are allocated independently on demand.
     if (vendor16 == 0x10ecU && device16 >= 0x8124U && device16 <= 0x8127U) {
         if (source) *source = ProfileSource::idTable;
         return &kProfileRl10gMax;

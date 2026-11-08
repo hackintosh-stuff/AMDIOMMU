@@ -47,46 +47,67 @@ allocates only `native-legacy` storage: 1024 records, a 16 MiB IOVA window and
 16 page-table pages. Metadata plus page tables occupy about **0.223 MiB per
 prepared domain**; a higher ceiling does not reserve its full storage at startup.
 
-When a mapping runs out of record slots or an IOVA range, the mapper allocates
-the next profile and retries the same request under the mapper lock:
-`native-legacy` → `rl-10g` → `rl-10g-max`, stopping at the selected ceiling.
-The first mapping does not itself trigger growth. Existing mappings can remain
-live throughout both growth steps.
+Record slots and IOVA pages grow independently. When a mapping runs out of
+record slots, the mapper doubles only the record capacity. When it cannot
+allocate an IOVA range, it doubles only the page capacity. Each increase stops
+at that resource's configured ceiling, then retries the same request under the
+mapper lock. The first mapping does not itself trigger growth. Existing mappings
+can remain live throughout growth.
 
 Growth copies the allocation records, physical-page index and allocation bitmaps
-into a larger metadata arena. Existing leaf pointers are copied, and newly
-allocated leaf pages are linked through unused PDEs. The root and all existing
-page-table pages remain at their original physical addresses, so existing IOVAs
-keep the same translations. New leaf blocks need not be physically adjacent to
-the original block.
+into a larger metadata arena. Existing leaf pointers are copied. A page-capacity
+increase also allocates a new leaf block and links it through unused PDEs;
+a record-capacity increase leaves the page tables untouched. The root and all
+existing page-table pages remain at their original physical addresses, so
+existing IOVAs keep the same translations. New leaf blocks need not be physically
+adjacent to the original block.
 
-Because growth adds PDEs, an active domain always completes a full domain
-invalidation including the PDE cache before the new capacity becomes usable.
-This growth fence is required even when the controller has no NP cache. Ordinary
-maps keep their existing NP-cache optimization when filling an already prepared
-leaf.
+When page capacity grows, an active domain completes a full domain invalidation
+including the PDE cache before the added range becomes usable. This growth fence
+is required even when the controller has no NP cache. Growing only the record
+capacity needs no hardware invalidation. Ordinary maps keep their existing
+NP-cache optimization when filling an already prepared leaf.
 
-At the ceiling, an allocation that cannot fit returns `kIOReturnNoResources`.
+At the exhausted resource's ceiling, an allocation that cannot fit returns
+`kIOReturnNoResources`.
 Allocation failure leaves existing mappings and capacity in place. If hardware
 synchronization fails, new mapping admission closes through the existing failed
 domain state. Successful growth does not count as a capacity rejection.
 
 The default ceiling remains `rl-10g-max`: 65535 records and 1 GiB of IOVA space.
 A claim-based client keeps the `native-legacy` ceiling unless explicitly
-overridden. Storage grows with usable capacity:
+overridden. Record capacity advances from 1024 through 2048, 4096, 8192, 16384
+and 32768 to 65535, capped earlier when configured. IOVA capacity follows its
+own sequence:
 
-| Current profile | Metadata arena | Allocated table pages | Table bytes |
-|---|---:|---:|---:|
-| `native-legacy` | 167936 bytes | 16 | 65536 |
-| `rl-10g` | 3313664 bytes | 264 | 1081344 |
-| `rl-10g-max` | 10563584 bytes | 520 | 2129920 |
+| IOVA capacity | IOVA pages | Allocated table pages | Table bytes | Table segments |
+|---|---:|---:|---:|---:|
+| 16 MiB | 4096 | 16 | 65536 | 1 |
+| 32 MiB | 8192 | 24 | 98304 | 2 |
+| 64 MiB | 16384 | 40 | 163840 | 3 |
+| 128 MiB | 32768 | 72 | 294912 | 4 |
+| 256 MiB | 65536 | 136 | 557056 | 5 |
+| 512 MiB | 131072 | 264 | 1081344 | 6 |
+| 1 GiB | 262144 | 520 | 2129920 | 7 |
 
-The initial block retains its spare pages. Growth adds 248 and then 256 leaf
-pages, so the allocated totals differ from a newly built contiguous profile.
-`rootPA` remains stable; `ptBytes` and `tablePages` now grow with allocated storage.
-Snapshot ABI5 keeps the Snapshot/Record sizes and adds physical segment metadata
-for the concatenated page-table export. [DEBUG.md](DEBUG.md) documents the format
-and a saved-snapshot inspector that also reads ABI4 captures.
+The initial block retains its spare pages. Each page-capacity increase adds only
+the newly needed leaf tables, while a record-capacity increase adds no table
+segment. `rootPA` remains stable; `ptBytes` and `tablePages` grow only with IOVA
+capacity. Snapshot ABI5 and its physical segment descriptors remain unchanged.
+[DEBUG.md](DEBUG.md) documents the format and a saved-snapshot inspector that
+also reads ABI4 captures.
+
+For example, a domain whose record capacity remains at 1024 and whose IOVA
+capacity grows to 64 MiB uses 294912 metadata bytes and 163840 table bytes:
+**458752 bytes, or 0.4375 MiB** in total. Allocating 16384 records and a 512 MiB
+window would use about 4.191 MiB. The actual capacity follows allocation pressure
+over the domain's lifetime; a later live-page count does not determine how far
+it has already grown.
+
+The named profiles describe ceilings. `iommu-profile` and
+`iommu-profile-allocated` are display labels: they show a known profile only
+when both current capacities match it exactly, and `dynamic` otherwise. Read
+`iommu-profile-records` and `iommu-profile-pages` for the actual usable limits.
 
 The identity table records what device-based sizing would have suggested.
 The configured ceiling limits growth; each successful step allocates only the

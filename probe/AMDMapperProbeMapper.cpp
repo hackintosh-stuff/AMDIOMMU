@@ -28,8 +28,9 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingArena {
         IOBufferMemoryDescriptor *memory;
         mapper_abi::TableSegment segment;
     };
-    // One initial allocation plus one leaf allocation per remaining profile.
-    static constexpr UInt32 kMaxTableAllocations = 3;
+    // Initial 4096-page window plus six doublings to the 262144-page ceiling.
+    // Record-slot growth does not allocate a page-table segment.
+    static constexpr UInt32 kMaxTableAllocations = 7;
     IOLock *lock;
     volatile UInt64 *tables;
     UInt64 tablePA;
@@ -46,9 +47,12 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingArena {
     UInt32 minMapBits, maxMapBits;
     bool accepting;
     UInt32 capacityGrowthCount;
+    UInt32 recordGrowthCount, pageGrowthCount;
     UInt64 growthTime;
     const char *growthState;
     const char *growthFrom;
+    const char *growthResource;
+    UInt32 growthFromRecords, growthFromPages;
 
     volatile UInt64 &leaf(unsigned page) { return leaves[page / 512][page % 512]; }
 
@@ -133,15 +137,15 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingArena {
 // Only metadata moves during growth. The shared layout/copy helpers are also
 // exercised by the host capacity test; the kernel owns allocation and lifetime.
 static bool AllocateMapperArena(amdmapper::MappingArena &arena,
-                                const mapper_abi::Profile &profile) {
-    if (!profile.records || profile.records > 0xffffU ||
-        !profile.pages || (profile.pages % 512)) return false;
-    const UInt64 bytes = mapper_abi::arenaBytesFor(profile);
+                                const mapper_abi::Capacity &capacity) {
+    if (!capacity.records || capacity.records > 0xffffU ||
+        !capacity.pages || (capacity.pages % 512)) return false;
+    const UInt64 bytes = mapper_abi::arenaBytesFor(capacity);
     if (!bytes || bytes > mapper_abi::kMaxArenaBytes) return false;
     void *memory = IOMalloc((vm_size_t)bytes);
     if (!memory) return false;
     bzero(memory, (size_t)bytes);
-    amdmapper::bindArena(arena, memory, profile);
+    amdmapper::bindArena(arena, memory, capacity);
     return true;
 }
 
@@ -156,7 +160,7 @@ bool org_maz1_AMDMapperProbe::PrepareMappings(
     bzero(d, sizeof(*d));
     d->lock = IOLockAlloc();
     if (!d->lock) { IOFree(d, sizeof(*d)); return false; }
-    if (!AllocateMapperArena(*d, profile)) {
+    if (!AllocateMapperArena(*d, mapper_abi::capacityForProfile(profile))) {
         IOLockFree(d->lock);
         IOFree(d, sizeof(*d));
         return false;
@@ -197,6 +201,7 @@ bool org_maz1_AMDMapperProbe::PrepareMappings(
     snapshot.preparedAt = mach_absolute_time();
     d->accepting = true;
     d->growthState = "prepared";
+    d->growthResource = "none";
     OSSynchronizeIO();
     fMapper = d;
     return true;
@@ -205,53 +210,58 @@ bool org_maz1_AMDMapperProbe::PrepareMappings(
 // Allocate and copy software metadata before linking any new hardware tables.
 // The mapper lock keeps every live record and internal pointer stable until the
 // new arena is adopted. Existing table allocations remain wired throughout.
-bool org_maz1_AMDMapperProbe::TryGrowCapacity(MapperState *d) {
-    const mapper_abi::Profile *current = CurrentProfile();
-    const mapper_abi::Profile *target =
-        mapper_abi::nextCapacityProfile(current, CeilingProfile());
-    if (!target) {
+bool org_maz1_AMDMapperProbe::TryGrowCapacity(
+    MapperState *d, mapper_abi::CapacityResource resource) {
+    const mapper_abi::Capacity current{d->records, d->pages};
+    const mapper_abi::Profile *ceiling = CeilingProfile();
+    mapper_abi::Capacity target{};
+    if (!ceiling || !mapper_abi::nextCapacity(current, *ceiling, resource, target)) {
         d->growthState = "at-ceiling";
         return false;
     }
     amdmapper::MappingArena grown{};
-    if (!AllocateMapperArena(grown, *target)) {
+    if (!AllocateMapperArena(grown, target)) {
         d->growthState = "failed-arena";
         return false;
     }
     amdmapper::copyArena(grown, *d);
-    const UInt32 firstLeaf = d->pages / 512;
-    const UInt32 leafCount = target->pages / 512 - firstLeaf;
-    IOBufferMemoryDescriptor *newTables = nullptr;
-    UInt64 newTablePA = 0;
-    if (!AllocateTableArea(newTables, (UInt64)leafCount * 4096ULL, newTablePA)) {
-        IOFree(grown.arena, grown.arenaBytes);
-        d->growthState = "failed-tables";
-        return false;
+    // Record-slot pressure only moves software metadata. Page-pool pressure
+    // additionally extends the fixed-root tree with the required leaf tables.
+    if (target.pages > current.pages) {
+        const UInt32 firstLeaf = current.pages / 512;
+        const UInt32 leafCount = (target.pages - current.pages) / 512;
+        IOBufferMemoryDescriptor *newTables = nullptr;
+        UInt64 newTablePA = 0;
+        if (!AllocateTableArea(newTables, (UInt64)leafCount * 4096ULL, newTablePA)) {
+            IOFree(grown.arena, grown.arenaBytes);
+            d->growthState = "failed-tables";
+            return false;
+        }
+        amdsparse::Arena rootArena = {d->tables, d->tablePA,
+            (UInt32)(d->tableAllocations[0].segment.bytes / 4096), 1,
+            d->snapshot.rootLevel, d->tablePA, 0, 0, nullptr};
+        volatile UInt64 *directory = amdtable::leafDirectory(rootArena, mapper_abi::kBase);
+        if (!amdtable::attachLeafTables(directory, firstLeaf, leafCount,
+                (volatile UInt64 *)newTables->getBytesNoCopy(), newTablePA, grown.leaves)) {
+            // The helper performs every check before the first PDE write.
+            newTables->release();
+            IOFree(grown.arena, grown.arenaBytes);
+            d->growthState = "failed-page-tables";
+            d->accepting = false;
+            d->snapshot.flags |= mapper_abi::kFailed;
+            d->snapshot.flags &= ~mapper_abi::kAccepting;
+            return false;
+        }
+        // From this point hardware can reference the new allocation. Retain it
+        // even if completion cannot be confirmed; no new IOVA is returned on failure.
+        d->tableAllocations[d->tableAllocationCount++] = {newTables,
+            {newTablePA, d->snapshot.ptBytes, (UInt64)leafCount * 4096ULL}};
+        d->snapshot.ptBytes += (UInt64)leafCount * 4096ULL;
+        d->snapshot.tablePages += leafCount;
+        OSSynchronizeIO();
     }
-    amdsparse::Arena rootArena = {d->tables, d->tablePA,
-        (UInt32)(d->tableAllocations[0].segment.bytes / 4096), 1,
-        d->snapshot.rootLevel, d->tablePA, 0, 0, nullptr};
-    volatile UInt64 *directory = amdtable::leafDirectory(rootArena, mapper_abi::kBase);
-    if (!amdtable::attachLeafTables(directory, firstLeaf, leafCount,
-            (volatile UInt64 *)newTables->getBytesNoCopy(), newTablePA, grown.leaves)) {
-        // The helper performs every check before the first PDE write.
-        newTables->release();
-        IOFree(grown.arena, grown.arenaBytes);
-        d->growthState = "failed-page-tables";
-        d->accepting = false;
-        d->snapshot.flags |= mapper_abi::kFailed;
-        d->snapshot.flags &= ~mapper_abi::kAccepting;
-        return false;
-    }
-    // From this point hardware can reference the new allocation. Retain it
-    // even if completion cannot be confirmed; no new IOVA is returned on failure.
-    d->tableAllocations[d->tableAllocationCount++] = {newTables,
-        {newTablePA, d->snapshot.ptBytes, (UInt64)leafCount * 4096ULL}};
-    d->snapshot.ptBytes += (UInt64)leafCount * 4096ULL;
-    d->snapshot.tablePages += leafCount;
-    OSSynchronizeIO();
     bool invalidated = false;
-    const bool committed = CommitCapacityGrowth(*target, d->snapshot.tablePages, invalidated);
+    const bool committed = CommitCapacityGrowth(target, d->snapshot.tablePages, invalidated);
     if (invalidated) ++d->snapshot.invalidates;
     if (!committed) {
         IOFree(grown.arena, grown.arenaBytes);
@@ -266,15 +276,24 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(MapperState *d) {
     const size_t oldBytes = d->arenaBytes;
     static_cast<amdmapper::MappingArena &>(*d) = grown;
     IOFree(oldArena, oldBytes);
-    d->snapshot.capacityMaps = target->records;
-    d->snapshot.capacityPages = target->pages;
-    d->snapshot.iovaBytes = target->pages * 4096ULL;
+    d->snapshot.capacityMaps = target.records;
+    d->snapshot.capacityPages = target.pages;
+    d->snapshot.iovaBytes = target.pages * 4096ULL;
     ++d->capacityGrowthCount;
-    d->growthFrom = current->name;
+    if (resource == mapper_abi::CapacityResource::recordSlots) {
+        ++d->recordGrowthCount;
+        d->growthResource = "records";
+    } else {
+        ++d->pageGrowthCount;
+        d->growthResource = "iova-pages";
+    }
+    d->growthFrom = mapper_abi::profileNameForCapacity(current);
+    d->growthFromRecords = current.records;
+    d->growthFromPages = current.pages;
     d->growthState = "grown";
     d->growthTime = mach_absolute_time();
-    IOLog("AMDMapperProbe: capacity grew %s -> %s (records=%u pages=%u table-pages=%u)\n",
-          current->name, target->name, target->records, target->pages,
+    IOLog("AMDMapperProbe: capacity grew for %s (records=%u -> %u pages=%u -> %u table-pages=%u)\n",
+          d->growthResource, current.records, target.records, current.pages, target.pages,
           d->snapshot.tablePages);
     return true;
 }
@@ -550,7 +569,8 @@ IOReturn org_maz1_AMDMapperProbe::MapMemory(
         if (!physicalValid) break;
 
         unsigned slot = d->nextSlot(0, false);
-        while (slot == d->records && TryGrowCapacity(d))
+        while (slot == d->records &&
+               TryGrowCapacity(d, mapper_abi::CapacityResource::recordSlots))
             slot = d->nextSlot(0, false);
         if (slot == d->records) {
             ++fRejectedRecords;
@@ -560,7 +580,8 @@ IOReturn org_maz1_AMDMapperProbe::MapMemory(
         const unsigned alignmentPages = alignment > 4096 ? (unsigned)(alignment / 4096) : 1;
         unsigned basePage = 0;
         bool rangeAllocated = d->allocateRange(layout.pages, basePage, alignmentPages);
-        while (!rangeAllocated && TryGrowCapacity(d))
+        while (!rangeAllocated &&
+               TryGrowCapacity(d, mapper_abi::CapacityResource::iovaPages))
             rangeAllocated = d->allocateRange(layout.pages, basePage, alignmentPages);
         if (!rangeAllocated) {
             ++fRejectedNoRange;
@@ -670,11 +691,17 @@ void org_maz1_AMDMapperProbe::PublishCapacity(bool capacityChanged) {
     if (capacityChanged && fMapper) {
         auto *d = fMapper;
         IOLockLock(d->lock);
-        const mapper_abi::Profile *current = CurrentProfile();
+        const mapper_abi::Capacity current{d->records, d->pages};
+        const char *profileName = mapper_abi::profileNameForCapacity(current);
         const UInt32 growthCount = d->capacityGrowthCount;
+        const UInt32 recordGrowthCount = d->recordGrowthCount;
+        const UInt32 pageGrowthCount = d->pageGrowthCount;
         const UInt64 growthTime = d->growthTime;
         const char *growthState = d->growthState;
         const char *growthFrom = d->growthFrom;
+        const char *growthResource = d->growthResource;
+        const UInt32 growthFromRecords = d->growthFromRecords;
+        const UInt32 growthFromPages = d->growthFromPages;
         const UInt64 tableBytes = d->snapshot.ptBytes;
         const UInt32 tablePages = d->snapshot.tablePages;
         const UInt64 arenaBytes = d->arenaBytes;
@@ -682,16 +709,21 @@ void org_maz1_AMDMapperProbe::PublishCapacity(bool capacityChanged) {
         // Registry writes can block, so publish the captured decision only after
         // releasing the mapper lock. Profiles and state names have static storage.
         auto publish = [&](IORegistryEntry *entry) {
-            entry->setProperty("iommu-profile", current->name);
-            entry->setProperty("iommu-profile-allocated", current->name);
-            entry->setProperty("iommu-profile-records", current->records, 32);
-            entry->setProperty("iommu-profile-pages", current->pages, 32);
+            entry->setProperty("iommu-profile", profileName);
+            entry->setProperty("iommu-profile-allocated", profileName);
+            entry->setProperty("iommu-profile-records", current.records, 32);
+            entry->setProperty("iommu-profile-pages", current.pages, 32);
             entry->setProperty("iommu-profile-table-pages", tablePages, 32);
             entry->setProperty("iommu-table-bytes", tableBytes, 64);
             entry->setProperty("mapper-arena-bytes", arenaBytes, 64);
-            entry->setProperty("mapper-map-window-bytes", current->pages * 4096ULL, 64);
+            entry->setProperty("mapper-map-window-bytes", current.pages * 4096ULL, 64);
             entry->setProperty("iommu-capacity-grown", growthCount ? "yes" : "no");
             entry->setProperty("iommu-growth-count", growthCount, 32);
+            entry->setProperty("iommu-record-growth-count", recordGrowthCount, 32);
+            entry->setProperty("iommu-page-growth-count", pageGrowthCount, 32);
+            entry->setProperty("iommu-growth-resource", growthResource);
+            entry->setProperty("iommu-growth-from-records", growthFromRecords, 32);
+            entry->setProperty("iommu-growth-from-pages", growthFromPages, 32);
             entry->setProperty("iommu-growth-state", growthState);
             entry->setProperty("iommu-growth-time", growthTime, 64);
             if (growthFrom) entry->setProperty("iommu-profile-grown-from", growthFrom);
@@ -878,6 +910,11 @@ void org_maz1_AMDMapperProbe::PublishMappings(OSDictionary **copy) {
         // Capacity decisions are also published after each growth attempt.
         setProperty("iommu-capacity-grown", d->capacityGrowthCount ? "yes" : "no");
         setProperty("iommu-growth-count", d->capacityGrowthCount, 32);
+        setProperty("iommu-record-growth-count", d->recordGrowthCount, 32);
+        setProperty("iommu-page-growth-count", d->pageGrowthCount, 32);
+        setProperty("iommu-growth-resource", d->growthResource);
+        setProperty("iommu-growth-from-records", d->growthFromRecords, 32);
+        setProperty("iommu-growth-from-pages", d->growthFromPages, 32);
         setProperty("iommu-growth-state", d->growthState ? d->growthState : "unknown");
         setProperty("iommu-growth-time", d->growthTime, 64);
     }

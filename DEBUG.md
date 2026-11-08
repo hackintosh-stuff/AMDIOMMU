@@ -114,8 +114,10 @@ per-domain dictionaries produced by a controller-level publication.
 
 `amdiommu_profile` selects the growth ceiling (see README for the values).
 Allocated storage and usable capacity both start at `native-legacy`. A record-slot
-or IOVA allocation failure triggers allocation of the next profile and a retry.
-A first mapping that fits does not grow the domain.
+allocation failure doubles only the record capacity; an IOVA allocation failure
+doubles only the page capacity. Each resource is capped independently by the
+selected ceiling, and the mapper retries the request after growth. A first
+mapping that fits does not grow the domain.
 
 - `iommu-profile-suggested` records the device-based suggestion;
   `iommu-profile-source` says where it came from: `boot-arg`, `id-table`,
@@ -128,18 +130,22 @@ A first mapping that fits does not grow the domain.
 
 | Growth evidence key | Values / meaning |
 |---|---|
-| `iommu-profile` | Current usable capacity profile on the device mapper / PCI device |
+| `iommu-profile` | Display label on the device mapper / PCI device: a named profile when both capacities match it exactly, otherwise `dynamic` |
 | `iommu-profile-prepared` | `native-legacy`, the initial usable capacity |
-| `iommu-profile-allocated` | Profile whose metadata and leaf storage have actually been allocated |
+| `iommu-profile-allocated` | Display label for the currently allocated usable capacity; numeric records/pages are authoritative |
 | `iommu-profile-ceiling` | Selected ceiling, or `unsupported-name` for an invalid request |
 | `iommu-profile-ceiling-source` | `boot-arg` \| `default` |
 | `iommu-profile-records`, `iommu-profile-pages` | Current usable limits |
 | `iommu-profile-table-pages`, `iommu-table-bytes` | Actual allocated page-table size; grows as leaf blocks are added |
-| `mapper-arena-bytes` | Current metadata arena size; grows with the allocated profile |
+| `mapper-arena-bytes` | Current metadata arena size; grows when either capacity increases |
 | `iommu-growth-policy` | `capacity-demand` \| `disabled` |
 | `iommu-capacity-grown` | Whether at least one capacity increase succeeded |
-| `iommu-growth-count` | Number of successful increases; normally 0, 1 or 2 |
-| `iommu-profile-grown-from` | Source profile of the most recent successful increase |
+| `iommu-growth-count` | Total successful increases; the sum of record and page growth counts |
+| `iommu-record-growth-count` | Successful increases of the record-slot capacity |
+| `iommu-page-growth-count` | Successful increases of the IOVA page capacity |
+| `iommu-growth-resource` | Resource changed by the most recent successful increase: `records`, `iova-pages`, or `none` before growth |
+| `iommu-growth-from-records`, `iommu-growth-from-pages` | Numeric capacities before the most recent successful increase; zero before growth |
+| `iommu-profile-grown-from` | Display label before the most recent successful increase; use the numeric growth-from fields to distinguish `dynamic` capacities |
 | `mapper-map-window-bytes` | Current usable IOVA window in bytes |
 | `iommu-growth-state` | `prepared`, `grown`, `at-ceiling`, `failed-arena`, `failed-tables`, `failed-page-tables` or `failed-synchronization` |
 | `iommu-growth-time` | Time of the most recent successful increase, or zero |
@@ -147,16 +153,27 @@ A first mapping that fits does not grow the domain.
 Capacity decisions are published on the mapper and PCI device after releasing
 the mapper lock, so growth count, state and limits do not require a snapshot
 request. The mapper snapshot also includes count, state and time. `at-ceiling`
-means an allocation needed more capacity after the configured ceiling was
-reached; a freed range may still satisfy a later mapping.
+means the resource needed by an allocation has reached its configured ceiling;
+the other resource may still have room to grow. A freed slot or range may still
+satisfy a later mapping.
 
 `mapper-rejects-records` and `mapper-rejects-no-range` count requests that still
 failed after growth/retry, not allocation pressure that growth resolved. Raw
 snapshot `capacityMaps` / `capacityPages` describe usable limits. `rootPA` stays
 fixed, while `ptBytes` / `tablePages` describe the current total of allocated table
-blocks. Normal growth changes the page counts from 16 to 264 to 520. New PDEs
-always require a full invalidation including the PDE cache on an active domain,
-even when `iommu-np-cache` is zero.
+blocks. Record-only growth keeps these table values and the segment count
+unchanged, and requires no hardware invalidation. IOVA capacity grows from
+16 to 32, 64, 128, 256, 512 and 1024 MiB; the corresponding allocated table-page
+counts are 16, 24, 40, 72, 136, 264 and 520. Each successful page increase adds
+one segment, so the segment count is one plus `iommu-page-growth-count`, rather
+than one plus the total growth count.
+
+New PDEs always require a full invalidation including the PDE cache on an active
+domain, even when `iommu-np-cache` is zero. Read `invalidation-full-completed`
+with the page-growth count when checking this path; record growth does not add
+a full invalidation. Capacity is retained after mappings are released, so use
+the growth counters and published capacity instead of inferring the growth
+history from the current live-map or live-page count.
 
 ## Segmented page-table snapshots
 
@@ -191,8 +208,11 @@ python3 tools/dev/inspect-mapper-snapshot.py /tmp/mapper-snapshot.plist
 
 The inspector reads ABI4 and ABI5, follows every reachable table through the
 appropriate physical-address map and compares all present PTEs with the complete
-live mapping set. Its JSON report gives each mapper's sequence, capacities,
-allocated bytes, segment count and verified IOVA pages. Use this snapshot check
+live mapping set. Its JSON report gives each mapper's sequence, numeric
+capacities, allocated bytes, segment count and verified IOVA pages. It also
+reports `record_growth_count`, `page_growth_count`, `growth_resource`,
+`grown_from_records` and `grown_from_pages`; these are `null` for older captures
+that do not publish the corresponding properties. Use this snapshot check
 alongside the normal traffic check. The old claim analyzer's fixed 16 MiB
 capacity assertions remain scoped to its archived workload.
 

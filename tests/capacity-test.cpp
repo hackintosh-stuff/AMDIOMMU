@@ -1,4 +1,4 @@
-// Host regression for capacity profiles and live allocator growth.
+// Host regression for capacity profiles and independent live allocator growth.
 //
 // These properties are checked against the same
 // headers the kext compiles:
@@ -8,7 +8,7 @@
 //   2. The profile table exposes the documented capacities and unknown names
 //      are refused instead of silently widening the arena.
 //   3. The arena arithmetic matches the shared metadata layout.
-//   4. Moving metadata to a larger arena preserves live mappings and accounting.
+//   4. Growing only the exhausted resource preserves live mappings and accounting.
 // Page tables are prebuilt here to isolate metadata migration; incremental
 // page-table allocation is exercised by the separate table-growth test.
 // This host test does not execute the kext's MapMemory or hardware commands.
@@ -119,6 +119,16 @@ void profileTable() {
           "rl-10g-max lookup failed");
     check(mapper_abi::kProfileRl10gMax.records == 65535,
           "measurement ceiling must use the largest UInt16 slot count");
+    const mapper_abi::Profile *profiles[] = {
+        &mapper_abi::kProfileLegacy, &mapper_abi::kProfileRl10g,
+        &mapper_abi::kProfileRl10gMax};
+    for (const auto *profile : profiles) {
+        const auto capacity = mapper_abi::capacityForProfile(*profile);
+        check(capacity.records == profile->records && capacity.pages == profile->pages &&
+                  mapper_abi::sameProfileName(
+                      mapper_abi::profileNameForCapacity(capacity), profile->name),
+              "exact profile capacity lost its display name");
+    }
 }
 
 void arenaArithmetic() {
@@ -140,6 +150,10 @@ void arenaArithmetic() {
     check(mapper_abi::arenaBytesFor(mapper_abi::kProfileRl10gMax) <
               mapper_abi::kMaxArenaBytes,
           "rl-10g-max arena exceeds the wired-memory guard");
+    check(mapper_abi::arenaBytesFor(mapper_abi::Capacity{2048, 4096}) == 290816ULL,
+          "record-only growth allocated more than its actual metadata capacity");
+    check(mapper_abi::arenaBytesFor(mapper_abi::Capacity{1024, 16384}) == 294912ULL,
+          "page-only growth allocated more than its actual metadata capacity");
     check(mapper_abi::kMappingBytes == 120, "record slot size changed");
 }
 
@@ -222,32 +236,44 @@ void capacitySemantics() {
 }
 
 void growthPolicy() {
-    // Select the next capacity profile without exceeding the configured ceiling.
-    const auto &legacy = mapper_abi::kProfileLegacy;
-    const auto &rl10g = mapper_abi::kProfileRl10g;
+    const auto legacy = mapper_abi::capacityForProfile(mapper_abi::kProfileLegacy);
     const auto &ceiling = mapper_abi::kProfileRl10gMax;
-    check(mapper_abi::nextCapacityProfile(&legacy, &ceiling) == &rl10g,
-          "legacy capacity must open the intermediate profile first");
-    check(mapper_abi::nextCapacityProfile(&legacy, &rl10g) == &rl10g,
-          "a 512 MiB ceiling must still be reachable from the legacy arena");
-    check(mapper_abi::nextCapacityProfile(&rl10g, &ceiling) == &ceiling,
-          "a domain below its ceiling must still be able to grow");
-    check(mapper_abi::nextCapacityProfile(&ceiling, &ceiling) == nullptr,
-          "a domain already at its ceiling must not grow");
-    check(mapper_abi::nextCapacityProfile(&ceiling, &rl10g) == nullptr,
-          "growth must never shrink the arena");
-    check(mapper_abi::nextCapacityProfile(&legacy, &legacy) == nullptr,
-          "a forced legacy ceiling must disable growth entirely");
-    check(mapper_abi::nextCapacityProfile(nullptr, &ceiling) == nullptr,
-          "a missing prepared profile must not grow");
-    check(mapper_abi::nextCapacityProfile(&legacy, nullptr) == nullptr,
-          "a missing ceiling must not grow");
-    // A ceiling that cannot describe its own window must be refused: growth would
-    // otherwise install a table area smaller than the IOVA range it advertises.
-    mapper_abi::Profile shortTables = ceiling;
-    shortTables.tablePages = ceiling.pages / 512;
-    check(mapper_abi::nextCapacityProfile(&legacy, &shortTables) == nullptr,
-          "a ceiling that does not cover its own leaf tables must be refused");
+    auto current = legacy;
+    mapper_abi::Capacity target{};
+    using mapper_abi::CapacityResource;
+    const unsigned recordCapacities[] = {2048, 4096, 8192, 16384, 32768, 65535};
+    for (unsigned records : recordCapacities) {
+        const bool grew = mapper_abi::nextCapacity(
+            current, ceiling, CapacityResource::recordSlots, target);
+        check(grew && target.records == records && target.pages == legacy.pages,
+              "record growth must double only the record capacity up to its ceiling");
+        if (!grew) return;
+        check(mapper_abi::sameProfileName(
+                  mapper_abi::profileNameForCapacity(target), "dynamic"),
+              "mixed record/page capacity was rounded up to a named profile");
+        current = target;
+    }
+    check(!mapper_abi::nextCapacity(current, ceiling, CapacityResource::recordSlots, target),
+          "record capacity grew beyond its ceiling");
+
+    // Reaching the record ceiling must not prevent independent page growth.
+    const unsigned pageCapacities[] = {8192, 16384, 32768, 65536, 131072, 262144};
+    for (unsigned pages : pageCapacities) {
+        const bool grew = mapper_abi::nextCapacity(
+            current, ceiling, CapacityResource::iovaPages, target);
+        check(grew && target.pages == pages && target.records == ceiling.records,
+              "page growth must double only the page capacity up to its ceiling");
+        if (!grew) return;
+        current = target;
+    }
+    check(current.records == ceiling.records && current.pages == ceiling.pages &&
+              !mapper_abi::nextCapacity(current, ceiling, CapacityResource::iovaPages, target),
+          "independent growth failed to reach and stop at both configured limits");
+    check(!mapper_abi::nextCapacity(legacy, mapper_abi::kProfileLegacy,
+              CapacityResource::recordSlots, target) &&
+              !mapper_abi::nextCapacity(legacy, mapper_abi::kProfileLegacy,
+              CapacityResource::iovaPages, target),
+          "a forced legacy ceiling must disable both growth resources");
     // The grown window must keep the measured peak (52,227 pages) covered
     // with headroom, and the grown arena must stay inside the wired-memory guard.
     check(ceiling.pages >= 4 * 52227,
@@ -258,13 +284,13 @@ void growthPolicy() {
 
 void liveCapacityGrowth() {
     const auto &ceiling = mapper_abi::kProfileRl10gMax;
-    const mapper_abi::Profile *current = &mapper_abi::kProfileLegacy;
+    auto current = mapper_abi::capacityForProfile(mapper_abi::kProfileLegacy);
     std::vector<amdtx::u64> storage(
-        mapper_abi::arenaBytesFor(*current) / sizeof(amdtx::u64));
+        mapper_abi::arenaBytesFor(current) / sizeof(amdtx::u64));
     amdmapper::MappingArena arena{};
-    amdmapper::bindArena(arena, storage.data(), *current);
+    amdmapper::bindArena(arena, storage.data(), current);
     auto &allocator = arena.allocator;
-    check(arena.arenaBytes == mapper_abi::arenaBytesFor(*current) &&
+    check(arena.arenaBytes == mapper_abi::arenaBytesFor(current) &&
               arena.arenaBytes < mapper_abi::arenaBytesFor(ceiling),
           "metadata preparation allocated the ceiling instead of the initial profile");
 
@@ -359,18 +385,22 @@ void liveCapacityGrowth() {
         check(valid, "metadata growth changed an existing IOVA translation or expected PA");
         return valid;
     };
-    const auto growArena = [&](const mapper_abi::Profile &expected) {
-        const auto *next = mapper_abi::nextCapacityProfile(current, &ceiling);
-        check(next == &expected, "capacity exhaustion selected the wrong next profile");
-        if (next != &expected) return false;
+    const auto growArena = [&](mapper_abi::CapacityResource resource,
+                               const mapper_abi::Capacity &expected) {
+        mapper_abi::Capacity next{};
+        const bool planned = mapper_abi::nextCapacity(current, ceiling, resource, next);
+        const bool selected = planned && next.records == expected.records &&
+            next.pages == expected.pages;
+        check(selected, "capacity exhaustion grew the wrong resource or selected the wrong size");
+        if (!selected) return false;
         const amdmapper::MappingArena previous = arena;
         const auto retainedTables = tableWords;
         const auto retainedRoot = pageTables.rootPA;
         const auto retainedTablePages = pageTables.pages;
         std::vector<amdtx::u64> expandedStorage(
-            mapper_abi::arenaBytesFor(*next) / sizeof(amdtx::u64));
+            mapper_abi::arenaBytesFor(next) / sizeof(amdtx::u64));
         amdmapper::MappingArena expanded{};
-        amdmapper::bindArena(expanded, expandedStorage.data(), *next);
+        amdmapper::bindArena(expanded, expandedStorage.data(), next);
         amdmapper::copyArena(expanded, arena);
 
         const bool copied =
@@ -390,12 +420,12 @@ void liveCapacityGrowth() {
                         ((previous.pages + 63) / 64) * sizeof(amdtx::u64)) == 0;
         check(copied, "metadata growth did not preserve an existing array");
         check(expanded.arena != previous.arena &&
-                  expanded.arenaBytes == mapper_abi::arenaBytesFor(*next) &&
+                  expanded.arenaBytes == mapper_abi::arenaBytesFor(next) &&
                   expanded.allocator.used != previous.allocator.used &&
                   expanded.allocator.ever != previous.allocator.ever,
               "metadata growth did not bind newly allocated storage");
-        check(expanded.records == next->records && expanded.pages == next->pages &&
-                  expanded.allocator.poolPages == next->pages &&
+        check(expanded.records == next.records && expanded.pages == next.pages &&
+                  expanded.allocator.poolPages == next.pages &&
                   expanded.allocator.maxMapPages == previous.allocator.maxMapPages &&
                   expanded.allocator.livePages == previous.allocator.livePages &&
                   expanded.allocator.peakPages == previous.allocator.peakPages &&
@@ -424,7 +454,7 @@ void liveCapacityGrowth() {
     // Include normal reuse so the migration must retain a nonzero reuse count.
     check(allocateMapping(1) == AllocationResult::mapped, "initial mapping failed");
     if (!releaseMapping(0)) return;
-    for (unsigned i = 0; i < current->records; ++i) {
+    for (unsigned i = 0; i < current.records; ++i) {
         const auto result = allocateMapping(1);
         check(result == AllocationResult::mapped, "legacy record fill failed early");
         if (result != AllocationResult::mapped) return;
@@ -432,27 +462,31 @@ void liveCapacityGrowth() {
     check(allocator.reusedAllocations != 0, "the setup did not exercise allocator reuse");
     check(allocateMapping(1) == AllocationResult::recordsFull,
           "legacy record exhaustion was not detected");
-    if (!growArena(mapper_abi::kProfileRl10g)) return;
+    if (!growArena(mapper_abi::CapacityResource::recordSlots, {2048, 4096})) return;
     check(allocateMapping(1) == AllocationResult::mapped,
           "record-limited mapping did not succeed after metadata growth");
 
-    // Fill the page window with larger maps, leaving record slots available.
-    while (allocator.livePages < allocator.poolPages) {
-        const unsigned remaining = allocator.poolPages - allocator.livePages;
-        const unsigned pages = remaining < current->mapPages ? remaining : current->mapPages;
-        const auto result = allocateMapping(pages);
-        check(result == AllocationResult::mapped, "intermediate page fill failed early");
-        if (result != AllocationResult::mapped) return;
+    // Fill each page window with larger maps while record capacity stays 2048.
+    const unsigned pageCapacities[] = {8192, 16384};
+    for (unsigned nextPages : pageCapacities) {
+        while (allocator.livePages < allocator.poolPages) {
+            const unsigned remaining = allocator.poolPages - allocator.livePages;
+            const unsigned pages = remaining < allocator.maxMapPages
+                ? remaining : allocator.maxMapPages;
+            const auto result = allocateMapping(pages);
+            check(result == AllocationResult::mapped, "page fill failed before the current limit");
+            if (result != AllocationResult::mapped) return;
+        }
+        check(liveCount < current.records, "page fill unexpectedly exhausted record slots");
+        check(allocateMapping(1) == AllocationResult::pagesFull,
+              "page exhaustion was not detected");
+        if (!growArena(mapper_abi::CapacityResource::iovaPages, {2048, nextPages})) return;
+        check(allocateMapping(1) == AllocationResult::mapped,
+              "page-limited mapping did not succeed after metadata growth");
     }
-    check(liveCount < current->records, "page fill unexpectedly exhausted record slots");
-    check(allocateMapping(1) == AllocationResult::pagesFull,
-          "intermediate page exhaustion was not detected");
-    if (!growArena(ceiling)) return;
-    check(allocateMapping(1) == AllocationResult::mapped,
-          "page-limited mapping did not succeed after metadata growth");
     if (!verifyLiveTranslations()) return;
-    check(mapper_abi::nextCapacityProfile(current, &ceiling) == nullptr,
-          "capacity growth exceeded the configured ceiling");
+    check(current.records == 2048 && current.pages == 16384,
+          "live growth changed capacity that the workload did not exhaust");
 
     // Old storage has been freed; each live mapping must still resolve and retire.
     for (unsigned slot = 0; slot < arena.records; ++slot) {
