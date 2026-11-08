@@ -142,10 +142,11 @@ mapping that fits does not grow the domain.
 | `iommu-profile-ceiling-source` | `boot-arg` \| `default` |
 | `iommu-profile-records`, `iommu-profile-pages` | Current usable limits |
 | `iommu-profile-table-pages`, `iommu-table-bytes` | Actual allocated page-table size; includes added leaf tables and the second L2 directory |
-| `mapper-record-storage-bytes` | Allocated bytes for mapping records and their liveness bitmap; changes only with record capacity |
+| `mapper-record-storage-bytes` | Sum of allocated record-metadata chunk bytes: mapping records and their liveness bitmaps |
+| `mapper-record-storage-chunks` | Number of retained record-metadata chunks; starts at one and increases once per successful record-capacity growth, up to eight |
 | `mapper-page-storage-bytes` | Sum of allocated page-metadata chunk bytes: physical-page index, start-page owner index, leaf pointers and allocator bitmaps |
 | `mapper-page-storage-chunks` | Number of retained page-metadata chunks; starts at one and increases once per successful page-capacity growth, up to eight |
-| `mapper-arena-bytes` | Record allocation plus all page-metadata chunks, each rounded to 4 KiB; excludes page tables, fixed mapper state and its allocation descriptors |
+| `mapper-arena-bytes` | Sum of all record- and page-metadata chunks, each rounded to 4 KiB; excludes page tables, fixed mapper state and its allocation descriptors |
 | `iommu-growth-policy` | `capacity-demand` \| `disabled` |
 | `iommu-capacity-grown` | Whether at least one capacity increase succeeded |
 | `iommu-growth-count` | Total successful increases; the sum of record and page growth counts |
@@ -191,32 +192,42 @@ describes construction in one contiguous block; incremental allocation owns
 1033 pages because it retains the initial block's five spare pages. Registry
 and snapshot table sizes report the actual 1033-page allocation.
 
-Record growth copies records and their liveness bitmap into a replacement
-allocation, releasing the old record allocation after commit. Page growth
-appends metadata for only the added range; existing page indexes, owner indexes,
-leaf-pointer arrays and bitmap storage keep their addresses and contents.
-The record allocation stays in place during page growth. A single allocator
-uses global IOVA-page indexes across all chunks, preserving live, peak and reuse
-counts and allowing a mapping to cross a metadata-chunk boundary.
+Record and page growth each append metadata for only the added range. Existing
+mapping objects, record liveness bitmaps, page indexes, owner indexes,
+leaf-pointer arrays and page bitmaps keep their addresses and contents. Neither
+resource copies or replaces its existing chunks. Global record indexes and
+liveness searches span all record chunks. A single allocator uses global
+IOVA-page indexes across all page chunks, preserving live, peak and reuse counts
+and allowing a mapping to cross a page-metadata chunk boundary.
 
-The initial metadata chunk covers 4096 IOVA pages; subsequent chunks cover
+The initial record chunk covers 1024 slots; subsequent chunks cover 1024, 2048,
+4096, 8192, 16384, 32768 and 65536 slots, capped at the selected ceiling. Record
+growth allocates and clears only the added chunk, then appends it after the
+capacity decision commits. Existing page metadata, allocator state and hardware
+tables stay in place. For the explicit 65535-record ceiling, the final chunk
+covers 32767 slots.
+
+The initial page chunk covers 4096 IOVA pages; subsequent chunks cover
 4096, 8192, 16384, 32768, 65536, 131072 and 262144 pages. The new chunk is
 staged before attaching hardware tables and is appended to usable storage only
-after capacity growth commits. Retained page-metadata chunks are released
-with the mapper. The record allocation and every page chunk are independently
-rounded to 4 KiB, so check `mapper-arena-bytes` against record bytes plus the
-sum of all page chunks:
+after capacity growth commits. All retained metadata chunks are released with
+the mapper. Every record and page chunk is independently rounded to 4 KiB, so
+check `mapper-arena-bytes` against the sum of all chunks of both resources:
 
-| Records / IOVA pages | Record storage bytes | Page metadata chunks | Page storage bytes | Total metadata bytes |
-|---|---:|---:|---:|---:|
-| 1024 / 4096 | 126976 | 1 | 53248 | 180224 |
-| 1024 / 8192 | 126976 | 2 | 106496 | 233472 |
-| 1024 / 16384 | 126976 | 3 | 208896 | 335872 |
-| 131072 / 524288 | 15745024 | 8 | 6451200 | 22196224 |
+| Records / IOVA pages | Record chunks | Record storage bytes | Page chunks | Page storage bytes | Total metadata bytes |
+|---|---:|---:|---:|---:|---:|
+| 1024 / 4096 | 1 | 126976 | 1 | 53248 | 180224 |
+| 2048 / 4096 | 2 | 253952 | 1 | 53248 | 307200 |
+| 1024 / 8192 | 1 | 126976 | 2 | 106496 | 233472 |
+| 1024 / 16384 | 1 | 126976 | 3 | 208896 | 335872 |
+| 131072 / 524288 | 8 | 15765504 | 8 | 6451200 | 22216704 |
 
-`mapper-page-storage-chunks` is distinct from the page-table segment count.
-With 128 MiB of IOVA capacity there are four metadata chunks and five table
-segments; at 2 GiB there are eight metadata chunks and 66 table segments.
+Starting from legacy capacity, `mapper-record-storage-chunks` equals one plus
+the record-growth count, and `mapper-page-storage-chunks` equals one plus the
+page-growth count. These describe independent software allocations and are
+distinct from the page-table segment count. With 128 MiB of IOVA capacity there
+are four page-metadata chunks and five table segments; at 2 GiB there are eight
+page-metadata chunks and 66 table segments. Record growth adds no table segments.
 
 The internal start-page owner index is 32-bit, so the record capacity can pass
 65535 without truncating an owner. It accounts for four bytes per IOVA page in
@@ -272,8 +283,8 @@ The inspector reads ABI4 and ABI5, follows every reachable table through the
 appropriate physical-address map and compares all present PTEs with the complete
 live mapping set. Its JSON report gives each mapper's sequence, numeric
 capacities, allocated bytes, segment count and verified IOVA pages. It also
-reports `record_storage_bytes`, `page_storage_bytes`, `page_storage_chunks`,
-`record_growth_count`, `page_growth_count`, `growth_resource`,
+reports `record_storage_bytes`, `record_storage_chunks`, `page_storage_bytes`,
+`page_storage_chunks`, `record_growth_count`, `page_growth_count`, `growth_resource`,
 `grown_from_records` and `grown_from_pages`; these are `null` for older captures
 that do not publish the corresponding properties. Use this snapshot check
 alongside the normal traffic check. The old claim analyzer's fixed 16 MiB

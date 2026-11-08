@@ -49,9 +49,10 @@ allocates only `native-legacy` storage: 1024 records, a 16 MiB IOVA window and
 65536 bytes: **245760 bytes, or about 0.234 MiB per prepared domain**. A higher
 ceiling does not reserve its full storage at startup.
 
-These totals cover record storage, page-metadata chunks and the page-table
-allocations. Fixed mapper state is separate, including eight metadata-chunk
-descriptors and a 66-entry table-allocation descriptor array (2112 bytes).
+These totals cover record-metadata chunks, page-metadata chunks and the page-table
+allocations. Fixed mapper state is separate, including eight record-chunk
+descriptors, eight page-chunk descriptors and a 66-entry table-allocation
+descriptor array (2112 bytes).
 
 Record slots and IOVA pages grow independently. When a mapping runs out of
 record slots, the mapper doubles only the record capacity. When it cannot
@@ -60,10 +61,14 @@ at that resource's configured ceiling, then retries the same request under the
 mapper lock. The first mapping does not itself trigger growth. Existing mappings
 can remain live throughout growth.
 
-Metadata has separate storage for records and IOVA pages. Record growth copies
-the mapping records and their liveness bitmap into a larger record allocation,
-then releases the old one after committing the replacement. Page metadata stays
-in place throughout record growth.
+Metadata has separate chunk storage for records and IOVA pages. The initial
+record chunk covers 1024 slots; successive increases append chunks covering
+1024, 2048, 4096, 8192, 16384, 32768 and 65536 slots, clipped at the configured
+record ceiling. Each chunk owns its mapping records and liveness bitmap. Global
+slot indexes resolve through the chunk list, so existing mapping objects and
+bitmap storage keep their addresses throughout growth. Only the added chunk is
+allocated and cleared; existing record metadata is not copied. Page metadata
+stays in place throughout record growth.
 
 IOVA-page metadata grows by appending a chunk for the added range. The initial
 chunk covers 4096 IOVA pages; successive increases add chunks covering 4096,
@@ -75,11 +80,12 @@ including ranges that cross a chunk boundary, and retains its live, peak and
 reuse counts. Page growth allocates only the added chunk and copies no existing
 page metadata; record storage also stays in place.
 
-The record allocation and every page-metadata chunk are rounded independently
-to 4 KiB. `mapper-record-storage-bytes` reports the record allocation size;
-`mapper-page-storage-bytes` sums the page chunks, and `mapper-arena-bytes`
-reports the combined metadata total. `mapper-page-storage-chunks` reports the
-number of metadata chunks, from one initially to eight at the full window.
+Every record and page-metadata chunk is rounded independently to 4 KiB.
+`mapper-record-storage-bytes` and `mapper-page-storage-bytes` sum their respective
+chunks, and `mapper-arena-bytes` reports the combined metadata total.
+`mapper-record-storage-chunks` and `mapper-page-storage-chunks` each start at one
+and increase only when that resource grows, up to eight each. All retained
+metadata chunks are released with the mapper.
 
 A page-capacity increase also allocates new leaf tables and, when extending
 beyond the first 1 GiB directory, a second L2 table. Each new page-table block
@@ -147,12 +153,15 @@ capacity grows to 64 MiB keeps its 126976-byte record allocation and uses
 208896 bytes across three IOVA-page metadata chunks. With 163840 table bytes,
 the total is **499712 bytes, or about 0.477 MiB**. Extending that domain from
 32 to 64 MiB allocates only the added chunk's 102400 metadata bytes. The complete
-`dma32-max` capacity uses 15745024 record-storage bytes, 6451200 page-storage
-bytes across eight chunks and 4231168 table bytes. Its metadata total is
-22196224 bytes. Metadata-chunk counts describe software storage; page-table
-segment counts describe the separate hardware-table allocations. The actual
-capacity follows allocation pressure over the domain's lifetime; a later
-live-page count does not determine how far it has already grown.
+`dma32-max` capacity uses 15765504 record-storage bytes across eight chunks,
+6451200 page-storage bytes across eight chunks and 4231168 table bytes. Its
+metadata total is 22216704 bytes. Record growth from 1024 to 2048 slots appends
+one 126976-byte chunk, bringing record storage to 253952 bytes; the initial
+chunk and its live mappings remain in place. Metadata-chunk counts describe
+software storage; page-table segment counts describe the separate hardware-table
+allocations. The actual capacity follows allocation pressure over the domain's
+lifetime; a later live-map or live-page count does not determine how far it has
+already grown.
 
 The named profiles describe ceilings. `iommu-profile` and
 `iommu-profile-allocated` are display labels: they show a known profile only

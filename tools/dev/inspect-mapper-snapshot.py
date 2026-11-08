@@ -84,6 +84,7 @@ def inspect_mapper(entry):
         'reachable_table_pages': reachable_tables,
         'metadata_bytes': entry.get('mapper-arena-bytes'),
         'record_storage_bytes': entry.get('mapper-record-storage-bytes'),
+        'record_storage_chunks': entry.get('mapper-record-storage-chunks'),
         'page_storage_bytes': entry.get('mapper-page-storage-bytes'),
         'page_storage_chunks': entry.get('mapper-page-storage-chunks'),
         'verified_iova_pages': len(actual),

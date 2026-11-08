@@ -98,7 +98,7 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingStorage {
         auto &row = exportScratch;
         for (unsigned i = nextSlot(0, true); i < records;
              i = nextSlot(i + 1, true)) {
-            exportRecord(mappings[i].record, row);
+            exportRecord(mappingAt(i).record, row);
             if (!data->appendBytes(&row, sizeof(row))) {
                 data->release();
                 return nullptr;
@@ -148,14 +148,15 @@ struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingStorage {
     }
 };
 
-// The kernel owns record storage and each retained page-metadata chunk. Shared
+// The kernel owns every retained record and page-metadata chunk. Shared
 // layout and access helpers are also exercised by the host capacity test.
-static bool AllocateRecordStorage(amdmapper::RecordStorage &storage, UInt32 records) {
-    const UInt64 bytes = mapper_abi::recordStorageBytesFor(records);
+static bool AllocateRecordChunk(amdmapper::RecordChunk &chunk,
+                                UInt32 firstRecord, UInt32 records) {
+    const UInt64 bytes = mapper_abi::recordChunkBytesFor(records);
     void *memory = IOMalloc((vm_size_t)bytes);
     if (!memory) return false;
     bzero(memory, (size_t)bytes);
-    amdmapper::bindRecordStorage(storage, memory, records);
+    amdmapper::bindRecordChunk(chunk, memory, firstRecord, records);
     return true;
 }
 
@@ -169,9 +170,31 @@ static bool AllocateIovaPageChunk(amdmapper::IovaPageChunk &chunk,
     return true;
 }
 
+static void ReleaseRecordChunk(amdmapper::RecordChunk &chunk) {
+    if (chunk.memory) IOFree(chunk.memory, chunk.bytes);
+    chunk = {};
+}
+
 static void ReleaseRecordStorage(amdmapper::RecordStorage &storage) {
-    if (storage.recordMemory) IOFree(storage.recordMemory, storage.recordBytes);
+    for (UInt32 i = 0; i < storage.recordChunkCount; ++i)
+        ReleaseRecordChunk(storage.recordChunks[i]);
     storage = {};
+}
+
+static bool AllocateRecordStorage(amdmapper::RecordStorage &storage, UInt32 records) {
+    amdmapper::initializeRecordStorage(storage);
+    while (storage.records < records) {
+        UInt32 addedRecords = storage.records ? storage.records : mapper_abi::kRecords;
+        if (addedRecords > records - storage.records) addedRecords = records - storage.records;
+        amdmapper::RecordChunk chunk{};
+        if (storage.recordChunkCount == amdmapper::kMaxRecordChunks ||
+            !AllocateRecordChunk(chunk, storage.records, addedRecords)) {
+            ReleaseRecordStorage(storage);
+            return false;
+        }
+        amdmapper::appendRecordChunk(storage, chunk);
+    }
+    return true;
 }
 
 static void ReleaseIovaPageChunk(amdmapper::IovaPageChunk &chunk) {
@@ -278,8 +301,8 @@ bool org_maz1_AMDMapperProbe::PrepareMappings(
     return true;
 }
 
-// Record growth replaces only record storage. Page growth appends metadata for
-// the added IOVA range; existing chunks and allocator state remain in place.
+// Each resource appends metadata for only its added record or IOVA range;
+// existing chunks, mapping addresses and allocator state remain in place.
 // The mapper lock covers preparation, hardware synchronization and publication.
 bool org_maz1_AMDMapperProbe::TryGrowCapacity(
     MapperState *d, mapper_abi::CapacityResource resource) {
@@ -295,14 +318,14 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
         return false;
     }
     const bool growRecords = resource == mapper_abi::CapacityResource::recordSlots;
-    amdmapper::RecordStorage grownRecords{};
+    amdmapper::RecordChunk addedRecordChunk{};
     amdmapper::IovaPageChunk addedPageChunk{};
     if (growRecords) {
-        if (!AllocateRecordStorage(grownRecords, target.records)) {
+        if (d->recordChunkCount == amdmapper::kMaxRecordChunks ||
+            !AllocateRecordChunk(addedRecordChunk, current.records, target.records - current.records)) {
             d->growthState = "failed-record-storage";
             return false;
         }
-        amdmapper::copyRecordStorage(grownRecords, *d);
     } else {
         if (d->pageChunkCount == amdmapper::kMaxIovaPageChunks ||
             !AllocateIovaPageChunk(addedPageChunk, current.pages, target.pages - current.pages)) {
@@ -372,7 +395,7 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
     const bool committed = CommitCapacityGrowth(target, d->snapshot.tablePages, invalidated);
     if (invalidated) ++d->snapshot.invalidates;
     if (!committed) {
-        ReleaseRecordStorage(grownRecords);
+        ReleaseRecordChunk(addedRecordChunk);
         ReleaseIovaPageChunk(addedPageChunk);
         if (invalidated) ++d->snapshot.invalidateFailures;
         d->growthState = "failed-synchronization";
@@ -382,9 +405,7 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(
         return false;
     }
     if (growRecords) {
-        amdmapper::RecordStorage previous = *d;
-        static_cast<amdmapper::RecordStorage &>(*d) = grownRecords;
-        ReleaseRecordStorage(previous);
+        amdmapper::appendRecordChunk(*d, addedRecordChunk);
     } else {
         amdmapper::appendIovaPageChunk(*d, addedPageChunk);
     }
@@ -720,7 +741,7 @@ IOReturn org_maz1_AMDMapperProbe::MapMemory(
             result = kIOReturnInternalError; break;
         }
 
-        auto &mapping = d->mappings[slot];
+        auto &mapping = d->mappingAt(slot);
         bzero(&mapping, sizeof(mapping));
         mapping.memory = memory; mapping.command = dmaCommand;
         d->setSlotLive(slot, true);
@@ -817,6 +838,7 @@ void org_maz1_AMDMapperProbe::PublishCapacity(bool capacityChanged) {
         const UInt64 tableBytes = d->snapshot.ptBytes;
         const UInt32 tablePages = d->snapshot.tablePages;
         const UInt64 recordBytes = d->recordBytes;
+        const UInt32 recordStorageChunks = d->recordChunkCount;
         const UInt64 pageBytes = d->pageBytes;
         const UInt32 pageStorageChunks = d->pageChunkCount;
         const UInt64 metadataBytes = d->metadataBytes();
@@ -831,6 +853,7 @@ void org_maz1_AMDMapperProbe::PublishCapacity(bool capacityChanged) {
             entry->setProperty("iommu-profile-table-pages", tablePages, 32);
             entry->setProperty("iommu-table-bytes", tableBytes, 64);
             entry->setProperty("mapper-record-storage-bytes", recordBytes, 64);
+            entry->setProperty("mapper-record-storage-chunks", recordStorageChunks, 32);
             entry->setProperty("mapper-page-storage-bytes", pageBytes, 64);
             entry->setProperty("mapper-page-storage-chunks", pageStorageChunks, 32);
             entry->setProperty("mapper-arena-bytes", metadataBytes, 64);
@@ -916,7 +939,7 @@ IOReturn org_maz1_AMDMapperProbe::UnmapMemory(
         const UInt32 owner = d->startPageOwner((UInt32)page);
         if (!owner || owner > d->records) break;
         const unsigned slot = owner - 1U;
-        auto &mapping = d->mappings[slot];
+        auto &mapping = d->mappingAt(slot);
         auto &record = mapping.record;
         if (!d->slotLive(slot) || record.basePage != page || record.mapAddress != mapAddress) break;
         if (mapping.memory != memory || mapping.command != dmaCommand ||

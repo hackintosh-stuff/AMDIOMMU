@@ -116,19 +116,34 @@ inline bool sameProfileName(const char *a, const char *b) {
     return *a == *b;
 }
 
-// Record slots and IOVA-page metadata have separate allocations. The record
-// store and each appended page chunk are rounded to a page. The combined guard
-// excludes hardware page tables and fixed storage descriptors.
+// Record slots and IOVA-page metadata have separate retained chunks. Each
+// chunk is rounded to a page. The combined guard excludes hardware page tables
+// and fixed storage descriptors.
 // Keep the arithmetic shared with the host capacity test.
 static constexpr uint32_t kMappingBytes = 16 + sizeof(RecordHeader); // 2 pointers + header
 static_assert(kMappingBytes == 120, "one record slot is two pointers plus the ABI3 header");
 static constexpr uint64_t kMaxMetadataBytes = 64ULL << 20;
 
-inline uint64_t recordStorageBytesFor(uint32_t records) {
+inline uint64_t recordChunkBytesFor(uint32_t records) {
     const uint64_t recordWords = ((uint64_t)records + 63) / 64;
     const uint64_t bytes = (uint64_t)records * kMappingBytes +
         recordWords * sizeof(uint64_t);              // liveSlots
     return (bytes + 4095ULL) & ~4095ULL;
+}
+
+// Preparation and growth use the same legacy-first geometric chunk sequence.
+// A named ceiling can clip the last record chunk below a full doubling.
+inline uint64_t recordStorageBytesFor(uint32_t records) {
+    uint64_t bytes = 0;
+    uint32_t covered = 0;
+    while (covered < records) {
+        const uint32_t requested = covered ? covered : kRecords;
+        const uint32_t remaining = records - covered;
+        const uint32_t chunkRecords = requested < remaining ? requested : remaining;
+        bytes += recordChunkBytesFor(chunkRecords);
+        covered += chunkRecords;
+    }
+    return bytes;
 }
 
 inline uint64_t iovaPageChunkBytesFor(uint32_t pages) {
@@ -202,7 +217,7 @@ enum class ProfileSource { bootArg, idTable, classTable, legacy };
 
 // ---------------------------------------------------------------------------
 // Double only the exhausted resource, stopping at its configured ceiling.
-// The caller migrates metadata and synchronizes any newly added page tables
+// The caller appends metadata and synchronizes any newly added page tables
 // before publishing the resulting capacity.
 // ---------------------------------------------------------------------------
 inline bool nextCapacity(const Capacity &current, const Profile &ceiling,

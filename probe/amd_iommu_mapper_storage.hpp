@@ -1,4 +1,4 @@
-// Independent record storage and retained IOVA-page metadata chunks.
+// Retained record and IOVA-page metadata chunks.
 // Allocation and lifetime stay with the caller; hardware page tables are separate.
 #pragma once
 #include <stddef.h>
@@ -9,18 +9,53 @@ class IOMemoryDescriptor;
 class IODMACommand;
 
 namespace amdmapper {
-struct RecordStorage {
+// Initial legacy chunk plus seven record-capacity doublings to the DMA32 ceiling.
+static constexpr uint32_t kMaxRecordChunks = 8;
+
+struct RecordStorage;
+struct RecordBitmap {
+    const RecordStorage *storage;
+    explicit operator bool() const { return storage != nullptr; }
+    amdtx::u64 &operator[](unsigned word) const;
+};
+
+struct RecordChunk {
     struct Mapping {
         IOMemoryDescriptor *memory;
         IODMACommand *command;
         mapper_abi::RecordHeader record;
     };
-    void *recordMemory;
-    size_t recordBytes;
+    void *memory;
+    size_t bytes;
+    uint32_t firstRecord, records;
     Mapping *mappings;
     amdtx::u64 *liveSlots;
-    uint32_t records;
 };
+
+struct RecordStorage {
+    using Mapping = RecordChunk::Mapping;
+    RecordChunk recordChunks[kMaxRecordChunks];
+    size_t recordBytes;
+    RecordBitmap liveSlots;
+    uint32_t records, recordChunkCount;
+
+    // The caller supplies a global slot inside the allocated capacity.
+    const RecordChunk &chunkAtRecord(uint32_t slot) const {
+        for (uint32_t i = recordChunkCount; i > 1; --i)
+            if (slot >= recordChunks[i - 1].firstRecord) return recordChunks[i - 1];
+        return recordChunks[0];
+    }
+    Mapping &mappingAt(uint32_t slot) const {
+        const auto &chunk = chunkAtRecord(slot);
+        return chunk.mappings[slot - chunk.firstRecord];
+    }
+};
+
+inline amdtx::u64 &RecordBitmap::operator[](unsigned word) const {
+    const auto &chunk = storage->chunkAtRecord(word * 64);
+    return chunk.liveSlots[word - chunk.firstRecord / 64];
+}
+
 // Initial legacy chunk plus seven IOVA-capacity doublings to the DMA32 ceiling.
 static constexpr uint32_t kMaxIovaPageChunks = 8;
 
@@ -86,22 +121,37 @@ struct MappingStorage : RecordStorage, IovaPageStorage {
 static_assert(sizeof(RecordStorage::Mapping) == mapper_abi::kMappingBytes,
               "mapping metadata must match record storage size accounting");
 
-// The caller supplies zeroed storage with the corresponding byte count.
-// Binding one resource leaves the other resource's pointers and counters alone.
-inline void bindRecordStorage(RecordStorage &target, void *zeroedStorage,
-                              uint32_t records) {
-    target.recordMemory = zeroedStorage;
-    target.recordBytes = static_cast<size_t>(mapper_abi::recordStorageBytesFor(records));
+// Bind the bitmap view once to the stable owning store. Append descriptors in
+// place after initialization; copying this store would retain the old owner.
+inline void initializeRecordStorage(RecordStorage &target) {
+    target = {};
+    target.liveSlots = RecordBitmap{&target};
+}
+
+// The caller supplies a zeroed chunk with the corresponding byte count.
+inline void bindRecordChunk(RecordChunk &target, void *zeroedStorage,
+                           uint32_t firstRecord, uint32_t records) {
+    target.memory = zeroedStorage;
+    target.bytes = static_cast<size_t>(mapper_abi::recordChunkBytesFor(records));
+    target.firstRecord = firstRecord;
     target.records = records;
     auto *cursor = static_cast<uint8_t *>(zeroedStorage);
-    target.mappings = reinterpret_cast<RecordStorage::Mapping *>(cursor);
-    cursor += static_cast<size_t>(records) * sizeof(RecordStorage::Mapping);
+    target.mappings = reinterpret_cast<RecordChunk::Mapping *>(cursor);
+    cursor += static_cast<size_t>(records) * sizeof(RecordChunk::Mapping);
     target.liveSlots = reinterpret_cast<amdtx::u64 *>(cursor);
+}
+
+// The caller owns a chunk starting at target.records and has checked the
+// descriptor limit. Existing record allocations and slot numbers stay in place.
+inline void appendRecordChunk(RecordStorage &target, const RecordChunk &chunk) {
+    target.recordChunks[target.recordChunkCount++] = chunk;
+    target.recordBytes += chunk.bytes;
+    target.records += chunk.records;
 }
 
 // Bind the bitmap views once to the stable owning store. After initialization,
 // append descriptors in place; copying this store would leave views bound to
-// the previous owner. Record-storage replacement does not move this object.
+// the previous owner. Both resource stores stay in place throughout growth.
 inline void initializeIovaPageStorage(IovaPageStorage &target,
                                      uint32_t maxMapPages = mapper_abi::kMapPages) {
     target = {};
@@ -137,15 +187,6 @@ inline void appendIovaPageChunk(IovaPageStorage &target, const IovaPageChunk &ch
     target.pageBytes += chunk.bytes;
     target.pages += chunk.pages;
     target.allocator.poolPages = target.pages;
-}
-
-// Both record stores are bound, and target is at least as large as source.
-// The caller holds the mapper lock until the replacement store is adopted.
-inline void copyRecordStorage(RecordStorage &target, const RecordStorage &source) {
-    for (uint32_t i = 0; i < source.records; ++i)
-        target.mappings[i] = source.mappings[i];
-    for (uint32_t i = 0; i < (source.records + 63) / 64; ++i)
-        target.liveSlots[i] = source.liveSlots[i];
 }
 
 } // namespace amdmapper

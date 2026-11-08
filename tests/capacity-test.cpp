@@ -7,11 +7,11 @@
 //      it replaces, preserving the accepted legacy allocation behaviour.
 //   2. The profile table exposes the documented capacities and unknown names
 //      are refused instead of silently widening the metadata.
-//   3. The record store and appended page chunks match shared byte accounting.
-//   4. Record growth migrates only records; page growth retains every old chunk.
-//   5. Record owners above 65535 remain addressable across migration and release.
+//   3. Retained record and page chunks match shared byte accounting.
+//   4. Either resource grows by appending capacity without moving existing chunks.
+//   5. Record owners above 65535 remain addressable across growth and release.
 //   6. One contiguous IOVA allocation and its export can cross page chunks.
-// Page tables are prebuilt here to isolate metadata migration; incremental
+// Page tables are prebuilt here to isolate metadata growth; incremental
 // page-table allocation is exercised by the separate table-growth test.
 // This host test does not execute the kext's MapMemory or hardware commands.
 #include <cstdint>
@@ -43,7 +43,45 @@ bool isZeroed(const void *memory, std::size_t bytes) {
     return true;
 }
 
+using RecordChunkWords = std::vector<std::vector<amdtx::u64>>;
 using PageChunkWords = std::vector<std::vector<amdtx::u64>>;
+
+void prepareRecordStorage(amdmapper::RecordStorage &storage,
+                          RecordChunkWords &words, unsigned records) {
+    amdmapper::initializeRecordStorage(storage);
+    words.reserve(amdmapper::kMaxRecordChunks);
+    while (storage.records < records) {
+        unsigned added = storage.records ? storage.records : mapper_abi::kRecords;
+        if (added > records - storage.records) added = records - storage.records;
+        words.emplace_back(mapper_abi::recordChunkBytesFor(added) / sizeof(amdtx::u64));
+        amdmapper::RecordChunk chunk{};
+        amdmapper::bindRecordChunk(chunk, words.back().data(), storage.records, added);
+        amdmapper::appendRecordChunk(storage, chunk);
+    }
+}
+
+bool recordChunksRetained(amdmapper::RecordStorage &storage,
+                         const std::vector<amdmapper::RecordChunk> &before,
+                         const RecordChunkWords &contents) {
+    if (storage.recordChunkCount < before.size() || contents.size() < before.size() ||
+            storage.liveSlots.storage != &storage)
+        return false;
+    for (unsigned i = 0; i < before.size(); ++i) {
+        const auto &old = before[i];
+        const auto &chunk = storage.recordChunks[i];
+        if (chunk.memory != old.memory || chunk.bytes != old.bytes ||
+                chunk.firstRecord != old.firstRecord || chunk.records != old.records ||
+                chunk.mappings != old.mappings || chunk.liveSlots != old.liveSlots ||
+                &storage.chunkAtRecord(old.firstRecord) != &storage.recordChunks[i] ||
+                &storage.mappingAt(old.firstRecord) != old.mappings ||
+                &storage.mappingAt(old.firstRecord + old.records - 1) !=
+                    old.mappings + old.records - 1 ||
+                &storage.liveSlots[old.firstRecord / 64] != old.liveSlots ||
+                std::memcmp(chunk.memory, contents[i].data(), chunk.bytes) != 0)
+            return false;
+    }
+    return true;
+}
 
 // Keep the owner object in place: its allocator views refer to its chunk list.
 // Build the same geometric sequence as the production growth path.
@@ -198,23 +236,25 @@ void storageArithmetic() {
               mapper_abi::iovaPageStorageBytesFor(4096) == 53248ULL &&
               mapper_abi::metadataBytesFor(mapper_abi::kProfileLegacy) == 180224ULL,
           "legacy metadata must round each independent store to a page");
-    check(mapper_abi::recordStorageBytesFor(16384) == 1970176ULL &&
+    check(mapper_abi::recordStorageBytesFor(16384) == 1986560ULL &&
               mapper_abi::iovaPageStorageBytesFor(131072) == 1626112ULL &&
-              mapper_abi::metadataBytesFor(mapper_abi::kProfileRl10g) == 3596288ULL,
+              mapper_abi::metadataBytesFor(mapper_abi::kProfileRl10g) == 3612672ULL,
           "rl-10g metadata size does not match the documented footprint");
     check(mapper_abi::metadataBytesFor(mapper_abi::kProfileRl10g) <
               mapper_abi::kMaxMetadataBytes,
           "rl-10g metadata exceeds the wired-memory guard");
-    check(mapper_abi::metadataBytesFor(mapper_abi::kProfileRl10gMax) == 11108352ULL,
+    check(mapper_abi::metadataBytesFor(mapper_abi::kProfileRl10gMax) == 11128832ULL,
           "rl-10g-max metadata size does not match the documented footprint");
     check(mapper_abi::metadataBytesFor(mapper_abi::kProfileRl10gMax) <
               mapper_abi::kMaxMetadataBytes,
           "rl-10g-max metadata exceeds the wired-memory guard");
-    check(mapper_abi::metadataBytesFor(mapper_abi::kProfileDma32Max) == 22196224ULL &&
+    check(mapper_abi::metadataBytesFor(mapper_abi::kProfileDma32Max) == 22216704ULL &&
               mapper_abi::metadataBytesFor(mapper_abi::kProfileDma32Max) <
               mapper_abi::kMaxMetadataBytes,
           "dma32-max metadata footprint is wrong or exceeds the wired-memory guard");
-    check(mapper_abi::metadataBytesFor(mapper_abi::Capacity{2048, 4096}) == 303104ULL,
+    check(mapper_abi::recordChunkBytesFor(1024) == 126976ULL &&
+              mapper_abi::recordStorageBytesFor(2048) == 253952ULL &&
+              mapper_abi::metadataBytesFor(mapper_abi::Capacity{2048, 4096}) == 307200ULL,
           "record-only growth allocated more than its actual metadata capacity");
     check(mapper_abi::iovaPageStorageBytesFor(8192) == 106496ULL &&
               mapper_abi::iovaPageStorageBytesFor(16384) == 208896ULL &&
@@ -365,16 +405,15 @@ void growthPolicy() {
 void liveCapacityGrowth() {
     const auto &ceiling = mapper_abi::kProfileRl10gMax;
     auto current = mapper_abi::capacityForProfile(mapper_abi::kProfileLegacy);
-    std::vector<amdtx::u64> recordWords(
-        mapper_abi::recordStorageBytesFor(current.records) / sizeof(amdtx::u64));
+    RecordChunkWords recordWords;
     PageChunkWords pageWords;
     amdmapper::MappingStorage metadata{};
-    amdmapper::bindRecordStorage(metadata, recordWords.data(), current.records);
+    prepareRecordStorage(metadata, recordWords, current.records);
     preparePageStorage(metadata, pageWords, current.pages);
     auto &allocator = metadata.allocator;
     check(metadata.metadataBytes() == mapper_abi::metadataBytesFor(current) &&
               metadata.metadataBytes() < mapper_abi::metadataBytesFor(ceiling) &&
-              metadata.pageChunkCount == 1,
+              metadata.recordChunkCount == 1 && metadata.pageChunkCount == 1,
           "metadata preparation allocated the ceiling instead of the initial profile");
 
     std::vector<amdtx::u64> tableWords(ceiling.tablePages * 512);
@@ -398,8 +437,8 @@ void liveCapacityGrowth() {
         if (slot == metadata.records) return AllocationResult::recordsFull;
         unsigned base = 0;
         if (!amdtx::allocate(allocator, pages, base)) return AllocationResult::pagesFull;
-        auto &mapping = metadata.mappings[slot];
-        // Opaque identities are copied and compared, never dereferenced by this test.
+        auto &mapping = metadata.mappingAt(slot);
+        // Opaque identities are retained and compared, never dereferenced by this test.
         mapping.memory = reinterpret_cast<IOMemoryDescriptor *>(
             static_cast<std::uintptr_t>(0x100000 + slot * 16));
         mapping.command = reinterpret_cast<IODMACommand *>(
@@ -426,7 +465,7 @@ void liveCapacityGrowth() {
         return AllocationResult::mapped;
     };
     const auto releaseMapping = [&](unsigned slot) {
-        auto &mapping = metadata.mappings[slot];
+        auto &mapping = metadata.mappingAt(slot);
         const auto &record = mapping.record;
         const unsigned owner = metadata.startPageOwner(record.basePage);
         const bool owned = owner == slot + 1 &&
@@ -454,7 +493,7 @@ void liveCapacityGrowth() {
             return table ? table[index] : 0;
         };
         for (unsigned slot = 0; slot < liveCount && valid; ++slot) {
-            const auto &record = metadata.mappings[slot].record;
+            const auto &record = metadata.mappingAt(slot).record;
             for (unsigned i = 0; i < record.pages; ++i) {
                 const auto walk = amdpte::walkPageTable(readEntry, pageTables.rootLevel,
                     pageTables.rootPA, record.mapAddress + i * 4096ULL);
@@ -476,43 +515,38 @@ void liveCapacityGrowth() {
             next.pages == expected.pages;
         check(selected, "capacity exhaustion grew the wrong resource or selected the wrong size");
         if (!selected) return false;
-        const amdmapper::RecordStorage retainedRecords = metadata;
-        const unsigned retainedChunkCount = metadata.pageChunkCount;
-        const std::vector<amdmapper::IovaPageChunk> retainedChunks(
-            metadata.chunks, metadata.chunks + retainedChunkCount);
+        const unsigned retainedRecordChunkCount = metadata.recordChunkCount;
+        const std::vector<amdmapper::RecordChunk> retainedRecords(
+            metadata.recordChunks, metadata.recordChunks + retainedRecordChunkCount);
+        const unsigned retainedPageChunkCount = metadata.pageChunkCount;
+        const std::vector<amdmapper::IovaPageChunk> retainedPages(
+            metadata.chunks, metadata.chunks + retainedPageChunkCount);
         const auto retainedPageWords = pageWords;
         const auto retainedRecordWords = recordWords;
         const auto retainedTables = tableWords;
         const auto retainedRoot = pageTables.rootPA;
         const auto retainedTablePages = pageTables.pages;
         const auto *retainedAllocator = &allocator;
+        const auto *retainedRecordBitmap = &metadata.liveSlots;
         const unsigned retainedMaxMapPages = allocator.maxMapPages;
         const unsigned retainedLivePages = allocator.livePages;
         const unsigned retainedPeakPages = allocator.peakPages;
         const unsigned retainedReusedAllocations = allocator.reusedAllocations;
         const bool recordsGrowing = resource == mapper_abi::CapacityResource::recordSlots;
         if (recordsGrowing) {
-            std::vector<amdtx::u64> expandedWords(
-                mapper_abi::recordStorageBytesFor(next.records) / sizeof(amdtx::u64));
-            amdmapper::RecordStorage expanded{};
-            amdmapper::bindRecordStorage(expanded, expandedWords.data(), next.records);
-            amdmapper::copyRecordStorage(expanded, metadata);
-            check(expanded.recordMemory != retainedRecords.recordMemory &&
-                      expanded.mappings != retainedRecords.mappings &&
-                      expanded.liveSlots != retainedRecords.liveSlots &&
-                      std::memcmp(expanded.mappings, retainedRecords.mappings,
-                          current.records * sizeof(expanded.mappings[0])) == 0 &&
-                      std::memcmp(expanded.liveSlots, retainedRecords.liveSlots,
-                          ((current.records + 63) / 64) * sizeof(amdtx::u64)) == 0,
-                  "record growth did not migrate the existing record metadata");
-            check(isZeroed(expanded.mappings + current.records,
-                      (next.records - current.records) * sizeof(expanded.mappings[0])) &&
-                      amdtx::findNextBitmapPage(expanded.liveSlots, current.records,
-                          next.records, true) == next.records,
-                  "new record capacity is not initially free and zeroed");
-            static_cast<amdmapper::RecordStorage &>(metadata) = expanded;
-            recordWords.swap(expandedWords);
-            // The replaced record store is freed at this branch's scope boundary.
+            const unsigned addedRecords = next.records - current.records;
+            recordWords.emplace_back(
+                mapper_abi::recordChunkBytesFor(addedRecords) / sizeof(amdtx::u64));
+            amdmapper::RecordChunk added{};
+            amdmapper::bindRecordChunk(added, recordWords.back().data(),
+                                       current.records, addedRecords);
+            check(isZeroed(added.memory, added.bytes) &&
+                      added.firstRecord == current.records && added.records == addedRecords &&
+                      added.bytes == mapper_abi::recordChunkBytesFor(addedRecords) &&
+                      metadata.records == current.records &&
+                      metadata.recordChunkCount == retainedRecordChunkCount,
+                  "staging a zeroed record chunk exposed capacity before append");
+            amdmapper::appendRecordChunk(metadata, added);
         } else {
             const unsigned addedPages = next.pages - current.pages;
             pageWords.emplace_back(
@@ -524,42 +558,44 @@ void liveCapacityGrowth() {
                       added.pages == addedPages &&
                       added.bytes == mapper_abi::iovaPageChunkBytesFor(addedPages) &&
                       metadata.pages == current.pages &&
-                      metadata.pageChunkCount == retainedChunkCount &&
+                      metadata.pageChunkCount == retainedPageChunkCount &&
                       allocator.poolPages == current.pages,
                   "staging a zeroed page chunk exposed capacity before append");
             for (unsigned i = 0; i < added.pages / 512; ++i)
                 added.leaves[i] = preparedLeaves[current.pages / 512 + i];
             amdmapper::appendIovaPageChunk(metadata, added);
-            check(metadata.recordMemory == retainedRecords.recordMemory &&
-                      metadata.recordBytes == retainedRecords.recordBytes &&
-                      metadata.mappings == retainedRecords.mappings &&
-                      metadata.liveSlots == retainedRecords.liveSlots &&
-                      recordWords == retainedRecordWords,
-                  "page append moved or modified the record store");
         }
-        const bool retained = pageChunksRetained(metadata, retainedChunks, retainedPageWords);
-        check(retained, "metadata growth moved or modified a retained page chunk");
+        const bool recordsRetained = recordChunksRetained(
+            metadata, retainedRecords, retainedRecordWords);
+        const bool pagesRetained = pageChunksRetained(metadata, retainedPages, retainedPageWords);
+        check(recordsRetained && pagesRetained,
+              "metadata growth moved or modified a retained record or page chunk");
         check(&metadata.allocator == retainedAllocator &&
+                  &metadata.liveSlots == retainedRecordBitmap &&
                   allocator.maxMapPages == retainedMaxMapPages &&
                   allocator.livePages == retainedLivePages &&
                   allocator.peakPages == retainedPeakPages &&
                   allocator.reusedAllocations == retainedReusedAllocations &&
                   allocator.poolPages == next.pages && metadata.pages == next.pages &&
                   metadata.records == next.records &&
-                  metadata.pageChunkCount == retainedChunkCount + (recordsGrowing ? 0U : 1U) &&
+                  metadata.recordChunkCount == retainedRecordChunkCount + (recordsGrowing ? 1U : 0U) &&
+                  metadata.pageChunkCount == retainedPageChunkCount + (recordsGrowing ? 0U : 1U) &&
+                  metadata.recordBytes == mapper_abi::recordStorageBytesFor(next.records) &&
                   metadata.pageBytes == mapper_abi::iovaPageStorageBytesFor(next.pages) &&
                   metadata.metadataBytes() == mapper_abi::metadataBytesFor(next),
               "metadata growth reset allocator state or reported the wrong capacity");
-        check(amdtx::findNextBitmapPage(allocator.used, current.pages, next.pages, true) ==
+        check(amdtx::findNextBitmapPage(metadata.liveSlots, current.records,
+                  next.records, true) == next.records &&
+                  amdtx::findNextBitmapPage(allocator.used, current.pages, next.pages, true) ==
                   next.pages &&
                   amdtx::findNextBitmapPage(allocator.ever, current.pages, next.pages, true) ==
                   next.pages,
-              "appended page capacity was not initially free");
+              "appended metadata capacity was not initially free");
         current = next;
         check(tableWords == retainedTables && pageTables.rootPA == retainedRoot &&
                   pageTables.pages == retainedTablePages,
               "metadata growth changed the retained page tables or PTEs");
-        return retained && verifyLiveTranslations();
+        return recordsRetained && pagesRetained && verifyLiveTranslations();
     };
 
     // Include normal reuse so page append must retain a nonzero reuse count.
@@ -574,6 +610,9 @@ void liveCapacityGrowth() {
     check(allocateMapping(1) == AllocationResult::recordsFull,
           "legacy record exhaustion was not detected");
     if (!growStorage(mapper_abi::CapacityResource::recordSlots, {2048, 4096})) return;
+    check(amdtx::findNextBitmapPage(metadata.liveSlots, 0, metadata.records, false) ==
+              mapper_abi::kRecords,
+          "the global record bitmap did not find the first appended slot");
     check(allocateMapping(1) == AllocationResult::mapped,
           "record-limited mapping did not succeed after metadata growth");
 
@@ -599,7 +638,7 @@ void liveCapacityGrowth() {
     check(current.records == 2048 && current.pages == 16384,
           "live growth changed capacity that the workload did not exhaust");
 
-    // The old record store is gone; all retained page chunks remain usable.
+    // Every original record and page chunk remains owned through the final unmap.
     for (unsigned slot = 0; slot < metadata.records; ++slot) {
         if (!(metadata.liveSlots[slot / 64] & (1ULL << (slot % 64)))) continue;
         if (!releaseMapping(slot)) return;
@@ -614,11 +653,10 @@ void liveCapacityGrowth() {
 // without filling tens of thousands of mappings just to reach those slots.
 void wideRecordOwners() {
     const mapper_abi::Capacity initial{65536, 65536};
-    std::vector<amdtx::u64> recordWords(
-        mapper_abi::recordStorageBytesFor(initial.records) / sizeof(amdtx::u64));
+    RecordChunkWords recordWords;
     PageChunkWords pageWords;
     amdmapper::MappingStorage metadata{};
-    amdmapper::bindRecordStorage(metadata, recordWords.data(), initial.records);
+    prepareRecordStorage(metadata, recordWords, initial.records);
     preparePageStorage(metadata, pageWords, initial.pages);
     amdtx::u64 leafWords[512] = {};
     metadata.leafTable(0) = leafWords;
@@ -630,7 +668,7 @@ void wideRecordOwners() {
             amdtx::allocate(metadata.allocator, 1, base);
         check(allocated, "wide-slot mapping could not allocate an IOVA page");
         if (!allocated) return false;
-        auto &mapping = metadata.mappings[slot];
+        auto &mapping = metadata.mappingAt(slot);
         mapping.memory = reinterpret_cast<IOMemoryDescriptor *>(
             static_cast<std::uintptr_t>(0x100000 + slot * 16));
         mapping.command = reinterpret_cast<IODMACommand *>(
@@ -654,12 +692,15 @@ void wideRecordOwners() {
         return true;
     };
     const auto verifyOwners = [&]() {
+        unsigned liveSlot = amdtx::findNextBitmapPage(
+            metadata.liveSlots, 0, metadata.records, true);
         for (const auto &entry : live) {
             const uint32_t owner = metadata.startPageOwner(entry.second);
-            const bool found = owner == entry.first + 1 && owner <= metadata.records;
-            check(found, "wide record owner was truncated or lost during migration");
+            const bool found = owner == entry.first + 1 && owner <= metadata.records &&
+                liveSlot == entry.first;
+            check(found, "wide owner lookup or global live-slot scan lost a mapping");
             if (!found) return false;
-            const auto &record = metadata.mappings[owner - 1].record;
+            const auto &record = metadata.mappingAt(owner - 1).record;
             const auto translated = amdpte::decodePte(
                 metadata.leafTable(entry.second / 512)[entry.second % 512], 1);
             const bool matches = record.recordIndex == entry.first &&
@@ -670,8 +711,12 @@ void wideRecordOwners() {
                 metadata.physicalPage(entry.second) == record.firstPA;
             check(matches, "owner lookup no longer identifies the retained mapping");
             if (!matches) return false;
+            liveSlot = amdtx::findNextBitmapPage(
+                metadata.liveSlots, liveSlot + 1, metadata.records, true);
         }
-        return true;
+        const bool complete = liveSlot == metadata.records;
+        check(complete, "the record bitmap reports a live slot outside the mapping set");
+        return complete;
     };
     if (!mapAtSlot(65534) || !mapAtSlot(65535) || !verifyOwners()) return;
 
@@ -681,27 +726,40 @@ void wideRecordOwners() {
     check(planned && target.records == 131072 && target.pages == initial.pages,
           "wide record growth did not preserve the independent page capacity");
     if (!planned) return;
-    const unsigned retainedChunkCount = metadata.pageChunkCount;
-    const std::vector<amdmapper::IovaPageChunk> retainedChunks(
-        metadata.chunks, metadata.chunks + retainedChunkCount);
+    const unsigned retainedRecordChunkCount = metadata.recordChunkCount;
+    const std::vector<amdmapper::RecordChunk> retainedRecords(
+        metadata.recordChunks, metadata.recordChunks + retainedRecordChunkCount);
+    const auto retainedRecordWords = recordWords;
+    const auto *retainedRecordBitmap = &metadata.liveSlots;
+    const unsigned retainedPageChunkCount = metadata.pageChunkCount;
+    const std::vector<amdmapper::IovaPageChunk> retainedPages(
+        metadata.chunks, metadata.chunks + retainedPageChunkCount);
     const auto retainedPageWords = pageWords;
     const auto *retainedAllocator = &metadata.allocator;
     const unsigned retainedMaxMapPages = metadata.allocator.maxMapPages;
     const unsigned retainedLivePages = metadata.allocator.livePages;
     const unsigned retainedPeakPages = metadata.allocator.peakPages;
     const unsigned retainedReusedAllocations = metadata.allocator.reusedAllocations;
-    {
-        std::vector<amdtx::u64> expandedWords(
-            mapper_abi::recordStorageBytesFor(target.records) / sizeof(amdtx::u64));
-        amdmapper::RecordStorage expanded{};
-        amdmapper::bindRecordStorage(expanded, expandedWords.data(), target.records);
-        amdmapper::copyRecordStorage(expanded, metadata);
-        static_cast<amdmapper::RecordStorage &>(metadata) = expanded;
-        recordWords.swap(expandedWords);
-        // The old record store is freed; the original page store remains owned.
-    }
-    check(pageChunksRetained(metadata, retainedChunks, retainedPageWords) &&
-              metadata.pageChunkCount == retainedChunkCount &&
+    const unsigned addedRecords = target.records - initial.records;
+    recordWords.emplace_back(
+        mapper_abi::recordChunkBytesFor(addedRecords) / sizeof(amdtx::u64));
+    amdmapper::RecordChunk added{};
+    amdmapper::bindRecordChunk(added, recordWords.back().data(),
+                               initial.records, addedRecords);
+    check(isZeroed(added.memory, added.bytes) && metadata.records == initial.records &&
+              metadata.recordChunkCount == retainedRecordChunkCount,
+          "preparing the wide record chunk published capacity or nonzero metadata");
+    amdmapper::appendRecordChunk(metadata, added);
+    check(recordChunksRetained(metadata, retainedRecords, retainedRecordWords) &&
+              metadata.recordChunkCount == retainedRecordChunkCount + 1 &&
+              metadata.records == target.records &&
+              metadata.recordBytes == mapper_abi::recordStorageBytesFor(target.records) &&
+              &metadata.liveSlots == retainedRecordBitmap &&
+              amdtx::findNextBitmapPage(metadata.liveSlots, initial.records,
+                  target.records, true) == target.records,
+          "wide record append moved old mappings or failed to add free slots");
+    check(pageChunksRetained(metadata, retainedPages, retainedPageWords) &&
+              metadata.pageChunkCount == retainedPageChunkCount &&
               metadata.pageBytes == mapper_abi::iovaPageStorageBytesFor(initial.pages) &&
               &metadata.allocator == retainedAllocator &&
               metadata.allocator.poolPages == initial.pages &&
@@ -716,7 +774,7 @@ void wideRecordOwners() {
     // Resolve each mapping by the same slot+1 owner index used by unmap.
     for (const auto &entry : live) {
         const uint32_t owner = metadata.startPageOwner(entry.second);
-        auto &mapping = metadata.mappings[owner - 1];
+        auto &mapping = metadata.mappingAt(owner - 1);
         const auto &record = mapping.record;
         const bool released = amdtx::release(metadata.allocator, record.basePage, record.pages);
         check(released, "a wide-slot mapping could not release its retained IOVA");
@@ -732,7 +790,7 @@ void wideRecordOwners() {
                   metadata.pages &&
               amdtx::findNextBitmapPage(metadata.liveSlots, 0, metadata.records, true) ==
                   metadata.records,
-          "wide-slot mappings did not fully retire after metadata migration");
+          "wide-slot mappings did not fully retire after metadata growth");
     for (const auto &entry : live) {
         check(metadata.startPageOwner(entry.second) == 0 &&
                   metadata.leafTable(entry.second / 512)[entry.second % 512] == 0,
