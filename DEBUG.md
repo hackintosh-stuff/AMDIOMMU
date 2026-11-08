@@ -503,7 +503,7 @@ allocator micro-optimization cycle.
 
 The mapper handles system sleep and wake itself, so a real S3 reaches it without
 a client RPC. `amdiommu_pm=off` disables those notifications;
-`R47PowerTransition` remains the compatibility entry for a client that drives PM
+`RequestPowerTransition` remains the compatibility entry for a client that drives PM
 itself. Translation hardware stops only when no requester still holds a live
 mapping. The DMA path repairs a controller that has lost its register image.
 

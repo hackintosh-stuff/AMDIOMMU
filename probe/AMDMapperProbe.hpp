@@ -184,7 +184,7 @@ private:
     struct MapperState;
     MapperState *fMapper = nullptr;
     // R72: the mapper hears about a real system sleep/wake itself instead of
-    // waiting for the private R47PowerTransition RPC, and repairs a controller
+    // waiting for the private RequestPowerTransition RPC, and repairs a controller
     // that lost its register image even when no notification arrived at all.
     IONotifier *fSystemPMNotifier = nullptr;
     UInt64 fSleepNotifications = 0, fWakeNotifications = 0;
@@ -224,10 +224,11 @@ private:
         bool newMapping = false, bool *skipped = nullptr);
     void PublishAuto();
     // Compatibility entry point for a client that still drives PM through the
-    // private R47PowerTransition RPC. Called synchronously by the client's gated
+    // private RequestPowerTransition RPC. Called synchronously by the client's gated
     // PM actions after its network-family disable retired TX and rebuilt RX.
     // R72 adds a self-driven path (see RegisterSystemPM) so this call is no
     // longer the only way a real S3 reaches the mapper.
+    // Formerly R47PowerTransition.
     IOReturn PowerTransition(UInt32);
     bool SuspendAuto();
     bool ResumeAuto();

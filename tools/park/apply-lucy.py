@@ -20,8 +20,8 @@ def main():
         if record.get('version')!=VERSION or record.get('template')!=fingerprint or not mod['is_current'](text):
             raise SystemExit('R64 generated Lucy input stale or modified')
         print('R64 Lucy lifecycle already current'); return
-    if 'R47PowerTransition' not in text or 'r44NormalMapped' not in text:
-        raise SystemExit('R64 requires R47/R63 ordinary mapped Lucy base')
+    if 'RequestPowerTransition' not in text or 'r44NormalMapped' not in text:
+        raise SystemExit('R64 requires the ordinary mapped Lucy base')
     updated=mod['patch'](text); cpp.write_bytes(updated.encode('utf-8'))
     record={'version':VERSION,'template':fingerprint,'input_cpp_sha256':sha(text.encode()),'output_cpp_sha256':sha(updated.encode())}
     stamp.write_bytes((json.dumps(record,indent=2)+chr(10)).encode('utf-8'))

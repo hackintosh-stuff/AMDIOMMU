@@ -19,7 +19,7 @@ METHODS = r'''
 IOReturn RTL8111::r66_2MapperPower(UInt32 operation)
 {
     if (!r53NormalMapped || !mapper || !pciDevice) return kIOReturnNotReady;
-    const OSSymbol *key = OSSymbol::withCString("R47PowerTransition");
+    const OSSymbol *key = OSSymbol::withCString("RequestPowerTransition");
     if (!key) return kIOReturnNoMemory;
     const IOReturn result = mapper->callPlatformFunction(key, false, pciDevice,
         (void *)(uintptr_t)operation, NULL, NULL);

@@ -1261,7 +1261,7 @@ bool org_maz1_AMDMapperProbe::PowerSupported() const {
     return present == c->domainCount;
 }
 
-// R72: suspend is reached from two triggers - the private R47PowerTransition RPC
+// R72: suspend is reached from two triggers - the private RequestPowerTransition RPC
 // and the self-driven system sleep notification. Both close admission, and both
 // touch the translation hardware only when no requester still holds a live
 // mapping. With IOMMU_EN cleared a client that is still DMAing would address

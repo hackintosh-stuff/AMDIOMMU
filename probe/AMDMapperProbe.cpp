@@ -202,14 +202,16 @@ IOReturn org_maz1_AMDMapperProbe::callPlatformFunction(
         return AttachAuto(static_cast<IOService *>(target), true, true)
             ? kIOReturnSuccess : kIOReturnNotReady;
     }
-    if (name && name->isEqualTo("R63SetRequesterDMA")) {
+    // Formerly R63SetRequesterDMA.
+    if (name && name->isEqualTo("SetRequesterDMAAccess")) {
         if (!fAuto || !fNicDevice) return kIOReturnNotReady;
         const uintptr_t op = (uintptr_t)operation;
         if (target != fNicDevice || unused3 || unused4 || (op != 1 && op != 2))
             return kIOReturnBadArgument;
         return SetRequesterDMA(op == 1);
     }
-    if (name && name->isEqualTo("R47PowerTransition")) {
+    // Formerly R47PowerTransition.
+    if (name && name->isEqualTo("RequestPowerTransition")) {
         if (!fAuto || !fNicDevice) return kIOReturnNotReady;
         const uintptr_t op = (uintptr_t)operation;
         if (target != fNicDevice || unused3 || unused4 || (op != 1 && op != 2))

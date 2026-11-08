@@ -4,7 +4,7 @@ HELPER = r"""
 static IOReturn r64RequesterDMA(IOMapper *mapper, IOPCIDevice *pci, UInt32 operation)
 {
     if (!mapper || !pci) return kIOReturnNotReady;
-    const OSSymbol *key = OSSymbol::withCString("R63SetRequesterDMA");
+    const OSSymbol *key = OSSymbol::withCString("SetRequesterDMAAccess");
     if (!key) return kIOReturnNoMemory;
     const IOReturn result = mapper->callPlatformFunction(key, false, pci,
         (void *)(uintptr_t)operation, NULL, NULL);

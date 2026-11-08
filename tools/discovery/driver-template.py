@@ -34,7 +34,7 @@ IOReturn RTL8125::r47MapperPower(bool waking)
      * platform supports it. Ordinary startup and networking do not
      * call this method. */
     if (!r44NormalMapped || !mapper || !pciDevice) return kIOReturnNotReady;
-    const OSSymbol *name = OSSymbol::withCString("R47PowerTransition");
+    const OSSymbol *name = OSSymbol::withCString("RequestPowerTransition");
     if (!name) return kIOReturnNoMemory;
     /* The mapper validates the same PCI nub that owns this driver's DMA.
      * A successful wake includes device/page invalidations and both CWs. */

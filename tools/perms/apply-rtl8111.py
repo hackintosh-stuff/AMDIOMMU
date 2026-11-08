@@ -22,7 +22,7 @@ def upgraded(cpp, info):
     cpp = once(cpp, anchor, '''static IOReturn r63RequesterDMA(IOMapper *mapper, IOPCIDevice *pci, UInt32 op)
 {
     if (!mapper || !pci) return kIOReturnNotReady;
-    const OSSymbol *key = OSSymbol::withCString("R63SetRequesterDMA");
+    const OSSymbol *key = OSSymbol::withCString("SetRequesterDMAAccess");
     if (!key) return kIOReturnNoMemory;
     const IOReturn rc = mapper->callPlatformFunction(key, false, pci,
         (void *)(uintptr_t)op, NULL, NULL);

@@ -445,7 +445,7 @@ bool org_maz1_AMDMapperProbe::QuiesceMappings() {
 }
 
 // Compatibility entry point for a client that still drives PM through the
-// private R47PowerTransition RPC. Since R72 the mapper also hears about system
+// private RequestPowerTransition RPC. Since R72 the mapper also hears about system
 // sleep/wake itself (registerSleepWakeInterest) and reconciles a lost controller
 // from the DMA path, so PM no longer depends on this call. A client that does
 // call it still gets the same admission/pairing contract.
