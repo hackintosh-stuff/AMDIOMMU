@@ -1,4 +1,60 @@
-# Reading IORegistry properties
+# Implementation and debugging reference
+
+Build, configuration examples and OpenCore installation are in
+[README.md](README.md). This document describes implementation behavior,
+configuration internals, capacity accounting and diagnostic evidence.
+
+- [Production configuration](#production-configuration) and [device selection](#device-selection)
+- [Profile and growth evidence](#profile-and-growth-evidence)
+- [Runtime IOVA allocation](#runtime-iova-allocation)
+- [IORegistry snapshots](#reading-ioregistry-properties)
+- [Segmented page-table snapshots](#segmented-page-table-snapshots)
+- [Power management](#power-management) and [hook diagnostics](#hook-diagnostics)
+- [Debug build experiment modes](#debug-build-experiment-modes)
+
+## Production configuration
+
+The production kext discovers the AMD IOMMU through the ACPI IVRS table and PCI
+configuration. It takes over the controller after the state and feature
+registers agree, then prepares a translation domain for each selected requester.
+
+| Argument | Values | Meaning |
+|---|---|---|
+| `amdiommu=<mode>` | `passive` | Auto-attach is off; explicit clients use the offer/claim handshake and call `AMDIOMMUClaimRequesterV1`. |
+| | `auto-attach` | Publishes `iommu-parent` at first publish, so clients using `IOMapper::copyMapperForDevice()` get the mapper. The offer is also published, allowing claim-based clients to receive a definite answer rather than `kIOReturnNotReady`. |
+| | absent / any other value, including `off` | Inert: no notifier, device arm or MMIO. `off` is not a recognised mode; it matches no mode. |
+| `amdiommu_devices=<ids>` | Four hexadecimal requester-ID digits prefixed with `n`, for example `n2200,n2201` or `n2300,n2301` | Selects segment-zero requesters. If omitted, selection comes from `AMDMapperProbeDevices` in the kext's `Info.plist`. |
+| `amdiommu_profile=<name>` | See [Profile ceilings](#profile-ceilings) | Selects the independent record and IOVA-page growth limits. |
+| `amdiommu_pm=off` | `off` | Disables registration for self-driven sleep/wake notifications. DMA-path repair of a controller that lost its register image remains available. With the argument absent, notifications are registered. |
+
+### Device selection
+
+Prefix each requester ID with a non-hex character such as `n`.
+`PE_parse_boot_argn` converts an all-digit boot-arg value into a 32-bit integer
+inside the caller's buffer (`3400` arrived as `0x0D48`). `ReadDeviceSelection()`
+skips non-hex bytes before parsing each four-digit hexadecimal ID.
+
+When `amdiommu_devices` is absent, the kext reads `AMDMapperProbeDevices` from its
+`Info.plist` personality (`IOKitPersonalities/AMDMapperProbe`). The value uses
+`IOPCIMatch` format: whitespace-separated `0xDDDDVVVV` words, optionally followed
+by `&0xMMMMMMMM`. `VVVV` is the PCI vendor and `DDDD` the device; comparison is
+`((device << 16 | vendor) & mask) == (id & mask)`. The personality dictionary becomes
+the instance property table, so the implementation reads it with `getProperty()`.
+
+The checked-in adapter list is:
+
+- Mellanox CX4 Lx family driven by Apple's MLX5 client:
+  `0x101515b3 0x101715b3 0x101915b3 0x101b15b3 0x101d15b3`.
+- Realtek range driven by Apple's Ethernet Realtek driver:
+  `0x812410ec 0x812510ec 0x812610ec 0x812710ec`.
+
+The two selection sources are never merged. An explicit `amdiommu_devices`
+value is the sole selection; otherwise the identity list is used. Devices
+outside the selected set retain physical pass-through DMA. Selected devices
+publish an offer in both production modes, allowing a claim-based client to
+receive a definite answer even when auto-attach has already supplied its mapper.
+
+## Reading IORegistry properties
 
 `AMDMapperProbe` publishes its state as IORegistry properties on the controller
 (`org_maz1_AMDMapperProbe`) and on each per-device mapper instance. Most of them
@@ -6,7 +62,7 @@ are **snapshots, not live counters**: `setProperty()` copies a value at one
 moment, and the kernel-side state can change afterwards without changing what
 `ioreg` shows. Refresh before drawing any conclusion from a value.
 
-## Two kinds of property
+### Two kinds of property
 
 | Kind | Examples | Published by | Freshness |
 |---|---|---|---|
@@ -17,7 +73,7 @@ moment, and the kernel-side state can change afterwards without changing what
 The hook is a separate kext and does not use the snapshot protocol. Its counters
 can be read directly; the probe's cannot.
 
-## Why the probe publishes on demand
+### Why the probe publishes on demand
 
 The DMA path runs under the per-device mapper lock, once per map and unmap. It
 only updates in-memory structures: `Domain::active` and `activeTime` are set at
@@ -41,7 +97,7 @@ changes, the live map counts change, or 128 further map/unmap calls have
 accumulated. It runs outside the lock, at the end of `MapMemory`. `UnmapMemory`
 does not call it, so `-live` keys are not a substitute for a snapshot.
 
-## When a snapshot is published
+### When a snapshot is published
 
 | Trigger | What is refreshed |
 |---|---|
@@ -56,7 +112,7 @@ The attach-time snapshot is the usual source of confusion: a device may have
 been doing translated DMA for a long time while `ioreg` still shows
 `iommu-dte-active=no` and `mapper-map-ok=0`.
 
-## Refresh and read
+### Refresh and read
 
 `tools/dev/probe-snapshot.c` sends `R44Snapshot` to every instance:
 
@@ -74,7 +130,7 @@ successful poke increments `mapper-snapshot-sequence`; compare that value before
 and after if you need to prove a fresh snapshot landed. It changes nothing else
 on the machine and does not require a reboot.
 
-## Reading rules
+### Reading rules
 
 - `iommu-dte-active=no` means "not active at the last publication", **not**
   "translation is off". The DTE is activated by the first map; refresh first.
@@ -92,7 +148,7 @@ on the machine and does not require a reboot.
 - Acceptance checks in tests and design notes that say
   "`iommu-dte-active=yes`" always mean **after a snapshot has been pulled**.
 
-## Property families
+### Property families
 
 Property names are grouped by meaning; no release property carries a round
 prefix.
@@ -112,17 +168,37 @@ per-domain dictionaries produced by a controller-level publication.
 
 ## Profile and growth evidence
 
-`amdiommu_profile` selects the growth ceiling (see README for the values).
-Auto-attach defaults to `dma32-max`: 131072 records and 524288 IOVA pages
-(2 GiB). The window is `[0x80000000, 0x100000000)`, entirely usable by 32-bit
-DMA clients. Explicit `native-legacy`, `rl-10g` and `rl-10g-max` selections
-retain their existing limits.
+### Profile ceilings
+
+`amdiommu_profile` selects the growth ceiling, not a startup reservation.
+
+| Name | Record ceiling | IOVA-page ceiling | IOVA capacity | Selection |
+|---|---:|---:|---|---|
+| `dma32-max` | 131072 | 524288 | 2 GiB | Default for auto-attach |
+| `rl-10g-max` | 65535 | 262144 | 1 GiB | Explicit smaller ceiling |
+| `rl-10g` | 16384 | 131072 | 512 MiB | Explicit smaller ceiling |
+| `native-legacy` | 1024 | 4096 | 16 MiB | Growth disabled; default for claim-based clients |
+
+An unknown profile name disables growth and publishes
+`iommu-profile-ceiling=unsupported-name`. The full `dma32-max` window is
+`[0x80000000, 0x100000000)`, entirely usable by 32-bit DMA clients.
+
+### Growth policy and profile suggestions
 
 Allocated storage and usable capacity both start at `native-legacy`. A record-slot
 allocation failure doubles only the record capacity; an IOVA allocation failure
 doubles only the page capacity. Each resource is capped independently by the
-selected ceiling, and the mapper retries the request after growth. A first
-mapping that fits does not grow the domain.
+selected ceiling, and the mapper retries the request under the mapper lock after
+growth. A first mapping that fits does not grow the domain, and existing mappings
+can remain live throughout growth. Record capacity advances from 1024 through
+2048, 4096, 8192, 16384, 32768 and 65536 to 131072; an explicit smaller ceiling
+clips the final increase.
+
+At the exhausted resource's ceiling, a request that cannot fit returns
+`kIOReturnNoResources`. Allocation failure retains the existing mappings and
+capacity. If hardware synchronization fails, the existing failed-domain state
+closes new mapping admission. Growth that satisfies the request is not a capacity
+rejection.
 
 - `iommu-profile-suggested` records the device-based suggestion;
   `iommu-profile-source` says where it came from: `boot-arg`, `id-table`,
@@ -132,6 +208,18 @@ mapping that fits does not grow the domain.
   ceiling unless an operator raises it explicitly.
 - `amdiommu_autoattach` no longer exists; `amdiommu=auto-attach` is the switch
   for publishing `iommu-parent` at first publish.
+
+The device identity table records the ceiling it would suggest independently of
+the default `dma32-max` ceiling or an explicit operator selection:
+
+| Derived from | Matches | Suggested ceiling |
+|---|---|---|
+| vendor/device table | `15b3:1015/1017/1019/101b/101d`, `10ec:8124-8127` | `rl-10g-max` |
+| PCI class fallback | base class `0x02` (network) | `rl-10g-max` |
+| PCI class fallback | base class `0x01` (storage) | `rl-10g` |
+| otherwise | — | `native-legacy` |
+
+### Growth properties
 
 | Growth evidence key | Values / meaning |
 |---|---|
@@ -170,27 +258,43 @@ which allocation could not be obtained.
 
 `mapper-rejects-records` and `mapper-rejects-no-range` count requests that still
 failed after growth/retry, not allocation pressure that growth resolved. Raw
-snapshot `capacityMaps` / `capacityPages` describe usable limits. `rootPA` stays
-fixed, while `ptBytes` / `tablePages` describe the current total of allocated table
-blocks. Record-only growth keeps these table values and the segment count
-unchanged, and requires no hardware invalidation. IOVA capacity grows from
-16 to 32, 64, 128, 256, 512, 1024 and 2048 MiB; the corresponding allocated
-table-page counts are 16, 24, 40, 72, 136, 264, 520 and 1033. The corresponding
-segment counts are 1, 2, 3, 5, 9, 17, 33 and 66. Each page-table allocation is
-limited to 16 pages (64 KiB), so one capacity increase can add multiple
-segments. `iommu-page-growth-count` counts capacity increases; the segment
-count describes the number of allocated blocks.
+snapshot `capacityMaps` / `capacityPages` describe usable limits.
+
+### Hardware page-table growth
+
+`rootPA` stays fixed, while `ptBytes` / `tablePages` describe the current total of
+allocated table blocks. Record-only growth keeps these values and the segment
+count unchanged, and requires no hardware invalidation. IOVA capacity follows
+this sequence:
+
+| IOVA capacity | IOVA pages | Allocated table pages | Table bytes | Table segments |
+|---|---:|---:|---:|---:|
+| 16 MiB | 4096 | 16 | 65536 | 1 |
+| 32 MiB | 8192 | 24 | 98304 | 2 |
+| 64 MiB | 16384 | 40 | 163840 | 3 |
+| 128 MiB | 32768 | 72 | 294912 | 5 |
+| 256 MiB | 65536 | 136 | 557056 | 9 |
+| 512 MiB | 131072 | 264 | 1081344 | 17 |
+| 1 GiB | 262144 | 520 | 2129920 | 33 |
+| 2 GiB | 524288 | 1033 | 4231168 | 66 |
+
+Each page-table allocation contains at most 16 pages (64 KiB) of physically
+contiguous storage. Blocks can be placed independently; a capacity increase
+can add several segments. `iommu-page-growth-count` counts capacity increases,
+whereas the segment count describes allocated blocks.
 
 The last page-capacity increase adds 513 pages across 33 blocks: one L2
 directory and 512 leaf tables. All blocks are allocated before any new PDE is
 attached. Once the child tables are prepared, the new directory is linked
 through the original L3 entry 3; the original L3 entry 2, its existing subtree
-and the root PA stay intact.
+and the root PA stay intact. The DTE root remains unchanged.
 At the 2 GiB ceiling there are 66 segments, 4231168 allocated table bytes
 and 1028 reachable table pages. The `dma32-max` profile's 1028-page budget
 describes construction in one contiguous block; incremental allocation owns
 1033 pages because it retains the initial block's five spare pages. Registry
 and snapshot table sizes report the actual 1033-page allocation.
+
+### Metadata chunks and memory accounting
 
 Record and page growth each append metadata for only the added range. Existing
 mapping objects, record liveness bitmaps, page indexes, owner indexes,
@@ -222,6 +326,21 @@ check `mapper-arena-bytes` against the sum of all chunks of both resources:
 | 1024 / 16384 | 1 | 126976 | 3 | 208896 | 335872 |
 | 131072 / 524288 | 8 | 15765504 | 8 | 6451200 | 22216704 |
 
+The initial domain uses 180224 metadata bytes and 65536 table bytes:
+**245760 bytes, about 0.234 MiB**. A domain with 1024 records and a 64 MiB IOVA
+window uses 335872 metadata bytes plus 163840 table bytes:
+**499712 bytes, about 0.477 MiB**. Extending that window from 32 to 64 MiB
+allocates only the new page chunk's 102400 metadata bytes. Record growth from
+1024 to 2048 slots adds one 126976-byte chunk and retains the original chunk.
+The complete `dma32-max` capacity uses 22216704 metadata bytes and 4231168 table
+bytes.
+
+These totals exclude fixed mapper state, which includes eight record-chunk
+descriptors, eight page-chunk descriptors and 66 table-allocation descriptors
+(the table descriptor array occupies 2112 bytes). Reported metadata bytes are
+the sum of the independently rounded allocations, not the size of this fixed
+state.
+
 Starting from legacy capacity, `mapper-record-storage-chunks` equals one plus
 the record-growth count, and `mapper-page-storage-chunks` equals one plus the
 page-growth count. These describe independent software allocations and are
@@ -234,14 +353,40 @@ The internal start-page owner index is 32-bit, so the record capacity can pass
 the page-storage allocation. Exported `recordIndex` and capacity fields are
 32-bit as well; ABI5 and the Snapshot/Record byte layouts are unchanged.
 
+### Growth synchronization
+
 New PDEs always require a full invalidation including the PDE cache on an active
 domain, even when `iommu-np-cache` is zero. A page-capacity increase performs
 this once, after attaching all its blocks and before exposing the added range.
 Read `invalidation-full-completed` with the page-growth count when checking
-this path; record growth does not add a full invalidation. Capacity is retained
+this path; record growth does not add a full invalidation. Ordinary maps retain
+the NP-cache optimization when filling an already prepared leaf. Capacity is retained
 after mappings are released, so use the growth counters and published capacity
 instead of inferring the growth history from the current live-map or live-page
 count.
+
+## Runtime IOVA allocation
+
+The runtime allocator uses the existing first-fit search, alignment and conflict
+skip rules to choose a range. Once a range is selected, it updates `used` and
+`ever` with one mask per covered 64-bit bitmap word. The mask covers only the
+requested pages in the first and last words; all intervening words are updated
+as full words. Each bitmap view lookup resolves a global word through the
+retained page-metadata chunks.
+
+Release first checks every covered word to confirm that the whole range is
+allocated. Only after that check passes does it clear the corresponding `used`
+bits. It retains `ever` so later allocations still report reuse. `livePages`
+changes by the requested page count, `peakPages` keeps its existing meaning,
+and `reusedAllocations` increases once when any page in an allocation was used
+before. The allocator's state layout, capacity limits and growth policy are
+unchanged.
+
+A 256-page range covers four bitmap words when word-aligned, or five when it
+starts within a word. This reduces repeated bitmap indexing and chunk lookup;
+it is an operation-count change, not a measured throughput or latency result.
+The compile-time `BoundedAllocator` retains its separate per-page implementation
+as the reference for the existing host equivalence test.
 
 ## Segmented page-table snapshots
 
@@ -289,6 +434,51 @@ reports `record_storage_bytes`, `record_storage_chunks`, `page_storage_bytes`,
 that do not publish the corresponding properties. Use this snapshot check
 alongside the normal traffic check. The old claim analyzer's fixed 16 MiB
 capacity assertions remain scoped to its archived workload.
+
+## Power management
+
+The mapper handles system sleep and wake itself, so a real S3 reaches it without
+a client RPC. `amdiommu_pm=off` disables those notifications;
+`R47PowerTransition` remains the compatibility entry for a client that drives PM
+itself. Translation hardware stops only when no requester still holds a live
+mapping. The DMA path repairs a controller that has lost its register image.
+
+Sleep/wake cycles have run with translation active, with one domain and with
+four: registers restored, no resume failures and no target faults. Published
+state includes `pm-self-driven`, `pm-controller-state`, suspend/resume counts,
+`pm-resume-registers-restored`, `pm-suspend-retained`, `pm-lazy-restores` and
+`pm-resume-failures`. Refresh the snapshot before interpreting these values.
+Acceptance criteria remain in the requirements document.
+
+## Hook diagnostics
+
+`AMDMapperHook.kext` supplies the mapper before driver startup when a selected
+client neither performs the claim handshake nor obtains a mapper through
+auto-attach. In `amdiommu=auto-attach`, the mapper is already published and the
+hook stands by. Selection still comes from the probe's explicit requester list
+or default identity list; the hook does not add devices.
+
+The `AMDMapperHook` IORegistry node reports `hook-state=installed` when ready.
+The `hook-*` counters indicate whether it intervened. `hook-open`,
+`hook-open-routed` and `hook-routed` report use of the open-time claim and
+`copyMapperForDevice` fallback paths. Hook properties are event-driven and can be read
+directly, separately from the probe's on-demand snapshots. Loading and disabling
+the companion are described in [README.md](README.md#amdmapperhook-optional-companion).
+
+## Debug build experiment modes
+
+The production build compiles the six production translation units. The Debug
+build adds `probe/*Debug.cpp` and `-DAMD_MAPPER_PROBE_DEBUG=1`, restoring the
+retired M2 experiment modes below. The parsers are in
+`probe/AMDMapperProbeDebug.hpp`; implementations are in `probe/*Debug.cpp`.
+Build commands and bundle paths are listed in [README.md](README.md#build).
+
+| Argument | Values | Meaning |
+|---|---|---|
+| `amdiommu=<mode>` | `arm`, `mmio`, `write`, `table`, `enable`, `cmd` | Progressive M2 hardware-enablement gates: arming, MMIO read, MMIO write, device table, short enable window and command channel. Each is an independent, individually revertible switch. |
+| | `pgt`, `pgt4k`, `pgthold`, `pgtsleep`, `pgt3l` | M2 page-table translation experiments: four-level identity table, 4 KiB leaves, a 20-second held-translation window, sleep-only control and a three-level table. `pgt` is a prefix match, so `pgt4k` also opens the main gate. |
+| | `.batch<N>`, `.t0x<N>` / `.token<N>`, `.std`, `.alltx`, `.rxstd`, `.session` | Suffixes in the same `amdiommu=` value, for example `amdiommu=pgt.batch512.t0x2a.std.alltx.rxstd.session`. The parser scans each `.key` segment; a separate trailing boot-arg is not a dependable channel on this kernel. |
+| `m2b2delay=<seconds>` | 1–300 | Delay before the one-shot page-table probe; default 20000 ms. |
 
 ## Key reference
 

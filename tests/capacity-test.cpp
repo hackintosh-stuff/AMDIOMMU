@@ -175,10 +175,21 @@ void allocationEquivalence() {
     check(mismatches == 0, "runtime allocator diverged from the compile-time allocator");
     // The legacy pool must also be fully drainable: every page returns to the
     // bitmap, which is what makes unmap-then-remap reuse identical.
-    for (const auto &range : live) amdtx::release(fixed, range.first, range.second);
-    for (std::size_t i = 0; i < 4096 / 64; ++i) {
-        check(fixed.used[i] == 0, "legacy allocator did not return every page");
+    for (const auto &range : live) {
+        const bool releasedFixed = amdtx::release(fixed, range.first, range.second);
+        const bool releasedRuntime = amdtx::release(runtime, range.first, range.second);
+        check(releasedFixed && releasedRuntime,
+              "equivalent allocators could not release a retained range");
     }
+    for (std::size_t i = 0; i < 4096 / 64; ++i) {
+        check(fixed.used[i] == 0 && used[i] == 0,
+              "equivalent allocators did not return every page");
+    }
+    check(fixed.livePages == 0 && runtime.livePages == 0 &&
+              fixed.peakPages == runtime.peakPages &&
+              fixed.reusedAllocations == runtime.reusedAllocations &&
+              std::memcmp(fixed.ever, ever, sizeof(ever)) == 0,
+          "draining equivalent allocators changed accounting or reuse history");
 }
 
 void profileTable() {

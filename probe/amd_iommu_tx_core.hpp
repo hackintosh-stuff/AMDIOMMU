@@ -102,6 +102,11 @@ struct RuntimeAllocatorState {
 };
 using RuntimeAllocator = RuntimeAllocatorState<u64 *>;
 
+// Mask a nonempty range contained in one 64-bit bitmap word.
+inline u64 bitmapWordRangeMask(unsigned firstBit, unsigned bitCount) {
+    return (~0ULL << firstBit) & (~0ULL >> (64U - firstBit - bitCount));
+}
+
 template<class Bitmap>
 inline bool allocate(RuntimeAllocatorState<Bitmap> &a, unsigned pages, unsigned &basePage,
                      unsigned alignmentPages = 1) {
@@ -122,12 +127,17 @@ inline bool allocate(RuntimeAllocatorState<Bitmap> &a, unsigned pages, unsigned 
             continue;
         }
         bool reused = false;
-        for (unsigned j = 0; j < pages; ++j) {
-            const unsigned p = base + j;
-            const u64 bit = 1ULL << (p % 64);
-            reused = reused || (a.ever[p / 64] & bit);
-            a.used[p / 64] |= bit;
-            a.ever[p / 64] |= bit;
+        for (unsigned page = base; page < end; ) {
+            const unsigned firstBit = page % 64;
+            const unsigned room = 64 - firstBit;
+            const unsigned count = end - page < room ? end - page : room;
+            const u64 mask = bitmapWordRangeMask(firstBit, count);
+            auto &usedWord = a.used[page / 64];
+            auto &everWord = a.ever[page / 64];
+            reused = reused || (everWord & mask);
+            usedWord |= mask;
+            everWord |= mask;
+            page += count;
         }
         a.livePages += pages;
         if (a.livePages > a.peakPages) a.peakPages = a.livePages;
@@ -141,13 +151,21 @@ template<class Bitmap>
 inline bool release(RuntimeAllocatorState<Bitmap> &a, unsigned basePage, unsigned pages) {
     if (!a.used || !pages || pages > a.maxMapPages || basePage > a.poolPages - pages ||
         a.livePages < pages) return false;
-    for (unsigned j = 0; j < pages; ++j) {
-        const unsigned p = basePage + j;
-        if (!(a.used[p / 64] & (1ULL << (p % 64)))) return false;
+    const unsigned end = basePage + pages;
+    for (unsigned page = basePage; page < end; ) {
+        const unsigned firstBit = page % 64;
+        const unsigned room = 64 - firstBit;
+        const unsigned count = end - page < room ? end - page : room;
+        const u64 mask = bitmapWordRangeMask(firstBit, count);
+        if ((a.used[page / 64] & mask) != mask) return false;
+        page += count;
     }
-    for (unsigned j = 0; j < pages; ++j) {
-        const unsigned p = basePage + j;
-        a.used[p / 64] &= ~(1ULL << (p % 64));
+    for (unsigned page = basePage; page < end; ) {
+        const unsigned firstBit = page % 64;
+        const unsigned room = 64 - firstBit;
+        const unsigned count = end - page < room ? end - page : room;
+        a.used[page / 64] &= ~bitmapWordRangeMask(firstBit, count);
+        page += count;
     }
     a.livePages -= pages;
     return true;

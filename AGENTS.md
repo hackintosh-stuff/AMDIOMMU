@@ -2,6 +2,12 @@
 
 ## Documentation: state, not a log
 
+`README.md` is the user-facing overview: purpose, supported capabilities,
+configuration, build and installation entry points. Put implementation details,
+capacity and memory accounting, synchronization, ABI formats, IORegistry
+properties and debugging procedures in `DEBUG.md`, and link to them from the
+README instead of duplicating them there.
+
 `COMPATIBILITY.md` and the compatibility section of `README.md` are state
 documents. They say what is true of this driver now, not what happened round by
 round.
