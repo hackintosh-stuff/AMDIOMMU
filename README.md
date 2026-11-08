@@ -36,41 +36,61 @@ Two build variants exist and accept different boot-args:
 | | `auto-attach` | Publishes `iommu-parent` at first publish for selected requesters, so Apple's own Ethernet kexts (which only call `IOMapper::copyMapperForDevice()`) get the mapper. The offer is published as well, so a client that does run the claim handshake gets a definite answer instead of `kIOReturnNotReady`. |
 | | absent / any other value (incl. `off`) | Inert: no notifier, no device arm, no MMIO. `off` is not a recognised value — it simply matches no mode. |
 | `amdiommu_devices=<ids>` | decimals prefixed with `n`, e.g. `n2200,n2201` or `n2300,n2301` | Selects PCI requesters (segment zero). **Prefix each ID with a non-hex character (`n`)**: kernel's `PE_parse_boot_argn` rewrites an all-digit value into a 32-bit integer in the caller's buffer (`3400` arrived as `0x0D48`). The parser skips non-hex bytes before reading four hex digits. Omit to fall back to the identity list in the kext's `Info.plist` (`AMDMapperProbeDevices`, see below). |
-| `amdiommu_profile=<name>` | `rl-10g-max` | Growth ceiling, and the default: 65535 records / 262144 pages (1 GiB), 516 table pages. |
-| | `rl-10g` | Ceiling at 16384 records / 131072 pages (512 MiB), 260 table pages. |
+| `amdiommu_profile=<name>` | `rl-10g-max` | Growth ceiling, and the default: 65535 records / 262144 pages (1 GiB). |
+| | `rl-10g` | Ceiling at 16384 records / 131072 pages (512 MiB). |
 | | `native-legacy` | Ceiling at the accepted ABI3 window (1024 records / 16 MiB): growth is disabled. |
 | | unknown name | Widen nothing: growth is disabled and `iommu-profile-ceiling` records `unsupported-name`. |
 | `amdiommu_pm=off` | `off` | Do not register the self-driven sleep/wake interest. The DMA path still repairs a controller that lost its register image; the mapper simply learns about the loss later. Absent means registered. |
 
-`amdiommu_profile` selects the **reserved ceiling**. Each domain allocates its
-metadata arena and complete page-table area at that size before publishing its
-mapper. Initial usable capacity is `native-legacy` (1024 records / 16 MiB).
+`amdiommu_profile` selects the **growth ceiling**. Each domain initially
+allocates only `native-legacy` storage: 1024 records, a 16 MiB IOVA window and
+16 page-table pages. Metadata plus page tables occupy about **0.223 MiB per
+prepared domain**; a higher ceiling does not reserve its full storage at startup.
 
-When a mapping runs out of record slots or an IOVA range, the mapper opens the
-next profile and retries that allocation under the same mapper lock:
+When a mapping runs out of record slots or an IOVA range, the mapper allocates
+the next profile and retries the same request under the mapper lock:
 `native-legacy` → `rl-10g` → `rl-10g-max`, stopping at the selected ceiling.
 The first mapping does not itself trigger growth. Existing mappings can remain
 live throughout both growth steps.
 
-Growth changes only usable limits. Array addresses, the root physical address,
-page-table size and existing PTEs stay unchanged. On an active domain whose
-controller caches non-present translations, a full domain invalidation including
-the PDE cache must complete before new capacity becomes usable. The ordinary
-map path still synchronizes each newly published mapping as required.
+Growth copies the allocation records, physical-page index and allocation bitmaps
+into a larger metadata arena. Existing leaf pointers are copied, and newly
+allocated leaf pages are linked through unused PDEs. The root and all existing
+page-table pages remain at their original physical addresses, so existing IOVAs
+keep the same translations. New leaf blocks need not be physically adjacent to
+the original block.
+
+Because growth adds PDEs, an active domain always completes a full domain
+invalidation including the PDE cache before the new capacity becomes usable.
+This growth fence is required even when the controller has no NP cache. Ordinary
+maps keep their existing NP-cache optimization when filling an already prepared
+leaf.
 
 At the ceiling, an allocation that cannot fit returns `kIOReturnNoResources`.
-If growth synchronization fails, capacity stays unchanged, the mapping returns
-`kIOReturnIOError`, and new mapping admission closes through the existing failed
+Allocation failure leaves existing mappings and capacity in place. If hardware
+synchronization fails, new mapping admission closes through the existing failed
 domain state. Successful growth does not count as a capacity rejection.
 
 The default ceiling remains `rl-10g-max`: 65535 records and 1 GiB of IOVA space.
-Its metadata and page tables reserve about **12.09 MiB per prepared domain**,
-even while usable capacity is still small. A claim-based client keeps the
-`native-legacy` ceiling unless explicitly overridden. Snapshot ABI4 is unchanged;
-`ptBytes` and `tablePages` describe the full reserved table area from preparation.
+A claim-based client keeps the `native-legacy` ceiling unless explicitly
+overridden. Storage grows with usable capacity:
+
+| Current profile | Metadata arena | Allocated table pages | Table bytes |
+|---|---:|---:|---:|
+| `native-legacy` | 167936 bytes | 16 | 65536 |
+| `rl-10g` | 3313664 bytes | 264 | 1081344 |
+| `rl-10g-max` | 10563584 bytes | 520 | 2129920 |
+
+The initial block retains its spare pages. Growth adds 248 and then 256 leaf
+pages, so the allocated totals differ from a newly built contiguous profile.
+`rootPA` remains stable; `ptBytes` and `tablePages` now grow with allocated storage.
+Snapshot ABI5 keeps the Snapshot/Record sizes and adds physical segment metadata
+for the concatenated page-table export. [DEBUG.md](DEBUG.md) documents the format
+and a saved-snapshot inspector that also reads ABI4 captures.
 
 The identity table records what device-based sizing would have suggested.
-The configured ceiling controls the actual reservation and growth limit.
+The configured ceiling limits growth; each successful step allocates only the
+storage needed for that step.
 
 | Derived from | Matches | Suggested ceiling |
 |---|---|---|

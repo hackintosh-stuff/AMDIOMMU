@@ -28,7 +28,8 @@ that critical section.
 
 A snapshot is also meant to be *one consistent picture*. `PublishMappings()`
 holds the mapper lock while exporting the summary struct, the live mapping
-records and the page-table bytes together; `PublishAuto()` then takes the shared
+records, page-table bytes and their physical segment descriptors together;
+`PublishAuto()` then takes the shared
 controller lock, consumes the IOMMU event log head and reads the control
 register. Those reads have hardware side effects. Publishing each key whenever
 its own value changes would both stall the DMA path and produce a set of values
@@ -83,8 +84,9 @@ on the machine and does not require a reboot.
   mapped, not a leak indicator. Compare two snapshots: stable counts across
   interface down/up cycles mean the resources were rebuilt cleanly; a count that
   only grows with idle time is the thing to investigate.
-- Read `mapper-state-raw`, `mapper-live-raw` and `mapper-page-table-raw` from the
-  same snapshot. Their lengths and the ABI version are published alongside them.
+- Read `mapper-state-raw`, `mapper-live-raw`, `mapper-page-table-raw` and
+  `mapper-page-table-segments-raw` from the same ABI5 snapshot. The segment
+  descriptors are necessary to follow physical pointers between table blocks.
 - `iommu-event-overflow=no` and `iommu-event-valid=yes` describe the event log as
   of the last snapshot; a fault that happened just now may not be visible yet.
 - Acceptance checks in tests and design notes that say
@@ -110,15 +112,15 @@ per-domain dictionaries produced by a controller-level publication.
 
 ## Profile and growth evidence
 
-`amdiommu_profile` selects the reserved ceiling (see README for the values).
-Usable capacity starts at `native-legacy` and opens the next profile only when a
-record-slot or IOVA allocation is exhausted. A first mapping that fits does not
-grow the domain.
+`amdiommu_profile` selects the growth ceiling (see README for the values).
+Allocated storage and usable capacity both start at `native-legacy`. A record-slot
+or IOVA allocation failure triggers allocation of the next profile and a retry.
+A first mapping that fits does not grow the domain.
 
 - `iommu-profile-suggested` records the device-based suggestion;
   `iommu-profile-source` says where it came from: `boot-arg`, `id-table`,
-  `class-table` or `legacy-fallback`. The configured ceiling controls actual
-  storage and the growth limit.
+  `class-table` or `legacy-fallback`. The configured ceiling is the growth limit;
+  it is not a startup memory reservation.
 - A claim-based client (Lucy, the board RTL8111) keeps the `native-legacy`
   ceiling unless an operator raises it explicitly.
 - `amdiommu_autoattach` no longer exists; `amdiommu=auto-attach` is the switch
@@ -128,18 +130,18 @@ grow the domain.
 |---|---|
 | `iommu-profile` | Current usable capacity profile on the device mapper / PCI device |
 | `iommu-profile-prepared` | `native-legacy`, the initial usable capacity |
-| `iommu-profile-reserved` | Profile used to allocate all metadata and table storage |
+| `iommu-profile-allocated` | Profile whose metadata and leaf storage have actually been allocated |
 | `iommu-profile-ceiling` | Selected ceiling, or `unsupported-name` for an invalid request |
 | `iommu-profile-ceiling-source` | `boot-arg` \| `default` |
 | `iommu-profile-records`, `iommu-profile-pages` | Current usable limits |
-| `iommu-profile-table-pages`, `iommu-table-bytes` | Reserved page-table size; unchanged by growth |
-| `mapper-arena-bytes` | Reserved metadata arena size; unchanged by growth |
+| `iommu-profile-table-pages`, `iommu-table-bytes` | Actual allocated page-table size; grows as leaf blocks are added |
+| `mapper-arena-bytes` | Current metadata arena size; grows with the allocated profile |
 | `iommu-growth-policy` | `capacity-demand` \| `disabled` |
 | `iommu-capacity-grown` | Whether at least one capacity increase succeeded |
 | `iommu-growth-count` | Number of successful increases; normally 0, 1 or 2 |
 | `iommu-profile-grown-from` | Source profile of the most recent successful increase |
 | `mapper-map-window-bytes` | Current usable IOVA window in bytes |
-| `iommu-growth-state` | `prepared`, `grown`, `at-ceiling` or `failed-synchronization` |
+| `iommu-growth-state` | `prepared`, `grown`, `at-ceiling`, `failed-arena`, `failed-tables`, `failed-page-tables` or `failed-synchronization` |
 | `iommu-growth-time` | Time of the most recent successful increase, or zero |
 
 Capacity decisions are published on the mapper and PCI device after releasing
@@ -150,9 +152,49 @@ reached; a freed range may still satisfy a later mapping.
 
 `mapper-rejects-records` and `mapper-rejects-no-range` count requests that still
 failed after growth/retry, not allocation pressure that growth resolved. Raw
-snapshot `capacityMaps` / `capacityPages` describe usable limits, while
-`rootPA`, `ptBytes` and `tablePages` describe the fixed reserved table area.
-ABI4 and the PM boundary blob layout remain unchanged.
+snapshot `capacityMaps` / `capacityPages` describe usable limits. `rootPA` stays
+fixed, while `ptBytes` / `tablePages` describe the current total of allocated table
+blocks. Normal growth changes the page counts from 16 to 264 to 520. New PDEs
+always require a full invalidation including the PDE cache on an active domain,
+even when `iommu-np-cache` is zero.
+
+## Segmented page-table snapshots
+
+ABI5 retains a 4544-byte Snapshot and 2152-byte Record. The live-record layout is
+unchanged; the version identifies the new page-table export convention:
+
+| Export | Contents |
+|---|---|
+| `mapper-state-raw` | Snapshot; `ptBytes` is the sum of all allocated table-block sizes |
+| `mapper-live-raw` | `liveCount` mapping records |
+| `mapper-page-table-raw` | Complete table blocks concatenated in allocation order |
+| `mapper-page-table-segments-raw` | One 24-byte little-endian `<QQQ` descriptor per block: physical base, byte offset in the concatenated blob, byte size |
+
+To read a table at physical address `pa`, find its segment and read at
+`offset + pa - physicalBase`. Subtracting `rootPA` from every table pointer is
+only valid for the older contiguous ABI4 export. The four ABI5 blobs are captured
+under the same mapper lock and belong to one `mapper-snapshot-sequence`.
+
+PM boundaries also retain their own `pm-suspend-pt-segments-raw` and
+`pm-resume-pt-segments-raw` alongside the existing table/live blobs.
+`pm-snapshots-valid=yes` requires both sets of segment descriptors. Decode a saved
+boundary with its saved descriptors, not with the current domain's later layout.
+
+After requesting a fresh snapshot with the helper described above, save and
+inspect the registry export:
+
+```sh
+sudo /tmp/probe-snapshot
+ioreg -a -l -w0 -r -c org_maz1_AMDMapperProbe > /tmp/mapper-snapshot.plist
+python3 tools/dev/inspect-mapper-snapshot.py /tmp/mapper-snapshot.plist
+```
+
+The inspector reads ABI4 and ABI5, follows every reachable table through the
+appropriate physical-address map and compares all present PTEs with the complete
+live mapping set. Its JSON report gives each mapper's sequence, capacities,
+allocated bytes, segment count and verified IOVA pages. Use this snapshot check
+alongside the normal traffic check. The old claim analyzer's fixed 16 MiB
+capacity assertions remain scoped to its archived workload.
 
 ## Key reference
 

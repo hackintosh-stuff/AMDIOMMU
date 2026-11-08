@@ -4,7 +4,9 @@
 #include <stdint.h>
 
 namespace mapper_abi {
-static constexpr uint32_t kVersion = 4;
+// Version 5 describes non-contiguous table storage through TableSegment rows.
+// Mapping records and the Snapshot byte layout remain compatible with version 4.
+static constexpr uint32_t kVersion = 5;
 // Ordinary DMA addresses must satisfy a 32-bit IODMACommand as well as 64-bit
 // clients. Keep this independent of the legacy experiment's 64 GiB window.
 static constexpr uint64_t kBase = 0x80000000ULL; // 2 GiB; every profile stays below 4 GiB
@@ -47,15 +49,20 @@ struct Snapshot {
     // active mappings are exported separately in mapper-live-raw.
     Record lastMap, lastUnmap;
 };
+// The raw page-table blob concatenates allocations in this order. Resolve a
+// PTE physical address through its segment instead of subtracting rootPA.
+struct TableSegment {
+    uint64_t physicalBase, offset, bytes;
+};
+static_assert(sizeof(TableSegment) == 24, "page-table segment descriptor");
 static_assert(sizeof(RecordHeader) == 104, "ordinary mapper record prefix");
-static_assert(sizeof(Record) == 2152, "R70 ordinary mapper record ABI4");
-static_assert(sizeof(Snapshot) == 4544, "R70 ordinary mapper snapshot ABI4");
+static_assert(sizeof(Record) == 2152, "ordinary mapper record layout");
+static_assert(sizeof(Snapshot) == 4544, "ordinary mapper snapshot layout");
 
 // ---------------------------------------------------------------------------
-// Capacity profiles. The ceiling sizes the arena and page-table storage before
-// any client maps. Usable records and IOVA pages start at the legacy profile
-// and advance through these profiles when allocation exhausts either limit.
-// Every profile uses the same per-map bounds and the same snapshot ABI.
+// Capacity profiles. Metadata starts at the legacy size and is replaced on
+// demand. Page-table growth appends leaf allocations while retaining the root
+// and all earlier table pages. Every profile uses the same per-map bounds.
 // ---------------------------------------------------------------------------
 struct Profile {
     const char *name;
@@ -63,6 +70,8 @@ struct Profile {
     uint32_t pages;
     uint32_t mapPages;
     uint32_t runs;
+    // Budget for preparing this profile in a single allocation. Incremental
+    // growth retains earlier allocations and publishes its actual page count.
     uint32_t tablePages;
 };
 static constexpr Profile kProfileLegacy = {
@@ -133,14 +142,13 @@ inline const Profile *profileForName(const char *name) {
 // instead of the 16 MiB ABI3 window.
 //
 // This table records an identity-based capacity suggestion. The configured
-// ceiling determines reserved storage; nextCapacityProfile() determines the
-// next usable capacity when the current record or page limit is exhausted.
+// ceiling limits growth; nextCapacityProfile() determines the next allocation
+// size when the current record or page limit is exhausted.
 enum class ProfileSource { bootArg, idTable, classTable, legacy };
 
 // ---------------------------------------------------------------------------
-// Advance usable capacity without replacing its backing storage. Prefer the
-// intermediate profile when it fits under the reserved ceiling. The caller
-// synchronizes the hardware before publishing the returned limits.
+// Choose the next allocation profile up to the configured ceiling. The caller
+// allocates storage and synchronizes new PDEs before publishing these limits.
 // ---------------------------------------------------------------------------
 inline const Profile *nextCapacityProfile(const Profile *current,
                                           const Profile *ceiling) {

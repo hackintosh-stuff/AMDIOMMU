@@ -7,6 +7,7 @@
 #include <kern/thread.h>
 
 class IOPCIDevice;
+class IOBufferMemoryDescriptor;
 
 #include "amd_iommu_mapper_abi.hpp"
 
@@ -151,8 +152,8 @@ private:
     // R72: refused because the controller could not be restored after a wake.
     UInt32 fRejectedUnavailable = 0;
     void PublishCapacity(bool capacityChanged = false);
-    // The ceiling sizes reserved storage. Usable capacity starts at legacy
-    // and grows on allocation pressure without moving existing mappings.
+    // The ceiling limits growth. Storage starts at legacy and is allocated
+    // on demand while existing IOVA translations stay in place.
     mapper_abi::Profile fProfile = mapper_abi::kProfileLegacy;
     bool fProfileForced = false;
     bool SelectProfile();
@@ -230,22 +231,16 @@ private:
     IOReturn PowerTransition(UInt32);
     bool SuspendAuto();
     bool ResumeAuto();
-    bool PrepareMappings(volatile UInt64 *, UInt64, UInt32, UInt32,
-                            const mapper_abi::Profile &prepared,
-                            const mapper_abi::Profile &reserved);
-    // Reserve all ceiling storage once, but expose only prepared capacity.
-    // `d` is zeroed and owns nothing; on failure it still owns nothing.
-    static bool BuildArena(MapperState *d, volatile UInt64 *tables,
-                              UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel,
-                              const mapper_abi::Profile &prepared,
-                              const mapper_abi::Profile &reserved);
+    bool PrepareMappings(IOBufferMemoryDescriptor *tables, UInt64 tablePA,
+                         UInt32 rootLevel, const mapper_abi::Profile &profile);
     // Called with the mapper lock held after a slot or range allocation fails.
     bool TryGrowCapacity(MapperState *d);
-    // Synchronize the NP cache and publish domain limits under the controller
-    // lock. Existing roots and table pages stay in place.
+    // Synchronize newly linked PDEs and publish domain limits under the
+    // controller lock. Existing roots and table pages stay in place.
     const mapper_abi::Profile *CurrentProfile() const;
     const mapper_abi::Profile *CeilingProfile() const;
-    bool CommitCapacityGrowth(const mapper_abi::Profile &target, bool &invalidated);
+    bool CommitCapacityGrowth(const mapper_abi::Profile &target,
+                              UInt32 allocatedTablePages, bool &invalidated);
     // Page-table storage has the controller buffers' alignment and contiguity.
     bool AllocateTableArea(IOBufferMemoryDescriptor *&md, UInt64 bytes, UInt64 &pa);
     bool QuiesceMappings();

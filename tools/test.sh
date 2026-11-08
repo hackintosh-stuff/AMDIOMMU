@@ -63,6 +63,13 @@ printf '\n== capacity model and live growth ==\n'
     -o "$WORK/capacity-test"
 "$WORK/capacity-test"
 
+# ---- append leaf tables while retaining existing translations ------------
+printf '\n== incremental leaf table growth ==\n'
+"$CXX" -std=c++17 -Wall -Wextra -Wpedantic -Werror -O1 -g $SAN_FLAGS \
+    -I "$ROOT/probe" "$ROOT/tests/table-growth-test.cpp" \
+    -o "$WORK/table-growth-test"
+"$WORK/table-growth-test"
+
 # ---- round 12: the two cores that decide the verdict --------------------
 #
 # WHY THESE ARE HERE AND NOT IN A ONE-OFF BINARY
@@ -224,10 +231,10 @@ python3 "$ROOT/tools/verify/reproducibility.py"
 # data, not for a change in verdict.
 
 printf 'TEST_OK=%s\nINSPECTOR=%s\n' "$WORK/offline-tests" "$WORK/ivrs-inspect"
-printf 'CORE_OK=%s %s %s %s %s %s %s\n' "$WORK/dma-observe-test" \
+printf 'CORE_OK=%s %s %s %s %s %s %s %s\n' "$WORK/dma-observe-test" \
        "$WORK/pte-core-test" "$WORK/obs-write-test" \
        "$WORK/bizwalk-core-test" "$WORK/evidence-gate-test" \
-       "$WORK/rxpost-test" "$WORK/capacity-test"
+       "$WORK/rxpost-test" "$WORK/capacity-test" "$WORK/table-growth-test"
 (cd "$ROOT" && shasum -a 256 include/amd_iommu/*.hpp src/*.cpp \
     probe/amd_iommu_*.hpp probe/AMDMapperProbe*.cpp probe/AMDMapperProbe*.hpp \
     tools/lucy-obs/*.hpp \

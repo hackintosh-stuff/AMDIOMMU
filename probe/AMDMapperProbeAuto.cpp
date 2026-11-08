@@ -53,7 +53,8 @@ bool ParseRequester(const char *text, UInt32 &requester) {
     }
     return true;
 }
-// The page-table area is profile-driven: mapper_abi::Profile::tablePages.
+// The initial table allocation follows the prepared profile. Later leaf
+// allocations are tracked by the mapper and retained alongside the root.
 constexpr UInt32 kMaxParts = 16;  // power-of-two split fits a 1 MiB range
 static_assert(mapper_abi::kMapPages <= 512, "revisit exact range command bound");
 
@@ -148,9 +149,9 @@ struct org_maz1_AMDMapperProbe::Domain {
     // S2: the admission record for this domain. Shown per device so a refused
     // or legacy domain cannot be mistaken for a pool-sized one.
     const char *profileName;
-    UInt32 profileRecords, profilePages, tablePages;
-    // Storage is reserved at this ceiling; profileName describes usable limits.
-    // Capacity growth never replaces tables, tablePA or tablePages.
+    UInt32 profileRecords, profilePages, allocatedTablePages;
+    // The ceiling limits growth; profileName describes allocated usable capacity.
+    // Growth appends leaf pages while retaining tables and tablePA as the root.
     const mapper_abi::Profile *ceilingProfile;
     const char *state;
     bool active;
@@ -509,8 +510,8 @@ bool org_maz1_AMDMapperProbe::DefaultDeviceMatches(
     return false;
 }
 
-// Select the reserved ceiling. Each domain initially exposes legacy capacity
-// and opens the next profile when a mapping exhausts records or IOVA pages.
+// Select the growth ceiling. Each domain starts with legacy storage and
+// allocates the next profile when a mapping exhausts records or IOVA pages.
 bool org_maz1_AMDMapperProbe::SelectProfile() {
     char requested[24] = {};
     const bool named = PE_parse_boot_argn("amdiommu_profile", requested,
@@ -940,8 +941,8 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
     d->deviceID = ((UInt32)nic->getBusNumber() << 8) |
         ((UInt32)nic->getDeviceNumber() << 3) | nic->getFunctionNumber();
     d->state = "preparing";
-    // Reserve the selected ceiling before publishing iommu-parent. The initial
-    // usable profile remains legacy; later growth only exposes reserved space.
+    // Allocate legacy storage before publishing iommu-parent. The ceiling is
+    // an allocation limit, not a reservation made for every attached device.
     mapper_abi::ProfileSource source = sourceIn;
     if (!requested) requested = &mapper_abi::kProfileLegacy;
     char requestedName[24] = {};
@@ -978,28 +979,26 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
     nic->setProperty("iommu-growth-policy", growth ? "capacity-demand" : "disabled");
     nic->setProperty("iommu-capacity-grown", "no");
     nic->setProperty("iommu-profile", prepared->name);
-    const UInt64 reservedBytes = mapper_abi::arenaBytesFor(*ceiling);
-    const bool preparedOK = reservedBytes &&
-        reservedBytes <= mapper_abi::kMaxArenaBytes &&
-        ceiling->tablePages >= ceiling->pages / 512 + 2 &&
+    const UInt64 preparedBytes = mapper_abi::arenaBytesFor(*prepared);
+    const bool preparedOK = preparedBytes &&
+        preparedBytes <= mapper_abi::kMaxArenaBytes &&
+        prepared->tablePages >= prepared->pages / 512 + 2 &&
         AllocateTableArea(d->tables,
-            (UInt64)ceiling->tablePages * M2B2_PAGE_SIZE, d->tablePA) &&
-        PrepareMappings((volatile UInt64 *)d->tables->getBytesNoCopy(),
-            d->tablePA, ceiling->tablePages, M2B2_PAGE_MODE_4_LEVEL,
-            *prepared, *ceiling);
+            (UInt64)prepared->tablePages * M2B2_PAGE_SIZE, d->tablePA) &&
+        PrepareMappings(d->tables, d->tablePA, M2B2_PAGE_MODE_4_LEVEL, *prepared);
     if (!preparedOK) {
         nic->setProperty("admission", "refused-no-arena");
-        IOLog("AMDMapperProbe: admission refused, reserved capacity %s did not prepare\n",
-              ceiling->name);
+        IOLog("AMDMapperProbe: admission refused, initial capacity %s did not prepare\n",
+              prepared->name);
         if (fAutoAttach)
-            panic("AMDMapperProbe: admission-refused: reserved capacity did not prepare");
+            panic("AMDMapperProbe: admission-refused: initial capacity did not prepare");
         if (d->tables) { d->tables->release(); d->tables = nullptr; }
         return false;
     }
     d->profileName = prepared->name;
     d->profileRecords = prepared->records;
     d->profilePages = prepared->pages;
-    d->tablePages = ceiling->tablePages;
+    d->allocatedTablePages = prepared->tablePages;
     d->ceilingProfile = ceiling;
     const char *admission = growth
         ? (ceiling == &mapper_abi::kProfileRl10gMax
@@ -1052,18 +1051,20 @@ const mapper_abi::Profile *org_maz1_AMDMapperProbe::CeilingProfile() const {
 }
 
 bool org_maz1_AMDMapperProbe::CommitCapacityGrowth(
-    const mapper_abi::Profile &target, bool &invalidated) {
+    const mapper_abi::Profile &target, UInt32 allocatedTablePages, bool &invalidated) {
     invalidated = false;
     Controller *c = fController;
     Domain *d = fDomain;
     if (!c || !d) return false;
     // Caller holds the mapper lock; retain the existing mapper -> controller order.
     LockGuard guard(c->lock);
+    // Linked table memory remains owned even when synchronization fails.
+    d->allocatedTablePages = allocatedTablePages;
     if (!c->ready || c->command.failed) return false;
-    if (d->active && (c->hardware.capabilityHeader & kNpCache)) {
+    if (d->active) {
         invalidated = true;
-        // bytes==0 includes the PDE cache. An active DTE is left untouched.
-        // Confirm completion before exposing any of the newly available range.
+        // New upper-level entries require a PDE-cache fence regardless of the
+        // non-present leaf-cache capability. An active DTE stays untouched.
         if (!InvalidateLocked(false, 0, 0, false, nullptr)) return false;
     }
     d->profileName = target.name;
@@ -1953,7 +1954,7 @@ void org_maz1_AMDMapperProbe::PublishAuto() {
     number("iommu-domain-id", d->domainID);
     number("iommu-root-pa", d->tablePA);
     number("iommu-table-pa", d->tablePA);
-    number("iommu-table-bytes", (UInt64)d->tablePages * M2B2_PAGE_SIZE);
+    number("iommu-table-bytes", (UInt64)d->allocatedTablePages * M2B2_PAGE_SIZE);
     setProperty("iommu-domain-profile", d->profileName ? d->profileName : "unknown");
     number("iommu-domain-profile-records", d->profileRecords);
     number("iommu-domain-profile-pages", d->profilePages);

@@ -13,7 +13,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 VERSION, SNAPSHOT_BYTES, RECORD_BYTES = 1, 960, 360
 ABI_LAYOUTS = {1: (960, 360, 32), 2: (1472, 616, 64), 3: (2496, 1128, 128),
-               4: (4544, 2152, 256)}
+               4: (4544, 2152, 256), 5: (4544, 2152, 256)}
 VERSIONS = {'RTL812xLucy': '1.1.229', 'AMDMapperProbe': '0.53.0'}
 PHASES = ('phase1', 'phase2', 'pre-down', 'down', 'after-up')
 EXPORTS = {'r44-mapper-raw': 'mapper.bin', 'r44-live-raw': 'live.bin',
@@ -82,6 +82,14 @@ def decode(data, *, abi=1):
     return result
 
 
+def decode_table_segments(data):
+    """ABI5 page-table blocks: physical base, byte offset in pt.bin, byte size."""
+    if not data or len(data) % 24:
+        raise ValueError('page-table segments must contain <QQQ records')
+    return [dict(zip(('physicalBase', 'offset', 'bytes'), row))
+            for row in struct.iter_unpack('<QQQ', data)]
+
+
 def registry(class_name, marker):
     data = plistlib.loads(subprocess.check_output(['ioreg', '-a', '-l', '-w0', '-r', '-c', class_name]))
     found = []
@@ -111,6 +119,8 @@ def snapshot(parent, label, driver_prefixes=('rtl812x-r44-',),
     driver = registry('RTL8125', 'rtl812x-r44-mapper-found')
     exports = {}
     requested = dict(EXPORTS)
+    if abi >= 5:
+        requested['mapper-page-table-segments-raw'] = 'pt-segments.bin'
     if extra_exports:
         requested.update(extra_exports)
     for key, name in requested.items():
@@ -131,7 +141,10 @@ def snapshot(parent, label, driver_prefixes=('rtl812x-r44-',),
 
 def read_snapshot(path, *, abi=1):
     value = json.loads((path / 'snapshot.json').read_text())
-    for name in EXPORTS.values():
+    names = list(EXPORTS.values())
+    if abi >= 5:
+        names.append('pt-segments.bin')
+    for name in names:
         data = (path / name).read_bytes()
         if value['exports'].get(name) != {'bytes': len(data), 'sha256': sha(data)}:
             raise ValueError('snapshot digest mismatch: ' + str(path / name))
@@ -142,6 +155,8 @@ def read_snapshot(path, *, abi=1):
         raise ValueError('live record count/size mismatch')
     value['live'] = [record(live, i, map_pages=map_pages) for i in range(0, len(live), record_bytes)]
     value['pt'] = (path / 'pt.bin').read_bytes()
+    if abi >= 5:
+        value['pt_segments'] = decode_table_segments((path / 'pt-segments.bin').read_bytes())
     return value
 
 

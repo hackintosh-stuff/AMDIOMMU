@@ -3,6 +3,8 @@
 #include "AMDMapperProbeInternal.hpp"
 #include "amd_iommu_tx_core.hpp"
 #include "amd_iommu_mapper_abi.hpp"
+#include "amd_iommu_mapper_arena.hpp"
+#include "amd_iommu_table_growth_core.hpp"
 #include <IOKit/IOLocks.h>
 #include <kern/debug.h>
 
@@ -21,40 +23,27 @@
           (unsigned long long)record.mapLength, (unsigned)record.state);
 }
 
-struct org_maz1_AMDMapperProbe::MapperState {
-    struct Mapping {
-        IOMemoryDescriptor *memory;
-        IODMACommand *command;
-        mapper_abi::RecordHeader record;
+struct org_maz1_AMDMapperProbe::MapperState : amdmapper::MappingArena {
+    struct TableAllocation {
+        IOBufferMemoryDescriptor *memory;
+        mapper_abi::TableSegment segment;
     };
+    // One initial allocation plus one leaf allocation per remaining profile.
+    static constexpr UInt32 kMaxTableAllocations = 3;
     IOLock *lock;
     volatile UInt64 *tables;
-    // Root physical address of the reserved table area; stable for its lifetime.
     UInt64 tablePA;
-    // One wired block holds every capacity-dependent array at ceiling size.
-    // Growth changes usable limits without moving any array or table page.
-    void *arena;
-    size_t arenaBytes;
-    volatile UInt64 **leaves;
-    amdtx::RuntimeAllocator allocator;
-    // Both scratch buffers are per-domain and used only while lock is held.
+    TableAllocation tableAllocations[kMaxTableAllocations];
+    UInt32 tableAllocationCount;
+    // These scratch buffers and the state object stay in place across growth.
     BoundedProbeLayout<mapper_abi::kRuns> walkScratch;
     mapper_abi::Record exportScratch;
-    Mapping *mappings;
-    // Expected PA from the descriptor walk, independent of the actual leaf PTE.
-    UInt64 *physicalByPage;
-    // Sole per-slot liveness state; accessed under the domain lock.
-    amdtx::u64 *liveSlots;
-    // Per-domain start index: zero means no mapping starts on this IOVA page.
-    UInt16 *slotByStartPage;
     mapper_abi::Snapshot snapshot;
-    OSData *suspendLive, *suspendPT, *resumeLive, *resumePT;
+    OSData *suspendLive, *suspendPT, *suspendPTSegments;
+    OSData *resumeLive, *resumePT, *resumePTSegments;
     UInt64 nextHandle;
-    // R48 observes successful caller address constraints outside the raw ABI.
-    // Only snapshot publication writes registry properties, never the hot path.
     UInt64 map32Ok, mapHighPAOk, mappedHighPAPages;
     UInt32 minMapBits, maxMapBits;
-    UInt32 records, pages;
     bool accepting;
     UInt32 capacityGrowthCount;
     UInt64 growthTime;
@@ -110,121 +99,112 @@ struct org_maz1_AMDMapperProbe::MapperState {
         return data;
     }
 
-    void capturePowerBoundary(OSData *&live, OSData *&pt) {
+    bool copyPageTables(OSData *&data, OSData *&segments) const {
+        data = OSData::withCapacity((unsigned)snapshot.ptBytes);
+        segments = OSData::withCapacity(tableAllocationCount *
+                                       sizeof(mapper_abi::TableSegment));
+        if (data && segments) {
+            bool complete = true;
+            for (UInt32 i = 0; i < tableAllocationCount; ++i) {
+                const auto &allocation = tableAllocations[i];
+                if (!data->appendBytes(allocation.memory->getBytesNoCopy(),
+                                       (unsigned)allocation.segment.bytes) ||
+                    !segments->appendBytes(&allocation.segment, sizeof(allocation.segment))) {
+                    complete = false;
+                    break;
+                }
+            }
+            if (complete) return true;
+        }
+        if (data) { data->release(); data = nullptr; }
+        if (segments) { segments->release(); segments = nullptr; }
+        return false;
+    }
+
+    void capturePowerBoundary(OSData *&live, OSData *&pt, OSData *&segments) {
         if (live) { live->release(); live = nullptr; }
         if (pt) { pt->release(); pt = nullptr; }
+        if (segments) { segments->release(); segments = nullptr; }
         live = copyLiveRecords();
-        pt = OSData::withBytes((const void *)tables, (unsigned)snapshot.ptBytes);
+        copyPageTables(pt, segments);
     }
 };
 
-// Reserve the ceiling once. Array offsets and upper-level PTEs are independent
-// of the usable limits, which can then grow while old mappings stay live.
-bool org_maz1_AMDMapperProbe::BuildArena(
-    MapperState *d, volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages,
-    UInt32 rootLevel, const mapper_abi::Profile &prepared, const mapper_abi::Profile &reserved) {
-    if (!d || d->arena || !tables || !tablePA || (tablePA & 4095ULL) ||
-        (rootLevel != 3 && rootLevel != 4)) return false;
-    // Capacity is decided before the tables are published: the caller must have
-    // reserved the ceiling's page-table area, and the record count must fit the
-    // UInt16 slot encoding used by slotByStartPage.
-    if (!reserved.records || reserved.records > 0xffffU || !reserved.pages ||
-        (reserved.pages % 512) || reserved.tablePages < 11 ||
-        tablePages < reserved.tablePages || !prepared.records || !prepared.pages ||
-        prepared.records > reserved.records || prepared.pages > reserved.pages)
-        return false;
-    const UInt32 leavesCount = reserved.pages / 512;
-    const UInt64 words = (reserved.records + 63) / 64;
-    const UInt64 pageWords = (reserved.pages + 63) / 64;
-    const UInt64 blockBytes = mapper_abi::arenaBytesFor(reserved);
-    IOLog("AMDMapperProbe: arena reserved=%s records=%u pages=%u tables=%u bytes=%llu\n",
-          reserved.name, reserved.records, reserved.pages, tablePages, blockBytes);
-    if (!blockBytes || blockBytes > mapper_abi::kMaxArenaBytes) return false;
-    void *arena = IOMalloc((vm_size_t)blockBytes);
-    if (!arena) return false;
-    bzero(arena, (size_t)blockBytes);
-    d->arena = arena;
-    d->arenaBytes = (size_t)blockBytes;
-    d->records = prepared.records;
-    d->pages = prepared.pages;
-    d->tables = tables;
-    d->tablePA = tablePA;
-    uint8_t *cursor = (uint8_t *)d->arena;
-    d->mappings = (MapperState::Mapping *)cursor;
-    cursor += (UInt64)reserved.records * sizeof(MapperState::Mapping);
-    d->physicalByPage = (UInt64 *)cursor;
-    cursor += (UInt64)reserved.pages * sizeof(UInt64);
-    d->slotByStartPage = (UInt16 *)cursor;
-    cursor += (UInt64)reserved.pages * sizeof(UInt16);
-    d->liveSlots = (amdtx::u64 *)cursor;
-    cursor += words * sizeof(amdtx::u64);
-    d->leaves = (volatile UInt64 **)cursor;
-    cursor += (UInt64)leavesCount * sizeof(volatile UInt64 *);
-    amdtx::u64 *used = (amdtx::u64 *)cursor;
-    cursor += pageWords * sizeof(amdtx::u64);
-    amdtx::u64 *ever = (amdtx::u64 *)cursor;
-    d->allocator = amdtx::RuntimeAllocator{used, ever, prepared.pages,
-                                           prepared.mapPages, 0, 0, 0};
-    amdsparse::Arena arenaMap = {tables, tablePA, tablePages, 1, rootLevel,
-                                 tablePA, 0, 0, nullptr};
-    for (UInt32 i = 0; i < leavesCount; ++i) {
-        d->leaves[i] = amdtx::prepareAt(arenaMap,
-            mapper_abi::kBase + (UInt64)i * 0x200000ULL, 512);
-        if (!d->leaves[i]) {
-            // Preparation has not exposed these arrays or tables to a client.
-            IOFree(d->arena, d->arenaBytes);
-            d->arena = nullptr;
-            d->arenaBytes = 0;
-            d->records = 0;
-            d->pages = 0;
-            d->tables = nullptr;
-            d->tablePA = 0;
-            d->mappings = nullptr;
-            d->physicalByPage = nullptr;
-            d->slotByStartPage = nullptr;
-            d->liveSlots = nullptr;
-            d->leaves = nullptr;
-            bzero(&d->allocator, sizeof(d->allocator));
-            return false;
-        }
-    }
-    auto &s = d->snapshot;
-    s.version = mapper_abi::kVersion; s.bytes = sizeof(s);
-    s.flags = mapper_abi::kPrepared | mapper_abi::kAccepting;
-    s.capacityMaps = prepared.records; s.capacityPages = prepared.pages;
-    s.maxMapPages = prepared.mapPages; s.maxRuns = prepared.runs;
-    s.iovaBase = mapper_abi::kBase; s.iovaBytes = prepared.pages * 4096ULL;
-    s.rootPA = tablePA; s.ptBytes = tablePages * 4096ULL;
-    s.rootLevel = rootLevel; s.tablePages = tablePages;
+// Only metadata moves during growth. The shared layout/copy helpers are also
+// exercised by the host capacity test; the kernel owns allocation and lifetime.
+static bool AllocateMapperArena(amdmapper::MappingArena &arena,
+                                const mapper_abi::Profile &profile) {
+    if (!profile.records || profile.records > 0xffffU ||
+        !profile.pages || (profile.pages % 512)) return false;
+    const UInt64 bytes = mapper_abi::arenaBytesFor(profile);
+    if (!bytes || bytes > mapper_abi::kMaxArenaBytes) return false;
+    void *memory = IOMalloc((vm_size_t)bytes);
+    if (!memory) return false;
+    bzero(memory, (size_t)bytes);
+    amdmapper::bindArena(arena, memory, profile);
     return true;
 }
 
 bool org_maz1_AMDMapperProbe::PrepareMappings(
-    volatile UInt64 *tables, UInt64 tablePA, UInt32 tablePages, UInt32 rootLevel,
-    const mapper_abi::Profile &prepared, const mapper_abi::Profile &reserved) {
-    if (fMapper) return false;
+    IOBufferMemoryDescriptor *tables, UInt64 tablePA, UInt32 rootLevel,
+    const mapper_abi::Profile &profile) {
+    if (fMapper || !tables || !tablePA || (tablePA & 4095ULL) ||
+        (rootLevel != 3 && rootLevel != 4) ||
+        tables->getLength() < profile.tablePages * 4096ULL) return false;
     auto *d = (MapperState *)IOMalloc(sizeof(MapperState));
     if (!d) return false;
     bzero(d, sizeof(*d));
     d->lock = IOLockAlloc();
     if (!d->lock) { IOFree(d, sizeof(*d)); return false; }
-    if (!BuildArena(d, tables, tablePA, tablePages, rootLevel, prepared, reserved)) {
+    if (!AllocateMapperArena(*d, profile)) {
         IOLockFree(d->lock);
         IOFree(d, sizeof(*d));
         return false;
     }
+    d->tables = (volatile UInt64 *)tables->getBytesNoCopy();
+    d->tablePA = tablePA;
+    amdsparse::Arena rootArena = {d->tables, tablePA, profile.tablePages, 1,
+                                  rootLevel, tablePA, 0, 0, nullptr};
+    for (UInt32 i = 0; i < profile.pages / 512; ++i) {
+        d->leaves[i] = amdtx::prepareAt(rootArena,
+            mapper_abi::kBase + (UInt64)i * 0x200000ULL, 512);
+        if (!d->leaves[i]) {
+            IOFree(d->arena, d->arenaBytes);
+            IOLockFree(d->lock);
+            IOFree(d, sizeof(*d));
+            return false;
+        }
+    }
+    // Domain retains its root allocation; MapperState owns another reference
+    // alongside the additional leaf allocations it will own after growth.
+    tables->retain();
+    d->tableAllocations[0] = {tables, {tablePA, 0, profile.tablePages * 4096ULL}};
+    d->tableAllocationCount = 1;
+    auto &snapshot = d->snapshot;
+    snapshot.version = mapper_abi::kVersion;
+    snapshot.bytes = sizeof(snapshot);
+    snapshot.flags = mapper_abi::kPrepared | mapper_abi::kAccepting;
+    snapshot.capacityMaps = profile.records;
+    snapshot.capacityPages = profile.pages;
+    snapshot.maxMapPages = profile.mapPages;
+    snapshot.maxRuns = profile.runs;
+    snapshot.iovaBase = mapper_abi::kBase;
+    snapshot.iovaBytes = profile.pages * 4096ULL;
+    snapshot.rootPA = tablePA;
+    snapshot.ptBytes = profile.tablePages * 4096ULL;
+    snapshot.rootLevel = rootLevel;
+    snapshot.tablePages = profile.tablePages;
+    snapshot.preparedAt = mach_absolute_time();
     d->accepting = true;
     d->growthState = "prepared";
-    d->growthTime = 0;
-    d->snapshot.preparedAt = mach_absolute_time();
     OSSynchronizeIO();
     fMapper = d;
     return true;
 }
 
-// The mapper lock covers allocation, growth and retry. All backing storage is
-// already present, so synchronization is the only fallible step and happens
-// before either the mapper or the hardware-facing domain exposes new limits.
+// Allocate and copy software metadata before linking any new hardware tables.
+// The mapper lock keeps every live record and internal pointer stable until the
+// new arena is adopted. Existing table allocations remain wired throughout.
 bool org_maz1_AMDMapperProbe::TryGrowCapacity(MapperState *d) {
     const mapper_abi::Profile *current = CurrentProfile();
     const mapper_abi::Profile *target =
@@ -233,10 +213,48 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(MapperState *d) {
         d->growthState = "at-ceiling";
         return false;
     }
+    amdmapper::MappingArena grown{};
+    if (!AllocateMapperArena(grown, *target)) {
+        d->growthState = "failed-arena";
+        return false;
+    }
+    amdmapper::copyArena(grown, *d);
+    const UInt32 firstLeaf = d->pages / 512;
+    const UInt32 leafCount = target->pages / 512 - firstLeaf;
+    IOBufferMemoryDescriptor *newTables = nullptr;
+    UInt64 newTablePA = 0;
+    if (!AllocateTableArea(newTables, (UInt64)leafCount * 4096ULL, newTablePA)) {
+        IOFree(grown.arena, grown.arenaBytes);
+        d->growthState = "failed-tables";
+        return false;
+    }
+    amdsparse::Arena rootArena = {d->tables, d->tablePA,
+        (UInt32)(d->tableAllocations[0].segment.bytes / 4096), 1,
+        d->snapshot.rootLevel, d->tablePA, 0, 0, nullptr};
+    volatile UInt64 *directory = amdtable::leafDirectory(rootArena, mapper_abi::kBase);
+    if (!amdtable::attachLeafTables(directory, firstLeaf, leafCount,
+            (volatile UInt64 *)newTables->getBytesNoCopy(), newTablePA, grown.leaves)) {
+        // The helper performs every check before the first PDE write.
+        newTables->release();
+        IOFree(grown.arena, grown.arenaBytes);
+        d->growthState = "failed-page-tables";
+        d->accepting = false;
+        d->snapshot.flags |= mapper_abi::kFailed;
+        d->snapshot.flags &= ~mapper_abi::kAccepting;
+        return false;
+    }
+    // From this point hardware can reference the new allocation. Retain it
+    // even if completion cannot be confirmed; no new IOVA is returned on failure.
+    d->tableAllocations[d->tableAllocationCount++] = {newTables,
+        {newTablePA, d->snapshot.ptBytes, (UInt64)leafCount * 4096ULL}};
+    d->snapshot.ptBytes += (UInt64)leafCount * 4096ULL;
+    d->snapshot.tablePages += leafCount;
+    OSSynchronizeIO();
     bool invalidated = false;
-    const bool committed = CommitCapacityGrowth(*target, invalidated);
+    const bool committed = CommitCapacityGrowth(*target, d->snapshot.tablePages, invalidated);
     if (invalidated) ++d->snapshot.invalidates;
     if (!committed) {
+        IOFree(grown.arena, grown.arenaBytes);
         if (invalidated) ++d->snapshot.invalidateFailures;
         d->growthState = "failed-synchronization";
         d->accepting = false;
@@ -244,9 +262,10 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(MapperState *d) {
         d->snapshot.flags &= ~mapper_abi::kAccepting;
         return false;
     }
-    d->records = target->records;
-    d->pages = target->pages;
-    d->allocator.poolPages = target->pages;
+    void *oldArena = d->arena;
+    const size_t oldBytes = d->arenaBytes;
+    static_cast<amdmapper::MappingArena &>(*d) = grown;
+    IOFree(oldArena, oldBytes);
     d->snapshot.capacityMaps = target->records;
     d->snapshot.capacityPages = target->pages;
     d->snapshot.iovaBytes = target->pages * 4096ULL;
@@ -254,8 +273,9 @@ bool org_maz1_AMDMapperProbe::TryGrowCapacity(MapperState *d) {
     d->growthFrom = current->name;
     d->growthState = "grown";
     d->growthTime = mach_absolute_time();
-    IOLog("AMDMapperProbe: capacity grew %s -> %s (records=%u pages=%u)\n",
-          current->name, target->name, target->records, target->pages);
+    IOLog("AMDMapperProbe: capacity grew %s -> %s (records=%u pages=%u table-pages=%u)\n",
+          current->name, target->name, target->records, target->pages,
+          d->snapshot.tablePages);
     return true;
 }
 
@@ -298,7 +318,8 @@ IOReturn org_maz1_AMDMapperProbe::PowerTransition(UInt32 operation) {
         d->snapshot.flags &= ~mapper_abi::kAccepting;
         if (d->resumeLive) { d->resumeLive->release(); d->resumeLive = nullptr; }
         if (d->resumePT) { d->resumePT->release(); d->resumePT = nullptr; }
-        d->capturePowerBoundary(d->suspendLive, d->suspendPT);
+        if (d->resumePTSegments) { d->resumePTSegments->release(); d->resumePTSegments = nullptr; }
+        d->capturePowerBoundary(d->suspendLive, d->suspendPT, d->suspendPTSegments);
         ok = SuspendAuto();
     } else if (operation == 2) {
         ok = ResumeAuto();
@@ -306,7 +327,7 @@ IOReturn org_maz1_AMDMapperProbe::PowerTransition(UInt32 operation) {
             // Exact retained records/PT are exported before any ordinary
             // mapping can run again. Allocation failure invalidates evidence,
             // but does not turn a successful hardware wake into a PM failure.
-            d->capturePowerBoundary(d->resumeLive, d->resumePT);
+            d->capturePowerBoundary(d->resumeLive, d->resumePT, d->resumePTSegments);
             d->accepting = true;
             d->snapshot.flags |= mapper_abi::kAccepting;
             // Admission is open again, so the suspend record is consumed here
@@ -332,7 +353,8 @@ bool org_maz1_AMDMapperProbe::SuspendDomain() {
         state->snapshot.flags &= ~mapper_abi::kAccepting;
         if (state->resumeLive) { state->resumeLive->release(); state->resumeLive = nullptr; }
         if (state->resumePT) { state->resumePT->release(); state->resumePT = nullptr; }
-        state->capturePowerBoundary(state->suspendLive, state->suspendPT);
+        if (state->resumePTSegments) { state->resumePTSegments->release(); state->resumePTSegments = nullptr; }
+        state->capturePowerBoundary(state->suspendLive, state->suspendPT, state->suspendPTSegments);
     }
     // Recorded before the transition is attempted: admission is closed either
     // way, so the DMA path may reopen it once the controller is proven usable
@@ -357,7 +379,7 @@ bool org_maz1_AMDMapperProbe::ResumeDomain() {
         ok = EnsureControllerOperationalLocked(state, "resume") && ControllerReady();
     }
     if (ok) {
-        state->capturePowerBoundary(state->resumeLive, state->resumePT);
+        state->capturePowerBoundary(state->resumeLive, state->resumePT, state->resumePTSegments);
         state->accepting = true;
         state->snapshot.flags |= mapper_abi::kAccepting;
         SetSuspendRequested(false);
@@ -373,15 +395,21 @@ bool org_maz1_AMDMapperProbe::ResumeDomain() {
 void org_maz1_AMDMapperProbe::PublishPMBoundary() {
     MapperState *state = fMapper;
     if (!state) return;
-    OSData *suspendLive, *suspendPT, *resumeLive, *resumePT;
+    OSData *suspendLive, *suspendPT, *suspendSegments;
+    OSData *resumeLive, *resumePT, *resumeSegments;
     IOLockLock(state->lock);
     suspendLive = state->suspendLive; suspendPT = state->suspendPT;
+    suspendSegments = state->suspendPTSegments;
     resumeLive = state->resumeLive; resumePT = state->resumePT;
+    resumeSegments = state->resumePTSegments;
     if (suspendLive) suspendLive->retain();
     if (suspendPT) suspendPT->retain();
+    if (suspendSegments) suspendSegments->retain();
     if (resumeLive) resumeLive->retain();
     if (resumePT) resumePT->retain();
-    const bool valid = suspendLive && suspendPT && resumeLive && resumePT;
+    if (resumeSegments) resumeSegments->retain();
+    const bool valid = suspendLive && suspendPT && suspendSegments &&
+        resumeLive && resumePT && resumeSegments;
     IOLockUnlock(state->lock);
     auto publish = [this](const char *key, OSData *data) {
         if (data) { setProperty(key, data); data->release(); }
@@ -389,8 +417,10 @@ void org_maz1_AMDMapperProbe::PublishPMBoundary() {
     };
     publish("pm-suspend-live-raw", suspendLive);
     publish("pm-suspend-pt-raw", suspendPT);
+    publish("pm-suspend-pt-segments-raw", suspendSegments);
     publish("pm-resume-live-raw", resumeLive);
     publish("pm-resume-pt-raw", resumePT);
+    publish("pm-resume-pt-segments-raw", resumeSegments);
     setProperty("pm-snapshots-valid", valid ? "yes" : "no");
 }
 
@@ -428,9 +458,13 @@ bool org_maz1_AMDMapperProbe::ReleaseMappings() {
     fMapper = nullptr;
     if (d->suspendLive) d->suspendLive->release();
     if (d->suspendPT) d->suspendPT->release();
+    if (d->suspendPTSegments) d->suspendPTSegments->release();
     if (d->resumeLive) d->resumeLive->release();
     if (d->resumePT) d->resumePT->release();
+    if (d->resumePTSegments) d->resumePTSegments->release();
     if (d->arena) IOFree(d->arena, d->arenaBytes);
+    for (UInt32 i = 0; i < d->tableAllocationCount; ++i)
+        d->tableAllocations[i].memory->release();
     IOLockFree(d->lock); IOFree(d, sizeof(*d));
     return true;
 }
@@ -637,7 +671,6 @@ void org_maz1_AMDMapperProbe::PublishCapacity(bool capacityChanged) {
         auto *d = fMapper;
         IOLockLock(d->lock);
         const mapper_abi::Profile *current = CurrentProfile();
-        const mapper_abi::Profile *reserved = CeilingProfile();
         const UInt32 growthCount = d->capacityGrowthCount;
         const UInt64 growthTime = d->growthTime;
         const char *growthState = d->growthState;
@@ -650,7 +683,7 @@ void org_maz1_AMDMapperProbe::PublishCapacity(bool capacityChanged) {
         // releasing the mapper lock. Profiles and state names have static storage.
         auto publish = [&](IORegistryEntry *entry) {
             entry->setProperty("iommu-profile", current->name);
-            entry->setProperty("iommu-profile-reserved", reserved->name);
+            entry->setProperty("iommu-profile-allocated", current->name);
             entry->setProperty("iommu-profile-records", current->records, 32);
             entry->setProperty("iommu-profile-pages", current->pages, 32);
             entry->setProperty("iommu-profile-table-pages", tablePages, 32);
@@ -818,11 +851,13 @@ void org_maz1_AMDMapperProbe::PublishMappings(OSDictionary **copy) {
     ++s.snapshotSequence; s.snapshotTime = mach_absolute_time();
     OSData *summary = OSData::withBytes(&s, sizeof(s));
     OSData *active = d->copyLiveRecords();
-    OSData *tables = OSData::withBytes((const void *)d->tables, (unsigned)s.ptBytes);
-    if (summary && active && tables) {
+    OSData *tables = nullptr, *segments = nullptr;
+    d->copyPageTables(tables, segments);
+    if (summary && active && tables && segments) {
         setProperty("mapper-state-raw", summary);
         setProperty("mapper-live-raw", active);
         setProperty("mapper-page-table-raw", tables);
+        setProperty("mapper-page-table-segments-raw", segments);
         setProperty("mapper-abi-version", mapper_abi::kVersion, 32);
         setProperty("mapper-live-maps", s.liveCount, 32);
         setProperty("mapper-live-pages", s.livePages, 32);
@@ -849,16 +884,20 @@ void org_maz1_AMDMapperProbe::PublishMappings(OSDictionary **copy) {
     if (summary) summary->release();
     if (active) active->release();
     if (tables) tables->release();
+    if (segments) segments->release();
     auto boundary = [this](const char *key, OSData *data) {
         if (data) setProperty(key, data);
         else removeProperty(key);
     };
     boundary("pm-suspend-live-raw", d->suspendLive);
     boundary("pm-suspend-pt-raw", d->suspendPT);
+    boundary("pm-suspend-pt-segments-raw", d->suspendPTSegments);
     boundary("pm-resume-live-raw", d->resumeLive);
     boundary("pm-resume-pt-raw", d->resumePT);
+    boundary("pm-resume-pt-segments-raw", d->resumePTSegments);
     setProperty("pm-snapshots-valid",
-        d->suspendLive && d->suspendPT && d->resumeLive && d->resumePT ? "yes" : "no");
+        d->suspendLive && d->suspendPT && d->suspendPTSegments &&
+        d->resumeLive && d->resumePT && d->resumePTSegments ? "yes" : "no");
     // Keep this domain's raw state, PTE bytes and hardware counters in one
     // snapshot. Hardware export takes only the controller lock after this lock.
     PublishAuto();

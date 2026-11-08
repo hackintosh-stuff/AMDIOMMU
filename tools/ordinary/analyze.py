@@ -19,14 +19,31 @@ def need(condition, message):
 def leaves(value):
     m, data = value['mapper'], value['pt']
     need(len(data) == m['ptBytes'] == m['tablePages'] * 4096, 'PT arena size differs')
+    segments = value.get('pt_segments') if m['version'] >= 5 else [
+        {'physicalBase': m['rootPA'], 'offset': 0, 'bytes': len(data)}]
+    need(segments, 'missing page-table segment descriptors')
+    end = 0
+    for segment in segments:
+        need(segment['physicalBase'] % 4096 == 0 and segment['offset'] == end and
+             segment['bytes'] > 0 and segment['bytes'] % 4096 == 0,
+             'page-table segment layout differs')
+        end += segment['bytes']
+    need(end == len(data), 'page-table segments do not cover the captured bytes')
     found, seen = {}, set()
 
+    def table_offset(pa):
+        need(pa % 4096 == 0, 'unaligned page-table pointer')
+        for segment in segments:
+            relative = pa - segment['physicalBase']
+            if 0 <= relative <= segment['bytes'] - 4096:
+                return segment['offset'] + relative
+        raise ValueError('table pointer leaves the captured segments')
+
     def walk(pa, level, base):
-        need(pa % 4096 == 0 and m['rootPA'] <= pa <= m['rootPA'] + len(data) - 4096,
-             'table pointer leaves the captured arena')
+        offset = table_offset(pa)
         need(pa not in seen, 'page table alias/cycle')
         seen.add(pa)
-        for index, raw in enumerate(struct.unpack_from('<512Q', data, pa - m['rootPA'])):
+        for index, raw in enumerate(struct.unpack_from('<512Q', data, offset)):
             if not raw & 1:
                 continue
             address = base + (index << (12 + 9 * (level - 1)))
