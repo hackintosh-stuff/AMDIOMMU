@@ -139,7 +139,7 @@ void allocationEquivalence() {
     amdtx::BoundedAllocator<4096, 128> fixed{};
     amdtx::u64 used[4096 / 64] = {};
     amdtx::u64 ever[4096 / 64] = {};
-    amdtx::RuntimeAllocator runtime{used, ever, 4096, 128, 0, 0, 0};
+    amdtx::RuntimeAllocator runtime{used, ever, 4096, 128, 0, 0, 0, 0};
 
     const std::uint32_t alignments[4] = {1, 1, 2, 8};
     std::vector<std::pair<unsigned, unsigned>> live;
@@ -151,9 +151,11 @@ void allocationEquivalence() {
             const unsigned pages = 1 + rng.below(128);
             const unsigned align = alignments[rng.below(4)];
             unsigned baseFixed = 0, baseRuntime = 0;
+            const unsigned retainedSearchStart = runtime.freePageSearchStart;
             const bool okFixed = amdtx::allocate(fixed, pages, baseFixed, align);
             const bool okRuntime = amdtx::allocate(runtime, pages, baseRuntime, align);
             if (okFixed != okRuntime || (okFixed && baseFixed != baseRuntime)) ++mismatches;
+            if (!okRuntime && runtime.freePageSearchStart != retainedSearchStart) ++mismatches;
             if (okFixed) live.emplace_back(baseFixed, pages);
         } else {
             const unsigned pick = rng.below(static_cast<std::uint32_t>(live.size()));
@@ -166,6 +168,8 @@ void allocationEquivalence() {
         if (fixed.livePages != runtime.livePages ||
             fixed.peakPages != runtime.peakPages ||
             fixed.reusedAllocations != runtime.reusedAllocations ||
+            runtime.freePageSearchStart >
+                amdtx::findNextBitmapPage(fixed.used, 0, 4096, false) ||
             std::memcmp(fixed.used, used, sizeof(used)) != 0 ||
             std::memcmp(fixed.ever, ever, sizeof(ever)) != 0) {
             ++mismatches;
@@ -186,6 +190,7 @@ void allocationEquivalence() {
               "equivalent allocators did not return every page");
     }
     check(fixed.livePages == 0 && runtime.livePages == 0 &&
+              runtime.freePageSearchStart == 0 &&
               fixed.peakPages == runtime.peakPages &&
               fixed.reusedAllocations == runtime.reusedAllocations &&
               std::memcmp(fixed.ever, ever, sizeof(ever)) == 0,
@@ -340,17 +345,23 @@ void capacitySemantics() {
     // that is the difference between a ring-sized arena and a pool-sized one.
     amdtx::u64 used[512 / 64] = {};
     amdtx::u64 ever[512 / 64] = {};
-    amdtx::RuntimeAllocator runtime{used, ever, 512, 1, 0, 0, 0};
+    amdtx::RuntimeAllocator runtime{used, ever, 512, 1, 0, 0, 0, 0};
     unsigned granted = 0;
     unsigned base = 0;
     while (amdtx::allocate(runtime, 1, base)) ++granted;
     check(granted == 512, "1-page grants do not fill the pool exactly");
-    check(runtime.livePages == 512, "live page accounting differs from grants");
+    check(runtime.livePages == 512 && runtime.freePageSearchStart == 512,
+          "sequential grants did not account for or skip the occupied pool");
     amdtx::release(runtime, 0, 1);
+    check(runtime.freePageSearchStart == 0,
+          "releasing the first page did not lower the search start");
     check(amdtx::allocate(runtime, 1, base) && base == 0,
           "a released page is not reused first");
+    check(runtime.freePageSearchStart == 1,
+          "refilling a low page did not retain a conservative search start");
     // A multi-page request larger than maxMapPages must be refused, not split.
-    check(!amdtx::allocate(runtime, 2, base), "per-map bound was ignored");
+    check(!amdtx::allocate(runtime, 2, base) && runtime.freePageSearchStart == 1,
+          "per-map refusal changed the search start or ignored the bound");
 }
 
 void growthPolicy() {
@@ -424,7 +435,8 @@ void liveCapacityGrowth() {
     auto &allocator = metadata.allocator;
     check(metadata.metadataBytes() == mapper_abi::metadataBytesFor(current) &&
               metadata.metadataBytes() < mapper_abi::metadataBytesFor(ceiling) &&
-              metadata.recordChunkCount == 1 && metadata.pageChunkCount == 1,
+              metadata.recordChunkCount == 1 && metadata.pageChunkCount == 1 &&
+              allocator.freePageSearchStart == 0,
           "metadata preparation allocated the ceiling instead of the initial profile");
 
     std::vector<amdtx::u64> tableWords(ceiling.tablePages * 512);
@@ -543,6 +555,7 @@ void liveCapacityGrowth() {
         const unsigned retainedLivePages = allocator.livePages;
         const unsigned retainedPeakPages = allocator.peakPages;
         const unsigned retainedReusedAllocations = allocator.reusedAllocations;
+        const unsigned retainedSearchStart = allocator.freePageSearchStart;
         const bool recordsGrowing = resource == mapper_abi::CapacityResource::recordSlots;
         if (recordsGrowing) {
             const unsigned addedRecords = next.records - current.records;
@@ -587,6 +600,7 @@ void liveCapacityGrowth() {
                   allocator.livePages == retainedLivePages &&
                   allocator.peakPages == retainedPeakPages &&
                   allocator.reusedAllocations == retainedReusedAllocations &&
+                  allocator.freePageSearchStart == retainedSearchStart &&
                   allocator.poolPages == next.pages && metadata.pages == next.pages &&
                   metadata.records == next.records &&
                   metadata.recordChunkCount == retainedRecordChunkCount + (recordsGrowing ? 1U : 0U) &&
@@ -641,9 +655,17 @@ void liveCapacityGrowth() {
         check(liveCount < current.records, "page fill unexpectedly exhausted record slots");
         check(allocateMapping(1) == AllocationResult::pagesFull,
               "page exhaustion was not detected");
+        const unsigned previousPages = allocator.poolPages;
+        check(allocator.freePageSearchStart == previousPages,
+              "filling the current page window did not advance the search start");
         if (!growStorage(mapper_abi::CapacityResource::iovaPages, {2048, nextPages})) return;
+        check(allocator.freePageSearchStart == previousPages,
+              "page append did not retain the new free range's start");
         check(allocateMapping(1) == AllocationResult::mapped,
               "page-limited mapping did not succeed after metadata growth");
+        check(metadata.mappingAt(liveCount - 1).record.basePage == previousPages &&
+                  allocator.freePageSearchStart == previousPages + 1,
+              "page growth did not resume allocation at the appended range");
     }
     if (!verifyLiveTranslations()) return;
     check(current.records == 2048 && current.pages == 16384,
@@ -654,7 +676,7 @@ void liveCapacityGrowth() {
         if (!(metadata.liveSlots[slot / 64] & (1ULL << (slot % 64)))) continue;
         if (!releaseMapping(slot)) return;
     }
-    check(liveCount == 0 && allocator.livePages == 0 &&
+    check(liveCount == 0 && allocator.livePages == 0 && allocator.freePageSearchStart == 0 &&
               amdtx::findNextBitmapPage(allocator.used, 0, metadata.pages, true) == metadata.pages &&
               amdtx::findNextBitmapPage(metadata.liveSlots, 0, metadata.records, true) == metadata.records,
           "metadata growth left live allocations after the final release");
@@ -751,6 +773,7 @@ void wideRecordOwners() {
     const unsigned retainedLivePages = metadata.allocator.livePages;
     const unsigned retainedPeakPages = metadata.allocator.peakPages;
     const unsigned retainedReusedAllocations = metadata.allocator.reusedAllocations;
+    const unsigned retainedSearchStart = metadata.allocator.freePageSearchStart;
     const unsigned addedRecords = target.records - initial.records;
     recordWords.emplace_back(
         mapper_abi::recordChunkBytesFor(addedRecords) / sizeof(amdtx::u64));
@@ -777,7 +800,8 @@ void wideRecordOwners() {
               metadata.allocator.maxMapPages == retainedMaxMapPages &&
               metadata.allocator.livePages == retainedLivePages &&
               metadata.allocator.peakPages == retainedPeakPages &&
-              metadata.allocator.reusedAllocations == retainedReusedAllocations,
+              metadata.allocator.reusedAllocations == retainedReusedAllocations &&
+              metadata.allocator.freePageSearchStart == retainedSearchStart,
           "wide record growth moved or modified page chunks");
     if (!verifyOwners() || !mapAtSlot(65536) || !mapAtSlot(131071) ||
             !verifyOwners()) return;
@@ -796,7 +820,7 @@ void wideRecordOwners() {
         mapping.memory = nullptr;
         mapping.command = nullptr;
     }
-    check(metadata.allocator.livePages == 0 &&
+    check(metadata.allocator.livePages == 0 && metadata.allocator.freePageSearchStart == 0 &&
               amdtx::findNextBitmapPage(metadata.allocator.used, 0, metadata.pages, true) ==
                   metadata.pages &&
               amdtx::findNextBitmapPage(metadata.liveSlots, 0, metadata.records, true) ==
@@ -830,7 +854,8 @@ void crossChunkAllocation() {
     }
     constexpr unsigned mappingPages = 4;
     unsigned base = 0;
-    check(!amdtx::allocate(allocator, mappingPages, base),
+    check(!amdtx::allocate(allocator, mappingPages, base) &&
+              allocator.freePageSearchStart == prefixPages,
           "the initial page pool unexpectedly fits the cross-chunk mapping");
 
     pageWords.emplace_back(
@@ -839,8 +864,11 @@ void crossChunkAllocation() {
     amdmapper::bindIovaPageChunk(added, pageWords.back().data(),
                                  storage.pages, mapper_abi::kPages);
     amdmapper::appendIovaPageChunk(storage, added);
+    check(allocator.freePageSearchStart == prefixPages,
+          "page append skipped the retained chunk's free tail");
     const bool allocated = amdtx::allocate(allocator, mappingPages, base);
-    check(allocated && base == prefixPages,
+    check(allocated && base == prefixPages &&
+              allocator.freePageSearchStart == prefixPages + mappingPages,
           "the global allocator could not span retained and appended page chunks");
     if (!allocated) return;
     check(&storage.chunkAtPage(base) != &storage.chunkAtPage(base + mappingPages - 1),
@@ -873,7 +901,8 @@ void crossChunkAllocation() {
         storage.leafTable(page / 512)[page % 512] = 0;
     }
     storage.startPageOwner(base) = 0;
-    check(amdtx::release(allocator, base, mappingPages),
+    check(amdtx::release(allocator, base, mappingPages) &&
+              allocator.freePageSearchStart == prefixPages,
           "the global allocator could not release a cross-chunk mapping");
     check(amdtx::findNextBitmapPage(allocator.used, base, base + mappingPages, true) ==
               base + mappingPages &&
@@ -884,7 +913,7 @@ void crossChunkAllocation() {
     for (const auto &range : prefix)
         check(amdtx::release(allocator, range.first, range.second),
               "the retained prefix could not be released after page append");
-    check(allocator.livePages == 0 &&
+    check(allocator.livePages == 0 && allocator.freePageSearchStart == 0 &&
               amdtx::findNextBitmapPage(allocator.used, 0, storage.pages, true) == storage.pages,
           "the chunked IOVA pool did not fully drain");
 }

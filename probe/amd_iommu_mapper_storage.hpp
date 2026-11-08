@@ -156,7 +156,7 @@ inline void initializeIovaPageStorage(IovaPageStorage &target,
                                      uint32_t maxMapPages = mapper_abi::kMapPages) {
     target = {};
     target.allocator = amdtx::RuntimeAllocatorState<PageBitmap>{
-        {&target, false}, {&target, true}, 0, maxMapPages, 0, 0, 0};
+        {&target, false}, {&target, true}, 0, maxMapPages, 0, 0, 0, 0};
 }
 
 inline void bindIovaPageChunk(IovaPageChunk &target, void *zeroedStorage,
@@ -182,6 +182,7 @@ inline void bindIovaPageChunk(IovaPageChunk &target, void *zeroedStorage,
 // The caller owns a prepared chunk starting at target.pages and has checked the
 // descriptor limit. Append only after any hardware growth fence has completed.
 // Existing chunks and all allocator accounting remain in place.
+// New free pages do not change the occupied prefix before freePageSearchStart.
 inline void appendIovaPageChunk(IovaPageStorage &target, const IovaPageChunk &chunk) {
     target.chunks[target.pageChunkCount++] = chunk;
     target.pageBytes += chunk.bytes;

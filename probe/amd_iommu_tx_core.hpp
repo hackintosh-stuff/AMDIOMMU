@@ -99,6 +99,8 @@ struct RuntimeAllocatorState {
     Bitmap used, ever;
     unsigned poolPages, maxMapPages;
     unsigned livePages, peakPages, reusedAllocations;
+    // Every page before this index is occupied; this page itself may be occupied.
+    unsigned freePageSearchStart;
 };
 using RuntimeAllocator = RuntimeAllocatorState<u64 *>;
 
@@ -114,16 +116,17 @@ inline bool allocate(RuntimeAllocatorState<Bitmap> &a, unsigned pages, unsigned 
         (alignmentPages & (alignmentPages - 1)) || pages > a.poolPages) return false;
     const unsigned lastBase = a.poolPages - pages;
     const u64 alignMask = alignmentPages - 1U;
-    unsigned from = 0;
-    while (from <= lastBase) {
-        const unsigned first = findNextBitmapPage(a.used, from, lastBase + 1, false);
+    const unsigned firstFreePage = findNextBitmapPage(
+        a.used, a.freePageSearchStart, lastBase + 1, false);
+    unsigned first = firstFreePage;
+    while (first <= lastBase) {
         const u64 aligned = (static_cast<u64>(first) + alignMask) & ~alignMask;
         if (aligned > lastBase) return false;
         const unsigned base = static_cast<unsigned>(aligned);
         const unsigned end = base + pages;
         const unsigned conflict = findNextBitmapPage(a.used, base, end, true);
         if (conflict != end) {
-            from = conflict + 1;
+            first = findNextBitmapPage(a.used, conflict + 1, lastBase + 1, false);
             continue;
         }
         bool reused = false;
@@ -139,6 +142,9 @@ inline bool allocate(RuntimeAllocatorState<Bitmap> &a, unsigned pages, unsigned 
             everWord |= mask;
             page += count;
         }
+        // Preserve a lower free hole skipped by alignment or a range conflict.
+        // Otherwise the committed range extends the known occupied prefix.
+        a.freePageSearchStart = base == firstFreePage ? end : firstFreePage;
         a.livePages += pages;
         if (a.livePages > a.peakPages) a.peakPages = a.livePages;
         if (reused) ++a.reusedAllocations;
@@ -167,6 +173,7 @@ inline bool release(RuntimeAllocatorState<Bitmap> &a, unsigned basePage, unsigne
         a.used[page / 64] &= ~bitmapWordRangeMask(firstBit, count);
         page += count;
     }
+    if (basePage < a.freePageSearchStart) a.freePageSearchStart = basePage;
     a.livePages -= pages;
     return true;
 }

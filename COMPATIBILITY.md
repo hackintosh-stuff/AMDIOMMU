@@ -17,7 +17,7 @@ Which combinations count, and how a failure is attributed, is defined in
 - **Endpoint routing.** The IOMMU is the one named for the selected device by the ACPI IVRS entry, and its PCI capability and MMIO base are checked against firmware. Only PCI segment 0 is handled; a device that needs a requester-ID alias, a redirection, or a nonzero IVHD device data setting is refused.
 - **Controller state and capacity.** A firmware-supplied EFR must agree with the hardware. A controller whose translation engine, command buffer, or event log is already enabled is left alone. Up to 16 selected devices share one IOMMU, with domains allocated on demand.
 - **Firmware memory requirements.** IVMD entries are parsed, but the reserved and unity mappings they can require are not implemented. The MSI firmware sample contains none, so that case stays open.
-- **Power management.** The mapper runs sleep and wake itself and restores a controller that lost its register image, including a wake that delivered no suspend notification. A client driver that cannot survive the transition stays out of reach. Mechanism, evidence keys and acceptance criteria are in [README.md](README.md#power-management).
+- **Power management.** The mapper runs sleep and wake itself and restores a controller that lost its register image, including a wake that delivered no suspend notification. A client driver that cannot survive the transition stays out of reach. Mechanism and evidence keys are in [DEBUG.md](DEBUG.md#power-management).
 
 ## Next validation
 

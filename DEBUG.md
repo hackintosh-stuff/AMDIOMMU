@@ -9,6 +9,7 @@ configuration internals, capacity accounting and diagnostic evidence.
 - [Runtime IOVA allocation](#runtime-iova-allocation)
 - [IORegistry snapshots](#reading-ioregistry-properties)
 - [Segmented page-table snapshots](#segmented-page-table-snapshots)
+- [Production integration validation](#production-integration-validation)
 - [Power management](#power-management) and [hook diagnostics](#hook-diagnostics)
 - [Debug build experiment modes](#debug-build-experiment-modes)
 
@@ -367,8 +368,22 @@ count.
 
 ## Runtime IOVA allocation
 
-The runtime allocator uses the existing first-fit search, alignment and conflict
-skip rules to choose a range. Once a range is selected, it updates `used` and
+The runtime allocator preserves first-fit placement, alignment and conflict
+skip rules. `freePageSearchStart` is a conservative starting page: every page
+before it is occupied, but the starting page itself may also be occupied. The
+search skips only that known occupied prefix, so it still returns the same
+lowest fitting range as a search from zero.
+
+After a successful allocation, the start advances to the end of the allocated
+range if that range begins at the first free page found. If alignment or a range
+conflict skipped a lower free hole, the start remains at that first free page.
+The allocator does not scan the occupied suffix after committing a range.
+Failed allocations leave the start unchanged; successful release lowers it to
+the released range's beginning when necessary. Initialization sets it to zero,
+and appending page metadata retains it while extending `poolPages`. This also
+keeps a free tail in an old chunk available for a mapping that spans new pages.
+
+Once a range is selected, the allocator updates `used` and
 `ever` with one mask per covered 64-bit bitmap word. The mask covers only the
 requested pages in the first and last words; all intervening words are updated
 as full words. Each bitmap view lookup resolves a global word through the
@@ -379,8 +394,9 @@ allocated. Only after that check passes does it clear the corresponding `used`
 bits. It retains `ever` so later allocations still report reuse. `livePages`
 changes by the requested page count, `peakPages` keeps its existing meaning,
 and `reusedAllocations` increases once when any page in an allocation was used
-before. The allocator's state layout, capacity limits and growth policy are
-unchanged.
+before. The search start is internal allocator state; it adds no metadata
+allocation, IORegistry property or snapshot ABI field. Capacity limits and the
+append-only growth policy are unchanged.
 
 A 256-page range covers four bitmap words when word-aligned, or five when it
 starts within a word. This reduces repeated bitmap indexing and chunk lookup;
@@ -434,6 +450,53 @@ reports `record_storage_bytes`, `record_storage_chunks`, `page_storage_bytes`,
 that do not publish the corresponding properties. Use this snapshot check
 alongside the normal traffic check. The old claim analyzer's fixed 16 MiB
 capacity assertions remain scoped to its archived workload.
+
+## Production integration validation
+
+Validate a complete candidate through the production build and its selected
+attachment mode. Dynamic capacity is used by the existing mapper; it does not
+require enabling the inactive `AMDIdentityMapper` scaffold or registering a
+system-wide mapper. For the normal auto-attach configuration, keep the device
+selection and capacity ceiling in place and run the following as one batch on
+the same deployed build.
+
+Run `tools/test.sh`, `tools/build/build-probe.sh` and `tools/verify/source.py`
+once for the candidate. The host tests cover independent record/page growth,
+retained metadata, large owners, cross-chunk ranges, the full table-growth
+sequence and allocator equivalence. Reuse that evidence across the hardware
+phases instead of rebuilding or rebooting for each scenario.
+
+| Phase | Normal workload | Evidence |
+|---|---|---|
+| Attachment | Boot the candidate and inventory every selected requester and its driver/interface | Loaded build identity, active DTEs, fresh baseline snapshot |
+| Per-link traffic | Send and receive on each connected test link, with one flow and with multiple flows | Completed transfers, interface-specific byte progress, fresh snapshot after each link's group |
+| Concurrent traffic | Run both available links together, including simultaneous transmit and receive | Continued progress on both links, target fault and invalidation counters, snapshot while traffic is active |
+| Mapping reuse | Stop and restart the normal traffic workload several times | Mapping/unmapping progress, retained capacity, consistent live PTEs |
+| Link recovery | Bring each test interface down/up once when another management path is available, then repeat traffic | Link returns and data transfers complete with the same deployed mapper |
+| Final state | Stop test traffic, allow the normal workload to settle, then capture again | All mapper snapshots validate, roots remain stable within the boot, no growing unreclaimed mapping set |
+
+Bind traffic to the intended local interface/address and use controlled peers;
+otherwise a passing transfer can exercise another NIC. An existing traffic tool
+or a file transfer with source/destination hashes is sufficient. Record a missing
+peer or disconnected link as unavailable and continue the other phases. A ping
+is a reachability check, not a substitute for sustained send/receive work.
+
+Request `R44Snapshot` at phase boundaries and inspect each capture with
+`tools/dev/inspect-mapper-snapshot.py`. Compare fresh baseline and final counters
+for each requester, including mapping rejections, invalidation failures and
+target IOMMU events. Check the independent live-record/PTE comparison for every
+mapper, not only the traffic-generating one. Do not require live-map counts to
+return to zero while network drivers retain their normal DMA rings.
+
+A passing batch supports integration for the tested attachment mode and device
+combination. High capacity paths exercised only by the host tests remain marked
+as host coverage; forcing a 2 GiB allocation, changing the initial capacity or
+injecting failures is not required for this normal-workload decision. Active
+hook routing and sleep/wake are separate capabilities: hook standby in
+auto-attach does not validate routing, and an adapter/driver combination already
+listed as unsuitable for sleep must not make this batch depend on S3. Keep those
+coverage limits with the integration result rather than starting another
+allocator micro-optimization cycle.
 
 ## Power management
 
