@@ -201,10 +201,10 @@ inline const char *profileNameForCapacity(const Capacity &capacity) {
     return "dynamic";
 }
 
-// S2 admission: the vendor/device policy. Only Apple's own Ethernet client
-// (AppleEthernetRL, 10ec:8124-8127) takes the pool-sized profile, and only on
-// the auto-attach path, because that is the one client that cannot call our
-// private claim. Lucy, the board RTL8111 and every claim-based path keep the
+// S2 admission: the vendor/device policy. appleClientPath=true enables the
+// identity/class suggestion table; both production modes enable it, so a
+// device's suggested ceiling does not depend on how its mapper was attached.
+// With false, only the vendor table applies and unlisted devices keep the
 // accepted ABI3 arena. The caller applies a boot-arg override beforehand.
 //
 // R70-S6: when neither the vendor table nor the Apple RL range matches, fall

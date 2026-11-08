@@ -281,7 +281,7 @@ void storageArithmetic() {
 }
 
 void devicePolicy() {
-    // S2 admission input: only AppleEthernetRL on the auto-attach path widens.
+    // S2 admission input: identity/class suggestions with the table on or off.
     check(mapper_abi::profileForDevice(0x10ec, 0x8124, true) ==
               &mapper_abi::kProfileRl10gMax,
           "AppleEthernetRL 8124 must take the 10 GbE-sized profile");

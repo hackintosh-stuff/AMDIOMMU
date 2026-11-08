@@ -2,9 +2,9 @@
 
 AMDIOMMU is a macOS kernel extension that provides DMA translation for selected
 PCIe devices on AMD platforms. It supports automatic attachment for compatible
-drivers and explicit integration by clients. The optional
-[AMDMapperHook](#amdmapperhook-optional-companion) helps drivers that need the
-mapper supplied before they start.
+drivers and explicit integration by clients. The optional AMDMapperHook Lilu
+plugin makes the mapper available before a selected driver starts; see
+[Install and Configure](#install-and-configure) for the two supported setups.
 
 Mapping capacity grows on demand while existing mappings remain valid. The
 mapper also handles system sleep and wake notifications.
@@ -26,71 +26,78 @@ and MacKernelSDK. Build configuration and the Debug experiment modes are in
 [DEBUG.md](DEBUG.md#release-build-configuration) and
 [DEBUG.md](DEBUG.md#debug-build-experiment-modes).
 
-## Configure
+## Install and Configure
 
-Enable automatic attachment with:
+Choose one of two setups. Each has its own set of kexts and `boot-args` value.
 
-```text
-amdiommu=auto-attach
-```
+| Setup | Kexts in `EFI/OC/Kexts/` | `boot-args` | Use when |
+|---|---|---|---|
+| Probe + Hook | `Lilu.kext`, `AMDMapperHook.kext`, `AMDMapperProbe.kext` | `amdiommu=passive` | A selected driver needs the mapper before it starts and cannot be modified to claim it. |
+| Probe only | `AMDMapperProbe.kext` | `amdiommu=auto-attach` | The driver obtains its mapper through `IOMapper::copyMapperForDevice()`. |
 
-With no explicit device list, the kext uses the adapter identities configured in
-its `Info.plist`. To select particular requesters, supply their IDs with the `n`
-prefix; for example:
+### Probe + Hook (`amdiommu=passive`)
 
-```text
-amdiommu=auto-attach amdiommu_devices=n2300,n2301
-```
+`AMDMapperHook.kext` is a Lilu plugin for `amdiommu=passive`. It supplies the
+mapper before driver startup for selected clients that do not perform the
+offer/claim handshake themselves. It leaves the driver unchanged and uses the
+probe's device selection; it does not add devices.
+List `Lilu.kext` before `AMDMapperHook.kext` in `Kernel > Add`. The hook is
+active when loaded; disable its `Kernel > Add` entry or add `-amdmhoff` to turn
+it off. Diagnostic properties are described in
+[DEBUG.md](DEBUG.md#hook-diagnostics).
 
-Use the requester IDs for the target machine. An explicit list replaces the
-default selection. Devices outside the selection keep their existing DMA path.
-The default list and selection format are described in
-[DEBUG.md](DEBUG.md#device-selection).
+### Probe only (`amdiommu=auto-attach`)
 
-| Setting | Purpose |
-|---|---|
-| `amdiommu=auto-attach` | Attach the mapper automatically to selected devices. |
-| `amdiommu=passive` | Use explicit client integration or the optional hook. |
-| `amdiommu_devices=<ids>` | Override the default device selection. |
-| `amdiommu_ceiling=<name>` | Choose a capacity ceiling; normally omit it and use the default. |
-| `amdiommu_pm=off` | Disable automatic sleep/wake notifications. |
+The probe publishes `iommu-parent` when each selected device first publishes, so
+drivers that only call `IOMapper::copyMapperForDevice()` receive the mapper
+without Lilu or the hook. An offer is published as well, so a claim-based client
+gets a definite answer rather than `kIOReturnNotReady`.
 
-Without a recognised `amdiommu` mode, the kext stays inactive. Auto-attach uses
-`dma32-max` as its default ceiling and allocates capacity as needed. See the
-[configuration reference](DEBUG.md#production-configuration) and
-[profile reference](DEBUG.md#profile-ceilings) for accepted values and limits.
+### Deploy through OpenCore
 
-## Install through OpenCore
-
-Deploy the built bundle into the target machine's EFI system partition:
-
-- Copy `AMDMapperProbe.kext` to `<EFI system partition>/EFI/OC/Kexts/`.
-- Enable its `Kernel > Add` entry in the OpenCore `config.plist` on that partition.
-- When using the hook, also install `Lilu.kext` and `AMDMapperHook.kext`, with
-  Lilu listed before the hook.
-- Reboot to load the deployed build.
+- Copy the bundles for the chosen setup to `<EFI system partition>/EFI/OC/Kexts/`.
+- Enable their `Kernel > Add` entries in the OpenCore `config.plist` on that partition.
+- Set `boot-args` to the mode shown above, then reboot to load the deployed build.
 
 Locate the EFI system partition on the target machine; its partition number can
 vary. The bundles in `build-m1a/`, `build-m1a-debug/` and `build-hook/` are build
 outputs until copied to the ESP. This project uses OpenCore injection rather
 than installation in `/Library/Extensions` or the auxiliary kernel collection.
 
-## AMDMapperHook (optional Lilu plugin)
+### Boot arguments
 
-Use `AMDMapperHook.kext` with `amdiommu=passive` when a selected driver needs the
-mapper made available before startup. It relies on Lilu and leaves the driver
-unchanged. In `auto-attach` mode the mapper is already available and the hook
-stands by.
+| Setting | Purpose |
+|---|---|
+| `amdiommu=passive` | Probe + Hook setup; auto-attach is off. |
+| `amdiommu=auto-attach` | Probe-only setup; publish `iommu-parent` at first publish. |
+| `amdiommu_devices=<ids>` | Override the default device selection. |
+| `amdiommu_ceiling=<name>` | Choose a capacity ceiling; normally omit it and use the default. |
+| `amdiommu_pm=off` | Disable automatic sleep/wake notifications. |
 
-The hook uses the probe's device selection. It is active when loaded; disable
-its OpenCore `Kernel > Add` entry or add `-amdmhoff` to turn it off. Diagnostic
-properties are described in [DEBUG.md](DEBUG.md#hook-diagnostics).
+With no explicit device list, the kext uses the adapter identities configured in
+its `Info.plist`. To select particular requesters, supply their IDs with the `n`
+prefix; for example:
+
+```text
+amdiommu=passive amdiommu_devices=n2300,n2301
+```
+
+Use the requester IDs for the target machine; the same selector works in either
+mode. An explicit list replaces the default selection; devices outside the
+selection keep their existing DMA path.
+The default list and selection format are described in
+[DEBUG.md](DEBUG.md#device-selection).
+
+Without a recognised `amdiommu` mode, the kext stays inactive. Both production
+modes use `dma32-max` as the default ceiling and allocate capacity as needed;
+`amdiommu_ceiling=native-legacy` keeps a domain at its initial 16 MiB window.
+See the [configuration reference](DEBUG.md#production-configuration) and
+[profile reference](DEBUG.md#profile-ceilings) for accepted values and limits.
 
 ## Compatibility
 
 [COMPATIBILITY.md](COMPATIBILITY.md) lists board, CPU, adapter and driver
-combinations verified on hardware. The matrix covers drivers shipped with
-macOS; unverified boards and third-party driver stacks are out of scope.
+combinations verified on hardware.
 
 ## Diagnostics and implementation
 

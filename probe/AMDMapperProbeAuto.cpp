@@ -582,7 +582,8 @@ const mapper_abi::Profile *org_maz1_AMDMapperProbe::ProfileForDevice(
         if (source) *source = mapper_abi::ProfileSource::bootArg;
         return forced;
     }
-    if (!fAutoAttach) return &mapper_abi::kProfileLegacy;
+    // Both production modes use the identity/class suggestion table; only the
+    // attachment timing differs. The boot-arg override above still wins.
     return mapper_abi::profileForDevice(vendor, device, true, classCode, source);
 }
 #pragma clang diagnostic pop
@@ -952,10 +953,9 @@ bool org_maz1_AMDMapperProbe::PrepareDomain(
         named && mapper_abi::profileForName(requestedName) == nullptr;
     bool forcedCeiling = false;
     const mapper_abi::Profile *ceiling = Ceiling(forcedCeiling);
-    // The claim path is the verified R67-2 configuration: it keeps the arena it
-    // was accepted with unless an operator raises the ceiling explicitly.
-    if (!forcedCeiling && !(fOwner && fOwner->fAutoAttach))
-        ceiling = &mapper_abi::kProfileLegacy;
+    // Both production modes grow on demand up to the same default ceiling.
+    // Only an explicit amdiommu_ceiling replaces it; native-legacy (or an
+    // unknown name) keeps the initial arena and leaves growth disabled.
     const mapper_abi::Profile *prepared = &mapper_abi::kProfileLegacy;
     const bool growth = prepared->records < ceiling->records ||
         prepared->pages < ceiling->pages;

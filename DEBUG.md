@@ -172,14 +172,16 @@ per-domain dictionaries produced by a controller-level publication.
 
 ### Profile ceilings
 
-`amdiommu_ceiling` selects the growth ceiling, not a startup reservation.
+`amdiommu_ceiling` selects the growth ceiling, not a startup reservation. When
+the argument is absent, both production modes use `dma32-max` and grow capacity
+on demand; `native-legacy` keeps a domain at its initial 16 MiB window.
 
 | Name | Record ceiling | IOVA-page ceiling | IOVA capacity | Selection |
 |---|---:|---:|---|---|
-| `dma32-max` | 131072 | 524288 | 2 GiB | Default for auto-attach |
+| `dma32-max` | 131072 | 524288 | 2 GiB | Default when `amdiommu_ceiling` is absent |
 | `rl-10g-max` | 65535 | 262144 | 1 GiB | Explicit smaller ceiling |
 | `rl-10g` | 16384 | 131072 | 512 MiB | Explicit smaller ceiling |
-| `native-legacy` | 1024 | 4096 | 16 MiB | Growth disabled; default for claim-based clients |
+| `native-legacy` | 1024 | 4096 | 16 MiB | Growth disabled; explicit fixed-size ceiling |
 
 An unknown profile name disables growth and publishes
 `iommu-profile-ceiling=unsupported-name`. The full `dma32-max` window is
@@ -206,8 +208,10 @@ rejection.
   `iommu-profile-source` says where it came from: `boot-arg`, `id-table`,
   `class-table` or `legacy-fallback`. The configured ceiling is the growth limit;
   it is not a startup memory reservation.
-- A claim-based client (Lucy, the board RTL8111) keeps the `native-legacy`
-  ceiling unless an operator raises it explicitly.
+- Both production modes share the default `dma32-max` ceiling and the
+  identity/class suggestion table; only the attachment timing differs.
+  `amdiommu_ceiling=native-legacy` is the explicit way to keep a domain at the
+  fixed 16 MiB arena with growth disabled.
 - `amdiommu_autoattach` no longer exists; `amdiommu=auto-attach` is the switch
   for publishing `iommu-parent` at first publish.
 
@@ -527,7 +531,7 @@ The `hook-*` counters indicate whether it intervened. `hook-open`,
 `hook-open-routed` and `hook-routed` report use of the open-time claim and
 `copyMapperForDevice` fallback paths. Hook properties are event-driven and can be read
 directly, separately from the probe's on-demand snapshots. Loading and disabling
-the companion are described in [README.md](README.md#amdmapperhook-optional-companion).
+the companion are described in [README.md](README.md#install-and-configure).
 
 ## Release build configuration
 
@@ -557,8 +561,9 @@ mechanics, snapshot ABI5, device selection, the ceiling or the auto-attach path.
 The optional Lilu plugin has its own entry, `tools/build/build-hook.sh`. Its
 sources are `hook/AMDMapperHook.cpp` and `hook/Info.plist`, read from
 `<repo>/hook` by default; the optional first argument still selects another
-source directory. The output path `build-hook/AMDMapperHook.kext` and the
-OpenCore installation steps in [README.md](README.md#build) are unchanged.
+source directory. The output path is `build-hook/AMDMapperHook.kext`, and the
+OpenCore installation steps are in
+[README.md](README.md#install-and-configure).
 
 ### Release validation and observations
 
