@@ -32,19 +32,13 @@ Choose one of two setups. Each has its own set of kexts and `boot-args` value.
 
 | Setup | Kexts in `EFI/OC/Kexts/` | `boot-args` | Use when |
 |---|---|---|---|
-| Probe + Hook | `Lilu.kext`, `AMDMapperHook.kext`, `AMDMapperProbe.kext` | `amdiommu=passive` | The driver needs the mapper before it starts and cannot be modified to claim it. |
-| Probe only | `AMDMapperProbe.kext` | `amdiommu=auto-attach` | The driver obtains its mapper through `IOMapper::copyMapperForDevice()`. |
+| Probe only | `AMDMapperProbe.kext` | `amdiommu=auto-attach` | The driver is an ethernet/wlan driver that was introduced in macOS Catalina (via DriverKit). |
+| Probe + Hook | `Lilu.kext`, `AMDMapperHook.kext`, `AMDMapperProbe.kext` | `amdiommu=passive` | The driver has optional IOMMU support, or it starts DMA before it asks for a mapper. |
 
-### Probe + Hook (`amdiommu=passive`)
-
-`AMDMapperHook.kext` is a Lilu plugin for `amdiommu=passive`. It supplies the
-mapper before driver startup for selected clients that do not perform the
-offer/claim handshake themselves. It leaves the driver unchanged and uses the
-probe's device selection; it does not add devices.
-List `Lilu.kext` before `AMDMapperHook.kext` in `Kernel > Add`. The hook is
-active when loaded; disable its `Kernel > Add` entry or add `-amdmhoff` to turn
-it off. Diagnostic properties are described in
-[DEBUG.md](DEBUG.md#hook-diagnostics).
+The two setups differ in opposite directions: the hook reaches more drivers and
+patches the kernel at boot; Probe only changes nothing in the kernel and covers
+fewer drivers. Start with Probe only, and add the hook only when the driver you
+need falls outside its reach.
 
 ### Probe only (`amdiommu=auto-attach`)
 
@@ -52,6 +46,42 @@ The probe publishes `iommu-parent` when each selected device first publishes, so
 drivers that only call `IOMapper::copyMapperForDevice()` receive the mapper
 without Lilu or the hook. An offer is published as well, so a claim-based client
 gets a definite answer rather than `kIOReturnNotReady`.
+
+It reaches:
+
+- macOS Ethernet drivers such as `AppleEthernetMLX5`, `AppleEthernetRL` and the
+  Aquantia clients, which ask for a mapper as they start and use what they get;
+- third-party drivers that claim the mapper before opening the device;
+- any driver whose first mapper request happens after its provider published.
+
+It does not reach a binary-only kext that looks for a mapper early and quietly
+falls back to a physical DMA path, a driver that maps DMA before it asks, or a
+driver that never asks at all. It also attaches a selected device as soon as it
+publishes, whether or not a driver uses it, and a domain it cannot prepare for a
+selected device stops the boot instead of leaving that device on its physical
+path.
+
+### Probe + Hook (`amdiommu=passive`)
+
+`AMDMapperHook.kext` is a Lilu plugin for `amdiommu=passive`. It supplies the
+mapper at the entry of `IOService::open()`, before the client can allocate, and
+also answers `IOMapper::copyMapperForDevice()` for devices that were opened
+earlier. It leaves the driver unchanged and uses the probe's device selection;
+it does not add devices.
+List `Lilu.kext` before `AMDMapperHook.kext` in `Kernel > Add`. The hook is
+active when loaded; disable its `Kernel > Add` entry or add `-amdmhoff` to turn
+it off. Diagnostic properties are described in
+[DEBUG.md](DEBUG.md#hook-diagnostics).
+
+It reaches the drivers Probe only reaches, plus drivers that look for a mapper
+before one exists, that map DMA before they ask, or whose binary cannot be
+changed. It still cannot help a driver that never takes a mapper; such a driver
+has to claim in `amd_iommu_policy::waitForMapper()` before `pciDevice->open()`.
+
+It costs a Lilu dependency and a boot-time kernel route of `IOService::open()`
+and `IOMapper::copyMapperForDevice()`, which apply system-wide and are filtered
+for PCI by the hook itself. In exchange it attaches only devices a client
+actually opens, and a refused claim leaves that device on its physical DMA path.
 
 ### Deploy through OpenCore
 
