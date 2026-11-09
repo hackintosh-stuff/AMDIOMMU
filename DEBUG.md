@@ -9,6 +9,7 @@ configuration internals, capacity accounting and diagnostic evidence.
 - [Runtime IOVA allocation](#runtime-iova-allocation)
 - [IORegistry snapshots](#reading-ioregistry-properties)
 - [Segmented page-table snapshots](#segmented-page-table-snapshots)
+- [Interface contract boundaries](#interface-contract-boundaries)
 - [Production integration validation](#production-integration-validation)
 - [Release build configuration](#release-build-configuration)
 - [Power management](#power-management) and [hook diagnostics](#hook-diagnostics)
@@ -485,6 +486,125 @@ reports `record_storage_bytes`, `record_storage_chunks`, `page_storage_bytes`,
 that do not publish the corresponding properties. Use this snapshot check
 alongside the normal traffic check. The old claim analyzer's fixed 16 MiB
 capacity assertions remain scoped to its archived workload.
+
+## Interface contract boundaries
+
+The driver implements one contract: IOVA translation for the requesters named
+by `amdiommu_devices` or the identity list, reached through `iommu-parent` and
+`IOMapper::copyMapperForDevice()`. Three parts of the `IOMapper` interface stay
+unimplemented or refused on purpose. Each is a stated boundary, not a pending
+item, and the evidence for it is published so that a client which does depend on
+the missing behaviour is visible instead of silently mis-mapped.
+
+### No system mapper publication
+
+`IOMapper::gSystem` is XNU's global state slot, not a handle a driver owns.
+`IOMapper::start()` is the only writer, and only when `fIsSystem` is true
+(`reference/IOMapper.xnu-12377.121.6.cpp:118-123`);
+`setMapperRequired()` writes the `kHasMapper` / `kNoMapper` states instead
+(`:144-154`), and the slot is either one of those small integers or a pointer to
+a live mapper (`reference/IOMapper.xnu-12377.121.6.h:66-71`). The driver clears
+`fIsSystem` before calling `super::start()`
+(`probe/AMDMapperProbe.cpp:176-179`), because that call is the point of no
+return.
+
+Publication is refused for four reasons:
+
+- **Reach is machine-wide, not selection-wide.** Consumers that never name a
+  mapper resolve through the slot: `IODMACommand` when it has no mapper and the
+  mapping is not `kUnmapped` (`reference/IODMACommand.xnu-12377.121.6.cpp:293-296`),
+  the memory-descriptor default paths, the C accessors `IOMapperIOVMAlloc`,
+  `IOMapperIOVMFree`, `IOMapperInsertPage`, and `ml_phys_read_*` /
+  `ml_phys_write_*` (`reference/IOMapper.xnu-12377.121.6.cpp:239-380`). It is not
+  a per-device opt-in: the boot disk, USB and the GPU would be rerouted too.
+- **There is no rollback.** `IOMapper::free()` calls `super::free()` and nothing
+  else (`:137-141`); a rejected experiment cannot be undone by unloading the
+  kext. Only a reboot clears the slot.
+- **The native PCI path is type-coupled, not abstract.** `AppleVTD::adjustDevice()`
+  builds device mappers from `OSDynamicCast(AppleVTD, IOMapper::gSystem)`
+  (`reference/AppleVTD.IOPCIFamily-726.100.6.cpp:2648-2652`). A mapper of any
+  other class does not replace that path; it removes it.
+- **The role requires coverage this driver does not have.** System-mapper duty
+  means every requester needs a valid DTE, including requesters outside the
+  selected list and outside the IVRS ranges this driver validates. A requester
+  left unmapped, or mapped through the wrong device table entry, faults or reads
+  the wrong memory on its first DMA: a machine-wide failure rather than a
+  rejected map. The prerequisites — identity coverage for ranges no client maps,
+  fixed-address and on-device-memory domains, and a policy for requesters with
+  no usable IVRS record — are all absent here.
+
+The supported channel is per device: `iommu-parent` on the selected PCI devices,
+set by `auto-attach`, by the claim handshake, or by `AMDMapperHook`. See
+[Production configuration](#production-configuration) and
+[Hook diagnostics](#hook-diagnostics).
+
+### `iovmInsert` refuses every call
+
+The method belongs to a system mapper's page-granular interface: place the
+physical page `physicalAddress` at `offset` inside the already allocated IOVA
+range `mapAddress`, for `length` bytes (one page in practice)
+(`reference/IOMapper.xnu-12377.121.6.h:125-129`; AppleVTD forwards it to
+`spaceInsert`, `reference/AppleVTD.IOPCIFamily-726.100.6.cpp:2483-2489`).
+
+In the audited sources its only caller is the C accessor `IOMapperInsertPage()`,
+which reaches a mapper exclusively by dereferencing `IOMapper::gSystem`
+(`reference/IOMapper.xnu-12377.121.6.cpp:269-280`). No `IODMACommand` or
+`IOMemoryDescriptor` path calls it: scatter/gather maps are built by one
+`iovmMapMemory` plus segment generation, and the partial-mapping branch
+(`fDMAOffset` / `fMapOffset` / `fPageOffset`) also skips it. Since this driver
+never occupies that slot, **no caller can reach its `iovmInsert`**. Implementing
+translation there would create a path that nothing exercises.
+
+Honouring an insert is also not a small addition; it would have to validate that
+the calling requester owns the target range, replace an existing leaf, invalidate
+the device caches at the right granularity, and update this driver's mapping
+record, page index and allocator state. An insert accepted for a range that was
+allocated on behalf of a different requester is a cross-client corruption path.
+
+Current behaviour: count the call, return `kIOReturnUnsupported`
+(`probe/AMDMapperProbe.cpp:331-341`), publish `iommu-insert-rejects`
+(`probe/AMDMapperProbe.cpp:338`). A nonzero value is evidence that a caller this
+driver has not seen does use the insert interface, not a fault of the mapping
+path. Returning success without establishing a translation is the alternative,
+and it is silent DMA corruption.
+
+### `fixed` / `identity` / `device-memory` map options are refused
+
+`kIODMAMapFixedAddress`, `kIODMAMapIdentityMap` and `kIODMAMapDeviceMemory` are
+refused as a set before any IOVA is allocated or any PTE written
+(`probe/AMDMapperProbeMapper.cpp:668-671`). They are not hints that the
+allocator may reinterpret:
+
+| Option | What the caller asked for | Why it is not honoured here |
+|---|---|---|
+| `kIODMAMapFixedAddress` | `*mapAddress` is an input: the caller chooses the address and expects the mapping there | Requires reserving an arbitrary caller-chosen range and failing when it is occupied. Returning success at a different address reports an address the caller did not ask for, so the refusal must happen before the output is overwritten |
+| `kIODMAMapIdentityMap` | IOVA equals PA for this range | The domain is an arena at `mapper_abi::kBase`, allocated and reused by IOVA. Identity for arbitrary RAM needs a different domain shape, not a dropped flag: accepting it while the walk still allocates from the arena returns translated IOVAs to a caller that believes it holds physical addresses |
+| `kIODMAMapDeviceMemory` | The descriptor refers to on-device or BAR memory, not RAM | The reference path consumes `pageList[0].phys_addr` directly when `kIODMAMapPhysicallyContiguous` accompanies the flag (`reference/AppleVTD.IOPCIFamily-726.100.6.cpp:565-578`), whereas this driver's leaf builder derives RAM pages from `getPhysicalSegment()` and applies the default leaf attributes; accepting the flag maps the wrong bytes |
+
+That `*mapAddress` is an input under `kIODMAMapFixedAddress` is visible in the
+reference: the fixed branch takes `mappedAddress = *mapAddress` and derives the
+base from it, then requires the page offset to match
+(`reference/AppleVTD.IOPCIFamily-726.100.6.cpp:1999-2007`). A mapper that
+overwrites the output unconditionally and reports success contradicts its caller.
+
+These refusals follow the interface rule that a declared option carries
+semantics which cannot be ignored, and that unsupported modes must be rejected
+rather than half-honoured. Refusing before the allocation is also what lets a
+caller take its own fallback instead of DMA-ing through a mapping that does not
+mean what it requested.
+
+A client that needs these modes is typically a GPU or a storage/USB stack, so a
+silently accepted flag is how the boot disk is lost rather than how a capability
+is gained. The refusal is observable: `mapper-rejects-options`
+(`probe/AMDMapperProbeMapper.cpp:916`) stays zero across a workload whose client
+does not use these modes, and rises exactly when one does. It is included in the
+aggregate reject count (`:876-878`) and returns the function's default
+`kIOReturnUnsupported` (`:638`).
+
+Supporting any of the three is a domain-policy change — a caller-supplied
+address space, a PA-ordered domain, or non-RAM page attributes — and needs its
+own validation. Until then the boundary is what makes it safe to hand this
+mapper to a client at all.
 
 ## Production integration validation
 
