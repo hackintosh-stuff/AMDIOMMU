@@ -339,9 +339,21 @@ bool onBlock(void* context, const IvrsBlockView& block) {
         }
         const IvhdBlockRef ref{block.bytes, block.offset, block.length,
                                block.fixedSize, block.type};
-        // Only compare fields whose meaning is identical across block forms.
+        // The flag byte keeps its name across forms but not its value: AM4 AGESA
+        // (B550/X570) emits 0xB0 in both the legacy 0x10 and the extended
+        // 0x11/0x40 blocks, while AM5 and Phoenix firmware keep 0xB0 on 0x10 and
+        // use 0x30 on the extended blocks. Both forms describe one register set,
+        // so flags are compared only within one form; a cross-form difference is
+        // recorded and the extended description becomes authoritative.
+        const bool legacy = block.type == 0x10;
+        const bool sameForm = unit.flagsFromLegacy == legacy;
+        if (!sameForm && unit.flags != block.flags) {
+            unit.flagsDifferAcrossForms = true;
+        }
+        // Capability offset, IOMMU info and register base have one meaning in
+        // every form, so two descriptions of one unit must still agree on them.
         const bool sameCore =
-            unit.flags == block.flags &&
+            (!sameForm || unit.flags == block.flags) &&
             unit.capabilityOffset == block.capabilityOffset &&
             unit.iommuInfo == block.iommuInfo &&
             unit.registerBase == block.registerBase;
@@ -368,6 +380,14 @@ bool onBlock(void* context, const IvrsBlockView& block) {
         }
         unit.blocks[unit.blockCount++] = ref;
         ++c.result->duplicateBlockCount;
+        if (legacy) {
+            unit.legacyFlags = block.flags;
+            unit.hasLegacyFlags = true;
+        } else {
+            // Extended descriptions are authoritative, including the flag byte.
+            unit.flags = block.flags;
+            unit.flagsFromLegacy = false;
+        }
         if (block.type != 0x10 && !unit.efrPresent) {
             unit.efrImage = block.efrImage;
             unit.efrPresent = true;
@@ -385,6 +405,11 @@ bool onBlock(void* context, const IvrsBlockView& block) {
     }
     IvhdUnit& unit = c.units->units[c.units->count++];
     unit.flags = block.flags;
+    unit.flagsFromLegacy = block.type == 0x10;
+    if (unit.flagsFromLegacy) {
+        unit.legacyFlags = block.flags;
+        unit.hasLegacyFlags = true;
+    }
     unit.deviceId = block.deviceId;
     unit.pciSegment = block.pciSegment;
     unit.capabilityOffset = block.capabilityOffset;

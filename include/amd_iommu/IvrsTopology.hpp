@@ -33,8 +33,20 @@ struct IvhdBlockRef {
 };
 
 struct IvhdUnit {
-    // Fields whose meaning is identical in every IVHD form.
+    // Authoritative flag byte: the extended form (0x11/0x40) wins when both
+    // forms describe one unit. See flagsDifferAcrossForms.
     std::uint8_t flags = 0;
+    // Type 0x10 description's flag byte, kept for reporting. Firmware does not
+    // keep this byte equal between forms: AM4 AGESA emits 0xB0 in every block,
+    // while AM5 and Phoenix firmware keep 0xB0 on the legacy 0x10 block and use
+    // 0x30 on 0x11/0x40. That is one register set carrying two bookkeeping
+    // values, not two IOMMUs.
+    std::uint8_t legacyFlags = 0;
+    bool hasLegacyFlags = false;
+    bool flagsFromLegacy = false; // `flags` still came from a 0x10 block.
+    bool flagsDifferAcrossForms = false;
+
+    // Fields whose meaning is identical in every IVHD form.
     std::uint16_t deviceId = 0;
     std::uint16_t pciSegment = 0;
     std::uint16_t capabilityOffset = 0;
@@ -53,8 +65,9 @@ struct IvhdUnit {
     IvhdBlockRef blocks[kMaxBlocksPerUnit]{};
     std::size_t blockCount = 0; // 1 for a single description, more if duplicated.
 
-    // Set when a duplicate description disagrees on a field that has the same
-    // meaning in both. Conflicting firmware must not be silently merged.
+    // Set when two descriptions of the *same* form disagree on a field that
+    // both forms carry with one meaning. A cross-form flag difference is not a
+    // conflict; it is reported through flagsDifferAcrossForms instead.
     bool conflictingDuplicates = false;
     std::size_t conflictBlockOffset = 0;
 

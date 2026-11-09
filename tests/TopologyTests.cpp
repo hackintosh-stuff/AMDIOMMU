@@ -111,6 +111,13 @@ struct Fixture {
         for (int i = 1; i < 8; ++i) bytes[size + i] = 0;
         size += 8;
     }
+    // HID entry: 22 fixed bytes plus a UID of `uidLength` characters.
+    void pushHid(std::uint8_t uidLength) {
+        bytes[size] = 0xF0;
+        for (int i = 1; i < 22; ++i) bytes[size + i] = 0;
+        bytes[size + 21] = uidLength;
+        size += 22 + uidLength;
+    }
     void seal() {
         put32(4, static_cast<std::uint32_t>(size));
         bytes[9] = 0;
@@ -188,6 +195,58 @@ void testDeduplication() {
     TOPO_CHECK(r3 && r3.unitCount == 2);
 }
 
+void testCrossFormFlags() {
+    // AM5 / Phoenix firmware describes one IOMMU twice: the legacy 0x10 block
+    // keeps flags 0xB0 while the extended 0x11 block reports 0x30. That single
+    // differing bit is firmware bookkeeping, not a second register set, so the
+    // table must still build and the requester must still resolve.
+    Fixture f;
+    auto pos = f.openIvhd(0x10, 0x0002, 0, 0xF7600000, 0xB0);
+    f.push4(0x03, 0x0003, 0x00);
+    f.push4(0x04, 0xFFFE, 0x00);
+    f.close(pos);
+    pos = f.openIvhd(0x11, 0x0002, 0, 0xF7600000, 0x30,
+                     0x246577EFA2254AFAULL);
+    f.push4(0x03, 0x0003, 0x00);
+    f.push4(0x04, 0xFFFE, 0x00);
+    f.close(pos);
+    IvhdUnitTable units{};
+    const auto r = buildTopology(f.bytes.data(), f.size, units);
+    TOPO_CHECK(r);
+    TOPO_CHECK(units.count == 1 && units.units[0].blockCount == 2);
+    TOPO_CHECK(!units.units[0].conflictingDuplicates);
+    TOPO_CHECK(units.units[0].flagsDifferAcrossForms);
+    TOPO_CHECK(units.units[0].flags == 0x30); // extended form is authoritative
+    TOPO_CHECK(units.units[0].hasLegacyFlags &&
+               units.units[0].legacyFlags == 0xB0);
+    TOPO_CHECK(units.units[0].efrPresent &&
+               units.units[0].efrImage == 0x246577EFA2254AFAULL);
+    const auto m = resolveRequester(units, 0, 0x0D, 0x00, 0x0);
+    TOPO_CHECK(m.status == RequesterStatus::Resolved);
+    TOPO_CHECK(m.dataSetting == 0x00 && !m.viaAlias);
+
+    // AM4 AGESA keeps the flag byte equal in all three forms. Same verdict,
+    // without the cross-form marker; a larger device table in the 0x40 block
+    // (HID entries) stays informational.
+    Fixture g;
+    pos = g.openIvhd(0x10, 0x0002, 0, 0xFD500000, 0xB0);
+    g.close(pos);
+    pos = g.openIvhd(0x11, 0x0002, 0, 0xFD500000, 0xB0,
+                     0x058F77EF22294A5AULL);
+    g.close(pos);
+    pos = g.openIvhd(0x40, 0x0002, 0, 0xFD500000, 0xB0,
+                     0x058F77EF22294A5AULL);
+    g.pushHid(0);
+    g.close(pos);
+    IvhdUnitTable u2{};
+    const auto r2 = buildTopology(g.bytes.data(), g.size, u2);
+    TOPO_CHECK(r2);
+    TOPO_CHECK(u2.units[0].blockCount == 3);
+    TOPO_CHECK(!u2.units[0].conflictingDuplicates);
+    TOPO_CHECK(!u2.units[0].flagsDifferAcrossForms);
+    TOPO_CHECK(u2.units[0].conflictingDeviceTables);
+}
+
 void testConflictingDuplicates() {
     Fixture f;
     auto pos = f.openIvhd(0x11, 0x0002, 0, 0xFD380000);
@@ -208,6 +267,26 @@ void testConflictingDuplicates() {
     g.close(pos);
     IvhdUnitTable u2{};
     TOPO_CHECK(errorOf(g, u2) == TopologyError::ConflictingDuplicates);
+
+    // Two descriptions of the same form that disagree on flags are still a
+    // conflict: only a cross-form difference is treated as bookkeeping.
+    Fixture h;
+    pos = h.openIvhd(0x11, 0x0002, 0, 0xFD380000, 0xB0, 0x1111);
+    h.close(pos);
+    pos = h.openIvhd(0x11, 0x0002, 0, 0xFD380000, 0x30, 0x1111);
+    h.close(pos);
+    IvhdUnitTable u3{};
+    TOPO_CHECK(errorOf(h, u3) == TopologyError::ConflictingDuplicates);
+
+    // 0x11 and 0x40 are both extended forms, so they belong to one class and
+    // must agree.
+    Fixture i;
+    pos = i.openIvhd(0x11, 0x0002, 0, 0xFD380000, 0x30, 0x1111);
+    i.close(pos);
+    pos = i.openIvhd(0x40, 0x0002, 0, 0xFD380000, 0xB0, 0x1111);
+    i.close(pos);
+    IvhdUnitTable u4{};
+    TOPO_CHECK(errorOf(i, u4) == TopologyError::ConflictingDuplicates);
 }
 
 void testNoUnits() {
@@ -530,6 +609,7 @@ int runTopologyTests() {
     checks = 0;
     testSingleUnit();
     testDeduplication();
+    testCrossFormFlags();
     testConflictingDuplicates();
     testNoUnits();
     testRangeValidation();

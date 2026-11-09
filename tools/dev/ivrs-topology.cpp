@@ -15,6 +15,10 @@ void printUnit(const IvhdUnit& unit, std::size_t index) {
     std::printf("unit %zu: segment=%u deviceId=0x%04x base=0x%016llx flags=0x%02x\n",
                 index, unit.pciSegment, unit.deviceId,
                 static_cast<unsigned long long>(unit.registerBase), unit.flags);
+    if (unit.hasLegacyFlags && unit.flagsDifferAcrossForms) {
+        std::printf("  legacyFlags=0x%02x extendedFlags=0x%02x (differs across forms)\n",
+                    unit.legacyFlags, unit.flags);
+    }
     std::printf("  blocks=%zu (", unit.blockCount);
     for (std::size_t b = 0; b < unit.blockCount; ++b) {
         std::printf("%s0x%02x@0x%zx", b ? ", " : "", unit.blocks[b].type,
