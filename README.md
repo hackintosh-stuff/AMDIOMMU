@@ -9,7 +9,7 @@ plugin makes the mapper available before a selected driver starts; see
 Mapping capacity grows on demand while existing mappings remain valid. The
 mapper also handles system sleep and wake notifications.
 
-Status: experimental, 0.98.0. See [COMPATIBILITY.md](COMPATIBILITY.md) for verified
+Status: experimental, 1.0.0. See [COMPATIBILITY.md](COMPATIBILITY.md) for verified
 board, CPU and device combinations.
 
 ## Build
