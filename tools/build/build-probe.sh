@@ -1,16 +1,18 @@
 #!/bin/sh
-# build-m1a.sh — 在 Mac 上构建 M1-A 探针。不需要 sudo。
+# build-m1a.sh — builds the M1-A probe on the Mac. No sudo needed.
 #
-# 用法： sh build-m1a.sh
-# 输出： build-m1a/AMDMapperProbe.kext（路径写入 latest-m1a-build.txt）
+# Usage: sh build-m1a.sh
+# Output: build-m1a/AMDMapperProbe.kext (the path is written to latest-m1a-build.txt)
 #
-# 生产构建使用 -O2 -g；PROBE_DEBUG=1 的 Debug 变体保持 -O0 -g 并额外编入
-# 退休实验模块。PROBE_OPT_LEVEL 可覆盖优化级别，用于同一源码、同一功能集合
-# 的对照构建（例如 PROBE_OPT_LEVEL=-O0 sh tools/build/build-probe.sh）。
+# The production build uses -O2 -g; the PROBE_DEBUG=1 Debug variant stays at
+# -O0 -g and additionally compiles in the retired experiment modules.
+# PROBE_OPT_LEVEL overrides the optimization level, for control builds of the
+# same source with the same feature set (e.g. PROBE_OPT_LEVEL=-O0 sh tools/build/build-probe.sh).
 #
-# 探针由多个源文件组成（见 probe/AMDMapperProbe*.cpp）。它们共用
-# probe/AMDMapperProbeInternal.hpp 里的 static 辅助函数，所以每个文件都是
-# 独立的编译单元，最后一起链接进同一个 kext。
+# The probe is made up of several source files (see probe/AMDMapperProbe*.cpp).
+# They share the static helpers in probe/AMDMapperProbeInternal.hpp, so every
+# file is a separate translation unit and all of them are linked into the same
+# kext at the end.
 
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -52,8 +54,8 @@ mkdir -p "$KEXT/Contents/MacOS"
 cp probe/AMDMapperProbe-Info.plist "$KEXT/Contents/Info.plist"
 plutil -lint "$KEXT/Contents/Info.plist"
 
-# 探针的所有编译单元。新增模块必须同时出现在这里和 split-probe.py 的
-# MEMBERS 表中，否则链接时会缺少符号。
+# All translation units of the probe. A new module must show up both here and in
+# the MEMBERS table of split-probe.py, otherwise the link will lack symbols.
 SRCS="probe/AMDMapperProbe.cpp \
       probe/AMDMapperProbeNic.cpp \
       probe/AMDMapperProbeAuto.cpp \
@@ -71,7 +73,7 @@ DEBUG_SRCS="probe/AMDMapperProbeDebug.cpp \
       probe/AMDMapperProbeMapperBindingDebug.cpp \
       probe/AMDMapperProbeDmaContractDebug.cpp \
       probe/AMDMapperProbeContigMapDebug.cpp \
-      probe/AMDMapperProbeMapTableDebug.cpp
+      probe/AMDMapperProbeMapTableDebug.cpp \
       probe/AMDMapperProbeMmioDebug.cpp \
       probe/AMDMapperProbeTableDebug.cpp \
       probe/AMDMapperProbeDmaDebug.cpp \
@@ -90,9 +92,10 @@ done
 [ -f probe/AMDMapperProbeInternal.hpp ] || {
     echo "missing probe/AMDMapperProbeInternal.hpp"; exit 1; }
 
-echo "== 编译（$(echo "$SRCS" | wc -w | tr -d ' ') 个编译单元，优化级别 $OPT_LEVEL）=="
-# 注意：不定义 IOKIT_ENABLE_SHARED_PTR。SDK 默认未定义，此时 OSPtr<T> 就是 T*。
-# 打开它会让 IOKit 直接 #error（要求额外定义 EXPERIMENTAL 宏，且声明 API 不稳定）。
+echo "== compile ($(echo "$SRCS" | wc -w | tr -d ' ') translation units, optimization level $OPT_LEVEL) =="
+# Note: IOKIT_ENABLE_SHARED_PTR is deliberately not defined. The SDK leaves it
+# undefined, and then OSPtr<T> is plain T*. Enabling it makes IOKit #error out
+# (it demands an additional EXPERIMENTAL define and declares the API unstable).
 # PROBE_TRACE_DEFINE adds one extra -D to the production build without changing
 # its defaults, e.g. -DAMD_MAPPER_PM_TRACE=1 for the PM fault tracer. The release
 # build leaves it unset, so the tracer is not compiled in at all.
@@ -114,7 +117,7 @@ for f in $SRCS; do
     OBJS="$OBJS $o"
 done
 
-echo "== 链接 =="
+echo "== link =="
 # shellcheck disable=SC2086
 xcrun ld -kext -arch x86_64 -sysroot "$SDK" \
     -platform_version macos "$SDKVER" "$SDKVER" \
@@ -123,7 +126,7 @@ xcrun ld -kext -arch x86_64 -syslibroot "$SDK" \
     -platform_version macos "$SDKVER" "$SDKVER" \
     $OBJS "$SDK/usr/lib/libkmod.a" -o "$BIN"
 
-echo "== 结构检查 =="
+echo "== structural checks =="
 nm "$BIN" | grep -q ' _kmod_info$' || { echo "missing _kmod_info"; exit 1; }
 nm "$BIN" | grep -q ' __start$'    || { echo "missing __start";    exit 1; }
 nm "$BIN" | grep -q ' __stop$'     || { echo "missing __stop";     exit 1; }
@@ -131,9 +134,11 @@ FT=$(otool -h "$BIN" | awk 'NR>1{print $5}' | tail -1)
 [ "$FT" = "11" ] || { echo "filetype is $FT, expected 11 (MH_KEXT_BUNDLE)"; exit 1; }
 echo "filetype=$FT OK"
 
-# 拆分后的关键回归：每个模块的方法都必须真的进了二进制。少一个模块时链接
-# 会因为缺符号而失败，但"多定义/被静态化"这类问题不会，所以显式点名检查。
-echo "== 模块符号检查 =="
+# Key regression after the split: every module's methods must really be in the
+# binary. With a missing module the link fails on undefined symbols, but issues
+# such as duplicate definitions or functions made static do not, so the names are
+# checked explicitly.
+echo "== module symbol check =="
 # Search by the readable name inside the mangled symbol. Each of these lives in
 # a different module, so together they prove the registered translation units were
 # compiled AND linked in. A missing module fails the link anyway; this catches
@@ -188,7 +193,7 @@ echo "all module entry points present OK"
 # and round 11's variable-length array in m2b2WalkBusinessRanges). Checking it
 # at BUILD time turns a reboot-and-wonder into an immediate, named failure --
 # and the message names the likely cause instead of only the symptom.
-echo "== 弱引用检查（栈帧 > 4 KiB 会触发 ____chkstk_darwin）=="
+echo "== weak reference check (a stack frame > 4 KiB triggers ____chkstk_darwin) =="
 if nm -u "$BIN" | grep -q 'chkstk'; then
     echo "FAIL: the binary has a weak reference to ____chkstk_darwin."
     echo "      A function's stack frame exceeds 4 KiB. kmutil will refuse"
@@ -204,15 +209,15 @@ if nm -u "$BIN" | grep -q 'chkstk'; then
 fi
 echo "no weak chkstk reference OK"
 
-echo "== 签名（ad-hoc）=="
+echo "== signing (ad-hoc) =="
 codesign --force --sign - --timestamp=none "$KEXT"
 codesign --verify --strict "$KEXT" && echo "codesign OK"
 
-echo "== 布局检查 =="
+echo "== layout check =="
 xcrun clang++ -std=c++17 -O0 -o "$W/layout-check" tools/dev/layout-check.cpp
 "$W/layout-check"
 
-echo "== 导入符号 =="
+echo "== imported symbols =="
 nm -u "$BIN" > "$W/imported-symbols.txt"
 echo "count: $(wc -l < "$W/imported-symbols.txt" | tr -d ' ')"
 

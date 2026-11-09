@@ -1,19 +1,21 @@
 #!/bin/sh
-# build-lucy.sh — 从源码构建 RTL812xLucy，不依赖 Xcode.app（只需 Command Line Tools）。
+# build-lucy.sh — builds RTL812xLucy from source without Xcode.app (Command Line Tools only).
 #
-# 用法： sh tools/build/lucy.sh [source-dir]
-# 相对源码目录基于项目根目录；兼容既有显式绝对路径；省略时自动选择。
-# 输出： build-lucy/RTL812xLucy.kext
+# Usage: sh tools/build/lucy.sh [source-dir]
+# A relative source dir is resolved against the project root; explicit absolute
+# paths keep working; when omitted the directory is selected automatically.
+# Output: build-lucy/RTL812xLucy.kext
 #
-# 为什么不用 xcodebuild：
-#   本机只装了 Command Line Tools，/usr/bin/xcodebuild 是个空壳，
-#   任何 -project 调用都会报 "requires Xcode"。但 kext 构建本身只需要
-#   clang + SDK 头 + libkmod，这些 CLT 都有。
+# Why not xcodebuild:
+#   This machine only has Command Line Tools installed and /usr/bin/xcodebuild is
+#   a stub; any -project invocation fails with "requires Xcode". A kext build
+#   itself only needs clang + SDK headers + libkmod, all of which CLT provides.
 #
-# 为什么用仓库自带的 MacKernelSDK 头而不是系统 SDK 头：
-#   驱动依赖 IONetworkingFamily 的 polled-mode SPI，Apple 已从公开 SDK 移除，
-#   仓库用 KernelSPI/ 覆盖头补回。MacKernelSDK 提供与之匹配的整套内核头，
-#   混用系统头容易版本不一致。
+# Why use the repo's bundled MacKernelSDK headers instead of the system SDK headers:
+#   The driver depends on IONetworkingFamily's polled-mode SPI, which Apple has
+#   removed from the public SDK; the repo restores it with the KernelSPI/ overlay
+#   headers. MacKernelSDK provides the matching set of kernel headers; mixing in
+#   system headers easily causes version mismatches.
 
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -48,7 +50,7 @@ elif grep -qx '#define kRxMemBaseShift 7' "$DRV/RTL812xLucy.hpp"; then
     echo '128-page input requires --r59' >&2; exit 1
 fi
 
-echo "== 环境 =="
+echo "== environment =="
 echo "source : $SRC"
 echo "driver : $DRV"
 echo "sdk    : $SDK"
@@ -64,45 +66,50 @@ KEXT="$W/RTL812xLucy.kext"
 BIN="$KEXT/Contents/MacOS/RTL812xLucy"
 mkdir -p "$KEXT/Contents/MacOS"
 
-# ---- 源文件清单 ----
-# 必须同时包含 .cpp 与 .c：驱动目录里有三个 C 文件
+# ---- source file list ----
+# Both .cpp and .c must be included: the driver directory holds three C files
 #   rtl812x_eeprom.c / rtl812x_firmware.c / rtl812x_phy.c
-# 它们提供 rtl8125_eeprom_type()、rtl8125_set_eeprom_sel_low() 等函数，
-# 被 RTL812xLucyHardware.cpp 调用。只编 .cpp 会留下未定义符号，
-# 链接虽能通过（-kext 允许未定义），但**加载时会解析失败**。
-# xcodeproj 靠 PBXFileSystemSynchronized 自动收集，所以没有显式清单可抄。
+# which provide rtl8125_eeprom_type(), rtl8125_set_eeprom_sel_low() and similar
+# functions called from RTL812xLucyHardware.cpp. Compiling only .cpp leaves
+# undefined symbols; the link still succeeds (-kext allows undefined symbols),
+# but **resolution fails at load time**.
+# The xcodeproj collects these through PBXFileSystemSynchronized, so there is no
+# explicit list to copy.
 SOURCES=""
 for f in "$DRV"/*.cpp "$DRV"/*.c; do
     [ -f "$f" ] || continue
     SOURCES="$SOURCES $f"
 done
-echo "== 源文件 =="
+echo "== sources =="
 for f in $SOURCES; do echo "  $(basename "$f")"; done
 
-# ---- 编译 ----
-# 关键宏说明：
-#   KERNEL / KERNEL_PRIVATE / DRIVER_PRIVATE  内核态构建，且启用私有 API
-#   __APPLE_KEXT__                            走 kext 分支（非 dext）
+# ---- compile ----
+# Key defines:
+#   KERNEL / KERNEL_PRIVATE / DRIVER_PRIVATE  kernel-space build with private APIs enabled
+#   __APPLE_KEXT__                            selects the kext branch (not dext)
 #
-# 必须用 -include 引入仓库自带的 RTL8125LucyPrefix.pch（xcodeproj 的
-# GCC_PREFIX_HEADER 指向它）。它不只是"方便"——它做了三件关键的事：
-#   1. include 全部基础类型与网络/IOKit 头（UInt32、mbuf_t 等都来自这里）；
-#   2. 定义 __PRIVATE_SPI__，启用 IONetworkingFamily 的 polled-mode SPI；
-#   3. **定义 USE_NEW_TX_DESC** —— RTL8127 必须用 32 字节 tx 描述符
-#      （r8127 无条件置 0xEB58 BIT_0）。若漏掉它，RtlTxDesc 少 16 字节，
-#      描述符环布局与硬件不符，收发包会直接错乱。
-#   它同时定义了 ENABLE_TX_NO_CLOSE。
+# The repo's own RTL8125LucyPrefix.pch must be pulled in with -include (the
+# xcodeproj's GCC_PREFIX_HEADER points at it). It is not merely a convenience:
+# it does three critical things:
+#   1. includes all base types and networking/IOKit headers (UInt32, mbuf_t, etc. come from here);
+#   2. defines __PRIVATE_SPI__, enabling IONetworkingFamily's polled-mode SPI;
+#   3. **defines USE_NEW_TX_DESC** — RTL8127 requires 32-byte tx descriptors
+#      (r8127 unconditionally sets 0xEB58 BIT_0). If it is missing, RtlTxDesc is
+#      16 bytes short, the descriptor ring layout no longer matches the hardware,
+#      and RX/TX breaks outright.
+# It also defines ENABLE_TX_NO_CLOSE.
 #
-# 刻意**不**在命令行定义 DEBUG：
-#   会打开大量 IOLog，拖慢启动且刷爆 msgbuf。pch 里 DEBUG 未定义即静默。
-# 也不要覆盖 USE_NEW_TX_DESC —— 以 pch 为准。
-# 编译选项对齐 xcodeproj 的 Release 配置：
-#   GCC_OPTIMIZATION_LEVEL = 0    → -O0（作者刻意不优化，避免内核态 UB 被放大）
-#   GCC_STRICT_ALIASING            → 默认 YES，即不加 -fno-strict-aliasing
-#   DEAD_CODE_STRIPPING = YES      → 链接后 strip 未用代码
-#   栈保护：Xcode 默认开，因此这里保留 -fstack-protector
-# 与预编译二进制的导入差异（___stack_chk_*、___memcpy_chk 等）主要来自这些选项。
-echo "== 编译 =="
+# DEBUG is deliberately **not** defined on the command line:
+#   it would enable a lot of IOLog, slowing boot and flooding msgbuf. With DEBUG
+#   left undefined in the pch, logging stays silent.
+# Do not override USE_NEW_TX_DESC either — the pch is authoritative.
+# Compiler options mirror the xcodeproj Release configuration:
+#   GCC_OPTIMIZATION_LEVEL = 0    → -O0 (the author deliberately does not optimize, to avoid amplifying kernel-space UB)
+#   GCC_STRICT_ALIASING            → YES by default, i.e. -fno-strict-aliasing is not added
+#   DEAD_CODE_STRIPPING = YES      → strip unused code after linking
+#   Stack protector: enabled by default in Xcode, so -fstack-protector is kept here
+# The import differences versus the prebuilt binary (___stack_chk_*, ___memcpy_chk, etc.) mostly come from these options.
+echo "== compile =="
 CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
  -nostdinc++ -std=gnu++17 -O0 \
  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -D__APPLE_KEXT__ \
@@ -115,8 +122,9 @@ CFLAGS="-arch x86_64 -mkernel -fapple-kext -mno-red-zone \
  -I $DRV/linux \
  -include $DRV/RTL8125LucyPrefix.pch"
 
-# C 文件用的选项：同样的架构/宏/头路径，去掉 C++ 专属开关。
-# 注意仍然 -include 前缀头——这些 .c 依赖 linux/linux.h 里的类型。
+# Options for the C files: same architecture/defines/include paths, minus the
+# C++-only switches. Note that the prefix header is still -included — these .c
+# files depend on types from linux/linux.h.
 CFLAGS_C="-arch x86_64 -mkernel -fapple-kext -mno-red-zone -O0 \
  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -D__APPLE_KEXT__ \
  -fno-builtin -fno-common -fstack-protector \
@@ -133,7 +141,7 @@ for f in $SOURCES; do
     echo "  CC $(basename "$f")"
     case "$f" in
         *.c)
-            # C 文件用 clang（C 前端），并去掉仅 C++ 有意义的开关
+            # C files go through clang (C front end) without the C++-only switches
             # shellcheck disable=SC2086
             xcrun clang -x c $CFLAGS_C -c "$f" -o "$o"
             ;;
@@ -145,20 +153,21 @@ for f in $SOURCES; do
     OBJS="$OBJS $o"
 done
 
-# ---- kmod_info 与 C++ 入口 ----
-# xcodebuild 会跑 CreateKModInfo.perl 自动生成 kmod_info；我们绕开 Xcode，
-# 就必须自己提供，否则二进制没有 _kmod_info，kextload 会直接拒绝。
+# ---- kmod_info and the C++ entry point ----
+# xcodebuild runs CreateKModInfo.perl to generate kmod_info; since we bypass
+# Xcode we must supply it ourselves, otherwise the binary has no _kmod_info and
+# kextload rejects it outright.
 echo "== kmod_info =="
 xcrun clang++ $CFLAGS "-DLUCY_KMOD_VERSION=\"$LUCY_VERSION\"" -c tools/build/lucy-kmod-info.cpp -o "$W/lucy-kmod-info.o"
 OBJS="$OBJS $W/lucy-kmod-info.o"
 
-# ---- 链接 ----
-echo "== 链接 =="
-# 链接顺序很重要（见 MacKernelSDK/Library/kmod/README）：
+# ---- link ----
+echo "== link =="
+# Link order matters (see MacKernelSDK/Library/kmod/README):
 #   *.o libkmodc++.a kmod_info.o libkmod.a
-# libkmodc++ 提供 _start（C++ 运行时初始化）与 .constructors_used；
-# libkmod 提供 C 侧的兜底符号。
-# 注意：libkmodc++.a 只在 universal/ 下，x86_64/ 里没有它。
+# libkmodc++ provides _start (C++ runtime initialization) and .constructors_used;
+# libkmod provides the C-side fallback symbols.
+# Note: libkmodc++.a exists only under universal/; x86_64/ does not have it.
 # shellcheck disable=SC2086
 xcrun ld -kext -arch x86_64 \
     $OBJS \
@@ -166,8 +175,8 @@ xcrun ld -kext -arch x86_64 \
     "$SDK/Library/x86_64/libkmod.a" \
     -o "$BIN"
 
-# ---- 结构检查 ----
-echo "== 结构检查 =="
+# ---- structural checks ----
+echo "== structural checks =="
 nm "$BIN" | grep -q ' _kmod_info$' || { echo "missing _kmod_info"; exit 1; }
 nm "$BIN" | grep -q ' __start$'    || { echo "missing __start";    exit 1; }
 nm "$BIN" | grep -q ' __stop$'     || { echo "missing __stop";     exit 1; }
@@ -175,32 +184,37 @@ FT=$(otool -h "$BIN" | awk 'NR>1{print $5}' | tail -1)
 [ "$FT" = "11" ] || { echo "filetype is $FT, expected 11 (MH_KEXT_BUNDLE)"; exit 1; }
 echo "filetype=$FT OK"
 
-# ---- 未定义符号检查（关键）----
-# -kext 链接允许未定义符号（它们由内核在加载时解析），所以缺源文件不会在
-# 链接阶段报错。必须单独检查：除了内核必然提供的 _RESERVED* 与基础 C 库，
-# 不该有我们自己的符号悬空。
-echo "== 未定义符号检查 =="
+# ---- undefined symbol check (critical) ----
+# A -kext link allows undefined symbols (the kernel resolves them at load time),
+# so a missing source file does not fail at the link stage. This must be checked
+# separately: apart from the _RESERVED* and base C library symbols the kernel
+# always provides, none of our own symbols may be left dangling.
+echo "== undefined symbol check =="
 UNDEF=$(nm -u "$BIN" | awk '{print $NF}' | grep -v '^_' || true)
-# 找出看起来属于本驱动自己的未定义符号（rtl8125_* / rtl812x_* / RTL8125*）
+# Find undefined symbols that look like they belong to this driver (rtl8125_* / rtl812x_* / RTL8125*)
 MISSING=$(nm -u "$BIN" | awk '{print $NF}' | grep -Ei '^_(rtl812[0-9x]*_|RTL8125)' || true)
 if [ -n "$MISSING" ]; then
-    echo "FAIL: 以下驱动内部符号未定义（很可能漏编了源文件）："
+    echo "FAIL: driver-internal symbols are undefined (a source file was probably left out):"
     echo "$MISSING" | sed 's/^/  /'
     exit 1
 fi
-echo "驱动内部符号全部已定义 OK"
-echo "未定义符号总数（含内核 RESERVED）：$(nm -u "$BIN" | wc -l | tr -d ' ')"
+echo "all driver-internal symbols defined OK"
+echo "total undefined symbols (including kernel RESERVED): $(nm -u "$BIN" | wc -l | tr -d ' ')"
 
-# ---- Info.plist：用仓库自带的（含 IOPCIPrimaryMatch 与 Driver Parameters）----
+# ---- Info.plist: use the one bundled with the repo (holds IOPCIPrimaryMatch and Driver Parameters) ----
 echo "== Info.plist =="
-# xcodeproj 用 GENERATE_INFOPLIST_FILE=YES 生成 plist，源码树里没有现成文件。
-# 这里从已发布的同版本二进制里取 plist 结构做模板是**不必要**的：
-# 我们直接生成一个等价的最小 plist。
-# Round46：pinned RTL812xLucy.hpp 的实际键是小写 enableTSO4/enableTSO6。
-# getParams() 在 attachInterface() 前读取它们，getFeatures() 据此公布能力。
-# 在普通 per-device IOMapper 路径上开启 IPv4 和 IPv6 TSO。
-# 一旦加入字典，缺省 µsPollTime2G 会由原 160000ns 变成 120000ns，
-# 因此同时写 160µs 保留原值；其余缺省值（ASPM/10G/5G）与无字典一致。
+# The xcodeproj generates the plist with GENERATE_INFOPLIST_FILE=YES; there is
+# no ready-made file in the source tree. Taking the plist structure from a
+# published binary of the same version as a template is **unnecessary**: we
+# generate an equivalent minimal plist directly.
+# Round46: the actual keys in the pinned RTL812xLucy.hpp are the lowercase
+# enableTSO4/enableTSO6. getParams() reads them before attachInterface(), and
+# getFeatures() advertises capabilities based on them.
+# Enable IPv4 and IPv6 TSO on the ordinary per-device IOMapper path.
+# Once the dictionary is present, the default µsPollTime2G changes from the
+# original 160000ns to 120000ns, so 160µs is written as well to keep the
+# original value; the remaining defaults (ASPM/10G/5G) match the no-dictionary
+# case.
 cat > "$KEXT/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -280,8 +294,8 @@ cat > "$KEXT/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$KEXT/Contents/Info.plist"
 
-# ---- 签名 ----
-echo "== 签名（ad-hoc）=="
+# ---- signing ----
+echo "== signing (ad-hoc) =="
 codesign --force --sign - --timestamp=none "$KEXT"
 codesign --verify --strict "$KEXT" && echo "codesign OK"
 

@@ -1,17 +1,20 @@
-// lucy-kmod-info.cpp — 为 RTL812xLucy 生成 kmod_info 与 C++ 运行时入口。
+// lucy-kmod-info.cpp — generates kmod_info and the C++ runtime entry point for RTL812xLucy.
 //
-// 为什么需要这个文件：
-//   用 xcodebuild 构建 kext 时，Xcode 会跑 CreateKModInfo.perl 自动生成一个
-//   含 kmod_info 结构体的 .c 文件并链进去。我们绕开 Xcode 用 clang 直接构建，
-//   就必须自己提供它，否则链接出来的二进制没有 _kmod_info 符号，
-//   kextload 会拒绝加载（"not a valid kext"）。
+// Why this file is needed:
+//   When a kext is built with xcodebuild, Xcode runs CreateKModInfo.perl to
+//   generate a .c file containing the kmod_info structure and links it in. We
+//   bypass Xcode and invoke clang directly, so we must provide it ourselves;
+//   otherwise the linked binary has no _kmod_info symbol and kextload rejects
+//   it ("not a valid kext").
 //
-// 与 AMDMapperProbe 的写法一致（KMOD_EXPLICIT_DECL + _realmain/_antimain），
-// 这是 Apple 在 mach/kmod.h 里给的公开方式，不需要任何私有脚本。
+// This matches how AMDMapperProbe does it (KMOD_EXPLICIT_DECL + _realmain/_antimain),
+// which is the public approach Apple documents in mach/kmod.h; no private
+// scripts are involved.
 //
-// 驱动本身没有定义 _realmain（它靠 IOKit 的 personality 匹配启动，
-// 不需要 kext 级入口），所以这里把 _realmain / _antimain 留空。
-// C++ 静态构造仍由 libkmodc++ 的 _start 负责。
+// The driver itself does not define _realmain (it is started through IOKit
+// personality matching and needs no kext-level entry point), so _realmain /
+// _antimain are left empty here. C++ static construction is still handled by
+// libkmodc++'s _start.
 
 #include <mach/kmod.h>
 #include <libkern/OSKextLib.h>
